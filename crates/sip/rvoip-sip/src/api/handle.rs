@@ -217,6 +217,65 @@ impl TryFrom<Event> for TransferOutcome {
     }
 }
 
+impl TransferOutcome {
+    /// The outcome `event` carries, if it is one of the transfer events
+    /// `TryFrom<Event>` accepts. It borrows the event, so the lifecycle index
+    /// can check every published event without cloning it or formatting a
+    /// conversion error for the ones that are not transfer outcomes.
+    pub(crate) fn from_event(event: &Event) -> Option<Self> {
+        match event {
+            Event::ReferCompleted {
+                call_id,
+                target,
+                status_code,
+                reason,
+            } => Some(Self::ReferCompleted {
+                call_id: call_id.clone(),
+                target: target.clone(),
+                status_code: *status_code,
+                reason: reason.clone(),
+            }),
+            Event::ReferProgress {
+                call_id,
+                status_code,
+                reason,
+            } => Some(Self::TargetRinging {
+                call_id: call_id.clone(),
+                status_code: *status_code,
+                reason: reason.clone(),
+            }),
+            Event::TransferTargetAnswered {
+                transfer_call_id,
+                target_uri,
+                evidence,
+            } => Some(Self::TargetAnswered {
+                call_id: transfer_call_id.clone(),
+                target_uri: target_uri.clone(),
+                evidence: evidence.clone(),
+            }),
+            Event::TransferReplacementDialogTerminated {
+                transfer_call_id,
+                dialog,
+                reason,
+            } => Some(Self::ReplacementTerminated {
+                call_id: transfer_call_id.clone(),
+                dialog: dialog.clone(),
+                reason: reason.clone(),
+            }),
+            Event::TransferFailed {
+                call_id,
+                status_code,
+                reason,
+            } => Some(Self::Failed {
+                call_id: call_id.clone(),
+                status_code: *status_code,
+                reason: reason.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// RFC 3326 Reason header value for explicit teardown causes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SipReason {
@@ -2119,6 +2178,59 @@ mod tests {
             .await
             .expect("retire generation B");
         coordinator.shutdown();
+    }
+
+    #[test]
+    fn transfer_outcome_from_event_matches_the_owned_conversion() {
+        let call_id = SessionId::new();
+        let events = [
+            Event::ReferCompleted {
+                call_id: call_id.clone(),
+                target: "sip:1003@example.com".into(),
+                status_code: 200,
+                reason: "OK".into(),
+            },
+            Event::ReferProgress {
+                call_id: call_id.clone(),
+                status_code: 180,
+                reason: "Ringing".into(),
+            },
+            Event::TransferTargetAnswered {
+                transfer_call_id: call_id.clone(),
+                target_uri: "sip:1003@example.com".into(),
+                evidence: TransferTargetEvidence::ReferProgressThenFinal {
+                    progress_status_code: 180,
+                    progress_reason: "Ringing".into(),
+                    final_status_code: 200,
+                    final_reason: "OK".into(),
+                },
+            },
+            Event::TransferFailed {
+                call_id: call_id.clone(),
+                status_code: 603,
+                reason: "Decline".into(),
+            },
+            Event::CallEstablished {
+                call_id: call_id.clone(),
+            },
+            Event::CallOnHold {
+                call_id: call_id.clone(),
+            },
+            Event::CallEnded {
+                call_id,
+                reason: "normal".into(),
+            },
+        ];
+        let mut outcomes = 0;
+        for (index, event) in events.into_iter().enumerate() {
+            let borrowed = TransferOutcome::from_event(&event);
+            outcomes += usize::from(borrowed.is_some());
+            assert!(
+                borrowed == TransferOutcome::try_from(event).ok(),
+                "event {index}"
+            );
+        }
+        assert_eq!(outcomes, 4);
     }
 
     #[test]

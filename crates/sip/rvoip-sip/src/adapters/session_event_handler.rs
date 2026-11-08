@@ -693,6 +693,42 @@ impl InboundInviteInitialState {
     }
 }
 
+/// The inbound INVITE as observers see it (`InboundInviteObservation`, the
+/// pending bundle). The server transaction already holds the transport's
+/// parse of `raw_request`, so that shared request is used as-is; the bytes
+/// are parsed again only when the transaction has already retired. Failure
+/// to parse is never fatal: observers then fall back to the headers-only
+/// path.
+fn observed_inbound_invite(
+    session_id: &SessionId,
+    transaction_request: Option<Arc<rvoip_sip_core::Request>>,
+    raw_request: Option<&bytes::Bytes>,
+) -> Option<Arc<rvoip_sip_core::Request>> {
+    let bytes = raw_request?;
+    if transaction_request.is_some() {
+        return transaction_request;
+    }
+    match rvoip_sip_core::parse_message(bytes.as_ref()) {
+        Ok(rvoip_sip_core::Message::Request(request)) => Some(Arc::new(request)),
+        Ok(_) => {
+            warn!(
+                session_id = %session_id,
+                "IncomingCall raw_request was not a SIP request"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to re-parse inbound INVITE bytes; \
+                 IncomingCall.raw_request() will be None"
+            );
+            None
+        }
+    }
+}
+
 async fn wait_for_owned_operation_cancellation(cancel: &mut tokio::sync::watch::Receiver<bool>) {
     loop {
         if *cancel.borrow_and_update() {
@@ -1255,8 +1291,13 @@ fn project_committed_response_events(
 }
 
 enum QueuedDialogPayload {
-    Dialog(DialogToSessionEvent),
-    Deferred(DeferredReplayDelivery),
+    /// The envelope the router was handed (always a
+    /// `RvoipCrossCrateEvent::DialogToSession`), shared instead of a deep
+    /// copy of the dialog event inside it.
+    Dialog(Arc<dyn CrossCrateEvent>),
+    /// Boxed: deferred replays are rare, and the hot `Dialog` variant is one
+    /// pointer.
+    Deferred(Box<DeferredReplayDelivery>),
 }
 
 struct DeferredReplayDelivery {
@@ -1346,6 +1387,11 @@ struct DialogToSessionDirectRouter {
     registration_adapter: Arc<OnceLock<Arc<RegistrationAdapter>>>,
     registration_response_owner: Option<Arc<DialogAdapter>>,
     store: Arc<crate::session_store::SessionStore>,
+    /// Runs `IncomingCall` on the publishing dialog worker instead of a shard
+    /// (`Config::session_inline_incoming_call_dispatch`). Weak so the router,
+    /// which the coordinator and the causal ingress slot own, never keeps the
+    /// handler alive; the shard tasks hold the strong references.
+    inline_incoming_calls: Option<std::sync::Weak<SessionCrossCrateEventHandler>>,
 }
 
 fn capture_dialog_ingress_handle(
@@ -1463,12 +1509,19 @@ async fn dispatch_queued_dialog_payload(
     exact_handle: Option<&SessionRegistryHandle>,
 ) -> Result<()> {
     match payload {
-        QueuedDialogPayload::Dialog(event) => {
+        QueuedDialogPayload::Dialog(envelope) => {
+            let Some(RvoipCrossCrateEvent::DialogToSession(event)) =
+                envelope.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+            else {
+                return Err(anyhow::anyhow!(
+                    "typed dialog ingress queued a non-dialog event"
+                ));
+            };
             handler
-                .handle_dialog_to_session_event(&event, exact_handle)
+                .handle_dialog_to_session_event(event, exact_handle)
                 .await
         }
-        QueuedDialogPayload::Deferred(delivery) => match delivery.begin() {
+        QueuedDialogPayload::Deferred(delivery) => match (*delivery).begin() {
             Some(started) => {
                 let event = started.event().clone();
                 let result = handler.handle_deferred_tracked_request(event).await;
@@ -1584,12 +1637,19 @@ impl DialogToSessionDirectRouter {
         let store = Arc::clone(&handler.state_machine.store);
         let per_shard_capacity = (queue_capacity / worker_count.max(1)).max(1);
         let mut shard_senders = Vec::with_capacity(worker_count);
+        let inline_handler = handler
+            .inline_incoming_call_dispatch
+            .then(|| Arc::new(handler.clone()));
 
         for shard in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueuedDialogToSessionEvent>(per_shard_capacity);
             let handler_for_shard = handler.clone();
+            let inline_handler_keepalive = inline_handler.clone();
             let mut shutdown = shutdown_rx.clone();
             if !retained_tasks.spawn(async move {
+                // The inline handler lives exactly as long as a shard can
+                // still accept work.
+                let _inline_handler_keepalive = inline_handler_keepalive;
                 let mut draining = false;
                 loop {
                     tokio::select! {
@@ -1704,6 +1764,7 @@ impl DialogToSessionDirectRouter {
             registration_adapter,
             registration_response_owner,
             store,
+            inline_incoming_calls: inline_handler.as_ref().map(Arc::downgrade),
         })
     }
 
@@ -1712,6 +1773,25 @@ impl DialogToSessionDirectRouter {
             Some(session_id) => session_dispatch_shard(session_id, self.shard_senders.len()),
             None => self.fallback_shard.fetch_add(1, Ordering::Relaxed) % self.shard_senders.len(),
         }
+    }
+
+    /// The handler that runs `event` inline, or `None` to queue it. Only
+    /// `IncomingCall` qualifies, and only while inline dispatch is configured
+    /// and the shards still run. While the target shard drains at shutdown
+    /// the event takes the queued path, which rejects it as before.
+    fn inline_incoming_call_handler(
+        &self,
+        event: &DialogToSessionEvent,
+        route_key: Option<&str>,
+    ) -> Option<Arc<SessionCrossCrateEventHandler>> {
+        if !matches!(event, DialogToSessionEvent::IncomingCall { .. }) {
+            return None;
+        }
+        let handler = self.inline_incoming_calls.as_ref()?.upgrade()?;
+        // IncomingCall always carries its new session id as the route key, so
+        // this is a pure hash and advances no fallback counter.
+        let shard = self.shard_for(route_key);
+        (!self.shard_senders[shard].is_closed()).then_some(handler)
     }
 
     async fn enqueue(&self, queued: QueuedDialogToSessionEvent) -> Result<()> {
@@ -1762,10 +1842,10 @@ impl DialogToSessionDirectRouter {
             DeferredTrackedRequestEvent::Completed { .. } => "deferred_request_completed",
         };
         self.enqueue(QueuedDialogToSessionEvent {
-            payload: QueuedDialogPayload::Deferred(DeferredReplayDelivery::new(
+            payload: QueuedDialogPayload::Deferred(Box::new(DeferredReplayDelivery::new(
                 self.deferred_tracker.clone(),
                 event,
-            )),
+            ))),
             queued_at: Instant::now(),
             kind,
             route_key,
@@ -1831,6 +1911,10 @@ impl CrossCrateEventHandler for DialogToSessionDirectRouter {
                     return Ok(());
                 }
             };
+        if let Some(handler) = self.inline_incoming_call_handler(typed, route_key.as_deref()) {
+            return dispatch_incoming_call_inline(&handler, typed, kind, route_key.as_deref())
+                .await;
+        }
         let authoritative = dialog_event_requires_processing_ack(typed);
         let (authoritative_completion, acknowledgement) = if authoritative {
             let (completion, acknowledgement) = oneshot::channel();
@@ -1839,7 +1923,7 @@ impl CrossCrateEventHandler for DialogToSessionDirectRouter {
             (None, None)
         };
         let queued = QueuedDialogToSessionEvent {
-            payload: QueuedDialogPayload::Dialog(typed.clone()),
+            payload: QueuedDialogPayload::Dialog(Arc::clone(&event)),
             queued_at: Instant::now(),
             kind,
             route_key,
@@ -1860,6 +1944,35 @@ impl CrossCrateEventHandler for DialogToSessionDirectRouter {
             Err(_) => Err(anyhow::anyhow!(
                 "authoritative dialog-to-session shard closed before acknowledgment"
             )),
+        }
+    }
+}
+
+/// Process one `IncomingCall` on the calling dialog worker exactly as a
+/// session shard processes it (dispatch, diagnostics, error log) and return
+/// what the shard would have acknowledged, error text included. An initial
+/// INVITE has no exact lifetime to recheck: it creates its session. The
+/// handler future is boxed so its state stays off the dialog worker's stack.
+async fn dispatch_incoming_call_inline(
+    handler: &SessionCrossCrateEventHandler,
+    event: &DialogToSessionEvent,
+    kind: &'static str,
+    route_key: Option<&str>,
+) -> Result<()> {
+    let dispatch_guard = cleanup_diag::stage_guard(
+        CleanupStage::SessionEventDispatch,
+        route_key.unwrap_or(kind),
+    );
+    let result = Box::pin(handler.handle_dialog_to_session_event(event, None)).await;
+    match result {
+        Ok(()) => {
+            dispatch_guard.finish_success();
+            Ok(())
+        }
+        Err(e) => {
+            error!(kind, "Error handling inline dialog-to-session event: {}", e);
+            dispatch_guard.finish_failure();
+            Err(anyhow::anyhow!(e.to_string()))
         }
     }
 }
@@ -1947,6 +2060,18 @@ pub struct SessionCrossCrateEventHandler {
     /// Serializes admission check/reserve so the hard limit is meaningful with
     /// multiple dialog-to-session workers.
     server_call_admission_lock: Arc<Mutex<()>>,
+
+    /// Reserve-then-decide with one atomic instead of
+    /// `server_call_admission_lock` (`Config::server_call_admission_lock_free`).
+    server_call_admission_lock_free: bool,
+
+    /// Whether inbound UAS sessions record per-transition history
+    /// (`Config::inbound_session_history`).
+    inbound_session_history: bool,
+
+    /// Run `IncomingCall` on the publishing dialog worker
+    /// (`Config::session_inline_incoming_call_dispatch`).
+    inline_incoming_call_dispatch: bool,
 
     /// Total capacity for the direct dialog-to-session dispatcher queues.
     dialog_event_dispatch_queue_capacity: usize,
@@ -3076,6 +3201,9 @@ impl SessionCrossCrateEventHandler {
             server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
             server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
             server_call_admission_lock: Arc::new(Mutex::new(())),
+            server_call_admission_lock_free: false,
+            inbound_session_history: true,
+            inline_incoming_call_dispatch: false,
             dialog_event_dispatch_queue_capacity: 1024,
             causal_dialog_ingress: None,
             state_machine_event_rx: None,
@@ -3117,6 +3245,9 @@ impl SessionCrossCrateEventHandler {
             server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
             server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
             server_call_admission_lock: Arc::new(Mutex::new(())),
+            server_call_admission_lock_free: false,
+            inbound_session_history: true,
+            inline_incoming_call_dispatch: false,
             dialog_event_dispatch_queue_capacity: 1024,
             causal_dialog_ingress: None,
             state_machine_event_rx: None,
@@ -3191,6 +3322,21 @@ impl SessionCrossCrateEventHandler {
         self.server_call_admission_soft_limit = soft_limit;
         self.server_call_admission_pacing_delay_ms = pacing_delay_ms;
         self.server_overload_retry_after_secs = retry_after_secs;
+        self
+    }
+
+    pub(crate) fn with_server_call_admission_lock_free(mut self, enabled: bool) -> Self {
+        self.server_call_admission_lock_free = enabled;
+        self
+    }
+
+    pub(crate) fn with_inbound_session_history(mut self, enabled: bool) -> Self {
+        self.inbound_session_history = enabled;
+        self
+    }
+
+    pub(crate) fn with_inline_incoming_call_dispatch(mut self, enabled: bool) -> Self {
+        self.inline_incoming_call_dispatch = enabled;
         self
     }
 
@@ -3731,6 +3877,11 @@ impl SessionCrossCrateEventHandler {
         let pacing_delay = self
             .server_call_admission_pacing_delay_ms
             .map(Duration::from_millis);
+        if self.server_call_admission_lock_free {
+            return self
+                .acquire_server_call_admission_lock_free(hard_limit, soft_limit, pacing_delay)
+                .await;
+        }
         let mut paced_once = false;
 
         loop {
@@ -3817,6 +3968,53 @@ impl SessionCrossCrateEventHandler {
             return ServerCallAdmissionDecision::Admit(Some(ServerCallAdmissionGuard {
                 pending: self.server_call_admission_pending.clone(),
             }));
+        }
+    }
+
+    /// The decision of [`Self::acquire_server_call_admission`] without the
+    /// admission mutex (see `server_admission`): it may reject, but never
+    /// over-admit, when concurrent attempts race exactly at the hard limit.
+    /// The perf-tests admission diagnostics past the attempt and limits are
+    /// recorded only on the serialized path.
+    async fn acquire_server_call_admission_lock_free(
+        &self,
+        hard_limit: usize,
+        soft_limit: usize,
+        pacing_delay: Option<Duration>,
+    ) -> ServerCallAdmissionDecision {
+        use super::server_admission::{reserve_and_decide, AdmissionLimits, AdmissionStep};
+        let limits = AdmissionLimits {
+            hard: hard_limit,
+            soft: soft_limit,
+            pacing_threshold: pacing_delay.and(self.server_call_admission_soft_limit),
+        };
+        let mut paced_once = false;
+        loop {
+            match reserve_and_decide(
+                self.state_machine.store.sessions.len(),
+                &self.server_call_admission_pending,
+                &self.server_call_admission_overloaded,
+                limits,
+                paced_once,
+            ) {
+                AdmissionStep::Admit { .. } => {
+                    return ServerCallAdmissionDecision::Admit(Some(ServerCallAdmissionGuard {
+                        pending: self.server_call_admission_pending.clone(),
+                    }));
+                }
+                AdmissionStep::Reject { observed_sessions } => {
+                    return ServerCallAdmissionDecision::Reject {
+                        observed_sessions,
+                        hard_limit,
+                    };
+                }
+                AdmissionStep::Pace { .. } => {
+                    if let Some(delay) = pacing_delay {
+                        tokio::time::sleep(delay).await;
+                    }
+                    paced_once = true;
+                }
+            }
         }
     }
 
@@ -4010,6 +4208,16 @@ impl SessionCrossCrateEventHandler {
             }
         };
 
+        // The transport already parsed these exact bytes into the server
+        // transaction's shared request; observers below take that request.
+        let transaction_request = raw_request.as_ref().and_then(|_| {
+            self.dialog_adapter
+                .dialog_api
+                .dialog_manager()
+                .core()
+                .transaction_manager()
+                .server_transaction_request(&pending_transaction)
+        });
         let initial_state = InboundInviteInitialState {
             local_uri: to.clone(),
             remote_uri: from.clone(),
@@ -4020,9 +4228,14 @@ impl SessionCrossCrateEventHandler {
         let create_result = self
             .state_machine
             .store
-            .create_session_initialized(session_id.clone(), Role::UAS, true, move |session| {
-                initial_state.apply(session);
-            })
+            .create_session_initialized(
+                session_id.clone(),
+                Role::UAS,
+                self.inbound_session_history,
+                move |session| {
+                    initial_state.apply(session);
+                },
+            )
             .await;
         drop(admission_guard);
         let created_session = match create_result {
@@ -4150,33 +4363,11 @@ impl SessionCrossCrateEventHandler {
                     .await;
             }
 
-            // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
-            // after the fast 200 OK path has completed, but before app
-            // observation events are published. Failure to parse is never
-            // fatal — we fall back to the legacy headers-only path.
-            let mut observed_request = None;
-            if let Some(bytes) = raw_request.as_ref() {
-                match rvoip_sip_core::parse_message(bytes.as_ref()) {
-                    Ok(rvoip_sip_core::Message::Request(req)) => {
-                        let req = Arc::new(req);
-                        observed_request = Some(req);
-                    }
-                    Ok(_) => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            "IncomingCall raw_request was not a SIP request"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Failed to re-parse inbound INVITE bytes; \
-                             IncomingCall.raw_request() will be None"
-                        );
-                    }
-                }
-            }
+            // SIP_API_DESIGN_2 Phase A: hand observers the parsed inbound
+            // INVITE after the fast 200 OK path has completed, but before app
+            // observation events are published.
+            let observed_request =
+                observed_inbound_invite(&session_id, transaction_request, raw_request.as_ref());
             if let Some(coordinator) = self.coordinator.get().and_then(|weak| weak.upgrade()) {
                 coordinator.notify_inbound_invite_observers(
                     crate::api::unified::InboundInviteObservation {
@@ -7354,6 +7545,7 @@ mod tests {
             registration_adapter: Arc::new(std::sync::OnceLock::new()),
             registration_response_owner: None,
             store: Arc::clone(&store),
+            inline_incoming_calls: None,
         };
 
         let incoming_router = router.clone();
@@ -7620,6 +7812,141 @@ mod tests {
             "re-INVITE/UPDATE failure classification was not propagated through its processing ACK"
         );
         assert!(handler.contains("get_session_snapshot_exact(handle)\n            .map_err"));
+    }
+
+    #[test]
+    fn observed_inbound_invite_takes_the_transaction_request_without_parsing() {
+        let session_id = SessionId("observed-inbound-invite".to_string());
+        let invite = "INVITE sip:bob@127.0.0.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-observed\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1>;tag=alice\r\n\
+To: <sip:bob@127.0.0.1>\r\n\
+Call-ID: observed-inbound-invite@example.test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let Ok(rvoip_sip_core::Message::Request(parsed)) =
+            rvoip_sip_core::parse_message(invite.as_bytes())
+        else {
+            panic!("fixture INVITE parses");
+        };
+        let transaction_request = Arc::new(parsed.clone());
+
+        // With the transaction's request at hand the bytes are not parsed:
+        // these could not be.
+        let unparsable = bytes::Bytes::from_static(b"not a SIP message");
+        let observed = super::observed_inbound_invite(
+            &session_id,
+            Some(Arc::clone(&transaction_request)),
+            Some(&unparsable),
+        )
+        .expect("transaction request");
+        assert!(Arc::ptr_eq(&observed, &transaction_request));
+
+        // A retired transaction falls back to parsing the bytes.
+        let bytes = bytes::Bytes::from_static(invite.as_bytes());
+        let reparsed =
+            super::observed_inbound_invite(&session_id, None, Some(&bytes)).expect("parsed bytes");
+        assert!(*reparsed == parsed);
+        assert!(super::observed_inbound_invite(&session_id, None, Some(&unparsable)).is_none());
+
+        // Without bytes observers keep the headers-only path.
+        assert!(
+            super::observed_inbound_invite(&session_id, Some(transaction_request), None).is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_invite_observers_get_the_server_transactions_request() {
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
+        let uas_port = reservation
+            .local_addr()
+            .expect("reserved UAS address")
+            .port();
+        drop(reservation);
+        let client = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw SIP client");
+        let client_port = client.local_addr().expect("raw client address").port();
+
+        let mut config = crate::api::unified::Config::local("invite-handoff-uas", uas_port)
+            .with_auto_180_ringing(false);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
+            .await
+            .expect("start UAS");
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&observed);
+        coordinator
+            .add_inbound_invite_observer(Arc::new(
+                move |observation: crate::api::unified::InboundInviteObservation| {
+                    *sink.lock().unwrap() = observation.request;
+                },
+            ))
+            .expect("register observer");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        const BRANCH: &str = "z9hG4bK-invite-handoff";
+        let sdp = "v=0\r\n\
+o=alice 901 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 24002 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+        let invite = format!(
+            "INVITE sip:bob@127.0.0.1:{uas_port} SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{client_port};branch={BRANCH};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1:{client_port}>;tag=alice-handoff\r\n\
+To: <sip:bob@127.0.0.1:{uas_port}>\r\n\
+Call-ID: invite-handoff@example.test\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@127.0.0.1:{client_port}>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n\
+{sdp}",
+            sdp.len()
+        );
+        client
+            .send_to(invite.as_bytes(), format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("send INVITE");
+
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = observed.lock().unwrap().clone() {
+                    return request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("inbound INVITE observed");
+
+        // Nobody answers, so the server INVITE transaction is still
+        // proceeding: the observer holds that transaction's own request, not
+        // a second parse of the same bytes.
+        let key = rvoip_sip_dialog::transaction::TransactionKey::new(
+            BRANCH.to_string(),
+            rvoip_sip_core::Method::Invite,
+            true,
+        );
+        let transaction_request = coordinator
+            .dialog_adapter()
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .transaction_manager()
+            .server_transaction_request(&key)
+            .expect("active server INVITE transaction");
+        assert!(Arc::ptr_eq(&request, &transaction_request));
+        assert_eq!(request.body(), sdp.as_bytes());
+
+        coordinator
+            .shutdown_gracefully(Some(std::time::Duration::from_secs(2)))
+            .await
+            .expect("shutdown UAS");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -8321,7 +8648,9 @@ Content-Length: {}\r\n\r\n\
         assert_eq!(captured.as_ref(), Some(&generation_a));
 
         let queued = QueuedDialogToSessionEvent {
-            payload: QueuedDialogPayload::Dialog(event),
+            payload: QueuedDialogPayload::Dialog(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                event,
+            ))),
             queued_at: std::time::Instant::now(),
             kind: "call_cancelled",
             route_key: Some(session_id.0.clone()),
@@ -8390,6 +8719,7 @@ Content-Length: {}\r\n\r\n\
             registration_adapter: Arc::new(std::sync::OnceLock::new()),
             registration_response_owner: None,
             store: Arc::new(crate::session_store::SessionStore::new()),
+            inline_incoming_calls: None,
         };
         let late_id = "already-retired".to_string();
 

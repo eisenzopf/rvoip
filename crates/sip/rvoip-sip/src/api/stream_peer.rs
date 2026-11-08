@@ -242,6 +242,32 @@ impl EventReceiver {
         }
     }
 
+    /// The control owner without a public observation subscription. A
+    /// control owner suppresses every observational copy (see
+    /// `next_with_lifecycle`), so subscribing would only add a bus delivery
+    /// and a wakeup per published event. The stream ends when the control
+    /// channel closes.
+    pub(crate) fn control_only(
+        control_rx: mpsc::UnboundedReceiver<SessionControlEvent>,
+        coordinator: Arc<UnifiedCoordinator>,
+    ) -> Self {
+        let (_, rx) = mpsc::channel(1);
+        Self {
+            rx,
+            control_rx: Some(control_rx),
+            control_coordinator: Some(coordinator),
+            owns_control: true,
+            observations_open: false,
+            filter: None,
+            exact_filter: None,
+            exact_store: None,
+            exact_lifecycle: None,
+            exact_watcher: None,
+            exact_terminal_delivered: false,
+            primed: std::collections::VecDeque::new(),
+        }
+    }
+
     pub(crate) async fn ensure_control(
         &mut self,
         coordinator: &Arc<UnifiedCoordinator>,
