@@ -592,6 +592,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cleanup_removes_all_exact_media_aliases_and_preserves_rebound_alias() {
+        let controller = MediaSessionController::new();
+        let old = DialogId::new("alias-old");
+        let new = DialogId::new("alias-new");
+        let unrelated = DialogId::new("alias-unrelated");
+        for name in ["first", "second", "rebound"] {
+            controller.store_session_mapping(name.into(), MediaSessionId::from_dialog(&old));
+        }
+        controller.store_session_mapping("rebound".into(), MediaSessionId::from_dialog(&new));
+        controller.store_session_mapping("other".into(), MediaSessionId::from_dialog(&unrelated));
+        // Cleanup is idempotent.
+        controller.cleanup_per_dialog_side_state(&old);
+        controller.cleanup_per_dialog_side_state(&old);
+        assert_eq!(controller.get_media_id("first"), None);
+        assert_eq!(controller.get_media_id("second"), None);
+        assert_eq!(
+            controller.get_media_id("rebound"),
+            Some(MediaSessionId::from_dialog(&new))
+        );
+        assert_eq!(
+            controller.get_media_id("other"),
+            Some(MediaSessionId::from_dialog(&unrelated))
+        );
+        assert_eq!(
+            controller.get_session_id(&MediaSessionId::from_dialog(&old)),
+            None
+        );
+        assert!(!controller
+            .session_mapping_owners
+            .lock()
+            .unwrap()
+            .contains_key(&MediaSessionId::from_dialog(&old)));
+    }
+
+    /// Concurrent rebinds of the same aliases between two media ids leave an
+    /// owner entry for every alias, so cleanup of each media removes exactly
+    /// its own aliases and both cleanups together leave nothing behind.
+    #[tokio::test]
+    async fn concurrent_mapping_rebinds_keep_all_cleanup_owners() {
+        let controller = MediaSessionController::new();
+        let old = DialogId::new("concurrent-alias-old");
+        let new = DialogId::new("concurrent-alias-new");
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let controller = &controller;
+                let old = &old;
+                let new = &new;
+                scope.spawn(move || {
+                    for iteration in 0..200 {
+                        controller.store_session_mapping(
+                            format!("alias-{}", iteration % 8),
+                            MediaSessionId::from_dialog(if (iteration + writer) % 2 == 0 {
+                                old
+                            } else {
+                                new
+                            }),
+                        );
+                    }
+                });
+            }
+        });
+        let expected_new: Vec<_> = controller
+            .session_to_media
+            .iter()
+            .filter(|entry| entry.value() == &MediaSessionId::from_dialog(&new))
+            .map(|entry| entry.key().clone())
+            .collect();
+        controller.cleanup_per_dialog_side_state(&old);
+        for alias in expected_new {
+            assert_eq!(
+                controller.get_media_id(&alias),
+                Some(MediaSessionId::from_dialog(&new))
+            );
+        }
+        controller.cleanup_per_dialog_side_state(&new);
+        assert!(controller.session_to_media.is_empty());
+        assert!(controller.media_to_session.is_empty());
+        assert!(controller.session_mapping_owners.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn decoded_audio_callback_preserves_rtp_timestamp() {
         let controller = MediaSessionController::new();
         let dialog_id = DialogId::new("rtp-timestamp-dialog");
