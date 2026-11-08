@@ -330,6 +330,15 @@ pub struct MediaExecutorConfig {
     /// [`Self::callback_send`] (the lane table); without it it reads as off,
     /// and on a lane without a table the loop stays a hosted future.
     pub callback_rx_kernel: bool,
+    /// A receive loop in its lane's table reads its socket on the lane's
+    /// readiness reports instead of until the socket is empty: the lane
+    /// keeps one level-triggered epoll for its graduated sockets (registered
+    /// with the lane's reactor as one descriptor) and reads each reported
+    /// socket once per report, so no read finds the socket empty and an
+    /// owner deadline never reads it. Linux only. Needs
+    /// [`Self::callback_rx_kernel`]; without it, or off Linux, it reads as
+    /// off (the entries read as without it).
+    pub lane_rx_readiness: bool,
     // ---- End lane table receive ----
 }
 
@@ -377,6 +386,7 @@ impl MediaExecutorConfig {
             callback_send: false,
             // Lane table receive.
             callback_rx_kernel: false,
+            lane_rx_readiness: false,
         }
     }
 
@@ -418,6 +428,7 @@ impl MediaExecutorConfig {
             callback_send: true,
             // Lane table receive.
             callback_rx_kernel: true,
+            lane_rx_readiness: true,
         }
     }
 
@@ -589,6 +600,12 @@ impl MediaExecutorConfig {
     /// Set [`Self::callback_rx_kernel`].
     pub fn with_callback_rx_kernel(mut self, enabled: bool) -> Self {
         self.callback_rx_kernel = enabled;
+        self
+    }
+
+    /// Set [`Self::lane_rx_readiness`].
+    pub fn with_lane_rx_readiness(mut self, enabled: bool) -> Self {
+        self.lane_rx_readiness = enabled;
         self
     }
 
@@ -812,6 +829,12 @@ impl MediaExecutorConfig {
     /// they own their call state (needs the lane table).
     pub fn callback_rx_kernel_active(&self) -> bool {
         self.callback_send_active() && self.callback_rx_kernel
+    }
+
+    /// Whether receive loops in a lane table read on the lane's readiness
+    /// reports (needs [`Self::callback_rx_kernel_active`]; Linux only).
+    pub fn lane_rx_readiness_active(&self) -> bool {
+        cfg!(target_os = "linux") && self.callback_rx_kernel_active() && self.lane_rx_readiness
     }
 
     // ---- End lane table receive ----
@@ -1111,6 +1134,14 @@ pub fn callback_send_enabled() -> bool {
 /// receive loop, when the transport starts receiving.
 pub fn callback_rx_kernel_enabled() -> bool {
     with_config(MediaExecutorConfig::callback_rx_kernel_active)
+}
+
+/// Whether a receive loop started now reads on its lane's readiness reports
+/// once it is in the lane's table
+/// ([`MediaExecutorConfig::lane_rx_readiness_active`]). Read once per
+/// receive loop, when the transport starts receiving.
+pub fn lane_rx_readiness_enabled() -> bool {
+    with_config(MediaExecutorConfig::lane_rx_readiness_active)
 }
 
 // ---- End lane table receive ----
@@ -2935,6 +2966,41 @@ mod tests {
         ));
         assert!(!accessor(
             MediaExecutorConfig::v1().with_callback_rx_kernel(true)
+        ));
+    }
+
+    #[test]
+    fn lane_rx_readiness_is_off_in_v1_on_in_v2_on_linux_and_reads_as_off_without_its_prerequisites()
+    {
+        let linux = cfg!(target_os = "linux");
+        let v1 = MediaExecutorConfig::v1();
+        assert!(!v1.lane_rx_readiness && !v1.lane_rx_readiness_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.lane_rx_readiness);
+        assert_eq!(v2.lane_rx_readiness_active(), linux, "Linux only");
+        assert!(v2.validate().is_ok());
+        for missing in [
+            MediaExecutorConfig::v2().with_mode(MediaExecutorMode::V1),
+            MediaExecutorConfig::v2().with_callback_rx_kernel(false),
+            MediaExecutorConfig::v2().with_callback_send(false),
+            MediaExecutorConfig::v2().with_lane_poller(false),
+            MediaExecutorConfig::v2().with_lane_rx_readiness(false),
+        ] {
+            assert!(missing.validate().is_ok(), "{missing:?}");
+            assert!(!missing.lane_rx_readiness_active(), "{missing:?}");
+        }
+        // Receive entries stay on without it.
+        assert!(MediaExecutorConfig::v2()
+            .with_lane_rx_readiness(false)
+            .callback_rx_kernel_active());
+        let accessor = |config: MediaExecutorConfig| {
+            let _guard = override_media_executor_config_on_this_thread(config);
+            lane_rx_readiness_enabled()
+        };
+        assert!(!accessor(MediaExecutorConfig::v1()));
+        assert_eq!(accessor(MediaExecutorConfig::v2()), linux);
+        assert!(!accessor(
+            MediaExecutorConfig::v2().with_callback_rx_kernel(false)
         ));
     }
 

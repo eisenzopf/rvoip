@@ -146,8 +146,16 @@
 //! pass; what a budget leaves keeps the lane going. Panic isolation and
 //! generation fencing are as for TX entries.
 //!
+//! With [`MediaExecutorConfig::lane_rx_readiness`] (Linux) a receive entry's
+//! socket is registered with the table's level-triggered lane epoll
+//! (`crate::lane_epoll`) instead: a pass asks it which sockets hold a
+//! datagram and calls each reported entry to read once, asking again until
+//! it reports none, at most [`LANE_RX_READINESS_WAITS_PER_PASS`] times per
+//! pass. No read finds a socket empty, and nothing parks on the socket.
+//!
 //! [`MediaExecutorConfig::callback_send`]: crate::executor::MediaExecutorConfig::callback_send
 //! [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
+//! [`MediaExecutorConfig::lane_rx_readiness`]: crate::executor::MediaExecutorConfig::lane_rx_readiness
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -163,7 +171,9 @@ use tokio::time::{Instant, Sleep};
 
 use crate::lane_clock::{Wheel, WheelEntry, WheelLinks, WHEEL_RESOLUTION};
 
-pub use crate::executor::{callback_rx_kernel_enabled, callback_send_enabled};
+pub use crate::executor::{
+    callback_rx_kernel_enabled, callback_send_enabled, lane_rx_readiness_enabled,
+};
 
 /// Entries one pass fires at most (every timer round together). The rest
 /// stay due and the pass asks the poller to continue.
@@ -175,6 +185,14 @@ pub const CALLBACK_FIRES_PER_ENTRY_PER_PASS: u8 = 2;
 /// poll budget). The rest stay ready and the pass asks the poller to
 /// continue.
 pub const CALLBACK_RX_SERVICES_PER_PASS: u32 = 256;
+/// Lane epoll waits one pass makes at most
+/// ([`MediaExecutorConfig::lane_rx_readiness`]). A socket gets one read per
+/// wait that reports it, so this is the per-call drain budget of a pass
+/// ([`crate::executor::INLINE_DRAIN_BUDGET`], the async loop's yield point);
+/// a socket still reported after it keeps the lane going.
+///
+/// [`MediaExecutorConfig::lane_rx_readiness`]: crate::executor::MediaExecutorConfig::lane_rx_readiness
+pub const LANE_RX_READINESS_WAITS_PER_PASS: u32 = 50;
 
 // ---- the source API ----
 
@@ -450,6 +468,19 @@ pub(crate) trait LaneRxSource: Send + 'static {
     /// list (its waker fired, or it was just installed or carried); else its
     /// owner deadline fell due.
     fn serve(&mut self, ready: bool) -> RxNext;
+    /// The socket to register with the lane epoll, for a source that asked
+    /// to read on its readiness reports (`None`: it parks on its own wakers).
+    /// Asked once, at install; the socket stays open while the source is
+    /// installed.
+    fn readiness_fd(&self) -> Option<crate::lane_epoll::SocketFd> {
+        None
+    }
+    /// The lane epoll reported the socket readable: read it once, then
+    /// continue as [`Self::serve`] does. Called only for a source attached
+    /// with [`RxWake::readiness`].
+    fn on_readable(&mut self) -> RxNext {
+        self.serve(true)
+    }
     /// The entry leaves the table (not after a panic): undo [`Self::attach`].
     fn on_leave(&mut self) {}
     /// For the supervisor, which knows the concrete type, to take it back.
@@ -501,6 +532,12 @@ impl std::task::Wake for SlotWake {
 /// What a receive source gets when it is installed.
 pub(crate) struct RxWake {
     pub(crate) waker: Waker,
+    /// Its socket is registered with the lane epoll: the lane calls
+    /// [`LaneRxSource::on_readable`] once per readiness report, and the
+    /// source neither reads its socket speculatively nor parks on it.
+    /// `false` when it asked for that and the lane could not (counted in
+    /// [`CallbackLaneCounters::rx_readiness_fallbacks`]).
+    pub(crate) readiness: bool,
     slot: Arc<SlotWake>,
 }
 
@@ -609,6 +646,66 @@ fn record_rx_panic(stage: &'static str) {
         stage,
         "lane table receive handler panicked; only its call's receive loop ended"
     );
+}
+
+/// The waker the lane epoll's reactor registration holds. Like a receive
+/// entry's wake between passes, it wakes the poller (whose waker each pass
+/// registers with the mailbox).
+struct EpollWake {
+    mailbox: Arc<Mailbox>,
+}
+
+impl std::task::Wake for EpollWake {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.mailbox.poller.wake();
+    }
+}
+
+/// A table's lane epoll and its bookkeeping.
+struct RxEpoll {
+    epoll: crate::lane_epoll::LaneEpoll,
+    /// Registered with the reactor for the epoll descriptor.
+    waker: Waker,
+    /// Wait in this pass even without a reactor report (a socket was just
+    /// registered and may hold datagrams already).
+    force: bool,
+    /// A pass stopped waiting with reports outstanding (its wait or service
+    /// budget ran out): the lane must not sleep on them, and the next pass
+    /// waits (`force` is set with it).
+    pending: bool,
+    /// Waits made in this pass ([`LANE_RX_READINESS_WAITS_PER_PASS`]).
+    waits: u32,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: runs on this thread after a lane epoll wait that reported
+    /// nothing, before the reactor's readiness is cleared (the window a
+    /// datagram arriving between the drain and the re-arm falls into).
+    static AFTER_EMPTY_WAIT: RefCell<Option<Box<dyn FnMut()>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_after_empty_wait(hook: Option<Box<dyn FnMut()>>) {
+    AFTER_EMPTY_WAIT.with(|slot| *slot.borrow_mut() = hook);
+}
+
+#[cfg(test)]
+fn run_after_empty_wait() {
+    let hook = AFTER_EMPTY_WAIT.with(|slot| slot.borrow_mut().take());
+    if let Some(mut hook) = hook {
+        hook();
+        AFTER_EMPTY_WAIT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(hook);
+            }
+        });
+    }
 }
 
 /// Ready receive entries marked on this thread, for the table that owns the
@@ -829,6 +926,8 @@ pub(crate) struct LaneTable {
     /// of the receive work (no ready list, no thread-local marks, no in-pass
     /// flag): without receive entries the pass is the TX table's alone.
     rx_seen: bool,
+    /// The lane epoll, created at the first registration.
+    rx_epoll: Option<Box<RxEpoll>>,
 }
 
 impl LaneTable {
@@ -863,6 +962,7 @@ impl LaneTable {
             rx_budget: CALLBACK_RX_SERVICES_PER_PASS,
             pass_rx_calls: 0,
             rx_seen: false,
+            rx_epoll: None,
         }
     }
 
@@ -885,6 +985,9 @@ impl LaneTable {
         self.carried = 0;
         self.rx_budget = CALLBACK_RX_SERVICES_PER_PASS;
         self.pass_rx_calls = 0;
+        if let Some(epoll) = self.rx_epoll.as_mut() {
+            epoll.waits = 0;
+        }
         self.mailbox.poller.register(poller);
     }
 
@@ -958,8 +1061,14 @@ impl LaneTable {
             queued: AtomicBool::new(true),
             mailbox: Arc::clone(&self.mailbox),
         });
+        // A source that asked for it reads on the lane epoll's reports.
+        let readiness = match source.readiness_fd() {
+            Some(socket) => self.register_readiness(slot, generation, socket),
+            None => false,
+        };
         source.attach(RxWake {
             waker: Waker::from(Arc::clone(&wake)),
+            readiness,
             slot: wake,
         });
         {
@@ -985,9 +1094,59 @@ impl LaneTable {
         }
     }
 
+    /// Register `socket` (entry `slot`, `generation`) with the lane epoll,
+    /// created on first use. `false` (counted) when that is not possible:
+    /// the entry then parks on its own wakers.
+    fn register_readiness(
+        &mut self,
+        slot: u32,
+        generation: u32,
+        socket: crate::lane_epoll::SocketFd,
+    ) -> bool {
+        if self.rx_epoll.is_none() {
+            match crate::lane_epoll::LaneEpoll::new() {
+                Ok(epoll) => {
+                    self.rx_epoll = Some(Box::new(RxEpoll {
+                        epoll,
+                        waker: Waker::from(Arc::new(EpollWake {
+                            mailbox: Arc::clone(&self.mailbox),
+                        })),
+                        force: false,
+                        pending: false,
+                        waits: 0,
+                    }));
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "no lane epoll; receive entries park on their sockets");
+                    self.counters.rx.readiness_fallbacks += 1;
+                    return false;
+                }
+            }
+        }
+        let epoll = self.rx_epoll.as_mut().expect("created above");
+        match epoll.epoll.add(slot, generation, socket) {
+            Ok(()) => {
+                // It may hold datagrams already: wait in this pass.
+                epoll.force = true;
+                self.counters.rx.epoll_registered += 1;
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, "socket not registered with the lane epoll; the entry parks on it");
+                self.counters.rx.readiness_fallbacks += 1;
+                false
+            }
+        }
+    }
+
     /// Free `slot`: the generation moves on, so every handle and message of
     /// the previous occupant is stale.
     fn release(&mut self, slot: u32) -> Released {
+        // Unregister its socket while the source (which keeps the socket
+        // open) is still in the slot.
+        if let Some(epoll) = self.rx_epoll.as_mut() {
+            epoll.epoll.remove(slot);
+        }
         let entry = &mut self.entries[slot as usize];
         debug_assert!(
             !entry.links.is_filed(),
@@ -1122,7 +1281,8 @@ impl LaneTable {
         self.rx_seen
             && (!self.ready.is_empty()
                 || local_ready_pending(self.id)
-                || self.mailbox.pending.load(Ordering::Acquire))
+                || self.mailbox.pending.load(Ordering::Acquire)
+                || self.rx_epoll.as_ref().is_some_and(|epoll| epoll.pending))
     }
 
     /// Receive handler calls in this pass (ready services and due fires).
@@ -1297,7 +1457,108 @@ impl LaneTable {
         if !self.ready.is_empty() {
             self.serve_ready_list(&mut report);
         }
+        if self.rx_epoll.is_some() {
+            self.serve_readiness(&mut report);
+        }
         report
+    }
+
+    /// Serve the sockets the lane epoll reports readable, one read per
+    /// report, asking again until it reports none (then the reactor's
+    /// readiness for it is cleared and its waker registered) or the pass's
+    /// wait or service budget is spent (then the lane keeps going). Only
+    /// when the reactor saw a datagram arrive since the last clear, or a
+    /// socket was just registered.
+    fn serve_readiness(&mut self, report: &mut FireReport) {
+        let Some(state) = self.rx_epoll.as_mut() else {
+            return;
+        };
+        if state.epoll.registered() == 0 {
+            state.pending = false;
+            state.force = false;
+            return;
+        }
+        let readiness = state.epoll.readiness();
+        let waker = state.waker.clone();
+        let mut cx = Context::from_waker(&waker);
+        loop {
+            let guard = match readiness.poll(&mut cx) {
+                Poll::Ready(guard) => guard,
+                // The waker is registered for the next arrival.
+                Poll::Pending => None,
+            };
+            let state = self.rx_epoll.as_mut().expect("checked above");
+            if guard.is_none() && !std::mem::take(&mut state.force) {
+                return;
+            }
+            state.force = false;
+            loop {
+                let state = self.rx_epoll.as_mut().expect("checked above");
+                if state.waits >= LANE_RX_READINESS_WAITS_PER_PASS || self.rx_budget == 0 {
+                    // Reports may be outstanding: the lane goes on, and its
+                    // next pass waits whatever the reactor says (the guard,
+                    // if any, is dropped uncleared).
+                    state.pending = true;
+                    state.force = true;
+                    self.counters.rx.epoll_budget_stops += 1;
+                    return;
+                }
+                state.waits += 1;
+                let max = (self.rx_budget as usize).min(crate::lane_epoll::MAX_EVENTS);
+                let ready = match state.epoll.wait(max) {
+                    Ok(ready) => ready,
+                    Err(error) => {
+                        // Try again in the next pass (EINTR; nothing else is
+                        // expected of a zero-timeout wait on our epoll).
+                        tracing::debug!(%error, "lane epoll wait failed");
+                        state.pending = true;
+                        state.force = true;
+                        return;
+                    }
+                };
+                if ready == 0 {
+                    state.pending = false;
+                    self.counters.rx.epoll_empty_waits += 1;
+                    #[cfg(test)]
+                    run_after_empty_wait();
+                    if let Some(guard) = guard {
+                        guard.clear();
+                    }
+                    // Poll again: registers the waker (or, should the
+                    // reactor have reported another edge, waits again).
+                    break;
+                }
+                self.counters.rx.epoll_waits += 1;
+                self.counters.rx.epoll_reports += ready as u64;
+                for index in 0..ready {
+                    let (slot, generation) = self
+                        .rx_epoll
+                        .as_ref()
+                        .expect("checked above")
+                        .epoll
+                        .report(index);
+                    if !self.is_rx(slot, generation) || self.rx_budget == 0 {
+                        // It left during this wait's services (its socket is
+                        // unregistered now), or the budget is spent (it is
+                        // reported again).
+                        self.counters.rx.epoll_stale_reports += 1;
+                        continue;
+                    }
+                    self.rx_budget -= 1;
+                    report.rx_calls += 1;
+                    self.note_rx_call();
+                    self.counters.rx.readable_calls += 1;
+                    let served = {
+                        let source = self.entries[slot as usize]
+                            .rx
+                            .as_mut()
+                            .expect("a receive entry has a source");
+                        catch_unwind(AssertUnwindSafe(|| source.on_readable()))
+                    };
+                    report.returned += self.apply_rx(slot, served, "readable");
+                }
+            }
+        }
     }
 
     /// The ready list, in order, within the pass's service budget.
@@ -1692,6 +1953,14 @@ static RX_STOPPED: AtomicU64 = AtomicU64::new(0);
 static RX_RETIRED: AtomicU64 = AtomicU64::new(0);
 static RX_ESCALATED: AtomicU64 = AtomicU64::new(0);
 static RX_POISONED: AtomicU64 = AtomicU64::new(0);
+static RX_READABLE_CALLS: AtomicU64 = AtomicU64::new(0);
+static RX_READINESS_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static RX_EPOLL_REGISTERED: AtomicU64 = AtomicU64::new(0);
+static RX_EPOLL_WAITS: AtomicU64 = AtomicU64::new(0);
+static RX_EPOLL_EMPTY_WAITS: AtomicU64 = AtomicU64::new(0);
+static RX_EPOLL_REPORTS: AtomicU64 = AtomicU64::new(0);
+static RX_EPOLL_STALE_REPORTS: AtomicU64 = AtomicU64::new(0);
+static RX_EPOLL_BUDGET_STOPS: AtomicU64 = AtomicU64::new(0);
 
 /// Lane table totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction. Table counters are
@@ -1753,6 +2022,27 @@ pub struct CallbackLaneCounters {
     pub rx_escalated: u64,
     /// Receive entries whose handler panicked (only that loop ended).
     pub rx_poisoned: u64,
+    /// Receive handler calls for a lane epoll readiness report
+    /// ([`MediaExecutorConfig::lane_rx_readiness`]); each reads once.
+    ///
+    /// [`MediaExecutorConfig::lane_rx_readiness`]: crate::executor::MediaExecutorConfig::lane_rx_readiness
+    pub rx_readable_calls: u64,
+    /// Receive entries that asked for the lane epoll and park on their
+    /// sockets instead (no epoll, or the socket could not be registered).
+    pub rx_readiness_fallbacks: u64,
+    /// Sockets registered with a lane epoll.
+    pub rx_epoll_registered: u64,
+    /// Lane epoll waits that reported sockets.
+    pub rx_epoll_waits: u64,
+    /// Lane epoll waits that reported none (at most one per pass that read:
+    /// the only empty probe on this path).
+    pub rx_epoll_empty_waits: u64,
+    /// Sockets reported readable.
+    pub rx_epoll_reports: u64,
+    /// Reports for an entry that had left (or past the service budget).
+    pub rx_epoll_stale_reports: u64,
+    /// Passes that stopped waiting with reports outstanding (a budget).
+    pub rx_epoll_budget_stops: u64,
 }
 
 /// The lane table totals ([`CallbackLaneCounters`]).
@@ -1781,6 +2071,14 @@ pub fn callback_lane_counters() -> CallbackLaneCounters {
         rx_retired: load(&RX_RETIRED),
         rx_escalated: load(&RX_ESCALATED),
         rx_poisoned: load(&RX_POISONED),
+        rx_readable_calls: load(&RX_READABLE_CALLS),
+        rx_readiness_fallbacks: load(&RX_READINESS_FALLBACKS),
+        rx_epoll_registered: load(&RX_EPOLL_REGISTERED),
+        rx_epoll_waits: load(&RX_EPOLL_WAITS),
+        rx_epoll_empty_waits: load(&RX_EPOLL_EMPTY_WAITS),
+        rx_epoll_reports: load(&RX_EPOLL_REPORTS),
+        rx_epoll_stale_reports: load(&RX_EPOLL_STALE_REPORTS),
+        rx_epoll_budget_stops: load(&RX_EPOLL_BUDGET_STOPS),
     }
 }
 
@@ -1794,6 +2092,14 @@ struct RxTableCounters {
     retired: u64,
     escalated: u64,
     poisoned: u64,
+    readable_calls: u64,
+    readiness_fallbacks: u64,
+    epoll_registered: u64,
+    epoll_waits: u64,
+    epoll_empty_waits: u64,
+    epoll_reports: u64,
+    epoll_stale_reports: u64,
+    epoll_budget_stops: u64,
 }
 
 impl RxTableCounters {
@@ -1806,6 +2112,14 @@ impl RxTableCounters {
             (&mut self.retired, &RX_RETIRED),
             (&mut self.escalated, &RX_ESCALATED),
             (&mut self.poisoned, &RX_POISONED),
+            (&mut self.readable_calls, &RX_READABLE_CALLS),
+            (&mut self.readiness_fallbacks, &RX_READINESS_FALLBACKS),
+            (&mut self.epoll_registered, &RX_EPOLL_REGISTERED),
+            (&mut self.epoll_waits, &RX_EPOLL_WAITS),
+            (&mut self.epoll_empty_waits, &RX_EPOLL_EMPTY_WAITS),
+            (&mut self.epoll_reports, &RX_EPOLL_REPORTS),
+            (&mut self.epoll_stale_reports, &RX_EPOLL_STALE_REPORTS),
+            (&mut self.epoll_budget_stops, &RX_EPOLL_BUDGET_STOPS),
         ] {
             let value = std::mem::take(pending);
             if value > 0 {
@@ -1944,6 +2258,15 @@ impl ManualLane {
     #[cfg(test)]
     pub(crate) fn rx_pending(&self) -> bool {
         self.table.as_ref().is_some_and(|table| table.rx_pending())
+    }
+
+    /// Sockets registered with this lane's epoll.
+    #[cfg(test)]
+    pub(crate) fn rx_readiness_registered(&self) -> usize {
+        self.table
+            .as_ref()
+            .and_then(|table| table.rx_epoll.as_ref())
+            .map_or(0, |epoll| epoll.epoll.registered())
     }
 
     /// Run `f` with the table current (no fire).

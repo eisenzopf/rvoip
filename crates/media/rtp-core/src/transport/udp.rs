@@ -543,6 +543,11 @@ struct ReceiveLoop {
     ///
     /// [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
     callback_kernel: bool,
+    /// A graduated loop reads on its lane's readiness reports
+    /// ([`MediaExecutorConfig::lane_rx_readiness`]; needs `callback_kernel`).
+    ///
+    /// [`MediaExecutorConfig::lane_rx_readiness`]: crate::executor::MediaExecutorConfig::lane_rx_readiness
+    rx_readiness: bool,
 }
 
 /// The RTP receive loop of a transport. Every received datagram goes
@@ -567,6 +572,7 @@ fn receive_loop(parts: ReceiveLoop) -> impl std::future::Future<Output = ()> + S
         config,
         socket: rtp_socket,
         callback_kernel,
+        rx_readiness,
     } = parts;
     let mut core = RxCore::unplaced(config);
     async move {
@@ -584,7 +590,7 @@ fn receive_loop(parts: ReceiveLoop) -> impl std::future::Future<Output = ()> + S
 
             // Graduate between two waits, where the loop holds no datagram.
             if graduate && core.graduation_ready() {
-                let call = callback_rx::RxCall::new(core, Arc::clone(&rtp_socket));
+                let call = callback_rx::RxCall::new(core, Arc::clone(&rtp_socket), rx_readiness);
                 match Box::pin(callback_rx::run_on_lane(call)).await {
                     // The entry stopped (the transport's `active` check),
                     // panicked or lost its lane: the loop ends.
@@ -1369,12 +1375,16 @@ impl UdpRtpTransport {
         // A v2 loop hosted on its lane poller may move into its lane's table
         // once it owns its call state (read once per loop).
         let callback_kernel = callback_rx::switch_for_loop(on_lane);
+        // Linux: a graduated loop reads on its lane epoll's readiness
+        // reports (read once per loop).
+        let rx_readiness = callback_rx::readiness_for_loop(callback_kernel);
         let rtp_receiver_future = memory_tracked(
             "rtp_core.udp_transport.rtp_receiver_task",
             receive_loop(ReceiveLoop {
                 config,
                 socket: rtp_socket,
                 callback_kernel,
+                rx_readiness,
             }),
         );
         let rtp_receiver = if on_lane {

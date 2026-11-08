@@ -27,6 +27,9 @@ enum Driver {
     Loop,
     /// A lane-table entry.
     Entry,
+    /// A lane-table entry read on its lane epoll's readiness reports
+    /// (Linux).
+    Readiness,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,6 +118,9 @@ struct Trace {
     /// The inbound SRTP context is back home after the loop's state was
     /// dropped.
     srtp_home: bool,
+    /// Sockets still registered with the lane epoll after the loop ended (0:
+    /// unregistered on every exit).
+    epoll_left: usize,
 }
 
 fn rtp_packet(pt: u8, seq: u16, payload: Vec<u8>) -> RtpPacket {
@@ -240,6 +246,7 @@ impl Run {
                 config,
                 socket: Arc::clone(&socket),
                 callback_kernel: driver != Driver::Loop,
+                rx_readiness: driver == Driver::Readiness,
             }));
         Self {
             socket,
@@ -340,6 +347,7 @@ impl Run {
             lane.pass(tokio::time::Instant::now(), || drop(future.take()));
         }
         assert!(self.lane.is_empty(), "the entry left with its loop");
+        let epoll_left = self.lane.rx_readiness_registered();
         let drops = rx_core::take_last_dropped_counts().expect("the loop's state was dropped");
         let mut events = [0usize; 5];
         loop {
@@ -395,6 +403,7 @@ impl Run {
             events,
             ended: self.ended,
             srtp_home: self.srtp_recv.lock().home.is_some(),
+            epoll_left,
         }
     }
 }
@@ -648,9 +657,13 @@ async fn an_entry_serves_its_owner_deadlines_never_early() {
 /// loop only; its neighbour on the same lane keeps receiving from the table.
 #[tokio::test]
 async fn a_panicking_call_ends_only_its_own_receive_loop() {
-    let mut good = Run::new(Driver::Entry, Options::default()).await;
+    panicking_call(Driver::Entry).await;
+}
+
+async fn panicking_call(driver: Driver) {
+    let mut good = Run::new(driver, Options::default()).await;
     let mut bad = Run::new(
-        Driver::Entry,
+        driver,
         Options {
             panic_at: Some(7),
             ..Options::default()
@@ -702,10 +715,16 @@ async fn a_panicking_call_ends_only_its_own_receive_loop() {
         "the neighbour received everything"
     );
     assert_eq!(bad.lane.len(), 1, "only the neighbour's entry is left");
+    assert_eq!(
+        bad.lane.rx_readiness_registered(),
+        usize::from(driver == Driver::Readiness),
+        "only the neighbour's socket is left on the lane epoll"
+    );
     // Teardown of the neighbour inside a pass: retired synchronously.
     bad.lane
         .pass(tokio::time::Instant::now(), || drop(good_future.take()));
     assert!(bad.lane.is_empty());
+    assert_eq!(bad.lane.rx_readiness_registered(), 0);
 }
 
 /// Fairness and budgets: a socket with two drain budgets and more queued is
@@ -713,8 +732,12 @@ async fn a_panicking_call_ends_only_its_own_receive_loop() {
 /// neighbour in the first pass, and nothing is lost or reordered.
 #[tokio::test]
 async fn a_flooding_socket_is_served_one_drain_budget_per_pass() {
-    let mut quiet = Run::new(Driver::Entry, Options::default()).await;
-    let mut flood = Run::new(Driver::Entry, Options::default()).await;
+    flooding_socket(Driver::Entry).await;
+}
+
+async fn flooding_socket(driver: Driver) {
+    let mut quiet = Run::new(driver, Options::default()).await;
+    let mut flood = Run::new(driver, Options::default()).await;
     let mut quiet_future = quiet.future.take();
     let to_flood = flood.socket.local_addr().unwrap();
     let to_quiet = quiet.socket.local_addr().unwrap();
@@ -845,10 +868,21 @@ async fn poller_serves_entries(driver: Driver) {
         after.rx_installs >= before.rx_installs + 6,
         "every loop graduated"
     );
-    assert!(
-        after.rx_ready_calls > before.rx_ready_calls,
-        "served from readiness"
-    );
+    if driver == Driver::Readiness {
+        assert!(
+            after.rx_epoll_registered >= before.rx_epoll_registered + 6,
+            "every socket registered with its lane epoll"
+        );
+        assert!(
+            after.rx_readable_calls > before.rx_readable_calls,
+            "served from lane epoll reports"
+        );
+    } else {
+        assert!(
+            after.rx_ready_calls > before.rx_ready_calls,
+            "served from readiness"
+        );
+    }
     assert!(
         after.rx_retired >= before.rx_retired + 6,
         "every entry retired by its abort"
@@ -885,4 +919,172 @@ async fn the_async_loop_and_the_entry_end_each_readiness_edge_with_an_empty_read
             "{driver:?}: {empty} empty reads"
         );
     }
+}
+
+// ---- lane readiness (Linux) ----
+
+/// Every script through the async loop, the entry and the entry on lane
+/// readiness gives the same trace (frames, accounting, events, how the loop
+/// ended, the SRTP context home, no socket left on the lane epoll), and the
+/// readiness runs really were served from their lane epoll's reports.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn lane_readiness_receive_scripts_match_the_async_loop_and_the_entry() {
+    let before = callback_lane_counters();
+    let scripts = scripts();
+    for (name, srtp, script) in &scripts {
+        let (loop_trace, loop_entries, _) = drive(Driver::Loop, *srtp, script).await;
+        let (entry_trace, entry_entries, _) = drive(Driver::Entry, *srtp, script).await;
+        let (ready_trace, ready_entries, ready_calls) =
+            drive(Driver::Readiness, *srtp, script).await;
+        assert_eq!(
+            ready_trace, loop_trace,
+            "{name}: lane readiness received as the async loop did"
+        );
+        assert_eq!(
+            ready_trace, entry_trace,
+            "{name}: lane readiness received as the entry did"
+        );
+        assert_eq!((loop_entries, entry_entries, ready_entries), (0, 1, 1));
+        assert!(ready_calls > 0, "{name}: the table drove it");
+        assert!(!ready_trace.seen.is_empty(), "{name}: not vacuous");
+        assert_eq!(ready_trace.epoll_left, 0, "{name}: unregistered");
+    }
+    let after = callback_lane_counters();
+    assert!(
+        after.rx_epoll_registered >= before.rx_epoll_registered + scripts.len() as u64,
+        "each readiness loop's socket was registered with its lane epoll"
+    );
+    assert!(
+        after.rx_readable_calls > before.rx_readable_calls,
+        "served from lane epoll reports"
+    );
+}
+
+/// The point of lane readiness: with one datagram per readiness edge the
+/// async loop and the entry end each edge with an empty read, while lane
+/// readiness reads each datagram exactly once and never finds the socket
+/// empty. Its only empty probe is one `epoll_wait` per pass that read.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn lane_readiness_reads_each_datagram_once_without_an_empty_read() {
+    const SENDS: u16 = 24;
+    let expected: Vec<u16> = (1..=SENDS).collect();
+    let (loop_seqs, loop_empty) = one_datagram_per_edge(Driver::Loop, SENDS).await;
+    let (entry_seqs, entry_empty) = one_datagram_per_edge(Driver::Entry, SENDS).await;
+    let before = callback_lane_counters();
+    let (ready_seqs, ready_empty) = one_datagram_per_edge(Driver::Readiness, SENDS).await;
+    let after = callback_lane_counters();
+    assert_eq!(loop_seqs, expected);
+    assert_eq!(entry_seqs, expected);
+    assert_eq!(ready_seqs, expected);
+    assert!(
+        loop_empty >= u64::from(SENDS - 1),
+        "the async loop: {loop_empty}"
+    );
+    assert!(
+        entry_empty >= u64::from(SENDS - 1),
+        "the entry: {entry_empty}"
+    );
+    assert_eq!(
+        ready_empty, 0,
+        "lane readiness: no read found the socket empty"
+    );
+    // Process totals (other tests add to them): at least this run's
+    // reports were served, each with one read.
+    assert!(after.rx_readable_calls >= before.rx_readable_calls + u64::from(SENDS - 1));
+    assert!(after.rx_epoll_reports >= before.rx_epoll_reports + u64::from(SENDS - 1));
+}
+
+/// No lost wakeup: a datagram that lands after a pass's last (empty) lane
+/// epoll wait, before the reactor's readiness for the epoll is cleared and
+/// its waker registered again, still wakes the lane and is read in the next
+/// pass. Nothing marks the entry: only the reactor's report of the epoll
+/// descriptor can deliver it.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn lane_readiness_receives_a_datagram_between_the_drain_and_the_rearm() {
+    use std::sync::atomic::AtomicUsize;
+    struct Count(AtomicUsize);
+    impl std::task::Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let mut run = Run::new(Driver::Readiness, Options::default()).await;
+    let to = run.socket.local_addr().unwrap();
+    // One peer for every datagram (the first latches it).
+    let peer = Arc::new(std::net::UdpSocket::bind("127.0.0.1:0").unwrap());
+    run.pass();
+    peer.send_to(&rtp(1), to).unwrap();
+    run.settle().await;
+    assert_eq!(run.max_entries, 1, "graduated");
+    assert_eq!(run.lane.rx_readiness_registered(), 1);
+    peer.send_to(&rtp(2), to).unwrap();
+    // The reactor turns and records the epoll descriptor readable.
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let fired = Arc::new(AtomicUsize::new(0));
+    {
+        let (peer, fired) = (Arc::clone(&peer), Arc::clone(&fired));
+        lane_table::set_after_empty_wait(Some(Box::new(move || {
+            if fired.fetch_add(1, Ordering::SeqCst) == 0 {
+                peer.send_to(&rtp(3), to).unwrap();
+            }
+        })));
+    }
+    let count = Arc::new(Count(AtomicUsize::new(0)));
+    let poller = std::task::Waker::from(Arc::clone(&count));
+    run.pass_waking(&poller);
+    lane_table::set_after_empty_wait(None);
+    assert_eq!(fired.load(Ordering::SeqCst), 1, "the window was hit once");
+    assert_eq!(run.seqs(), vec![1, 2], "datagram 3 arrived after the drain");
+    assert!(!run.lane.rx_pending(), "nothing marked: the lane may park");
+    for _ in 0..10_000 {
+        if count.0.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(
+        count.0.load(Ordering::SeqCst) > 0,
+        "the reactor woke the parked lane for datagram 3"
+    );
+    run.pass();
+    assert_eq!(run.seqs(), vec![1, 2, 3], "read in the next pass");
+    let trace = run.finish();
+    assert_eq!(trace.epoll_left, 0);
+}
+
+/// The same panic isolation on lane readiness: the poisoned entry's socket
+/// leaves the lane epoll with it, and the neighbour is still served from its
+/// reports.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn lane_readiness_a_panicking_call_ends_only_its_own_receive_loop() {
+    panicking_call(Driver::Readiness).await;
+}
+
+/// Lane readiness keeps the same budget: one read per lane epoll report and
+/// at most `LANE_RX_READINESS_WAITS_PER_PASS` waits per pass, so a flooding
+/// socket gets 50 reads per pass, its quiet neighbour is read in the first
+/// wait, and the reports left keep the lane going.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn lane_readiness_serves_a_flooding_socket_one_drain_budget_per_pass() {
+    assert_eq!(
+        lane_table::LANE_RX_READINESS_WAITS_PER_PASS as usize,
+        INLINE_DRAIN_BUDGET,
+        "the per-pass wait budget is the async loop's drain budget"
+    );
+    flooding_socket(Driver::Readiness).await;
+}
+
+/// Lane readiness on a real lane, parked between passes (no tick) and
+/// ticking: the lane epoll's reactor registration wakes the lane for every
+/// datagram, nothing is lost or reordered, and every socket leaves the epoll
+/// with its entry.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn lane_readiness_on_a_poller_serves_entries_from_lane_epoll_reports() {
+    poller_serves_entries(Driver::Readiness).await;
 }

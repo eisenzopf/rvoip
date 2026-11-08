@@ -74,6 +74,8 @@ mod error;
 pub mod executor;
 pub mod hot_state;
 pub(crate) mod lane_clock;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) mod lane_epoll;
 pub(crate) mod lane_poller;
 pub mod lane_table;
 pub mod lane_tick;

@@ -14,6 +14,11 @@
 //! - **Owner deadline.** The inline ingress's next deadline (the async
 //!   loop's owner timer) is filed on the table's wheel and served by
 //!   [`RxCall::serve`] when due.
+//! - **Lane readiness ([`MediaExecutorConfig::lane_rx_readiness`],
+//!   Linux).** The socket is registered with the lane's level-triggered
+//!   epoll (`crate::lane_epoll`) instead: [`RxCall::on_readable`] reads it
+//!   once per readiness report, a service never reads it speculatively (no
+//!   empty read), and nothing parks on it.
 //!
 //! Every call runs the async loop's iterations, unchanged in order and
 //! effect: [`InlineRx::next_wake_now`] is `next_wake` up to the point where
@@ -28,6 +33,7 @@
 //! and graduates again).
 //!
 //! [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
+//! [`MediaExecutorConfig::lane_rx_readiness`]: crate::executor::MediaExecutorConfig::lane_rx_readiness
 
 use super::*;
 use crate::lane_table::{self, LaneRxReturn, LaneRxSource, RxNext, RxWake};
@@ -43,6 +49,13 @@ const STEPS_PER_SERVICE: usize = 4 * INLINE_DRAIN_BUDGET;
 /// transport starts receiving.
 pub(super) fn switch_for_loop(on_lane: bool) -> bool {
     on_lane && crate::executor::callback_rx_kernel_enabled()
+}
+
+/// Whether a graduated loop reads on its lane's readiness reports: only with
+/// the table switch on for it (`kernel`). Read once per loop, when the
+/// transport starts receiving.
+pub(super) fn readiness_for_loop(kernel: bool) -> bool {
+    kernel && crate::executor::lane_rx_readiness_enabled()
 }
 
 /// What one step of an entry found ([`InlineRx::next_wake_now`]).
@@ -62,14 +75,45 @@ impl InlineRx {
     /// wait would park, its branches are polled once with the entry's waker
     /// `cx`, in its biased order: the socket, then the owner timer (due by
     /// the pass reading, never early).
+    ///
+    /// Lane readiness (`readable` is `Some`, an entry registered with its
+    /// lane epoll): the socket is read only when `readable` holds a report
+    /// (one read, which consumes it), never speculatively, and nothing parks
+    /// on it (the epoll reports its next datagram); the owner timer is then
+    /// checked as at the park.
     pub(super) fn next_wake_now(
         &mut self,
         socket: &UdpSocket,
         buffer: &mut [u8],
         cx: &mut Context<'_>,
+        readable: Option<&mut bool>,
     ) -> NowWake {
         if self.drained >= INLINE_DRAIN_BUDGET {
             return NowWake::Yield;
+        }
+        if let Some(report) = readable {
+            if std::mem::take(report) {
+                match crate::lane_epoll::recv_from_ready(socket, buffer) {
+                    Ok(received) => {
+                        self.drained += 1;
+                        return NowWake::Wake(InlineWake::Received(Ok(received)));
+                    }
+                    // A stale report.
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        note_empty_read();
+                    }
+                    Err(error) => {
+                        self.drained = 0;
+                        return NowWake::Wake(InlineWake::Received(Err(error)));
+                    }
+                }
+            }
+            self.drained = 0;
+            if self.timer.is_due(crate::media_clock::now_std()) {
+                self.on_timer();
+                return NowWake::Wake(InlineWake::Timer);
+            }
+            return NowWake::Parked;
         }
         match socket.try_recv_from(buffer) {
             Ok(received) => {
@@ -118,16 +162,26 @@ pub(super) struct RxCall {
     yielded: bool,
     /// A receive error for the async loop to report.
     error: Option<std::io::Error>,
+    /// Lane readiness asked for (the switch, read when the loop started).
+    readiness_requested: bool,
+    /// Lane readiness granted at install: the socket is registered with the
+    /// lane epoll.
+    readiness: bool,
+    /// A readiness report not read yet (one read per report).
+    readable: bool,
 }
 
 impl RxCall {
-    pub(super) fn new(core: RxCore, socket: Arc<UdpSocket>) -> Self {
+    pub(super) fn new(core: RxCore, socket: Arc<UdpSocket>, readiness_requested: bool) -> Self {
         Self {
             core,
             socket,
             wake: None,
             yielded: false,
             error: None,
+            readiness_requested,
+            readiness: false,
+            readable: false,
         }
     }
 
@@ -160,6 +214,9 @@ impl RxCall {
             wake,
             yielded,
             error,
+            readiness,
+            readable,
+            ..
         } = self;
         let Some(wake) = wake.as_ref() else {
             return RxNext::Escalate("detached");
@@ -169,7 +226,12 @@ impl RxCall {
             let Some(rx) = core.inline.as_mut() else {
                 return RxNext::Escalate("no_inline");
             };
-            match rx.next_wake_now(socket, &mut core.recv_storage, &mut cx) {
+            let report = if *readiness {
+                Some(&mut *readable)
+            } else {
+                None
+            };
+            match rx.next_wake_now(socket, &mut core.recv_storage, &mut cx, report) {
                 NowWake::Wake(InlineWake::Received(Ok((size, addr)))) => {
                     core.on_datagram(size, addr);
                 }
@@ -208,6 +270,8 @@ fn deadline_of(core: &RxCore) -> Option<tokio::time::Instant> {
 
 impl LaneRxSource for RxCall {
     fn attach(&mut self, wake: RxWake) {
+        self.readiness = wake.readiness;
+        self.readable = false;
         self.wake = Some(wake);
     }
 
@@ -223,7 +287,25 @@ impl LaneRxSource for RxCall {
         self.run()
     }
 
+    fn readiness_fd(&self) -> Option<crate::lane_epoll::SocketFd> {
+        self.readiness_requested
+            .then(|| crate::lane_epoll::socket_fd(&self.socket))
+    }
+
+    fn on_readable(&mut self) -> RxNext {
+        // One read for this report; a ready mark (if any) is left alone: a
+        // ready-list service after this one reads nothing more.
+        self.readable = true;
+        if let Some(next) = self.resume() {
+            return next;
+        }
+        self.run()
+    }
+
     fn on_leave(&mut self) {
+        // The table unregistered the socket.
+        self.readiness = false;
+        self.readable = false;
         self.wake = None;
     }
 

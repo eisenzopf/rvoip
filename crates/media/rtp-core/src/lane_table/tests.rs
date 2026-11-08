@@ -1155,3 +1155,245 @@ fn without_receive_entries_a_pass_does_no_receive_work() {
     let seen = lane.enter(|| with_current(|table| table.rx_seen)).unwrap();
     assert!(!seen);
 }
+
+// ---- lane readiness: the lane epoll ----
+
+/// A source that asks for the lane epoll and records how it was attached.
+struct AskingRx {
+    attached: Arc<Mutex<Vec<bool>>>,
+}
+
+impl LaneRxSource for AskingRx {
+    fn attach(&mut self, wake: RxWake) {
+        self.attached.lock().unwrap().push(wake.readiness);
+    }
+
+    fn serve(&mut self, _ready: bool) -> RxNext {
+        RxNext::Wait(None)
+    }
+
+    fn readiness_fd(&self) -> Option<crate::lane_epoll::SocketFd> {
+        Some(0)
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+/// Without a lane epoll (here: no runtime on the thread, as off Linux) a
+/// source that asks for one is attached without it (it parks on its own
+/// wakers) and the fallback is counted.
+#[test]
+fn without_a_lane_epoll_an_entry_parks_on_its_own_wakers() {
+    let attached = Arc::new(Mutex::new(Vec::new()));
+    let mut lane = ManualLane::new(Instant::now(), None);
+    let before = callback_lane_counters().rx_readiness_fallbacks;
+    let _entry = lane.enter(|| {
+        install_rx(Box::new(AskingRx {
+            attached: Arc::clone(&attached),
+        }))
+        .ok()
+        .expect("a table is current")
+    });
+    assert_eq!(*attached.lock().unwrap(), vec![false]);
+    assert_eq!(lane.rx_readiness_registered(), 0);
+    lane.shut_down();
+    assert!(callback_lane_counters().rx_readiness_fallbacks > before);
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct SocketLog {
+    /// (id, first payload byte) per successful read, in read order.
+    reads: Vec<(u32, u8)>,
+    /// Reads that found the socket empty.
+    empty: u32,
+    attached: Vec<bool>,
+}
+
+/// A receive source on a real socket that reads it once per readiness
+/// report, as a receive entry on lane readiness does.
+#[cfg(target_os = "linux")]
+struct SocketRx {
+    id: u32,
+    socket: Arc<tokio::net::UdpSocket>,
+    wake: Option<RxWake>,
+    log: Arc<Mutex<SocketLog>>,
+}
+
+#[cfg(target_os = "linux")]
+impl LaneRxSource for SocketRx {
+    fn attach(&mut self, wake: RxWake) {
+        self.log.lock().unwrap().attached.push(wake.readiness);
+        self.wake = Some(wake);
+    }
+
+    fn serve(&mut self, ready: bool) -> RxNext {
+        if ready {
+            if let Some(wake) = self.wake.as_ref() {
+                wake.begin_serve();
+            }
+        }
+        RxNext::Wait(None)
+    }
+
+    fn readiness_fd(&self) -> Option<crate::lane_epoll::SocketFd> {
+        Some(crate::lane_epoll::socket_fd(&self.socket))
+    }
+
+    fn on_readable(&mut self) -> RxNext {
+        let mut buffer = [0u8; 8];
+        match crate::lane_epoll::recv_from_ready(&self.socket, &mut buffer) {
+            Ok((size, _)) => {
+                assert!(size > 0);
+                self.log.lock().unwrap().reads.push((self.id, buffer[0]));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                self.log.lock().unwrap().empty += 1;
+            }
+            Err(error) => panic!("receive error: {error}"),
+        }
+        RxNext::Wait(None)
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn socket_rx_on(
+    lane: &mut ManualLane,
+    id: u32,
+    log: &Arc<Mutex<SocketLog>>,
+) -> (LaneRxHandle, Arc<tokio::net::UdpSocket>) {
+    let socket = Arc::new(tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let source = SocketRx {
+        id,
+        socket: Arc::clone(&socket),
+        wake: None,
+        log: Arc::clone(log),
+    };
+    let handle = lane.enter(|| {
+        install_rx(Box::new(source))
+            .ok()
+            .expect("a table is current")
+    });
+    (handle, socket)
+}
+
+/// At the table: each reported socket is read once per report (a socket
+/// with three datagrams is reported in three waits), no read finds a socket
+/// empty, a retired entry's socket leaves the epoll at once (its later
+/// datagrams are not reported), and the counts add up.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_readiness_source_reads_once_per_report_and_never_an_empty_socket() {
+    let log = Arc::new(Mutex::new(SocketLog::default()));
+    let mut lane = ManualLane::new(Instant::now(), None);
+    let (a_handle, a) = socket_rx_on(&mut lane, 0, &log).await;
+    let (_b_handle, b) = socket_rx_on(&mut lane, 1, &log).await;
+    let (_c_handle, _c) = socket_rx_on(&mut lane, 2, &log).await;
+    assert_eq!(log.lock().unwrap().attached, vec![true; 3]);
+    assert_eq!(lane.rx_readiness_registered(), 3);
+    // The install pass: nothing queued, one empty wait.
+    lane.pass_with_rx(Instant::now(), || {});
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for value in [1u8, 2, 3] {
+        peer.send_to(&[value], a.local_addr().unwrap())
+            .await
+            .unwrap();
+    }
+    peer.send_to(&[10], b.local_addr().unwrap()).await.unwrap();
+    // The reactor turns and records the epoll descriptor readable.
+    tokio::time::sleep(ms(5)).await;
+    let before = callback_lane_counters();
+    let (_, calls) = lane.pass_with_rx(Instant::now(), || {});
+    assert_eq!(calls, 4, "one call per report");
+    {
+        let log = log.lock().unwrap();
+        let a_reads: Vec<u8> = log.reads.iter().filter(|r| r.0 == 0).map(|r| r.1).collect();
+        let b_reads: Vec<u8> = log.reads.iter().filter(|r| r.0 == 1).map(|r| r.1).collect();
+        assert_eq!(a_reads, vec![1, 2, 3], "in order, one per wait");
+        assert_eq!(b_reads, vec![10]);
+        assert_eq!(log.empty, 0, "no read found its socket empty");
+    }
+    assert!(!lane.rx_pending(), "drained: the lane may park");
+    assert_eq!(
+        lane.pass_with_rx(Instant::now(), || {}).1,
+        0,
+        "nothing reported"
+    );
+    // Retire A on its lane: its socket leaves the epoll with it.
+    let mut a_handle = Some(a_handle);
+    lane.pass(Instant::now(), || drop(a_handle.take()));
+    assert_eq!(lane.rx_readiness_registered(), 2);
+    peer.send_to(&[4], a.local_addr().unwrap()).await.unwrap();
+    peer.send_to(&[11], b.local_addr().unwrap()).await.unwrap();
+    tokio::time::sleep(ms(5)).await;
+    assert_eq!(lane.pass_with_rx(Instant::now(), || {}).1, 1, "B only");
+    assert_eq!(
+        log.lock().unwrap().reads.last().copied(),
+        Some((1, 11)),
+        "A's datagram stays unread on its socket"
+    );
+    lane.shut_down();
+    let after = callback_lane_counters();
+    assert!(after.rx_epoll_reports >= before.rx_epoll_reports + 5);
+    assert!(
+        after.rx_epoll_waits >= before.rx_epoll_waits + 4,
+        "waits that reported"
+    );
+    assert!(
+        after.rx_epoll_empty_waits >= before.rx_epoll_empty_waits + 2,
+        "one empty wait per pass that read"
+    );
+    assert!(after.rx_readable_calls >= before.rx_readable_calls + 5);
+}
+
+/// Lane readiness shares the pass's receive service budget: with more ready
+/// sockets than `CALLBACK_RX_SERVICES_PER_PASS`, a pass reads that many,
+/// keeps the lane going, and the next pass reads the rest; every socket is
+/// read exactly once.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn readiness_services_are_budgeted_per_pass() {
+    let count = CALLBACK_RX_SERVICES_PER_PASS as usize + 20;
+    let log = Arc::new(Mutex::new(SocketLog::default()));
+    let mut lane = ManualLane::new(Instant::now(), None);
+    let mut sockets = Vec::new();
+    for id in 0..count {
+        sockets.push(socket_rx_on(&mut lane, id as u32, &log).await);
+    }
+    // The install passes (every entry marked ready once, then the budget
+    // carry).
+    lane.pass_with_rx(Instant::now(), || {});
+    lane.pass_with_rx(Instant::now(), || {});
+    assert!(!lane.rx_pending());
+    let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for (_, socket) in &sockets {
+        peer.send_to(&[7], socket.local_addr().unwrap())
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(ms(20)).await;
+    let (_, first) = lane.pass_with_rx(Instant::now(), || {});
+    assert_eq!(first, u64::from(CALLBACK_RX_SERVICES_PER_PASS));
+    assert!(lane.rx_pending(), "reports left keep the lane going");
+    let (_, second) = lane.pass_with_rx(Instant::now(), || {});
+    assert_eq!(
+        second as usize,
+        count - CALLBACK_RX_SERVICES_PER_PASS as usize
+    );
+    assert!(!lane.rx_pending());
+    let log = log.lock().unwrap();
+    let mut ids: Vec<u32> = log.reads.iter().map(|read| read.0).collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        (0..count as u32).collect::<Vec<_>>(),
+        "each socket once"
+    );
+    assert_eq!(log.empty, 0);
+}
