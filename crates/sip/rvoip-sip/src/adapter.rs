@@ -3369,12 +3369,23 @@ impl SipAdapter {
         signaling_end: Option<EndReason>,
     ) -> (AdapterEvent, &'static str) {
         let connection_id = epoch.connection_id.clone();
+        // A call rvoip-sip ended because its media key agreement failed sends
+        // its own BYE, so signaling usually ends first. The recorded failure
+        // still decides the terminal, exactly as in `translate_api_event`.
+        let security_failure = self
+            .media_security_failures
+            .remove(&epoch.session_id)
+            .map(|(_, failure)| media_security_failure_detail(failure));
         match signaling_end {
             Some(reason) => {
                 debug!(
                     ?reason,
                     "SipAdapter media stopped after signaling ended; reporting the signaling terminal"
                 );
+                let reason = match security_failure {
+                    Some(detail) => EndReason::Failed { detail },
+                    None => reason,
+                };
                 (
                     AdapterEvent::Ended {
                         connection_id,
@@ -3386,7 +3397,10 @@ impl SipAdapter {
             None => (
                 AdapterEvent::Failed {
                     connection_id,
-                    detail: "SIP media driver failed".to_string(),
+                    detail: match security_failure {
+                        Some(detail) => format!("SIP media driver failed; {detail}"),
+                        None => "SIP media driver failed".to_string(),
+                    },
                 },
                 "media-failed",
             ),
@@ -10387,6 +10401,73 @@ Signal=5\r\nDuration=160\r\n";
             })) if observed == connection_id
         ));
 
+        adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    /// The failed-media owner claims the route, so it, not
+    /// `translate_api_event`, publishes the terminal. A recorded media
+    /// security failure must still decide that terminal and be consumed on
+    /// both branches.
+    #[tokio::test]
+    async fn failed_media_terminal_reports_and_consumes_a_media_security_failure() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("media-security-owner", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session_id = SessionId::new();
+        let _handle = admit_test_session(&coordinator, &session_id).await;
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id.clone())
+            .expect("exact inbound route");
+        let record = || async {
+            adapter
+                .translate_api_event(ApiEvent::MediaSecurityFailed {
+                    call_id: session_id.clone(),
+                    keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
+                    reason: crate::api::events::MediaSecurityFailure::FingerprintMismatch,
+                })
+                .await;
+            assert_eq!(adapter.media_security_failures.len(), 1);
+        };
+
+        // Signaling ended first (rvoip-sip's own BYE): a failed end, not Normal.
+        record().await;
+        match adapter.failed_media_terminal(&epoch, Some(EndReason::Normal)) {
+            (
+                AdapterEvent::Ended {
+                    reason: EndReason::Failed { detail },
+                    ..
+                },
+                "media-stopped-signaling-ended",
+            ) => assert_eq!(detail, "media-security-failed: fingerprint-mismatch"),
+            other => panic!("expected a failed end, got {other:?}"),
+        }
+        assert!(adapter.media_security_failures.is_empty());
+
+        // Media failed first: the driver failure names the security cause.
+        record().await;
+        match adapter.failed_media_terminal(&epoch, None) {
+            (AdapterEvent::Failed { detail, .. }, "media-failed") => assert_eq!(
+                detail,
+                "SIP media driver failed; media-security-failed: fingerprint-mismatch"
+            ),
+            other => panic!("expected a media failure, got {other:?}"),
+        }
+        assert!(adapter.media_security_failures.is_empty());
+
+        // Without a recorded failure the signaling terminal is unchanged.
+        match adapter.failed_media_terminal(&epoch, Some(EndReason::Cancelled)) {
+            (
+                AdapterEvent::Ended {
+                    reason: EndReason::Cancelled,
+                    ..
+                },
+                _,
+            ) => {}
+            other => panic!("expected a cancelled end, got {other:?}"),
+        }
         adapter.shutdown().await.expect("adapter shutdown");
     }
 
