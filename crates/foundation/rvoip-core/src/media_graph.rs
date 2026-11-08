@@ -44,7 +44,7 @@ use crate::bridge::{codec_to_pt, frame_pump::DEFAULT_TELEPHONE_EVENT_PT};
 use crate::capability::CodecInfo;
 use crate::error::{Result, RvoipError};
 use crate::ids::MediaRouteId;
-use crate::stream::MediaFrame;
+use crate::stream::{GatedFrameAdmission, GatedFrameInput, MediaFrame};
 
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -558,6 +558,10 @@ pub struct MediaGraphSnapshot {
 pub(crate) enum MediaSinkTarget {
     Legacy(mpsc::Sender<MediaFrame>),
     Peer(mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>),
+    /// A stream input whose consumer gate the route applies itself (see
+    /// [`GatedFrameInput`]), so a frame goes straight into the consumer's
+    /// channel instead of through the stream's own input pump.
+    Gated(Arc<dyn GatedFrameInput>),
 }
 
 impl MediaSinkTarget {
@@ -567,7 +571,10 @@ impl MediaSinkTarget {
     pub(crate) fn for_stream(stream: &dyn crate::stream::MediaStream) -> Result<Self> {
         match stream.try_peer_frames_out() {
             Ok(sender) => Ok(Self::Peer(sender)),
-            Err(RvoipError::NotImplemented(_)) => stream.try_frames_out().map(Self::Legacy),
+            Err(RvoipError::NotImplemented(_)) => match stream.try_gated_frames_out() {
+                Some(input) => Ok(Self::Gated(input)),
+                None => stream.try_frames_out().map(Self::Legacy),
+            },
             Err(error) => Err(error),
         }
     }
@@ -576,6 +583,9 @@ impl MediaSinkTarget {
         match self {
             Self::Legacy(tx) => tx.is_closed(),
             Self::Peer(tx) => tx.is_closed(),
+            Self::Gated(input) => {
+                input.channel().is_closed() || input.admission() == GatedFrameAdmission::Closed
+            }
         }
     }
 
@@ -594,6 +604,33 @@ impl MediaSinkTarget {
                 ticket.forward(tx, frame).await.map_err(|_| ())
             }
             (Self::Peer(_), None) => Err(()),
+            (Self::Gated(input), Some(ticket)) => {
+                if !ticket.is_active() {
+                    return Ok(false);
+                }
+                match input.admission() {
+                    GatedFrameAdmission::Closed => return Err(()),
+                    // Taken and discarded, as the stream's own input pump
+                    // takes a frame from its channel and drops it.
+                    GatedFrameAdmission::Discard => return Ok(true),
+                    GatedFrameAdmission::Open => {}
+                }
+                let forwarded = ticket
+                    .forward_with(input.channel(), input.left_open(), |permit| {
+                        input.commit(permit, frame)
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                match forwarded {
+                    // Committed or discarded under the gate, or discarded
+                    // because the gate left `Open` while waiting for room:
+                    // the stream accepted the frame either way.
+                    crate::bridge::peer_switch::PeerForwarded::Committed(_)
+                    | crate::bridge::peer_switch::PeerForwarded::Abandoned => Ok(true),
+                    crate::bridge::peer_switch::PeerForwarded::Inactive => Ok(false),
+                }
+            }
+            (Self::Gated(input), None) => forwarding.publish_gated(input.as_ref(), frame).await,
         }
     }
 }
@@ -769,6 +806,53 @@ impl RouteForwardingGate {
             return Ok(false);
         }
         permit.send(frame);
+        Ok(true)
+    }
+
+    /// [`Self::publish_fenced`] into a gated stream input.
+    ///
+    /// The input's gate is checked first and rechecked at commit. A frame
+    /// whose gate leaves `Open` while it waits for room is discarded and
+    /// counts as accepted, as the stream's input pump would discard it.
+    async fn publish_gated(
+        &self,
+        input: &dyn GatedFrameInput,
+        frame: MediaFrame,
+    ) -> std::result::Result<bool, ()> {
+        match input.admission() {
+            GatedFrameAdmission::Closed => return Err(()),
+            GatedFrameAdmission::Discard => return Ok(true),
+            GatedFrameAdmission::Open => {}
+        }
+        if self.buffer_while_disabled {
+            let permit = tokio::select! {
+                biased;
+                () = input.left_open() => return Ok(true),
+                capacity = input.channel().reserve() => match capacity {
+                    Ok(permit) => permit,
+                    Err(_) => return Err(()),
+                },
+            };
+            input.commit(permit, frame);
+            return Ok(true);
+        }
+        let permit = tokio::select! {
+            biased;
+            () = self.wait_until_disabled() => return Ok(false),
+            () = input.left_open() => return Ok(true),
+            capacity = input.channel().reserve() => match capacity {
+                Ok(permit) => permit,
+                Err(_) => return Err(()),
+            },
+        };
+        let _cutover = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        input.commit(permit, frame);
         Ok(true)
     }
 }
@@ -6449,5 +6533,382 @@ mod tests {
             graph.shutdown_and_wait().await.unwrap();
             graph_runtime.shutdown_background();
         }
+    }
+
+    /// 20 ms of G.711 µ-law, distinct per frame.
+    fn pcmu_audio(value: u8, timestamp_rtp: u32) -> MediaFrame {
+        let mut frame = frame_at(value, timestamp_rtp);
+        frame.payload = Bytes::from(
+            (0..160u32)
+                .map(|index| (u32::from(value) * 13 + index * 7) as u8 | 0x10)
+                .collect::<Vec<u8>>(),
+        );
+        frame
+    }
+
+    type Delivered = Vec<(Vec<u8>, u32, Option<u8>)>;
+
+    /// Everything that arrives until the target stays quiet for 300 ms.
+    async fn collect_quiet(target: &mut mpsc::Receiver<MediaFrame>) -> Delivered {
+        let mut delivered = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(Duration::from_millis(300), target.recv()).await
+        {
+            delivered.push((
+                frame.payload.to_vec(),
+                frame.timestamp_rtp,
+                frame.payload_type,
+            ));
+        }
+        delivered
+    }
+
+    /// A gated stream input modelled on the in-process AI stream's: open,
+    /// paused (discard) or stopped (closed), with a transition fence.
+    struct TestGate {
+        channel: mpsc::Sender<MediaFrame>,
+        state: std::sync::atomic::AtomicU8,
+        transition: tokio::sync::RwLock<()>,
+        updates: watch::Sender<u8>,
+    }
+
+    impl TestGate {
+        const OPEN: u8 = 0;
+        const PAUSED: u8 = 1;
+        const STOPPED: u8 = 2;
+
+        fn new(channel: mpsc::Sender<MediaFrame>) -> Arc<Self> {
+            Arc::new(Self {
+                channel,
+                state: std::sync::atomic::AtomicU8::new(Self::OPEN),
+                transition: tokio::sync::RwLock::new(()),
+                updates: watch::channel(Self::OPEN).0,
+            })
+        }
+
+        async fn set(&self, state: u8) {
+            let _transition = self.transition.write().await;
+            self.state.store(state, Ordering::Release);
+            self.updates.send_replace(state);
+        }
+    }
+
+    impl GatedFrameInput for TestGate {
+        fn channel(&self) -> &mpsc::Sender<MediaFrame> {
+            &self.channel
+        }
+
+        fn admission(&self) -> GatedFrameAdmission {
+            match self.state.load(Ordering::Acquire) {
+                Self::OPEN => GatedFrameAdmission::Open,
+                Self::PAUSED => GatedFrameAdmission::Discard,
+                _ => GatedFrameAdmission::Closed,
+            }
+        }
+
+        fn left_open(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let mut updates = self.updates.subscribe();
+            Box::pin(async move {
+                while self.state.load(Ordering::Acquire) == Self::OPEN {
+                    if updates.changed().await.is_err() {
+                        return;
+                    }
+                }
+            })
+        }
+
+        fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool {
+            let Ok(_transition) = self.transition.try_read() else {
+                return false;
+            };
+            if self.state.load(Ordering::Acquire) != Self::OPEN {
+                return false;
+            }
+            permit.send(frame);
+            true
+        }
+    }
+
+    /// Add a route of the bridge's kind (behind a peer switch) or a plain
+    /// managed route, to `target`.
+    fn add_route(
+        graph: &MediaGraphHandle,
+        codec: CodecInfo,
+        target: MediaSinkTarget,
+        peer: bool,
+    ) -> ManagedMediaRoute {
+        if peer {
+            graph
+                .add_peer_sink_target(
+                    codec,
+                    target,
+                    crate::bridge::peer_switch::PeerRouteTicket::initial(),
+                )
+                .unwrap()
+        } else {
+            graph
+                .add_sink_internal(codec, target, false, None, true, false)
+                .unwrap()
+        }
+    }
+
+    /// A stream offering a plain sender and, optionally, a gated input and a
+    /// peer queue.
+    struct TargetChoiceStream {
+        frames: mpsc::Sender<MediaFrame>,
+        gated: Option<Arc<TestGate>>,
+        peer: Option<mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::stream::MediaStream for TargetChoiceStream {
+        fn id(&self) -> StreamId {
+            StreamId::from_string("strm_media_graph_target_choice")
+        }
+
+        fn kind(&self) -> StreamKind {
+            StreamKind::Audio
+        }
+
+        fn codec(&self) -> CodecInfo {
+            codec("pcmu", 8_000)
+        }
+
+        fn direction(&self) -> crate::connection::Direction {
+            crate::connection::Direction::Outbound
+        }
+
+        fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
+            mpsc::channel(1).1
+        }
+
+        fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
+            self.frames.clone()
+        }
+
+        fn try_peer_frames_out(
+            &self,
+        ) -> Result<mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>> {
+            self.peer.clone().ok_or(RvoipError::NotImplemented(
+                "MediaStream::try_peer_frames_out",
+            ))
+        }
+
+        fn try_gated_frames_out(&self) -> Option<Arc<dyn GatedFrameInput>> {
+            self.gated
+                .clone()
+                .map(|gate| gate as Arc<dyn GatedFrameInput>)
+        }
+
+        fn quality_snapshot(&self) -> crate::stream::QualitySnapshot {
+            crate::stream::QualitySnapshot::default()
+        }
+
+        async fn close(self: Arc<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A route into a stream uses the stream's peer queue when it has one,
+    /// else its gated input, else its plain sender.
+    #[test]
+    fn a_stream_target_prefers_its_peer_queue_then_its_gated_input() {
+        let (frames, _frames_rx) = mpsc::channel(1);
+        let (gate_tx, _gate_rx) = mpsc::channel(1);
+        let gate = TestGate::new(gate_tx);
+        let (peer, _peer_rx) = mpsc::channel(1);
+        let plain = TargetChoiceStream {
+            frames: frames.clone(),
+            gated: None,
+            peer: None,
+        };
+        assert!(matches!(
+            MediaSinkTarget::for_stream(&plain),
+            Ok(MediaSinkTarget::Legacy(_))
+        ));
+        let gated = TargetChoiceStream {
+            frames: frames.clone(),
+            gated: Some(Arc::clone(&gate)),
+            peer: None,
+        };
+        assert!(matches!(
+            MediaSinkTarget::for_stream(&gated),
+            Ok(MediaSinkTarget::Gated(_))
+        ));
+        let both = TargetChoiceStream {
+            frames,
+            gated: Some(gate),
+            peer: Some(peer),
+        };
+        assert!(matches!(
+            MediaSinkTarget::for_stream(&both),
+            Ok(MediaSinkTarget::Peer(_))
+        ));
+    }
+
+    /// A stream's gated input receives exactly what a plain channel target
+    /// receives (here transcoded caller audio, as for the in-process AI), and
+    /// the route honours the gate: paused frames are accepted and discarded,
+    /// audio flows again once it reopens, and a stopped gate ends the route
+    /// as a closed channel does.
+    #[tokio::test]
+    async fn gated_target_receives_what_a_channel_target_receives_and_honours_its_gate() {
+        let frames: Vec<MediaFrame> = (0..10u8)
+            .map(|value| pcmu_audio(value, u32::from(value) * 160))
+            .collect();
+        for peer in [true, false] {
+            let (source_tx, source_rx) = mpsc::channel(64);
+            let graph =
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (channel_tx, mut channel_rx) = mpsc::channel(64);
+            let route = add_route(
+                &graph,
+                codec("pcm_s16le", 16_000),
+                MediaSinkTarget::Legacy(channel_tx),
+                peer,
+            );
+            route.wait_active().await.unwrap();
+            for frame in frames.clone() {
+                source_tx.send(frame).await.unwrap();
+            }
+            let reference = collect_quiet(&mut channel_rx).await;
+            assert_eq!(reference.len(), 10);
+            assert_eq!(route.delivered_frames(), 10);
+            graph.shutdown_and_wait().await.unwrap();
+
+            let (source_tx, source_rx) = mpsc::channel(64);
+            let graph =
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (gate_tx, mut gate_rx) = mpsc::channel(64);
+            let gate = TestGate::new(gate_tx);
+            let route = add_route(
+                &graph,
+                codec("pcm_s16le", 16_000),
+                MediaSinkTarget::Gated(gate.clone()),
+                peer,
+            );
+            route.wait_active().await.unwrap();
+            for frame in frames.clone() {
+                source_tx.send(frame).await.unwrap();
+            }
+            assert_eq!(collect_quiet(&mut gate_rx).await, reference, "peer={peer}");
+            assert_eq!(route.delivered_frames(), 10);
+
+            gate.set(TestGate::PAUSED).await;
+            for value in 20..23u8 {
+                source_tx
+                    .send(pcmu_audio(value, u32::from(value) * 160))
+                    .await
+                    .unwrap();
+            }
+            wait_until(|| route.delivered_frames() == 13).await;
+            assert!(
+                collect_quiet(&mut gate_rx).await.is_empty(),
+                "paused frames crossed"
+            );
+
+            gate.set(TestGate::OPEN).await;
+            source_tx.send(pcmu_audio(30, 30 * 160)).await.unwrap();
+            assert_eq!(collect_quiet(&mut gate_rx).await.len(), 1);
+            assert_eq!(route.delivered_frames(), 14);
+
+            gate.set(TestGate::STOPPED).await;
+            assert!(MediaSinkTarget::Gated(gate.clone()).is_closed());
+            source_tx.send(pcmu_audio(31, 31 * 160)).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), route.status().wait_terminal())
+                    .await
+                    .expect("route terminal"),
+                MediaGraphRouteTerminalReason::TargetClosed
+            );
+            assert_eq!(route.delivered_frames(), 14);
+            graph.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    /// A frame waiting for room in a gated input is discarded (and counted as
+    /// accepted) once the gate pauses, exactly as the stream's input pump
+    /// would discard it. It never crosses later.
+    #[tokio::test]
+    async fn gated_target_discards_a_frame_whose_gate_pauses_while_it_waits() {
+        for peer in [true, false] {
+            let (source_tx, source_rx) = mpsc::channel(8);
+            let graph =
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (gate_tx, mut gate_rx) = mpsc::channel(1);
+            gate_tx.try_send(frame(0xEE)).unwrap();
+            let gate = TestGate::new(gate_tx);
+            let route = add_route(
+                &graph,
+                codec("pcmu", 8_000),
+                MediaSinkTarget::Gated(gate.clone()),
+                peer,
+            );
+            route.wait_active().await.unwrap();
+            source_tx.send(frame(1)).await.unwrap();
+            wait_until(|| graph.latest_snapshot().sink_offers >= 1).await;
+            gate.set(TestGate::PAUSED).await;
+            wait_until(|| route.delivered_frames() == 1).await;
+            assert_eq!(gate_rx.recv().await.unwrap().payload[0], 0xEE);
+            assert!(
+                collect_quiet(&mut gate_rx).await.is_empty(),
+                "a frame crossed after its gate paused (peer={peer})"
+            );
+            graph.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    /// Barge-in: a flush discards exactly the same queued frames whether the
+    /// route ends in a plain channel or a gated input, and audio after the
+    /// flush flows the same way.
+    #[tokio::test]
+    async fn flush_discards_the_same_frames_for_a_gated_target() {
+        let policy = MediaGraphPolicy {
+            sink_queue_frames: 50,
+            ..MediaGraphPolicy::default()
+        };
+        let mut outcomes = Vec::new();
+        for gated in [false, true] {
+            let (source_tx, source_rx) = mpsc::channel(64);
+            let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy.clone()).unwrap();
+            // A consumer that is not reading yet, so frames back up.
+            let (target_tx, mut target_rx) = mpsc::channel(1);
+            let target = if gated {
+                MediaSinkTarget::Gated(TestGate::new(target_tx))
+            } else {
+                MediaSinkTarget::Legacy(target_tx)
+            };
+            let route = add_route(&graph, codec("pcm_s16le", 16_000), target, true);
+            route.wait_active().await.unwrap();
+            for value in 0..20u8 {
+                source_tx
+                    .send(pcmu_audio(value, u32::from(value) * 160))
+                    .await
+                    .unwrap();
+            }
+            // One frame sits in the target, the delivery task holds the next
+            // one while it waits for room, and the rest are queued.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while graph.snapshot().await.sinks[0].queue_depth != 18 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("queue settled");
+            let flushed = graph.flush_sinks_and_wait().await.expect("flush");
+            source_tx.send(pcmu_audio(99, 99 * 160)).await.unwrap();
+            let delivered = collect_quiet(&mut target_rx).await;
+            outcomes.push((flushed, delivered, route.delivered_frames()));
+            graph.shutdown_and_wait().await.unwrap();
+        }
+        assert_eq!(outcomes[0].0, 18);
+        assert_eq!(
+            outcomes[0].1.len(),
+            3,
+            "the target, in-flight and fresh frames"
+        );
+        assert_eq!(outcomes[1], outcomes[0]);
     }
 }
