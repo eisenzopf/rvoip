@@ -7541,7 +7541,7 @@ mod config_tests {
         assert_eq!(coordinator.list_sessions().await.len(), states.len());
         assert!(coordinator.allocated_media_port_count().await > ports_before);
 
-        for handle in &handles {
+        for (index, handle) in handles.iter().enumerate() {
             let outcome = coordinator.reclaim_orphan_session_exact(handle).await;
             assert!(
                 matches!(
@@ -7549,8 +7549,7 @@ mod config_tests {
                     OrphanSessionReclaimOutcome::Forced
                         | OrphanSessionReclaimOutcome::AlreadyReleased
                 ),
-                "{}: {outcome:?}",
-                handle.session_id()
+                "session {index}: {outcome:?}"
             );
         }
         assert!(coordinator.list_sessions().await.is_empty());
