@@ -6312,6 +6312,15 @@ Signal=5\r\nDuration=160\r\n";
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbound_end_succeeds_when_crossed_peer_bye_releases_first() {
+        reserved_inbound_handoff_then_hangup(
+            "adapter-crossed-bye-peer-first",
+            ReservedHangup::CrossedLocalPeerReleasesFirst,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn inbound_end_cancellation_preserves_terminal_handoff() {
         reserved_inbound_handoff_then_hangup(
             "adapter-end-waiter-cancelled",
@@ -6360,6 +6369,10 @@ Signal=5\r\nDuration=160\r\n";
         Remote,
         /// A local `end` whose BYE the peer's own BYE crosses.
         CrossedLocal,
+        /// As `CrossedLocal`, but the peer's BYE releases the call before
+        /// the local BYE is answered, so that release removes the local
+        /// BYE's receipt while its confirmation is still outstanding.
+        CrossedLocalPeerReleasesFirst,
         /// A local `end` whose caller is cancelled once its BYE is sent.
         CancelledLocal,
     }
@@ -6410,6 +6423,13 @@ Signal=5\r\nDuration=160\r\n";
                 .adapter
                 .lookup_session(&call.connection_id)
                 .expect("exact session before hangup");
+            let lifetime = call
+                .coordinator
+                .helpers
+                .state_machine
+                .store
+                .lifecycle_handle(&session_id)
+                .expect("exact lifetime before hangup");
             let adapter = Arc::clone(&call.adapter);
             let connection_id = call.connection_id.clone();
             let ending = tokio::spawn(async move {
@@ -6454,6 +6474,16 @@ Signal=5\r\nDuration=160\r\n";
                 // Cross the in-flight local BYE with the peer's own BYE, then
                 // confirm the local one.
                 call.send_request("BYE", 2, &to).await;
+                if hangup == ReservedHangup::CrossedLocalPeerReleasesFirst {
+                    let store = &call.coordinator.helpers.state_machine.store;
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        while store.get_session_retained_snapshot_exact(&lifetime).is_ok() {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                        }
+                    })
+                    .await
+                    .expect("the peer BYE released the call");
+                }
                 Some(ending)
             };
             let headers = local_bye

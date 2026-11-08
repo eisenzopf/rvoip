@@ -13261,11 +13261,42 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
+        use crate::adapters::dialog_adapter::{
+            outgoing_bye_cleanup_interrupted_error, OutgoingByeWait,
+        };
         let reason = reason.into();
-        let confirmation = self
+        let confirmation = match self
             .dialog_adapter
-            .wait_for_outgoing_bye_final_response_exact(handle)
-            .await;
+            .wait_for_outgoing_bye_outcome_exact(handle)
+            .await
+        {
+            Ok(OutgoingByeWait::Confirmed) => Ok(()),
+            // The lifetime's terminal release removed this BYE's receipt
+            // before its final response was recorded. That release publishes
+            // its terminal fact first, and this hangup has not recorded one
+            // yet, so a normal end here was committed by another path: the
+            // peer's own BYE crossing ours (the simultaneous-BYE race of RFC
+            // 3261 §15.1.1). The call ended as the hangup asked; only the
+            // confirmation of the redundant BYE was lost. Any other terminal,
+            // or none, keeps the interrupted confirmation as a failure.
+            Ok(OutgoingByeWait::CleanupInterrupted) => {
+                let peer_ended =
+                    self.lifecycle_snapshot_exact(handle)
+                        .await
+                        .is_ok_and(|snapshot| {
+                            matches!(
+                                snapshot.terminal,
+                                Some(crate::api::lifecycle::CallTerminalInfo::Ended { .. })
+                            )
+                        });
+                if peer_ended {
+                    Ok(())
+                } else {
+                    Err(outgoing_bye_cleanup_interrupted_error())
+                }
+            }
+            Err(error) => Err(error),
+        };
         let lifecycle_commit =
             commit_local_bye_lifecycle_exact(Arc::clone(&self.helpers.state_machine), handle).await;
         let finalization = match lifecycle_commit {
