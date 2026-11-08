@@ -43,7 +43,11 @@ use crate::{Result, RtpSsrc, RtpTimestamp};
 pub(crate) type SsrcMap<V> = DashMap<RtpSsrc, V, crate::ssrc_hash::SsrcHashBuilder>;
 
 pub(crate) fn new_ssrc_map<V>() -> SsrcMap<V> {
-    DashMap::with_hasher(crate::ssrc_hash::SsrcHashBuilder::new())
+    // Per-session maps: a fixed shard count, see [`PER_SESSION_MAP_SHARDS`].
+    DashMap::with_hasher_and_shard_amount(
+        crate::ssrc_hash::SsrcHashBuilder::new(),
+        PER_SESSION_MAP_SHARDS,
+    )
 }
 
 #[cfg(feature = "memory-diagnostics")]
@@ -134,6 +138,24 @@ pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 64;
 /// queue must not become an unbounded duplicate packet buffer when nobody calls
 /// [`RtpSession::receive_packet`].
 pub const RTP_SESSION_RECEIVE_QUEUE_CAPACITY: usize = 32;
+
+/// Shard count for maps owned by one RTP session (remote streams, sender
+/// reports, RTCP-only members, DTMF state).
+///
+/// DashMap's default shard count scales with the host's CPU count: 4x the
+/// available parallelism, rounded up to a power of two, so 1,024 shards on a
+/// 192-thread host even for a call with one remote SSRC. Every session
+/// allocates and frees all of them, and RTCP report collection iterates
+/// over all of them. Sixteen shards keep concurrent multi-SSRC access while
+/// making per-call memory and scan work independent of the host size.
+pub(crate) const PER_SESSION_MAP_SHARDS: usize = 16;
+
+fn per_session_map<K, V>() -> DashMap<K, V>
+where
+    K: Eq + std::hash::Hash,
+{
+    DashMap::with_shard_amount(PER_SESSION_MAP_SHARDS)
+}
 
 fn take_rtcp_report_blocks(
     streams: &SsrcMap<RtpStream>,
@@ -1674,7 +1696,7 @@ impl RtpSession {
             streams: Arc::clone(&streams),
             packet_sender: packet_sender.clone(),
             clock_rate: clock_rate.clone(),
-            rtcp_members: DashMap::new(),
+            rtcp_members: per_session_map(),
             xr_enabled: AtomicBool::new(xr_quality.is_some()),
             xr_quality: xr_quality.unwrap_or_default(),
             receive_accounting: receive_accounting.clone(),
@@ -3065,6 +3087,88 @@ mod tests {
                 .is_err(),
             "RTCP BYE reached the RTP port of a peer that never agreed to rtcp-mux"
         );
+    }
+
+    /// More remote sources than both the shard count and the 31-block RTCP
+    /// limit: the smaller shard count must not cap stored SSRCs, drop sender
+    /// reports that arrive before their RTP stream, or disturb interval loss.
+    #[tokio::test]
+    async fn session_maps_preserve_many_sources_sender_reports_and_interval_loss() {
+        use crate::packet::rtcp::{NtpTimestamp, RtcpCompoundPacket, RtcpSenderReport};
+
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = RtpSession::new(RtpSessionConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            ..RtpSessionConfig::default()
+        })
+        .await
+        .unwrap();
+        // Set the destination after construction so periodic reports do not
+        // take interval loss before the explicit reports below.
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        let destination = session.local_addr().unwrap();
+        let mut events = session.subscribe();
+
+        for ssrc in 1..=35 {
+            let mut sr = RtcpSenderReport::new(ssrc);
+            sr.ntp_timestamp = NtpTimestamp {
+                seconds: 0xaaaa_1234,
+                fraction: 0x5678_bbbb,
+            };
+            peer.send_to(
+                &RtcpCompoundPacket::new_with_sr(sr).serialize().unwrap(),
+                destination,
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    if matches!(
+                        events.recv().await.unwrap(),
+                        RtpSessionEvent::RtcpSenderReport { ssrc: received, .. } if received == ssrc
+                    ) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("sender report was not retained before its RTP stream");
+            for (sequence, timestamp) in [(10, 0), (12, 320)] {
+                send_raw_rtp(&peer, destination, sequence, timestamp, ssrc).await;
+                assert_eq!(next_packet_event(&mut events).await.header.ssrc, ssrc);
+            }
+        }
+        assert_eq!(session.streams.len(), 35);
+        assert_eq!(session.received_sender_reports.len(), 35);
+        for ssrc in 1..=35 {
+            let stream = session.get_stream(ssrc).await.unwrap();
+            assert_eq!(stream.packets_received, 2);
+            assert_eq!(stream.packets_lost, 1);
+        }
+
+        let mut wire = [0u8; 2048];
+        for expected_fraction_lost in [85, 0] {
+            session.send_receiver_report().await.unwrap();
+            let (size, _) = tokio::time::timeout(Duration::from_secs(1), peer.recv_from(&mut wire))
+                .await
+                .unwrap()
+                .unwrap();
+            let report = parse_receiver_report(&wire[..size]);
+            assert_eq!(report.report_blocks.len(), 31);
+            let distinct: std::collections::HashSet<_> = report
+                .report_blocks
+                .iter()
+                .map(|block| block.ssrc)
+                .collect();
+            assert_eq!(distinct.len(), 31);
+            for block in report.report_blocks {
+                assert!((1..=35).contains(&block.ssrc));
+                assert_eq!(block.fraction_lost, expected_fraction_lost);
+                assert_eq!(block.cumulative_lost, 1);
+                assert_eq!(block.last_sr, 0x1234_5678);
+            }
+        }
+        session.close().await.unwrap();
     }
 
     async fn next_packet_event(events: &mut broadcast::Receiver<RtpSessionEvent>) -> RtpPacket {
