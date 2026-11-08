@@ -296,11 +296,11 @@ pub(crate) struct SrtpHot {
 
 impl SrtpDirectionHot {
     fn build(crypto: &crypto::SrtpCrypto) -> Option<Self> {
-        let (key, salt, auth_key, tag_len) = crypto.rtp_hot_material()?;
+        let (key, salt, mac, tag_len) = crypto.rtp_hot_material()?;
         if key.len() > 32 || salt.len() != 14 || tag_len > 20 {
             return None;
         }
-        let mac = auth::hmac_sha1_core(auth_key).ok()?;
+        let mac = mac.clone();
         let mut key_line = [0u8; 32];
         key_line[..key.len()].copy_from_slice(key);
         let mut salt_copy = [0u8; 14];
@@ -375,7 +375,7 @@ impl SrtpDirectionHot {
         }
         let tag_start = data.len() - tag_len;
         let (packet_data, auth_tag) = data.split_at_mut(tag_start);
-        let is_valid = auth::SrtpAuthenticator::verify_auth_tag_in_place(
+        let is_valid = auth::SrtpAuthenticator::verify_auth_tag_in_place_with(
             self.stream.auth,
             auth::HmacSha1Key::Keyed(&self.mac),
             tag_len,
@@ -413,7 +413,7 @@ impl SrtpDirectionHot {
         let packet_index = (u64::from(roc) << 16) | u64::from(sequence);
         let iv = key_derivation::create_srtp_iv_array(&self.stream.salt, ssrc, packet_index)?;
         crypto::aes_cm_encrypt(&mut buffer[start + header_size..], self.key(), &iv)?;
-        auth::SrtpAuthenticator::append_auth_tag(
+        auth::SrtpAuthenticator::append_auth_tag_with(
             self.stream.auth,
             auth::HmacSha1Key::Keyed(&self.mac),
             usize::from(self.stream.tag_len),
