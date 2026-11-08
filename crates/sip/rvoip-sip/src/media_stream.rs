@@ -380,6 +380,10 @@ pub(crate) fn codec_descriptor(
 /// `crates/webrtc/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
 const FRAME_CHANNEL_CAP: usize = 64;
 
+/// Inbound pump outcome when the SIP audio source closes: the ordinary end
+/// of a call's media after a remote hangup, so it is logged at debug.
+const AUDIO_SOURCE_CLOSED: &str = "sip-audio-source-closed";
+
 /// Epoch-normalized clock for PCM handed to the negotiated SIP media runtime.
 ///
 /// The media graph has already translated `MediaFrame::timestamp_rtp` into the
@@ -1226,7 +1230,14 @@ async fn run_media_driver(
         failure = &mut outbound => Some(failure),
     };
     if let Some(failure) = failed_pump {
-        tracing::warn!(target: "rvoip_sip", failure, "SipMediaStream pump stopped unexpectedly");
+        if failure == AUDIO_SOURCE_CLOSED {
+            // The inbound audio source closing is how a call's media ends
+            // after a remote hangup; only the other pump failures are
+            // unexpected.
+            tracing::debug!(target: "rvoip_sip", failure, "SipMediaStream pump stopped: audio source closed");
+        } else {
+            tracing::warn!(target: "rvoip_sip", failure, "SipMediaStream pump stopped unexpectedly");
+        }
         if lifecycle.mark_failed() {
             cancel_tx.send_replace(true);
         }
@@ -1371,7 +1382,7 @@ async fn run_inbound_pump(
                 Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
                 None => ready.push(audio_frame),
             },
-            InboundPumpEvent::Audio(None) => return "sip-audio-source-closed",
+            InboundPumpEvent::Audio(None) => return AUDIO_SOURCE_CLOSED,
             InboundPumpEvent::PlayoutTick => {}
         }
 
