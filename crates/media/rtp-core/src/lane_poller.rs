@@ -45,6 +45,14 @@
 //! them. A parked thread is not in `epoll_wait`, so Tokio's own cross-thread
 //! unpark cannot reach it; without this, waits on lane tasks from other
 //! threads (closing a stream, for one) would last up to a whole tick.
+//!
+//! Timing wheel and pass clock
+//! ([`crate::executor::MediaExecutorConfig::lane_timer_wheel`],
+//! [`crate::executor::MediaExecutorConfig::lane_pass_clock`]): the poller's
+//! lane clock keeps its deadlines in a timing wheel, and each pass reads the
+//! clock once and serves that reading to the futures it polls (see
+//! `crate::lane_clock`). A later timer round of the same pass and the tick's
+//! due check before it sleeps read the clock afresh.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -81,6 +89,9 @@ thread_local! {
     /// Poller passes run on this thread (one lane wakeup each), so a test
     /// can count its own poller's wakeups exactly.
     static TEST_PASSES: Cell<u64> = const { Cell::new(0) };
+    /// Pass-clock reads of the pollers on this thread: (served from a pass
+    /// reading, fresh clock reads).
+    static TEST_PASS_READS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
 }
 
 /// Lane tick: the longest single park of a ticking lane thread. Between
@@ -198,6 +209,13 @@ impl Future for Budgeted {
             Some(0) => false,
             Some(left) => {
                 budget.set(Some(left - 1));
+                // Pass clock: a pass reading serves at most this many loop
+                // polls; the first read after them refreshes it (a no-op
+                // without the pass clock).
+                let polled = LANE_SOCKET_POLLS_PER_WAKEUP - left;
+                if polled > 0 && polled % crate::lane_clock::PASS_CLOCK_REFRESH_POLLS == 0 {
+                    crate::lane_clock::pass_invalidate();
+                }
                 true
             }
             None => true,
@@ -243,8 +261,18 @@ impl LanePoller {
             let wake = TickWake::new();
             wake.bind_to_current_thread();
             let _ = published.set(Arc::clone(&wake));
-            run_poller_with(receiver, Some((tick, wake)), grid).await;
+            run_poller_with(receiver, Some((tick, wake)), PollerTimers::configured(grid)).await;
         }));
+        Self { jobs, tick_wake }
+    }
+
+    /// Timing wheel / pass clock test seam: start a poller (without the
+    /// tick) with explicit lane-clock settings.
+    #[cfg(test)]
+    pub(crate) fn start_with_timers(runtime: &Handle, timers: PollerTimers) -> Self {
+        let (jobs, receiver) = mpsc::unbounded_channel();
+        let tick_wake = Arc::new(OnceLock::new());
+        drop(runtime.spawn(run_poller_with(receiver, None, timers)));
         Self { jobs, tick_wake }
     }
 
@@ -322,7 +350,34 @@ async fn run_poller(
         (scheduler, wake)
     });
     let grid = tick.as_ref().and_then(|_| crate::lane_tick::timer_grid());
-    run_poller_with(jobs, tick, grid).await;
+    run_poller_with(jobs, tick, PollerTimers::configured(grid)).await;
+}
+
+/// How a poller keeps its hosted futures' deadlines and clock reads (read
+/// once, when the poller starts).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PollerTimers {
+    /// Hosted futures file their sleeps in the lane clock.
+    pub(crate) lane_timer: bool,
+    /// Lane tick grid timers: file deadlines on this grid.
+    pub(crate) grid: Option<crate::lane_tick::TickGrid>,
+    /// The lane clock is a timing wheel.
+    pub(crate) wheel: bool,
+    /// Each pass serves one clock reading to the futures it polls.
+    pub(crate) pass_clock: bool,
+}
+
+impl PollerTimers {
+    /// The configuration in effect, filing on `grid`.
+    fn configured(grid: Option<crate::lane_tick::TickGrid>) -> Self {
+        let lane_timer = crate::executor::lane_timer_enabled();
+        Self {
+            lane_timer,
+            grid,
+            wheel: lane_timer && crate::executor::lane_timer_wheel_enabled(),
+            pass_clock: crate::executor::lane_pass_clock_enabled(),
+        }
+    }
 }
 
 /// Lane tick: whether a non-hosted task on this lane was woken from another
@@ -334,7 +389,7 @@ fn remote_work(metrics: Option<&tokio::runtime::RuntimeMetrics>) -> bool {
 async fn run_poller_with(
     mut jobs: mpsc::UnboundedReceiver<LaneFuture>,
     tick: Option<(crate::lane_tick::TickScheduler, Arc<TickWake>)>,
-    grid: Option<crate::lane_tick::TickGrid>,
+    timers: PollerTimers,
 ) {
     use crate::lane_tick::{PassReport, TickDecision};
     let (mut tick, tick_wake) = match tick {
@@ -356,10 +411,19 @@ async fn run_poller_with(
     // wheel when the lane timer is enabled; the poller arms one runtime timer
     // at its earliest deadline (none while ticking: the tick serves it).
     // Without the switch the clock stays empty. With grid timers the clock
-    // files deadlines on the tick grid.
-    let lane_timer = crate::executor::lane_timer_enabled();
-    let mut clock = crate::lane_clock::LaneClockDriver::with_grid(grid);
+    // files deadlines on the tick grid, and with the timing wheel it keeps
+    // them in a wheel. With the pass clock a pass reads the clock once for
+    // the futures it polls.
+    let PollerTimers {
+        lane_timer,
+        grid,
+        wheel,
+        pass_clock,
+    } = timers;
+    let mut clock = crate::lane_clock::LaneClockDriver::with_timers(grid, wheel);
     let mut timer_counters = crate::executor::LaneTimerCounters::new();
+    let mut wheel_counters =
+        (wheel || pass_clock).then(crate::executor::LaneWheelCounterBatch::new);
     let mut tick_counters = crate::lane_tick::LaneTickCounterBatch::new();
     let mut accepting = true;
     loop {
@@ -379,6 +443,15 @@ async fn run_poller_with(
             LANE_DATAGRAMS.with(|count| count.set(0));
             LANE_POLL_BUDGET.with(|budget| budget.set(Some(LANE_SOCKET_POLLS_PER_WAKEUP)));
             let _current_clock = lane_timer.then(|| crate::lane_clock::enter(clock.clock()));
+            // Pass clock: the pass's one clock reading (the tick's start when
+            // ticking), served to everything this pass polls.
+            let _pass_clock = pass_clock.then(|| {
+                crate::lane_clock::enter_pass(
+                    started.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
+                )
+            });
+            // The tick's due-check reading, the last of the pass.
+            let mut last_reading: Option<tokio::time::Instant> = None;
             while accepting {
                 match jobs.poll_recv(cx) {
                     Poll::Ready(Some(job)) => loops.push(Budgeted { inner: job }),
@@ -394,7 +467,18 @@ async fn run_poller_with(
                 // polled in this same pass.
                 let mut fired = false;
                 if lane_timer {
-                    let (wakes, arms) = clock.wake_due();
+                    // Pass clock: the first round is served from the pass
+                    // reading; a later round exists because something fell
+                    // due while the previous one ran, so it reads afresh.
+                    let now = if !pass_clock {
+                        tokio::time::Instant::now()
+                    } else if rounds == 0 {
+                        crate::lane_clock::pass_cached_now()
+                            .unwrap_or_else(tokio::time::Instant::now)
+                    } else {
+                        crate::lane_clock::pass_refresh().unwrap_or_else(tokio::time::Instant::now)
+                    };
+                    let (wakes, arms) = clock.wake_due_at(now);
                     timer_wakes += wakes;
                     timer_counters.poll(false, wakes, arms);
                 }
@@ -416,8 +500,16 @@ async fn run_poller_with(
                     if ticking {
                         // No runtime timer while ticking. A deadline that
                         // fell due during this pass gets another round now;
-                        // later ones are served by a later tick.
-                        fired = clock.has_due(tokio::time::Instant::now());
+                        // later ones are served by a later tick. Always a
+                        // fresh reading: the decision to sleep depends on it.
+                        let now = if pass_clock {
+                            crate::lane_clock::pass_refresh()
+                                .unwrap_or_else(tokio::time::Instant::now)
+                        } else {
+                            tokio::time::Instant::now()
+                        };
+                        last_reading = Some(now);
+                        fired = clock.has_due(now);
                     } else if clock.poll_timer(cx).is_ready() {
                         fired = true;
                     }
@@ -446,6 +538,15 @@ async fn run_poller_with(
             let datagrams = LANE_DATAGRAMS.with(|count| count.replace(0));
             counters.wakeup(datagrams, exhausted);
             tick_counters.timers(clock.take_resets(), clock.clock().take_coalesced());
+            if let Some(batch) = wheel_counters.as_mut() {
+                let reads = crate::lane_clock::take_pass_clock_stats();
+                #[cfg(test)]
+                TEST_PASS_READS.with(|total| {
+                    let (cached, fresh) = total.get();
+                    total.set((cached + reads.cached, fresh + reads.fresh));
+                });
+                batch.pass(clock.clock().take_wheel_ops(), reads);
+            }
             if !accepting && loops.is_empty() {
                 return Poll::Ready(PassStep::Finished);
             }
@@ -455,9 +556,15 @@ async fn run_poller_with(
             let polled =
                 LANE_SOCKET_POLLS_PER_WAKEUP - left.unwrap_or(LANE_SOCKET_POLLS_PER_WAKEUP);
             tick_counters.pass(polled > 0 || datagrams > 0 || timer_wakes > 0);
+            // With the pass clock the tick's due-check reading, taken after
+            // the last poll of the pass, also ends it.
+            let ended = match (pass_clock, last_reading) {
+                (true, Some(reading)) => reading.into_std(),
+                _ => std::time::Instant::now(),
+            };
             match scheduler.end_pass(PassReport {
                 started,
-                ended: std::time::Instant::now(),
+                ended,
                 hosting: !loops.is_empty(),
                 must_continue: exhausted || deadlines_left,
             }) {
@@ -813,6 +920,273 @@ mod tests {
             .ok()
             .expect("poller is running");
         assert_eq!(rx.await, Ok(false));
+    }
+
+    // ---- Timing wheel and pass clock ----
+
+    fn wheel_and_pass_clock(pass_clock: bool) -> PollerTimers {
+        PollerTimers {
+            lane_timer: true,
+            grid: None,
+            wheel: true,
+            pass_clock,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wheel_and_pass_clock_poller_serves_hosted_sleeps_never_early() {
+        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2(),
+        );
+        if !crate::executor::lane_timer_enabled() {
+            return; // the process disabled the switch
+        }
+        let before = crate::executor::lane_wheel_counters();
+        let timers_before = crate::executor::inline_executor_counters();
+        let poller = LanePoller::start_with_timers(&Handle::current(), wheel_and_pass_clock(true));
+        let start = tokio::time::Instant::now();
+        let on_lane = Arc::new(AtomicUsize::new(0));
+        let early = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for index in 0..10u64 {
+            let on_lane = Arc::clone(&on_lane);
+            let early = Arc::clone(&early);
+            handles.push(
+                poller
+                    .host(async move {
+                        for frame in 1..=5u64 {
+                            let deadline = start
+                                + Duration::from_millis(7 * frame)
+                                + Duration::from_micros(150 * index);
+                            let sleep = crate::media_clock::sleep_until(deadline);
+                            if sleep.is_lane() {
+                                on_lane.fetch_add(1, Ordering::AcqRel);
+                            }
+                            sleep.await;
+                            // The pass reading that completed the sleep, and
+                            // the true clock, are both at or after it.
+                            if crate::media_clock::now() < deadline
+                                || tokio::time::Instant::now() < deadline
+                            {
+                                early.fetch_add(1, Ordering::AcqRel);
+                            }
+                        }
+                    })
+                    .ok()
+                    .expect("poller is running"),
+            );
+        }
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(5), handle.join())
+                .await
+                .expect("every hosted sleep completes");
+        }
+        assert_eq!(
+            on_lane.load(Ordering::Acquire),
+            50,
+            "filed in the lane clock"
+        );
+        assert_eq!(early.load(Ordering::Acquire), 0, "none completed early");
+        drop(poller);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let after = crate::executor::lane_wheel_counters();
+        assert!(
+            after.wheel_inserts >= before.wheel_inserts + 50,
+            "every deadline linked in the wheel"
+        );
+        assert!(
+            after.pass_clock_cached_reads > before.pass_clock_cached_reads,
+            "reads served by the pass"
+        );
+        assert!(after.pass_clock_fresh_reads > before.pass_clock_fresh_reads);
+        // The lane-clock counters keep their meaning with the wheel.
+        let timers_after = crate::executor::inline_executor_counters();
+        assert!(timers_after.lane_timer_wakes >= timers_before.lane_timer_wakes + 50);
+        assert!(timers_after.lane_timer_arms >= timers_before.lane_timer_arms + 50);
+        assert!(timers_after.lane_timer_fires > timers_before.lane_timer_fires);
+    }
+
+    /// Host ten loops that read the media clock three times per poll and
+    /// then yield (waking themselves), until stopped. Returns, over a window
+    /// of whole passes in the middle of the run: (poller passes, loop polls,
+    /// reads served from a pass reading, fresh clock reads).
+    async fn self_waking_readers(pass_clock: bool) -> (u64, u64, u64, u64) {
+        let poller =
+            LanePoller::start_with_timers(&Handle::current(), wheel_and_pass_clock(pass_clock));
+        let stop = Arc::new(AtomicBool::new(false));
+        let polls = Arc::new(AtomicU64::new(0));
+        let backwards = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..10 {
+            let stop = Arc::clone(&stop);
+            let polls = Arc::clone(&polls);
+            let backwards = Arc::clone(&backwards);
+            handles.push(
+                poller
+                    .host(futures::future::poll_fn(move |cx| {
+                        if stop.load(AtomicOrdering::Acquire) {
+                            return Poll::Ready(());
+                        }
+                        let first = crate::media_clock::now();
+                        let second = crate::media_clock::now();
+                        let third = crate::media_clock::now_std();
+                        if second < first || third < second.into_std() {
+                            backwards.fetch_add(1, Ordering::AcqRel);
+                        }
+                        polls.fetch_add(1, AtomicOrdering::AcqRel);
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }))
+                    .ok()
+                    .expect("poller is running"),
+            );
+        }
+        // Warm up, then measure a window of whole passes: this test's task
+        // runs only between poller passes (one thread).
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let passes_before = TEST_PASSES.with(Cell::get);
+        let reads_before = TEST_PASS_READS.with(Cell::get);
+        let polls_before = polls.load(AtomicOrdering::Acquire);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let passes = TEST_PASSES.with(Cell::get) - passes_before;
+        let reads = TEST_PASS_READS.with(Cell::get);
+        let loop_polls = polls.load(AtomicOrdering::Acquire) - polls_before;
+        stop.store(true, AtomicOrdering::Release);
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(5), handle.join())
+                .await
+                .expect("every loop stops");
+        }
+        drop(poller);
+        assert_eq!(
+            backwards.load(Ordering::Acquire),
+            0,
+            "media time never runs backwards"
+        );
+        (
+            passes,
+            loop_polls,
+            reads.0 - reads_before.0,
+            reads.1 - reads_before.1,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_pass_clock_poller_reads_the_clock_once_per_pass() {
+        let (passes, polls, cached, fresh) = self_waking_readers(true).await;
+        assert!(
+            passes > 10 && polls > passes,
+            "passes {passes}, polls {polls}"
+        );
+        assert_eq!(fresh, passes, "one clock read per pass");
+        // Every media-clock read of every loop poll, plus the lane clock's
+        // first timer round, is served from that one reading.
+        assert_eq!(cached, 3 * polls + passes, "polls {polls}, passes {passes}");
+
+        // Without the pass clock nothing is served from a pass reading (each
+        // read is a clock read, as before).
+        let (passes, polls, cached, fresh) = self_waking_readers(false).await;
+        assert!(
+            passes > 10 && polls > passes,
+            "passes {passes}, polls {polls}"
+        );
+        assert_eq!((cached, fresh), (0, 0));
+    }
+
+    #[test]
+    fn a_pass_reading_serves_a_bounded_number_of_hosted_polls() {
+        // Staleness bound in work: within a pass, the 17th and 33rd loop
+        // polls read the clock afresh; the others read the pass reading.
+        let seed = tokio::time::Instant::now() - Duration::from_millis(1);
+        let _ = crate::lane_clock::take_pass_clock_stats();
+        let readings = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&readings);
+        let mut hosted = Budgeted {
+            inner: Box::pin(futures::future::poll_fn(move |_| {
+                seen.lock().push(crate::media_clock::now());
+                Poll::<()>::Pending
+            })),
+        };
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        LANE_POLL_BUDGET.with(|budget| budget.set(Some(LANE_SOCKET_POLLS_PER_WAKEUP)));
+        {
+            let _pass = crate::lane_clock::enter_pass(seed);
+            for _ in 0..40 {
+                assert!(Pin::new(&mut hosted).poll(&mut cx).is_pending());
+            }
+        }
+        LANE_POLL_BUDGET.with(|budget| budget.set(None));
+        let readings = readings.lock().clone();
+        assert_eq!(readings.len(), 40);
+        assert!(
+            readings[..16].iter().all(|reading| *reading == seed),
+            "16 polls on the pass reading"
+        );
+        assert!(readings[16] > seed, "the 17th poll reads the clock");
+        assert!(readings[16..32]
+            .iter()
+            .all(|reading| *reading == readings[16]));
+        assert!(readings[32] >= readings[16], "the 33rd again, monotonic");
+        assert!(readings[33..]
+            .iter()
+            .all(|reading| *reading == readings[32]));
+        let stats = crate::lane_clock::take_pass_clock_stats();
+        assert_eq!((stats.cached, stats.fresh), (38, 3), "{stats:?}");
+        // Outside a pass the clock is read.
+        assert!(crate::media_clock::now() >= readings[32]);
+        assert_eq!(crate::lane_clock::take_pass_clock_stats().cached, 0);
+    }
+
+    #[tokio::test]
+    async fn paced_streams_on_a_ticking_lane_are_served_alike_with_the_heap_and_the_wheel() {
+        // The v2 profile (2 ms tick, grid timers) with the heap and no pass
+        // clock, then with the wheel and the pass clock: 40 paced streams of
+        // ten 20 ms deadlines each are served never early and within the
+        // same bound, in a comparable number of passes.
+        let quantum = Duration::from_millis(2);
+        let grid = crate::lane_tick::TickGrid::process(quantum);
+        let mut outcomes = Vec::new();
+        for wheel in [false, true] {
+            let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+                crate::executor::MediaExecutorConfig::v2()
+                    .with_lane_timer_wheel(wheel)
+                    .with_lane_pass_clock(wheel),
+            );
+            if !crate::executor::lane_timer_enabled() {
+                return; // the process disabled the switch
+            }
+            let before = crate::executor::lane_wheel_counters();
+            let outcome = serve_paced_streams(
+                LanePoller::start_with_tick(&Handle::current(), ticking(quantum), Some(grid)),
+                40,
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            let after = crate::executor::lane_wheel_counters();
+            if wheel {
+                assert!(
+                    after.wheel_inserts >= before.wheel_inserts + 400,
+                    "every deadline filed in the wheel"
+                );
+                assert!(after.pass_clock_fresh_reads > before.pass_clock_fresh_reads);
+            }
+            outcomes.push(outcome);
+        }
+        let (heap_passes, heap_early, heap_worst) = outcomes[0];
+        let (wheel_passes, wheel_early, wheel_worst) = outcomes[1];
+        assert_eq!(heap_early + wheel_early, 0, "never early");
+        for worst in [heap_worst, wheel_worst] {
+            // One quantum plus generous scheduling noise for a shared host.
+            assert!(
+                worst < quantum + Duration::from_millis(25),
+                "worst lateness {worst:?}"
+            );
+        }
+        assert!(
+            wheel_passes <= 2 * heap_passes + 20 && heap_passes <= 2 * wheel_passes + 20,
+            "passes: heap {heap_passes}, wheel {wheel_passes}"
+        );
     }
 
     // ---- Lane tick: a ticking poller ----

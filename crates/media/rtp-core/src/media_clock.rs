@@ -11,11 +11,15 @@
 //! - Everywhere else it is a plain [`tokio::time::Sleep`].
 //!
 //! [`now`] and [`now_std`] read the clock media deadlines are measured
-//! against. Today they read the runtime clock (honouring a paused test
-//! clock) and the monotonic system clock; a lane can later serve a cached
-//! reading per poller pass behind the same calls.
+//! against: the runtime clock (honouring a paused test clock) and the
+//! monotonic system clock. With [`MediaExecutorConfig::lane_pass_clock`]
+//! active, inside a lane poller pass they return the pass's single clock
+//! reading instead (an earlier reading of the same clock, at most a bounded
+//! amount of lane work old), so the futures one pass polls share one
+//! `clock_gettime`.
 //!
 //! [`MediaExecutorConfig::lane_timer`]: crate::executor::MediaExecutorConfig::lane_timer
+//! [`MediaExecutorConfig::lane_pass_clock`]: crate::executor::MediaExecutorConfig::lane_pass_clock
 
 use std::future::Future;
 use std::pin::Pin;
@@ -84,15 +88,30 @@ pub fn sleep(duration: std::time::Duration) -> MediaSleep {
 
 /// The instant media deadlines are measured against, on the runtime clock
 /// (a paused test clock included).
+///
+/// With [`MediaExecutorConfig::lane_pass_clock`] active, inside a lane poller
+/// pass this is the pass reading: an earlier reading of the same monotonic
+/// clock, refreshed after a bounded number of reads and hosted polls,
+/// instead of a clock read per call. Everywhere else it is
+/// [`tokio::time::Instant::now`].
+///
+/// Use it where a slightly earlier "now" is safe: deciding whether a
+/// deadline has passed (it can only answer "not yet" a little longer, never
+/// "yes" too early) and scheduling relative to the media clock. Latency
+/// measurements should keep reading the clock.
+///
+/// [`MediaExecutorConfig::lane_pass_clock`]: crate::executor::MediaExecutorConfig::lane_pass_clock
 #[inline]
 pub fn now() -> Instant {
-    Instant::now()
+    crate::lane_clock::pass_cached_now().unwrap_or_else(Instant::now)
 }
 
-/// [`now`] as a [`std::time::Instant`], for state kept in std instants.
+/// [`now`] as a [`std::time::Instant`], for state kept in std instants (the
+/// socket owner's inline path). Outside a pass-clock pass it is
+/// [`std::time::Instant::now`].
 #[inline]
 pub fn now_std() -> std::time::Instant {
-    std::time::Instant::now()
+    crate::lane_clock::pass_cached_now().map_or_else(std::time::Instant::now, Instant::into_std)
 }
 
 #[cfg(test)]
