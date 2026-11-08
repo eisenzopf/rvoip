@@ -87,6 +87,7 @@ pub mod dtls;
 pub mod dtls_srtp;
 pub mod events;
 pub mod feedback;
+pub mod host_plan;
 pub mod network;
 pub mod rtcp;
 pub mod security;
