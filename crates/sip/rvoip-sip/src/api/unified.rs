@@ -8072,6 +8072,81 @@ mod config_tests {
         assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
     }
 
+    /// A peer BYE holds the session lane while its CleanupMedia action stops
+    /// media; the media pump fails and its owner asks for a local hangup,
+    /// which reads the still-Active snapshot and queues on the lane. When the
+    /// lane is released the session is Terminated, HangupCall has no
+    /// transition and no BYE is sent. The hangup must finish at once instead
+    /// of waiting the non-INVITE timeout for a confirmation of that never-sent
+    /// BYE (which delays the call's terminal and keeps the setup/teardown
+    /// scheduler from draining at shutdown).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hangup_that_loses_the_lane_to_a_peer_bye_does_not_join_a_bye_it_never_sent() {
+        let coordinator = UnifiedCoordinator::new(Config::local("hangup-lost-lane", 0))
+            .await
+            .expect("start lost-lane hangup coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let session_id = SessionId::from("hangup-lost-lane-session");
+        let created = store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create lost-lane session");
+        let handle = created
+            .lifecycle_handle
+            .expect("capture lost-lane exact lifetime");
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Active;
+            })
+            .expect("place lost-lane session in Active");
+
+        // The peer BYE transition owns the lane.
+        let lane = store
+            .state_machine_lane_exact(&handle)
+            .expect("lost-lane exact state-machine lane");
+        let peer_bye = Arc::clone(&lane).lock_owned().await;
+        let idle_lane_refs = Arc::strong_count(&lane);
+
+        let hangup = tokio::spawn({
+            let coordinator = Arc::clone(&coordinator);
+            let handle = handle.clone();
+            async move { coordinator.hangup_exact(&handle).await }
+        });
+        // The hangup snapshots Active before it dispatches; a dispatch waiting
+        // for the lane holds its own reference to it. Forced ordering, no sleep.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while Arc::strong_count(&lane) == idle_lane_refs {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("hangup queued behind the peer BYE lane");
+
+        // The peer BYE commits Terminated, then releases the lane.
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Terminated;
+            })
+            .expect("commit the peer BYE terminal state");
+        drop(peer_bye);
+
+        let joined = tokio::time::timeout(Duration::from_secs(2), hangup).await;
+        assert!(
+            matches!(joined, Ok(Ok(Ok(())))),
+            "a no-op hangup joined a BYE it never sent: {joined:?}"
+        );
+        assert!(
+            !coordinator
+                .dialog_adapter
+                .has_outgoing_bye_after_exact(&handle, 0),
+            "the lost-lane hangup must not have dispatched a BYE"
+        );
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("no retained hangup task is left to drain");
+    }
+
     #[tokio::test]
     async fn hangup_without_exact_lifetime_fails_before_raw_id_reuse() {
         let coordinator = UnifiedCoordinator::new(Config::local("hangup-reuse-fence", 0))
@@ -11618,7 +11693,16 @@ impl UnifiedCoordinator {
             .dialog_adapter
             .outgoing_bye_generation_exact(handle)
             .unwrap_or(0);
-        let dispatch = self.helpers.hangup_exact(handle).await;
+        let dispatch = self.helpers.hangup_exact_transitioned(handle).await;
+        // `initial_state` is read before the session lane. A peer BYE that
+        // holds the lane can commit Terminated in between (its CleanupMedia
+        // action is what fails a media pump that then asks for this hangup);
+        // the queued HangupCall finds no transition and sends nothing.
+        // Joining a confirmation for that never-sent BYE would hold this
+        // retained operation, and every waiter's terminal publication, until
+        // the non-INVITE transaction timeout. The lane's own outcome decides.
+        let hangup_was_noop = matches!(dispatch, Ok(false));
+        let dispatch = dispatch.map(|_| ());
         let retained_new_bye = matches!(initial_state, Some(CallState::Active))
             && self
                 .dialog_adapter
@@ -11643,7 +11727,7 @@ impl UnifiedCoordinator {
         // the dialog (the ordinary simultaneous-BYE race). The confirmation
         // helper always performs exact local reclamation on any other
         // timeout/non-2xx while preserving that wire failure for the caller.
-        if matches!(initial_state, Some(CallState::Active)) {
+        if matches!(initial_state, Some(CallState::Active)) && !hangup_was_noop {
             return complete_established_bye_dispatch(
                 dispatch,
                 retained_new_bye,
