@@ -1195,8 +1195,6 @@ impl UdpRtpTransport {
         // Executor v2: the loop can adopt an inline ingress, and with the lane
         // poller it runs inside its lane's poller task (one task wakeup
         // serves every socket that became ready together).
-        let inline_capable =
-            crate::executor::media_executor_mode() == crate::executor::MediaExecutorMode::V2;
         let on_lane = crate::executor::lane_poller_enabled();
         // The loop owns the inbound SRTP context when it is that context's
         // only datagram user: no separate RTCP socket, whose receive task
@@ -1215,9 +1213,7 @@ impl UdpRtpTransport {
                 let mut observed_symmetric_generation =
                     symmetric_rtp_generation.load(Ordering::Acquire);
                 debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
-                // Executor v2 (None under v1): see `InlineRx`. The inline path
-                // authenticates and decrypts RTP in place in one reused
-                // buffer; v1 receives into a fresh buffer per datagram.
+                // Executor v2 (None under v1): see `InlineRx`.
                 let mut inline: Option<InlineRx> = None;
                 // The inbound SRTP context this loop holds (`None` under v1
                 // or without `owner_srtp`). Dropped with the loop, which gives
@@ -1231,11 +1227,11 @@ impl UdpRtpTransport {
                 let mut rx_hot: Option<RxHot> = hot_doorbell
                     .as_ref()
                     .map(|_| RxHot::new(symmetric_rtp_policy));
-                let mut inline_storage = if inline_capable {
-                    vec![0u8; recv_buffer_size]
-                } else {
-                    Vec::new()
-                };
+                // One receive buffer serves the whole loop. The inline path
+                // authenticates and decrypts RTP in place in it; on the v1
+                // path every event copies the bytes it keeps, and each
+                // iteration reads only the `size` bytes recv_from returned.
+                let mut storage = vec![0u8; recv_buffer_size];
 
                 loop {
                     // Check if we should continue running (hot call state:
@@ -1248,13 +1244,7 @@ impl UdpRtpTransport {
                         break;
                     }
 
-                    let mut fresh;
-                    let buffer: &mut [u8] = if inline.is_some() {
-                        &mut inline_storage
-                    } else {
-                        fresh = vec![0u8; recv_buffer_size];
-                        &mut fresh
-                    };
+                    let buffer: &mut [u8] = &mut storage;
 
                     // Receive packet
                     let received = match inline.as_mut() {
@@ -1757,13 +1747,13 @@ impl UdpRtpTransport {
         self.spawn_on_lane("rtp_core.udp_transport.rtcp_receiver_task", async move {
             let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
             let mut rtcp_moves = 0_u8;
+            // Reused across datagrams, as in the RTP receive loop.
+            let mut buffer = vec![0u8; rtcp_recv_buffer_size];
             loop {
                 // Check if we should continue running
                 if !active_state.load(Ordering::Acquire) {
                     break;
                 }
-
-                let mut buffer = vec![0u8; rtcp_recv_buffer_size];
 
                 // Receive packet
                 match rtcp_socket.recv_from(&mut buffer).await {
@@ -4437,6 +4427,77 @@ mod tests {
         assert_eq!(recovered.payload, valid_packet.payload);
 
         transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn receive_scratch_reuse_preserves_owned_packets_and_lengths() {
+        for rtcp_mux in [true, false] {
+            let receiver = UdpRtpTransport::new(RtpTransportConfig {
+                local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                local_rtcp_addr: (!rtcp_mux).then(|| "127.0.0.1:0".parse().unwrap()),
+                symmetric_rtp: false,
+                rtcp_mux,
+                session_id: Some(format!("scratch-reuse-{rtcp_mux}")),
+                use_port_allocator: false,
+                buffer_config: Default::default(),
+            })
+            .await
+            .unwrap();
+            let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let rtp_destination = receiver.local_rtp_addr().unwrap();
+            let rtcp_destination = if rtcp_mux {
+                rtp_destination
+            } else {
+                receiver
+                    .rtcp_socket
+                    .load_full()
+                    .unwrap()
+                    .local_addr()
+                    .unwrap()
+            };
+            let mut events = receiver.subscribe();
+            let mut retained = Vec::new();
+            // Long datagrams followed by short ones: a reused buffer must
+            // never leak the tail of an earlier, longer datagram.
+            for (seq, len) in [1024, 1, 160, 3].into_iter().enumerate() {
+                let payload = Bytes::from(vec![seq as u8 + 1; len]);
+                let packet = RtpPacket::new(
+                    RtpHeader::new(0, seq as u16, seq as u32 * 160, 123),
+                    payload.clone(),
+                )
+                .serialize()
+                .unwrap();
+                sender.send_to(&packet, rtp_destination).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    RtpEvent::MediaReceived {
+                        payload: actual, ..
+                    } => retained.push((actual, payload)),
+                    other => panic!("unexpected {other:?}"),
+                }
+                // Valid RTCP APP packets of alternating length share the RTP
+                // buffer with rtcp-mux and use the RTCP buffer without it.
+                let words = if seq % 2 == 0 { 128 } else { 3 };
+                let mut rtcp = vec![seq as u8 + 10; words * 4];
+                rtcp[..4].copy_from_slice(&[0x80, 204, 0, (words - 1) as u8]);
+                sender.send_to(&rtcp, rtcp_destination).await.unwrap();
+                match tokio::time::timeout(Duration::from_secs(2), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                {
+                    RtpEvent::RtcpReceived { data, .. } => retained.push((data, Bytes::from(rtcp))),
+                    other => panic!("unexpected {other:?}"),
+                }
+            }
+            for (actual, expected) in retained {
+                assert_eq!(actual, expected);
+            }
+            receiver.close().await.unwrap();
+        }
     }
 
     #[tokio::test]
