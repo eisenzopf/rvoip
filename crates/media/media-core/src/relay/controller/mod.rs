@@ -41,7 +41,8 @@ use crate::types::{AudioFrame, DialogId, MediaDirection, MediaSessionId};
 
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::transport::{
-    AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig, SymmetricRtpPolicy,
+    AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
+    SessionPortReservation, SymmetricRtpPolicy,
 };
 use rvoip_rtp_core::{
     RtpPacket, RtpSession, RtpSessionBufferConfig, RtpSessionConfig, RtpTransportBufferConfig,
@@ -1367,6 +1368,16 @@ impl Default for MediaSessionControllerConfig {
     }
 }
 
+/// The reservation [`MediaSessionController::start_media`] makes for a
+/// session with or without a separate RTCP port.
+fn session_port_reservation(separate_rtcp_port: bool) -> SessionPortReservation {
+    if separate_rtcp_port {
+        SessionPortReservation::RtpRtcpPair
+    } else {
+        SessionPortReservation::PortPair
+    }
+}
+
 fn configured_port_range_len(base_port: u16, max_port: u16) -> usize {
     if max_port < base_port {
         0
@@ -1817,6 +1828,35 @@ impl MediaSessionController {
             Some(allocator) => allocator.allocated_count().await,
             None => 0,
         }
+    }
+
+    /// Media sessions this controller's range can still start on `ip`.
+    ///
+    /// `separate_rtcp_port` selects the reservation [`Self::start_media`]
+    /// makes: a session started with
+    /// [`MediaConfig::with_rtcp_separate_port`] needs an even RTP port and
+    /// the port above it, every other session one port. Point-in-time and
+    /// advisory; `start_media` stays the authoritative check. `None` when
+    /// the controller has no range-backed allocator to count.
+    pub fn available_session_port_slots(
+        &self,
+        ip: std::net::IpAddr,
+        separate_rtcp_port: bool,
+    ) -> Option<usize> {
+        self.port_allocator
+            .as_ref()?
+            .available_session_slots(ip, session_port_reservation(separate_rtcp_port))
+    }
+
+    /// Media sessions the configured range holds when every port is free,
+    /// for the reservation `separate_rtcp_port` selects (see
+    /// [`Self::available_session_port_slots`]).
+    pub fn configured_session_port_slots(&self, separate_rtcp_port: bool) -> Option<usize> {
+        Some(
+            self.port_allocator
+                .as_ref()?
+                .configured_session_slots(session_port_reservation(separate_rtcp_port)),
+        )
     }
 
     /// Create a new media session controller
