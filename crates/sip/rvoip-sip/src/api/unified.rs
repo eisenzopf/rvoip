@@ -3023,6 +3023,19 @@ pub struct Config {
     /// tying that memory reservation to the larger event-queue capacities.
     pub server_call_capacity: Option<usize>,
 
+    /// Concurrent calls the `SipAdapter` event handoff is sized for.
+    ///
+    /// While an inbound call is answered and awaits its ACK, the adapter
+    /// reserves one event slot for its `Connected` handoff; a call that
+    /// finds no free slot is rejected with `503` before it is answered.
+    /// `None` keeps the default queue of 256 events and 4096 pending inbound
+    /// observations. When set, the queue holds two events per call and the
+    /// pending observations one per call, never fewer than those defaults.
+    /// Servers that answer more than about 128 calls at once should set this
+    /// to their expected concurrent call count. Valid values are 1 to
+    /// [`Config::MAX_SIP_ADAPTER_CALL_CAPACITY`].
+    pub sip_adapter_call_capacity: Option<usize>,
+
     /// Maximum active, quarantined, and retired SIP lifecycle records retained
     /// by the session authority.
     ///
@@ -3266,6 +3279,7 @@ impl std::fmt::Debug for Config {
                 &self.global_event_channel_capacity,
             )
             .field("server_call_capacity", &self.server_call_capacity)
+            .field("sip_adapter_call_capacity", &self.sip_adapter_call_capacity)
             .field(
                 "server_retained_lifecycle_capacity",
                 &self.server_retained_lifecycle_capacity,
@@ -3309,6 +3323,9 @@ impl Config {
     /// transaction defaults so ordinary client/server apps do not reserve a
     /// large broadcast ring unless they opt into a high-CPS profile.
     pub const DEFAULT_APP_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+    /// Largest accepted [`Config::sip_adapter_call_capacity`].
+    pub const MAX_SIP_ADAPTER_CALL_CAPACITY: usize = 131_072;
 
     /// Default per-transaction command channel capacity.
     pub const DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize =
@@ -3457,6 +3474,7 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
+            sip_adapter_call_capacity: None,
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -3590,6 +3608,7 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
+            sip_adapter_call_capacity: None,
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -4309,6 +4328,13 @@ impl Config {
     /// usually leave this unset and use the defaults.
     pub fn with_server_capacity(mut self, capacity: usize) -> Self {
         self.server_call_capacity = Some(capacity);
+        self
+    }
+
+    /// Size the `SipAdapter` event handoff for `calls` concurrent calls.
+    /// See [`Config::sip_adapter_call_capacity`].
+    pub fn with_sip_adapter_call_capacity(mut self, calls: usize) -> Self {
+        self.sip_adapter_call_capacity = Some(calls);
         self
     }
 
@@ -5373,6 +5399,14 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
+        }
+        if let Some(calls) = self.sip_adapter_call_capacity {
+            if calls == 0 || calls > Self::MAX_SIP_ADAPTER_CALL_CAPACITY {
+                return Err(SessionError::ConfigError(format!(
+                    "sip_adapter_call_capacity must be between 1 and {} when set",
+                    Self::MAX_SIP_ADAPTER_CALL_CAPACITY
+                )));
+            }
         }
         if matches!(self.server_retained_lifecycle_capacity, Some(0)) {
             return Err(SessionError::ConfigError(
@@ -10118,6 +10152,10 @@ impl UnifiedCoordinator {
 
     pub(crate) fn fast_auto_accept_incoming_calls(&self) -> bool {
         self.config.fast_auto_accept_incoming_calls
+    }
+
+    pub(crate) fn sip_adapter_call_capacity(&self) -> Option<usize> {
+        self.config.sip_adapter_call_capacity
     }
 
     pub(crate) async fn claim_session_control_events(
