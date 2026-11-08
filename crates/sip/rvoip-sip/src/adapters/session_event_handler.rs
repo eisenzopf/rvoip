@@ -423,9 +423,17 @@ fn committed_bye_termination(
     let (failed, cancelled, terminated) = terminal_template_counts(result);
     let dialog_cleanup = executed_action_count(result, &crate::state_table::Action::CleanupDialog);
     let media_cleanup = executed_action_count(result, &crate::state_table::Action::CleanupMedia);
+    // A crossed BYE can arrive while our own SendBYE still owns an exact
+    // operation. As with local BYE completion, the retained terminal release
+    // quiesces that operation before it cleans dialog and media, so the
+    // Terminating row must not clean up inline.
+    let cleanup_committed = if result.old_state == CallState::Terminating {
+        result.actions_executed.is_empty()
+    } else {
+        dialog_cleanup == 1 && media_cleanup == 1
+    };
     if (failed, cancelled, terminated, result.next_state) == (0, 0, 1, Some(CallState::Terminated))
-        && dialog_cleanup == 1
-        && media_cleanup == 1
+        && cleanup_committed
     {
         return Ok(());
     }
@@ -5855,6 +5863,16 @@ impl SessionCrossCrateEventHandler {
         };
 
         let state_event = match status_code {
+            // 100 matters to the table only while the initial INVITE can
+            // still be cancelled; elsewhere it stays a projection.
+            100 if committed.role == Role::UAC
+                && matches!(
+                    committed.call_state,
+                    CallState::Initiating | CallState::CancelPending
+                ) =>
+            {
+                Some(EventType::Dialog100Trying)
+            }
             183 if sdp.is_some() => Some(EventType::Dialog183SessionProgress),
             101..=199 => Some(EventType::Dialog180Ringing),
             _ => None,
@@ -5872,7 +5890,9 @@ impl SessionCrossCrateEventHandler {
                     return Ok(());
                 }
             };
-            if result.transition.is_none() {
+            // A 100 was always projected; only ringing/early-media
+            // projections are suppressed without a committed transition.
+            if result.transition.is_none() && status_code != 100 {
                 debug!(
                     session = %sid,
                     status_code,
@@ -9271,6 +9291,41 @@ Content-Length: {}\r\n\r\n\
             cleanup,
         );
         assert!(committed_bye_termination(&session_id, &duplicate).is_err());
+    }
+
+    #[test]
+    fn crossed_bye_requires_committed_terminal_with_retained_cleanup() {
+        let session_id = SessionId::from("crossed-bye-terminal");
+        assert!(
+            committed_bye_termination(&session_id, &missing_result(CallState::Terminating))
+                .is_err()
+        );
+        // A local SendBYE may still own an exact operation; the retained
+        // terminal release quiesces it before cleaning dialog and media.
+        let valid = committed_result(
+            CallState::Terminating,
+            CallState::Terminated,
+            vec![crate::state_table::EventTemplate::CallTerminated],
+        );
+        assert!(committed_bye_termination(&session_id, &valid).is_ok());
+        let inline_cleanup = committed_result_with_actions(
+            CallState::Terminating,
+            CallState::Terminated,
+            vec![crate::state_table::EventTemplate::CallTerminated],
+            vec![
+                crate::state_table::Action::CleanupDialog,
+                crate::state_table::Action::CleanupMedia,
+            ],
+        );
+        assert!(committed_bye_termination(&session_id, &inline_cleanup).is_err());
+        let no_terminal = committed_result(CallState::Terminating, CallState::Terminated, vec![]);
+        assert!(committed_bye_termination(&session_id, &no_terminal).is_err());
+        let active_without_cleanup = committed_result(
+            CallState::Active,
+            CallState::Terminated,
+            vec![crate::state_table::EventTemplate::CallTerminated],
+        );
+        assert!(committed_bye_termination(&session_id, &active_without_cleanup).is_err());
     }
 
     #[test]

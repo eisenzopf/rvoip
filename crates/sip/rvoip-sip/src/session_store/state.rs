@@ -285,6 +285,9 @@ pub struct SessionStateCold {
     /// authentication and timer retries until the final response consumes
     /// the offer/answer exchange.
     pub(crate) initial_invite_offer_sdp: Option<String>,
+    /// A 100 to the initial INVITE permits CANCEL without implying that the
+    /// peer is ringing. Reset whenever a fresh initial INVITE is sent.
+    pub(crate) initial_invite_trying_received: bool,
     pub pending_reinvite_options:
         Option<Arc<rvoip_sip_dialog::api::unified::ReInviteRequestOptions>>,
     pub pending_register_options:
@@ -1042,6 +1045,7 @@ impl SessionState {
                 pending_bye_reason: None,
                 pending_invite_options: None,
                 initial_invite_offer_sdp: None,
+                initial_invite_trying_received: false,
                 pending_reinvite_options: None,
                 pending_register_options: None,
                 pending_refer_options: None,
@@ -1251,6 +1255,7 @@ impl SessionState {
         let cold = Arc::make_mut(&mut self.cold);
         cold.pending_invite_options = None;
         cold.initial_invite_offer_sdp = None;
+        cold.initial_invite_trying_received = false;
         cold.invite_authorization_credentials.clear();
         cold.invite_auth_retry_count = 0;
         cold.pending_auth = None;
