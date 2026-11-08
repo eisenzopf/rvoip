@@ -106,6 +106,79 @@ impl SrtpAuthenticator {
         Ok(result == 0)
     }
 
+    /// Allocation-free twin of [`Self::verify_auth_tag`] for the executor v2
+    /// inline receive path. The MAC input, truncation, error cases and the
+    /// constant-time comparison are identical; the expected tag stays on the
+    /// stack instead of being copied into a `Vec`.
+    pub(crate) fn verify_auth_tag_in_place(
+        algorithm: SrtpAuthenticationAlgorithm,
+        auth_key: &[u8],
+        tag_length: usize,
+        packet_data: &[u8],
+        tag: &[u8],
+        roc: u32,
+    ) -> Result<bool> {
+        if algorithm == SrtpAuthenticationAlgorithm::Null {
+            return Ok(true);
+        }
+        let mut mac = HmacSha1::new_from_slice(auth_key)
+            .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
+        mac.update(packet_data);
+        mac.update(&roc.to_be_bytes());
+        let result = mac.finalize().into_bytes();
+        if tag_length > result.len() {
+            return Err(Error::SrtpError(format!(
+                "auth tag_length {} exceeds HMAC-SHA1 output {}",
+                tag_length,
+                result.len()
+            )));
+        }
+        let expected = &result.as_slice()[..tag_length];
+        if expected.len() != tag.len() {
+            return Err(Error::SrtpError(format!(
+                "Authentication tag length mismatch: expected {}, got {}",
+                expected.len(),
+                tag.len()
+            )));
+        }
+        let mut difference = 0u8;
+        for (a, b) in expected.iter().zip(tag.iter()) {
+            difference |= a ^ b;
+        }
+        Ok(difference == 0)
+    }
+
+    /// Allocation-free twin of [`Self::calculate_auth_tag`] for the executor
+    /// v2 TX path: the tag over `buffer[start..]` followed by the ROC is
+    /// appended to `buffer`. Same MAC input, truncation and errors; a Null
+    /// algorithm appends nothing (its tag is empty).
+    pub(crate) fn append_auth_tag(
+        algorithm: SrtpAuthenticationAlgorithm,
+        auth_key: &[u8],
+        tag_length: usize,
+        buffer: &mut Vec<u8>,
+        start: usize,
+        roc: u32,
+    ) -> Result<()> {
+        if algorithm == SrtpAuthenticationAlgorithm::Null {
+            return Ok(());
+        }
+        let mut mac = HmacSha1::new_from_slice(auth_key)
+            .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
+        mac.update(&buffer[start..]);
+        mac.update(&roc.to_be_bytes());
+        let result = mac.finalize().into_bytes();
+        if tag_length > result.len() {
+            return Err(Error::SrtpError(format!(
+                "auth tag_length {} exceeds HMAC-SHA1 output {}",
+                tag_length,
+                result.len()
+            )));
+        }
+        buffer.extend_from_slice(&result.as_slice()[..tag_length]);
+        Ok(())
+    }
+
     /// Get the authentication tag length
     pub fn tag_length(&self) -> usize {
         self.tag_length

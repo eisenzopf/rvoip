@@ -46,6 +46,8 @@ arc-swap = "1.7"
 # `RtpPacket::payload` is a refcounted slice with zero-copy parse.
 # When all Bytes clones drop, the owner returns the Vec to the pool.
 crossbeam-queue = "0.3"
+# Projection for the media clock's sleep enum (`media_clock::MediaSleep`).
+pin-project-lite = "0.2"
 # Cryptographic dependencies for DTLS
 hmac = "0.12.1"
 sha1 = "0.10"

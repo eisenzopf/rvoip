@@ -7406,6 +7406,7 @@ dependencies = [
  "once_cell",
  "p256",
  "parking_lot",
+ "pin-project-lite",
  "rand 0.8.7",
  "rcgen 0.14.8",
  "rvoip-infra-common",
