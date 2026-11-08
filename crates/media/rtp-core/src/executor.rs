@@ -50,6 +50,21 @@
 //! - [`MediaExecutorConfig::lane_pass_clock`]: a lane poller pass reads the
 //!   clock once and the futures it polls read that value through
 //!   [`crate::media_clock::now`]. Needs the lane poller.
+//! - [`MediaExecutorConfig::owner_srtp`]: the receive loop checks the
+//!   transport's inbound SRTP context out and uses it without the context
+//!   lock, which it takes again only after a rekey, rollback or removal.
+//! - [`MediaExecutorConfig::owner_rtcp`]: RTCP multiplexed on the RTP socket
+//!   is processed by the session's RTCP handling on the socket owner instead
+//!   of crossing the transport broadcast to the session task, and periodic
+//!   reports leave with a synchronous send (from a future hosted on the
+//!   socket's lane poller when the lane poller is on).
+//! - [`MediaExecutorConfig::owner_receive_stats`]: the socket owner publishes
+//!   the per-packet receive statistics through a single-writer seqlock
+//!   instead of taking the session statistics mutex per packet.
+//! - [`MediaExecutorConfig::counter_pool_cleanup`]: the per-thread PCM pool
+//!   keeps up to 1024 small buffers instead of 32, and a lane poller on a
+//!   current-thread runtime publishes the per-event counters its passes add
+//!   (PCM pool misses, owner RTCP) once per batch of passes.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -188,6 +203,30 @@ pub struct MediaExecutorConfig {
     /// Needs [`Self::lane_poller`]; without it, it reads as off.
     pub lane_pass_clock: bool,
     // ---- End lane timing wheel and pass clock ----
+    /// The receive loop owns the transport's inbound SRTP/SRTCP context and
+    /// uses it without the context lock. A transport with a separate RTCP
+    /// socket (whose own receive task also unprotects SRTCP) keeps the lock.
+    pub owner_srtp: bool,
+    /// Multiplexed inbound RTCP is processed on the socket owner (same
+    /// stranger filter and handling as the session task), and periodic
+    /// reports are sent synchronously; with [`Self::lane_poller`] the report
+    /// task is hosted on the socket's lane poller. RTCP on a separate RTCP
+    /// socket keeps its own receive task.
+    pub owner_rtcp: bool,
+    /// The socket owner, the only writer of a v2 session's per-packet receive
+    /// statistics, publishes them without the session statistics mutex
+    /// (a single-writer seqlock that readers overlay).
+    pub owner_receive_stats: bool,
+    // ---- Counter and PCM pool cleanup ----
+    /// The per-thread PCM pool (with [`Self::pcm_pool`]) keeps up to 1024
+    /// small buffers instead of 32, so a lane pass whose arrivals and playout
+    /// ticks do not interleave no longer allocates, and a lane poller on a
+    /// current-thread runtime publishes the per-event counters added during
+    /// its passes (PCM pool misses, owner RTCP) once per batch of passes
+    /// instead of one shared atomic add per event (see
+    /// [`add_lane_deferred`]).
+    pub counter_pool_cleanup: bool,
+    // ---- End counter and PCM pool cleanup ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -214,6 +253,11 @@ impl MediaExecutorConfig {
             // Lane timing wheel and pass clock.
             lane_timer_wheel: false,
             lane_pass_clock: false,
+            owner_srtp: false,
+            owner_rtcp: false,
+            owner_receive_stats: false,
+            // Counter and PCM pool cleanup.
+            counter_pool_cleanup: false,
         }
     }
 
@@ -235,6 +279,11 @@ impl MediaExecutorConfig {
             // Lane timing wheel and pass clock.
             lane_timer_wheel: true,
             lane_pass_clock: true,
+            owner_srtp: true,
+            owner_rtcp: true,
+            owner_receive_stats: true,
+            // Counter and PCM pool cleanup.
+            counter_pool_cleanup: true,
         }
     }
 
@@ -315,6 +364,32 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
+
+    /// Set [`Self::owner_srtp`].
+    pub fn with_owner_srtp(mut self, enabled: bool) -> Self {
+        self.owner_srtp = enabled;
+        self
+    }
+
+    /// Set [`Self::owner_rtcp`].
+    pub fn with_owner_rtcp(mut self, enabled: bool) -> Self {
+        self.owner_rtcp = enabled;
+        self
+    }
+
+    /// Set [`Self::owner_receive_stats`].
+    pub fn with_owner_receive_stats(mut self, enabled: bool) -> Self {
+        self.owner_receive_stats = enabled;
+        self
+    }
+
+    // ---- Counter and PCM pool cleanup ----
+    /// Set [`Self::counter_pool_cleanup`].
+    pub fn with_counter_pool_cleanup(mut self, enabled: bool) -> Self {
+        self.counter_pool_cleanup = enabled;
+        self
+    }
+    // ---- End counter and PCM pool cleanup ----
 
     /// Check the configuration without installing it.
     ///
@@ -411,6 +486,36 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
+    /// Whether receive loops started now own the inbound SRTP context.
+    pub fn owner_srtp_active(&self) -> bool {
+        self.is_v2() && self.owner_srtp
+    }
+
+    /// Whether sessions created now process multiplexed RTCP on the socket
+    /// owner and send periodic reports synchronously.
+    pub fn owner_rtcp_active(&self) -> bool {
+        self.is_v2() && self.owner_rtcp
+    }
+
+    /// Whether the periodic report task of a session created now is hosted
+    /// on its socket's lane poller.
+    pub fn owner_rtcp_on_lane_active(&self) -> bool {
+        self.owner_rtcp_active() && self.lane_poller_active()
+    }
+
+    /// Whether sessions created now publish receive statistics from the
+    /// socket owner without the statistics mutex.
+    pub fn owner_receive_stats_active(&self) -> bool {
+        self.is_v2() && self.owner_receive_stats
+    }
+
+    // ---- Counter and PCM pool cleanup ----
+    /// Whether the PCM pool keeps more small buffers and lane pollers batch
+    /// the per-event counters of their passes.
+    pub fn counter_pool_cleanup_active(&self) -> bool {
+        self.is_v2() && self.counter_pool_cleanup
+    }
+    // ---- End counter and PCM pool cleanup ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -595,6 +700,43 @@ pub fn lane_pass_clock_enabled() -> bool {
 
 // ---- End lane timing wheel and pass clock ----
 
+/// Whether a receive loop started now owns its transport's inbound SRTP
+/// context. Read when a transport starts.
+pub fn owner_srtp_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_srtp_active)
+}
+
+/// Whether a session created now processes multiplexed RTCP on the socket
+/// owner and sends periodic reports synchronously. Read when a session is
+/// created.
+pub fn owner_rtcp_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_rtcp_active)
+}
+
+/// Whether a session created now hosts its periodic report task on its
+/// socket's lane poller. Read when a session starts.
+pub fn owner_rtcp_on_lane_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_rtcp_on_lane_active)
+}
+
+/// Whether a session created now publishes its receive statistics from the
+/// socket owner without the statistics mutex. Read when a session is created.
+pub fn owner_receive_stats_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_receive_stats_active)
+}
+
+// ---- Counter and PCM pool cleanup ----
+
+/// Whether the PCM pool keeps more small buffers and lane pollers batch the
+/// per-event counters of their passes. Read by the pool when a buffer comes
+/// back to a pool that already holds 32 (a buffer may be returned by another
+/// object than the one that took it), and when a lane poller starts.
+pub fn counter_pool_cleanup_enabled() -> bool {
+    with_config(MediaExecutorConfig::counter_pool_cleanup_active)
+}
+
+// ---- End counter and PCM pool cleanup ----
+
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
 pub struct MediaExecutorConfigOverride {
@@ -738,11 +880,11 @@ pub(crate) trait InlineRtpIngress: Send + 'static {
     fn next_deadline(&mut self, now: Instant) -> Option<Instant>;
     fn on_deadline(&mut self, now: Instant);
 
-    /// One RTCP compound received on the RTP socket (multiplexed), after the
-    /// transport's source check and SRTCP unprotect. Returns whether it was
-    /// processed here; `false` (the default) sends it to the transport
-    /// broadcast, as v1 does. Owner-side RTCP processing builds on this.
-    fn on_rtcp(&mut self, _data: &[u8], _now: Instant) -> bool {
+    /// One RTCP compound received on the RTP socket (multiplexed) from
+    /// `source`, after the transport's latch check and SRTCP unprotect.
+    /// Returns whether it was processed here; `false` (the default) sends it
+    /// to the transport broadcast, as v1 does.
+    fn on_rtcp(&mut self, _data: &[u8], _source: SocketAddr, _now: Instant) -> bool {
         false
     }
 }
@@ -850,6 +992,14 @@ static TX_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static TX_BATCHES: AtomicU64 = AtomicU64::new(0);
 static TX_BATCHED_PACKETS: AtomicU64 = AtomicU64::new(0);
 static TX_BATCH_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static OWNER_SRTP_LOOPS: AtomicU64 = AtomicU64::new(0);
+static OWNER_SRTP_HANDOFFS: AtomicU64 = AtomicU64::new(0);
+static SRTP_LOCKS_AVOIDED: AtomicU64 = AtomicU64::new(0);
+static OWNER_RTCP_INBOUND: AtomicU64 = AtomicU64::new(0);
+static RTCP_SYNC_SENDS: AtomicU64 = AtomicU64::new(0);
+static RTCP_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
+static RTCP_LANE_TASKS: AtomicU64 = AtomicU64::new(0);
+static OWNER_RECEIVE_STATS: AtomicU64 = AtomicU64::new(0);
 
 /// Media executor totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction.
@@ -914,6 +1064,29 @@ pub struct InlineExecutorCounters {
     /// Batches (or batch remainders) sent packet by packet because
     /// `sendmmsg` is unavailable or returned short.
     pub tx_batch_fallbacks: u64,
+    /// Receive loops that own their transport's inbound SRTP context.
+    pub owner_srtp_loops: u64,
+    /// Times an owning receive loop adopted or gave back the context (the
+    /// first check-out, a rekey, a rollback, a removal).
+    pub owner_srtp_handoffs: u64,
+    /// Inbound SRTP/SRTCP datagrams authenticated without taking the
+    /// context lock.
+    pub srtp_locks_avoided: u64,
+    /// Inbound RTCP compounds processed on the socket owner (each also
+    /// counts one avoided session-task wakeup in `wakeups_avoided`).
+    pub owner_rtcp_inbound: u64,
+    /// Periodic RTCP reports written with `try_send_to` from the report
+    /// task's poll.
+    pub rtcp_sync_sends: u64,
+    /// Periodic RTCP reports the socket did not take at once and that went
+    /// through the awaited send (already protected, so each SRTCP index is
+    /// still consumed once).
+    pub rtcp_sync_deferred: u64,
+    /// Periodic report tasks hosted on a lane poller.
+    pub rtcp_lane_tasks: u64,
+    /// Sessions whose socket owner publishes receive statistics without the
+    /// statistics mutex.
+    pub owner_receive_stats: u64,
 }
 
 /// The media executor totals since start.
@@ -940,6 +1113,14 @@ pub fn inline_executor_counters() -> InlineExecutorCounters {
         tx_batches: TX_BATCHES.load(Ordering::Relaxed),
         tx_batched_packets: TX_BATCHED_PACKETS.load(Ordering::Relaxed),
         tx_batch_fallbacks: TX_BATCH_FALLBACKS.load(Ordering::Relaxed),
+        owner_srtp_loops: OWNER_SRTP_LOOPS.load(Ordering::Relaxed),
+        owner_srtp_handoffs: OWNER_SRTP_HANDOFFS.load(Ordering::Relaxed),
+        srtp_locks_avoided: SRTP_LOCKS_AVOIDED.load(Ordering::Relaxed),
+        owner_rtcp_inbound: OWNER_RTCP_INBOUND.load(Ordering::Relaxed),
+        rtcp_sync_sends: RTCP_SYNC_SENDS.load(Ordering::Relaxed),
+        rtcp_sync_deferred: RTCP_SYNC_DEFERRED.load(Ordering::Relaxed),
+        rtcp_lane_tasks: RTCP_LANE_TASKS.load(Ordering::Relaxed),
+        owner_receive_stats: OWNER_RECEIVE_STATS.load(Ordering::Relaxed),
     }
 }
 
@@ -1471,6 +1652,305 @@ impl Drop for TxPathCounters {
     }
 }
 
+/// Count one receive loop that owns its inbound SRTP context.
+pub(crate) fn record_owner_srtp_loop() {
+    OWNER_SRTP_LOOPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one adoption or return of the inbound SRTP context by its owner.
+/// Rekey rate.
+pub(crate) fn record_owner_srtp_handoff() {
+    OWNER_SRTP_HANDOFFS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one inbound RTCP compound processed on the socket owner. RTCP rate
+/// (a few seconds apart per call); batched with the lane pass when the
+/// poller defers (see [`add_lane_deferred`]).
+pub(crate) fn record_owner_rtcp_inbound() {
+    add_lane_deferred(&OWNER_RTCP_INBOUND, 1);
+    add_lane_deferred(&WAKEUPS_AVOIDED, 1);
+}
+
+/// Count one synchronous periodic report send (`synchronous`), or one the
+/// socket deferred to the awaited send; batched with the lane pass when the
+/// poller defers.
+pub(crate) fn record_rtcp_send(synchronous: bool) {
+    add_lane_deferred(
+        if synchronous {
+            &RTCP_SYNC_SENDS
+        } else {
+            &RTCP_SYNC_DEFERRED
+        },
+        1,
+    );
+}
+
+// ---- Counter and PCM pool cleanup: lane-deferred counters ----
+
+/// Lane passes a deferring poller runs between two publications of its
+/// thread's pending [`add_lane_deferred`] values. It also publishes them on
+/// every idle pass and when it stops.
+pub(crate) const LANE_DEFERRED_FLUSH_PASSES: u32 = 64;
+
+/// Distinct counters one thread holds pending; a value for a further counter
+/// is added at once.
+const LANE_DEFERRED_SLOTS: usize = 8;
+
+/// One thread's pending lane-deferred values.
+struct LaneDeferredTable {
+    /// Inside a deferring scope (a lane poller pass).
+    deferring: bool,
+    /// Counters in first-use order, each with its pending value.
+    slots: [(Option<&'static AtomicU64>, u64); LANE_DEFERRED_SLOTS],
+}
+
+impl LaneDeferredTable {
+    const fn new() -> Self {
+        Self {
+            deferring: false,
+            slots: [(None, 0); LANE_DEFERRED_SLOTS],
+        }
+    }
+
+    /// Hold `value` for `total`; `false` when every slot holds another
+    /// counter.
+    #[inline]
+    fn queue(&mut self, total: &'static AtomicU64, value: u64) -> bool {
+        for slot in &mut self.slots {
+            match slot.0 {
+                Some(held) if std::ptr::eq(held, total) => {
+                    slot.1 += value;
+                    return true;
+                }
+                Some(_) => {}
+                None => {
+                    *slot = (Some(total), value);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn pending(&self, total: &AtomicU64) -> u64 {
+        self.slots
+            .iter()
+            .find(|(held, _)| held.is_some_and(|held| std::ptr::eq(held, total)))
+            .map_or(0, |&(_, pending)| pending)
+    }
+
+    fn flush(&mut self) {
+        for (total, pending) in &mut self.slots {
+            let Some(total) = total else {
+                break; // slots fill in order
+            };
+            if *pending > 0 {
+                publish_lane_deferred(total, std::mem::take(pending));
+            }
+        }
+    }
+}
+
+impl Drop for LaneDeferredTable {
+    fn drop(&mut self) {
+        // Thread exit: nothing held here is lost.
+        self.flush();
+    }
+}
+
+thread_local! {
+    static LANE_DEFERRED: std::cell::RefCell<LaneDeferredTable> =
+        const { std::cell::RefCell::new(LaneDeferredTable::new()) };
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Atomic adds this thread made for lane-deferred counters (tests).
+    static LANE_DEFERRED_PUBLISHES: Cell<u64> = const { Cell::new(0) };
+}
+
+#[inline]
+fn publish_lane_deferred(total: &AtomicU64, value: u64) {
+    total.fetch_add(value, Ordering::Relaxed);
+    #[cfg(test)]
+    let _ = LANE_DEFERRED_PUBLISHES.try_with(|count| count.set(count.get() + 1));
+}
+
+/// Run `apply` on this thread's table; `None` during thread teardown or a
+/// re-entrant call.
+#[inline]
+fn with_lane_deferred<R>(apply: impl FnOnce(&mut LaneDeferredTable) -> R) -> Option<R> {
+    LANE_DEFERRED
+        .try_with(|table| {
+            table
+                .try_borrow_mut()
+                .ok()
+                .map(|mut table| apply(&mut table))
+        })
+        .ok()
+        .flatten()
+}
+
+/// Add `value` to `total`, a process counter of the media path that is
+/// updated per event (PCM pool misses, owner RTCP) rather than kept by an
+/// owner and published in batches.
+///
+/// During a lane poller pass with
+/// [`MediaExecutorConfig::counter_pool_cleanup`] active on a current-thread
+/// runtime (whose poller never changes thread), the value is held in a small
+/// per-thread table and the poller publishes the table every 64 passes, on
+/// every idle pass and when it stops; a thread's pending values are also
+/// published when it exits. Everywhere else the value is added at once.
+/// Either way every value reaches `total` exactly once, so readers see the
+/// same totals, at most a batch of lane passes later.
+#[inline]
+pub fn add_lane_deferred(total: &'static AtomicU64, value: u64) {
+    let held = with_lane_deferred(|table| table.deferring && table.queue(total, value));
+    if held != Some(true) {
+        publish_lane_deferred(total, value);
+    }
+}
+
+/// While alive, [`add_lane_deferred`] on this thread holds values instead of
+/// adding them. Dropping it restores the previous state and publishes
+/// nothing.
+pub(crate) struct LaneDeferredScope {
+    previous: bool,
+}
+
+impl LaneDeferredScope {
+    fn enter() -> Self {
+        let previous = with_lane_deferred(|table| std::mem::replace(&mut table.deferring, true))
+            .unwrap_or(false);
+        Self { previous }
+    }
+}
+
+impl Drop for LaneDeferredScope {
+    fn drop(&mut self) {
+        let previous = self.previous;
+        with_lane_deferred(|table| table.deferring = previous);
+    }
+}
+
+/// Publish everything this thread holds pending.
+fn flush_lane_deferred() {
+    with_lane_deferred(LaneDeferredTable::flush);
+}
+
+/// A lane poller's schedule for publishing the values its passes hold.
+pub(crate) struct LaneDeferredBatch {
+    passes: u32,
+}
+
+impl LaneDeferredBatch {
+    /// The schedule for a poller starting on this thread, or `None` when it
+    /// adds at once: [`MediaExecutorConfig::counter_pool_cleanup`] is not
+    /// active, or the runtime is multi-threaded (its poller may move between
+    /// workers, leaving values behind on a thread it no longer runs on).
+    pub(crate) fn for_this_poller() -> Option<Self> {
+        let current_thread = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+        });
+        (current_thread && counter_pool_cleanup_enabled()).then_some(Self { passes: 0 })
+    }
+
+    /// Hold this thread's lane-deferred values until the scope drops (one
+    /// poller pass).
+    pub(crate) fn enter_pass(&self) -> LaneDeferredScope {
+        LaneDeferredScope::enter()
+    }
+
+    /// A pass ended. `idle`: it polled no hosted future, or the poller hosts
+    /// none (the lane may now sleep for long).
+    #[inline]
+    pub(crate) fn pass_end(&mut self, idle: bool) {
+        self.passes += 1;
+        if idle || self.passes >= LANE_DEFERRED_FLUSH_PASSES {
+            self.passes = 0;
+            flush_lane_deferred();
+        }
+    }
+}
+
+impl Drop for LaneDeferredBatch {
+    fn drop(&mut self) {
+        flush_lane_deferred();
+    }
+}
+
+/// Restores this thread's previous state when dropped, after publishing what
+/// it holds pending.
+#[doc(hidden)]
+pub struct LaneDeferredGuard {
+    _scope: LaneDeferredScope,
+}
+
+impl Drop for LaneDeferredGuard {
+    fn drop(&mut self) {
+        flush_lane_deferred();
+    }
+}
+
+/// Test seam: hold [`add_lane_deferred`] values on this thread, as a
+/// deferring lane poller pass does, until the guard drops.
+#[doc(hidden)]
+pub fn defer_lane_counters_on_this_thread() -> LaneDeferredGuard {
+    LaneDeferredGuard {
+        _scope: LaneDeferredScope::enter(),
+    }
+}
+
+/// Test seam: the value this thread holds for `total` and has not yet
+/// added to it.
+#[doc(hidden)]
+pub fn pending_lane_deferred_on_this_thread(total: &AtomicU64) -> u64 {
+    with_lane_deferred(|table| table.pending(total)).unwrap_or(0)
+}
+
+// ---- End counter and PCM pool cleanup: lane-deferred counters ----
+
+/// Count one periodic report task hosted on a lane poller.
+pub(crate) fn record_rtcp_lane_task() {
+    RTCP_LANE_TASKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one session whose socket owner publishes its receive statistics.
+pub(crate) fn record_owner_receive_stats() {
+    OWNER_RECEIVE_STATS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Lock-free SRTP datagrams of one owning receive loop, published in
+/// batches.
+#[derive(Default)]
+pub(crate) struct SrtpOwnerCounters {
+    pending: u64,
+}
+
+impl SrtpOwnerCounters {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    #[inline]
+    pub(crate) fn lock_avoided(&mut self) {
+        self.pending += 1;
+        if self.pending >= FLUSH_EVERY {
+            self.flush();
+        }
+    }
+
+    pub(crate) fn flush(&mut self) {
+        publish(&SRTP_LOCKS_AVOIDED, &mut self.pending);
+    }
+}
+
+impl Drop for SrtpOwnerCounters {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1487,6 +1967,10 @@ mod tests {
         assert!(!v1.fast_ssrc_hash_active());
         assert!(!v1.inline_decode_active());
         assert!(!v1.pcm_pool_active());
+        assert!(!v1.owner_srtp_active());
+        assert!(!v1.owner_rtcp_active());
+        assert!(!v1.owner_rtcp_on_lane_active());
+        assert!(!v1.owner_receive_stats_active());
 
         let v2 = MediaExecutorConfig::v2();
         assert_eq!(v2.mode, MediaExecutorMode::V2);
@@ -1497,6 +1981,10 @@ mod tests {
         assert!(v2.fast_ssrc_hash_active());
         assert!(v2.inline_decode_active());
         assert!(v2.pcm_pool_active());
+        assert!(v2.owner_srtp_active());
+        assert!(v2.owner_rtcp_active());
+        assert!(v2.owner_rtcp_on_lane_active());
+        assert!(v2.owner_receive_stats_active());
         assert!(v2.validate().is_ok());
     }
 
@@ -1693,6 +2181,12 @@ mod tests {
         assert!(!v1_with_switches.fast_ssrc_hash_active(), "never under v1");
         assert!(!v1_with_switches.inline_decode_active(), "never under v1");
         assert!(!v1_with_switches.pcm_pool_active(), "never under v1");
+        assert!(!v1_with_switches.owner_srtp_active(), "never under v1");
+        assert!(!v1_with_switches.owner_rtcp_active(), "never under v1");
+        assert!(
+            !v1_with_switches.owner_receive_stats_active(),
+            "never under v1"
+        );
 
         let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
         assert!(no_poller.validate().is_ok());
@@ -1721,17 +2215,73 @@ mod tests {
         assert!(MediaExecutorConfig::v2()
             .with_inline_decode(false)
             .pcm_pool_active());
+        assert!(
+            no_poller.owner_srtp_active(),
+            "a receive task owns its context as well as a hosted loop"
+        );
+        assert!(no_poller.owner_rtcp_active());
+        assert!(
+            !no_poller.owner_rtcp_on_lane_active(),
+            "without the poller the report task stays a task"
+        );
 
         let one_off = MediaExecutorConfig::v2()
             .with_lane_timer(false)
             .with_lane_tx(false)
             .with_tx_batch(false)
-            .with_fast_ssrc_hash(false);
+            .with_fast_ssrc_hash(false)
+            .with_owner_srtp(false)
+            .with_owner_rtcp(false)
+            .with_owner_receive_stats(false);
         assert!(one_off.lane_poller_active());
         assert!(!one_off.lane_timer_active());
         assert!(!one_off.lane_tx_active());
         assert!(!one_off.tx_batch_active());
         assert!(!one_off.fast_ssrc_hash_active());
+        assert!(!one_off.owner_srtp_active());
+        assert!(!one_off.owner_rtcp_active());
+        assert!(!one_off.owner_rtcp_on_lane_active());
+        assert!(!one_off.owner_receive_stats_active());
+    }
+
+    #[test]
+    fn owner_srtp_counters_reach_the_totals() {
+        let before = inline_executor_counters();
+        let mut counters = SrtpOwnerCounters::new();
+        for _ in 0..(FLUSH_EVERY + 2) {
+            counters.lock_avoided();
+        }
+        let flushed = inline_executor_counters();
+        assert!(flushed.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY);
+        drop(counters);
+        record_owner_srtp_loop();
+        record_owner_srtp_handoff();
+        let after = inline_executor_counters();
+        assert!(after.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY + 2);
+        assert!(after.owner_srtp_loops > before.owner_srtp_loops);
+        assert!(after.owner_srtp_handoffs > before.owner_srtp_handoffs);
+    }
+
+    #[test]
+    fn owner_rtcp_counters_reach_the_totals() {
+        let before = inline_executor_counters();
+        record_owner_rtcp_inbound();
+        record_rtcp_send(true);
+        record_rtcp_send(false);
+        record_rtcp_lane_task();
+        let after = inline_executor_counters();
+        assert!(after.owner_rtcp_inbound > before.owner_rtcp_inbound);
+        assert!(after.wakeups_avoided > before.wakeups_avoided);
+        assert!(after.rtcp_sync_sends > before.rtcp_sync_sends);
+        assert!(after.rtcp_sync_deferred > before.rtcp_sync_deferred);
+        assert!(after.rtcp_lane_tasks > before.rtcp_lane_tasks);
+    }
+
+    #[test]
+    fn owner_receive_stats_sessions_are_counted() {
+        let before = inline_executor_counters();
+        record_owner_receive_stats();
+        assert!(inline_executor_counters().owner_receive_stats > before.owner_receive_stats);
     }
 
     #[test]
@@ -1990,4 +2540,222 @@ mod tests {
             "the extension holds: no early expiry at {first:?}"
         );
     }
+
+    // ---- Counter and PCM pool cleanup ----
+
+    #[test]
+    fn counter_pool_cleanup_is_part_of_v2_and_off_under_v1() {
+        assert!(!MediaExecutorConfig::v1().counter_pool_cleanup);
+        assert!(!MediaExecutorConfig::v1().counter_pool_cleanup_active());
+        assert!(MediaExecutorConfig::v2().counter_pool_cleanup_active());
+        assert!(
+            !MediaExecutorConfig::v1()
+                .with_counter_pool_cleanup(true)
+                .counter_pool_cleanup_active(),
+            "never under v1"
+        );
+        let off = MediaExecutorConfig::v2().with_counter_pool_cleanup(false);
+        assert!(!off.counter_pool_cleanup_active());
+        assert!(off.pcm_pool_active(), "independent of the pool switch");
+        off.validate().unwrap();
+        MediaExecutorConfig::v2()
+            .with_lane_poller(false)
+            .validate()
+            .unwrap();
+        let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+        assert!(counter_pool_cleanup_enabled());
+        let _off = override_media_executor_config_on_this_thread(off);
+        assert!(!counter_pool_cleanup_enabled());
+    }
+
+    /// Only a poller on a current-thread runtime with the switch defers: a
+    /// multi-threaded runtime may move the poller between workers.
+    #[test]
+    fn only_a_current_thread_poller_with_the_switch_defers() {
+        std::thread::spawn(|| {
+            let current = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            let multi = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .build()
+                .unwrap();
+            let defers = |runtime: &tokio::runtime::Runtime| {
+                runtime.block_on(async { LaneDeferredBatch::for_this_poller().is_some() })
+            };
+            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+            assert!(defers(&current));
+            assert!(!defers(&multi));
+            assert!(
+                LaneDeferredBatch::for_this_poller().is_none(),
+                "outside a runtime"
+            );
+            let _off = override_media_executor_config_on_this_thread(
+                MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
+            );
+            assert!(!defers(&current));
+            let _v1 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v1());
+            assert!(!defers(&current));
+        })
+        .join()
+        .unwrap();
+    }
+
+    fn lane_deferred_publishes() -> u64 {
+        LANE_DEFERRED_PUBLISHES.with(Cell::get)
+    }
+
+    /// The same events, counted per event and through a deferring lane batch:
+    /// identical totals, one atomic add per counter per batch instead of one
+    /// per event.
+    #[test]
+    fn lane_deferred_counts_reach_the_same_totals_with_fewer_atomic_adds() {
+        static PER_EVENT_A: AtomicU64 = AtomicU64::new(0);
+        static PER_EVENT_B: AtomicU64 = AtomicU64::new(0);
+        static BATCHED_A: AtomicU64 = AtomicU64::new(0);
+        static BATCHED_B: AtomicU64 = AtomicU64::new(0);
+        const PASSES: u32 = 200;
+        std::thread::spawn(|| {
+            let start = lane_deferred_publishes();
+            for pass in 0..PASSES {
+                add_lane_deferred(&PER_EVENT_A, 1);
+                add_lane_deferred(&PER_EVENT_B, u64::from(pass % 3));
+            }
+            let per_event = lane_deferred_publishes() - start;
+
+            let mut batch = LaneDeferredBatch { passes: 0 };
+            let start = lane_deferred_publishes();
+            for pass in 0..PASSES {
+                let _pass = batch.enter_pass();
+                add_lane_deferred(&BATCHED_A, 1);
+                add_lane_deferred(&BATCHED_B, u64::from(pass % 3));
+                if pass == 10 {
+                    assert_eq!(pending_lane_deferred_on_this_thread(&BATCHED_A), 11);
+                    assert_eq!(BATCHED_A.load(Ordering::Relaxed), 0, "held, not added");
+                }
+                batch.pass_end(false);
+            }
+            drop(batch);
+            let batched = lane_deferred_publishes() - start;
+
+            assert_eq!(
+                BATCHED_A.load(Ordering::Relaxed),
+                PER_EVENT_A.load(Ordering::Relaxed)
+            );
+            assert_eq!(
+                BATCHED_B.load(Ordering::Relaxed),
+                PER_EVENT_B.load(Ordering::Relaxed)
+            );
+            assert_eq!(PER_EVENT_A.load(Ordering::Relaxed), u64::from(PASSES));
+            assert_eq!(per_event, 2 * u64::from(PASSES));
+            // Flushes after passes 64, 128 and 192, and when the batch drops.
+            assert_eq!(batched, 2 * 4);
+            assert_eq!(pending_lane_deferred_on_this_thread(&BATCHED_A), 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    /// An idle pass publishes at once; outside a pass values are added at
+    /// once even while others are held; scopes nest; a counter beyond the
+    /// table's slots is added at once; a thread's held values survive its
+    /// exit.
+    #[test]
+    fn lane_deferred_values_are_published_exactly_once_on_every_path() {
+        static IDLE: AtomicU64 = AtomicU64::new(0);
+        static OUTSIDE: AtomicU64 = AtomicU64::new(0);
+        static EXITED: AtomicU64 = AtomicU64::new(0);
+        static MANY: [AtomicU64; LANE_DEFERRED_SLOTS + 2] =
+            [const { AtomicU64::new(0) }; LANE_DEFERRED_SLOTS + 2];
+        std::thread::spawn(|| {
+            let mut batch = LaneDeferredBatch { passes: 0 };
+            {
+                let _pass = batch.enter_pass();
+                add_lane_deferred(&IDLE, 3);
+                assert_eq!(IDLE.load(Ordering::Relaxed), 0);
+                batch.pass_end(true);
+            }
+            assert_eq!(IDLE.load(Ordering::Relaxed), 3, "an idle pass publishes");
+
+            {
+                let _pass = batch.enter_pass();
+                add_lane_deferred(&OUTSIDE, 1);
+                {
+                    let _nested = batch.enter_pass();
+                    add_lane_deferred(&OUTSIDE, 1);
+                }
+                assert!(
+                    with_lane_deferred(|table| table.deferring).unwrap(),
+                    "a nested scope restores the outer one"
+                );
+                batch.pass_end(false);
+            }
+            assert!(!with_lane_deferred(|table| table.deferring).unwrap());
+            add_lane_deferred(&OUTSIDE, 5);
+            assert_eq!(
+                OUTSIDE.load(Ordering::Relaxed),
+                5,
+                "outside a pass: at once"
+            );
+            assert_eq!(pending_lane_deferred_on_this_thread(&OUTSIDE), 2);
+            drop(batch);
+            assert_eq!(OUTSIDE.load(Ordering::Relaxed), 7);
+
+            // Every slot is taken by now (IDLE, OUTSIDE, then MANY): the
+            // counters that do not fit are added at once.
+            let guard = defer_lane_counters_on_this_thread();
+            for counter in &MANY {
+                add_lane_deferred(counter, 1);
+            }
+            let held = MANY
+                .iter()
+                .filter(|counter| counter.load(Ordering::Relaxed) == 0)
+                .count();
+            assert_eq!(held, LANE_DEFERRED_SLOTS - 2);
+            drop(guard);
+            assert!(MANY
+                .iter()
+                .all(|counter| counter.load(Ordering::Relaxed) == 1));
+
+            // Held when the thread exits.
+            let _pass = LaneDeferredScope::enter();
+            add_lane_deferred(&EXITED, 9);
+            std::mem::forget(_pass);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            EXITED.load(Ordering::Relaxed),
+            9,
+            "thread exit published it"
+        );
+    }
+
+    /// The owner RTCP counters count the same through a deferring pass.
+    #[test]
+    fn owner_rtcp_counts_are_held_for_the_lane_batch_and_reach_the_totals() {
+        std::thread::spawn(|| {
+            let before = inline_executor_counters();
+            let guard = defer_lane_counters_on_this_thread();
+            record_owner_rtcp_inbound();
+            record_rtcp_send(true);
+            record_rtcp_send(true);
+            record_rtcp_send(false);
+            assert_eq!(pending_lane_deferred_on_this_thread(&OWNER_RTCP_INBOUND), 1);
+            assert_eq!(pending_lane_deferred_on_this_thread(&WAKEUPS_AVOIDED), 1);
+            assert_eq!(pending_lane_deferred_on_this_thread(&RTCP_SYNC_SENDS), 2);
+            assert_eq!(pending_lane_deferred_on_this_thread(&RTCP_SYNC_DEFERRED), 1);
+            drop(guard);
+            assert_eq!(pending_lane_deferred_on_this_thread(&RTCP_SYNC_SENDS), 0);
+            let after = inline_executor_counters();
+            assert!(after.owner_rtcp_inbound > before.owner_rtcp_inbound);
+            assert!(after.wakeups_avoided > before.wakeups_avoided);
+            assert!(after.rtcp_sync_sends >= before.rtcp_sync_sends + 2);
+            assert!(after.rtcp_sync_deferred > before.rtcp_sync_deferred);
+        })
+        .join()
+        .unwrap();
+    }
+
+    // ---- End counter and PCM pool cleanup ----
 }
