@@ -67,8 +67,10 @@ fn every_yaml_event_is_manifested_or_marked_internal() {
     let internal_events: HashSet<&str> = [
         "AcceptCall",
         "AuthRequired",
+        "CancelAfterTrying",
         "CancelCall",
         "ConfirmedNegotiationFailure",
+        "Dialog100Trying",
         "Dialog180Ringing",
         "Dialog183SessionProgress",
         "Dialog200OK",

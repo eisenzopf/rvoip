@@ -52,6 +52,7 @@ fn uac_cancel_pending_provisional_sends_cancel_without_terminal_event() {
     let table = load();
 
     for event in [
+        EventType::Dialog100Trying,
         EventType::Dialog180Ringing,
         EventType::Dialog183SessionProgress,
     ] {
@@ -346,4 +347,46 @@ fn uas_matched_cancel_commits_cancellation_once_from_every_pre_answer_state() {
             "{state:?} must publish CallCancelled exactly once"
         );
     }
+}
+
+#[test]
+fn crossed_bye_commits_terminal_state_without_inline_cleanup() {
+    let table = load();
+    for role in [Role::UAC, Role::UAS] {
+        let hangup = transition(&table, role, CallState::Active, EventType::HangupCall);
+        assert_eq!(hangup.next_state, Some(CallState::Terminating));
+        assert_no_terminal_publish(hangup);
+        let remote_bye = transition(&table, role, CallState::Terminating, EventType::DialogBYE);
+        assert_eq!(remote_bye.next_state, Some(CallState::Terminated));
+        assert_eq!(
+            remote_bye.publish_events,
+            vec![EventTemplate::CallTerminated]
+        );
+        // SendBYE may still own an exact session operation. The retained
+        // terminal owner must quiesce it before releasing dialog/media.
+        assert!(remote_bye.actions.is_empty());
+    }
+}
+
+#[test]
+fn trying_records_progress_without_ringing_and_qualified_cancel_waits_for_terminal() {
+    let table = load();
+    let progress = transition(
+        &table,
+        Role::UAC,
+        CallState::Initiating,
+        EventType::Dialog100Trying,
+    );
+    assert_eq!(progress.next_state, None);
+    assert!(progress.publish_events.is_empty());
+    assert!(progress.actions.is_empty());
+    let cancel = transition(
+        &table,
+        Role::UAC,
+        CallState::Initiating,
+        EventType::CancelAfterTrying,
+    );
+    assert_eq!(cancel.next_state, Some(CallState::Cancelling));
+    assert_eq!(cancel.actions, vec![Action::SendCANCELWithOptions]);
+    assert_no_terminal_publish(cancel);
 }

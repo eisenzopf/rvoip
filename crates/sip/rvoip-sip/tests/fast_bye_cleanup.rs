@@ -814,3 +814,115 @@ async fn aborted_hangup_waiter_does_not_duplicate_exact_bye() {
         .await
         .expect("concurrent BYE must retire the exact session");
 }
+
+/// RFC 3261 section 9.1: a 100 response is enough to make CANCEL legal, even
+/// when the peer never sends 180.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn hangup_after_only_100_trying_dispatches_cancel() {
+    let uas = UdpSocket::bind("127.0.0.1:0").await.expect("UAS bind");
+    let port = uas.local_addr().expect("UAS address").port();
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut packet = vec![0; 8_192];
+        let mut invite = None;
+        let mut cancel_tx = Some(cancel_tx);
+        loop {
+            let (bytes, remote) = uas.recv_from(&mut packet).await.expect("UAS receive");
+            let Message::Request(request) = parse_message(&packet[..bytes]).expect("parse request")
+            else {
+                continue;
+            };
+            match request.method() {
+                Method::Invite => {
+                    let response = create_response(&request, StatusCode::Trying);
+                    uas.send_to(&Message::Response(response).to_bytes(), remote)
+                        .await
+                        .expect("send 100");
+                    invite = Some(request);
+                }
+                Method::Cancel => {
+                    let response = create_response(&request, StatusCode::Ok);
+                    uas.send_to(&Message::Response(response).to_bytes(), remote)
+                        .await
+                        .expect("send CANCEL 200");
+                    let mut response = create_response(
+                        invite.as_ref().expect("INVITE before CANCEL"),
+                        StatusCode::RequestTerminated,
+                    );
+                    if let Some(TypedHeader::To(to)) = response
+                        .headers
+                        .iter_mut()
+                        .find(|header| matches!(header, TypedHeader::To(_)))
+                    {
+                        to.set_tag("trying-only-peer");
+                    }
+                    uas.send_to(&Message::Response(response).to_bytes(), remote)
+                        .await
+                        .expect("send 487");
+                    if let Some(tx) = cancel_tx.take() {
+                        let _ = tx.send(());
+                    }
+                }
+                Method::Ack => break,
+                _ => {}
+            }
+        }
+    });
+    let caller = UnifiedCoordinator::new(caller_config())
+        .await
+        .expect("caller coordinator");
+    let mut events = caller.events().await.expect("caller events");
+    let id = caller
+        .invite(
+            Some("sip:caller@127.0.0.1".to_string()),
+            format!("sip:peer@127.0.0.1:{port}"),
+        )
+        .send()
+        .await
+        .expect("send INVITE");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                events.next().await,
+                Some(Event::CallProgressDetailed(response)) if response.status_code == 100
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("caller must observe the peer's 100 before hanging up");
+    caller.hangup(&id).await.expect("hangup");
+    let cancelled = tokio::time::timeout(Duration::from_secs(2), cancel_rx).await;
+    let terminal = if matches!(cancelled, Ok(Ok(()))) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if matches!(
+                    events.next().await,
+                    Some(Event::CallCancelled { call_id }) if call_id == id
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_ok()
+    } else {
+        false
+    };
+    let shutdown = caller
+        .shutdown_gracefully(Some(Duration::from_secs(1)))
+        .await;
+    peer.abort();
+    let _ = peer.await;
+    assert!(
+        matches!(cancelled, Ok(Ok(()))),
+        "a 100-only call did not send CANCEL after hangup"
+    );
+    assert!(terminal, "487 must commit canonical cancellation");
+    assert!(
+        shutdown.is_ok(),
+        "the cancelled call must release its resources before shutdown"
+    );
+}
