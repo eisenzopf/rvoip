@@ -8043,9 +8043,14 @@ mod tests {
             (1..=20u8).collect::<Vec<_>>(),
             "order or completeness changed"
         );
-        assert_eq!(route.delivered_frames(), 20);
+        // The delivery counter advances after the target accepts a frame, on
+        // the lane thread, so the last frame can reach this receiver first.
+        wait_until(|| route.delivered_frames() >= 20).await;
         assert_eq!(graph.snapshot().await.dropped_frames, 0);
+        assert_eq!(route.delivered_frames(), 20);
         graph.shutdown_and_wait().await.unwrap();
+        assert_eq!(route.delivered_frames(), 20, "a frame was counted twice");
+        assert!(target_rx.try_recv().is_err(), "a frame was delivered twice");
     }
 
     /// No extra latency: on one current-thread runtime the inline path needs
