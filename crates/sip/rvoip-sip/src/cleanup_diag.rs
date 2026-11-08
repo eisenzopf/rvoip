@@ -553,6 +553,34 @@ pub(crate) fn record_session_event_dispatch_aborted_workers(count: usize) {
     SESSION_EVENT_DISPATCH_ABORTED_WORKERS.fetch_add(count as u64, Ordering::Relaxed);
 }
 
+// Session cleanup accounting. Unlike the stage diagnostics above these are
+// always on: each increment marks a bounded-failure decision that operators
+// must be able to reconcile against released sessions and connections.
+static CANCELLED_REJECT_TERMINALS: AtomicU64 = AtomicU64::new(0);
+
+/// Always-on counters for the bounded session cleanup paths.
+///
+/// Every field is a monotonic count since process start.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionCleanupCounters {
+    /// Inbound rejects cancelled after their route was retired. Each one had
+    /// its terminal delivered by a retained compensation task instead of
+    /// leaving the orchestrator's connection lifecycle unresolved.
+    pub cancelled_reject_terminals: u64,
+}
+
+/// Read the session cleanup counters.
+pub fn session_cleanup_counters() -> SessionCleanupCounters {
+    SessionCleanupCounters {
+        cancelled_reject_terminals: CANCELLED_REJECT_TERMINALS.load(Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn record_cancelled_reject_terminal() {
+    CANCELLED_REJECT_TERMINALS.fetch_add(1, Ordering::Relaxed);
+}
+
 fn metrics() -> &'static [StageMetrics] {
     METRICS
         .get_or_init(|| {

@@ -1439,6 +1439,59 @@ impl Drop for InboundRejectionOwner {
     }
 }
 
+/// Owns the core terminal of an inbound reject after its route epoch has been
+/// retired.
+///
+/// The orchestrator bounds `reject` with an attempt timeout. If that cancels
+/// the future between `forget_epoch` and terminal delivery, a later session
+/// event finds no mapped epoch, so the orchestrator's admission quarantine
+/// (and with it the connection ID) is never resolved. Dropping an armed owner
+/// delivers the terminal from retained work instead.
+struct RejectTerminalOwner {
+    lifecycle: AdapterLifecycleSinkSlot,
+    out_tx: mpsc::Sender<OrchestratorAdapterEvent>,
+    retained_tasks: Arc<RetainedTasks>,
+    event: Option<AdapterEvent>,
+}
+
+impl RejectTerminalOwner {
+    fn new(adapter: &SipAdapter, event: AdapterEvent) -> Self {
+        Self {
+            lifecycle: adapter.lifecycle.clone(),
+            out_tx: adapter.out_tx.clone(),
+            retained_tasks: Arc::clone(&adapter.retained_tasks),
+            event: Some(event),
+        }
+    }
+
+    /// Deliver the terminal inline and disarm the drop compensation.
+    async fn deliver(mut self, source: &'static str) {
+        if let Some(event) = self.event.clone() {
+            SipAdapter::deliver_terminal_event_to(&self.lifecycle, &self.out_tx, event, source)
+                .await;
+        }
+        self.event = None;
+    }
+}
+
+impl Drop for RejectTerminalOwner {
+    fn drop(&mut self) {
+        let Some(event) = self.event.take() else {
+            return;
+        };
+        crate::cleanup_diag::record_cancelled_reject_terminal();
+        let lifecycle = self.lifecycle.clone();
+        let out_tx = self.out_tx.clone();
+        let spawned = self.retained_tasks.spawn_or_child(async move {
+            SipAdapter::deliver_terminal_event_to(&lifecycle, &out_tx, event, "reject-cancelled")
+                .await;
+        });
+        if !spawned {
+            warn!("SipAdapter could not retain a cancelled reject terminal after drain");
+        }
+    }
+}
+
 /// Holds inbound rejections inside their exact teardown until a test
 /// releases them, so tests can observe translator progress meanwhile.
 #[cfg(test)]
@@ -2339,6 +2392,69 @@ impl SipAdapter {
             self.close_stream_retained(stream);
         }
         true
+    }
+
+    /// Retained inbound end driver. It owns route retirement through terminal
+    /// publication; a public `end` caller only joins its result, so
+    /// cancelling that waiter cannot skip the core handoff after the
+    /// coordinator finishes its wire BYE.
+    async fn finish_inbound_end(
+        self: Arc<Self>,
+        epoch: SipRouteEpoch,
+        reason: EndReason,
+    ) -> CoreResult<()> {
+        let lifecycle_handle = epoch
+            .admitted_handle()
+            .cloned()
+            .ok_or(RvoipError::InvalidState(
+                "SIP inbound route has no exact lifecycle authority",
+            ))?;
+        let removed = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.remove_epoch_locked(&epoch)
+        }
+        .ok_or_else(|| RvoipError::ConnectionNotFound(epoch.connection_id.clone()))?;
+        if let Some(stream) = removed.stream.as_ref() {
+            stream.request_close();
+        }
+        // The stream close that `forget_epoch` would retain separately runs
+        // inside this driver. Both operations progress independently and
+        // neither holds the mapping lock.
+        let (network_result, media_result) = tokio::join!(
+            async {
+                self.coordinator
+                    .hangup_exact(&lifecycle_handle)
+                    .await
+                    .map_err(Self::map_session_err)
+            },
+            async move {
+                let Some(stream) = removed.stream else {
+                    return Ok(());
+                };
+                tokio::time::timeout(
+                    SIP_RETAINED_TASK_TIMEOUT,
+                    (stream as Arc<dyn MediaStream>).close(),
+                )
+                .await
+                .unwrap_or_else(|_| {
+                    Err(RvoipError::Adapter(
+                        "retained inbound media close timed out".to_owned(),
+                    ))
+                })
+            },
+        );
+        self.deliver_terminal_event(
+            AdapterEvent::Ended {
+                connection_id: epoch.connection_id,
+                reason,
+            },
+            "end",
+        )
+        .await;
+        network_result.and(media_result)
     }
 
     fn retire_outbound_route(&self, route: &Arc<SipOutboundRoute>) {
@@ -4699,6 +4815,15 @@ impl ConnectionAdapter for SipAdapter {
         if !self.forget_epoch(&epoch) {
             return Err(RvoipError::ConnectionNotFound(conn));
         }
+        // From here the route is retired: every exit, including cancellation
+        // by the orchestrator's attempt timeout, must hand over the terminal.
+        let terminal = RejectTerminalOwner::new(
+            self,
+            AdapterEvent::Failed {
+                connection_id: conn,
+                detail: terminal_detail,
+            },
+        );
         let lifecycle_handle = epoch
             .admitted_handle()
             .cloned()
@@ -4715,14 +4840,7 @@ impl ConnectionAdapter for SipAdapter {
         .send()
         .await
         .map_err(Self::map_session_err);
-        self.deliver_terminal_event(
-            AdapterEvent::Failed {
-                connection_id: conn,
-                detail: terminal_detail,
-            },
-            "reject",
-        )
-        .await;
+        terminal.deliver("reject").await;
         network_result
     }
 
@@ -4755,29 +4873,22 @@ impl ConnectionAdapter for SipAdapter {
             );
             return route.wait_cleanup().await;
         }
-        if !self.forget_epoch(&epoch) {
-            return Err(RvoipError::ConnectionNotFound(conn));
+        let adapter = self.self_weak.upgrade().ok_or(RvoipError::InvalidState(
+            "SIP adapter end owner is unavailable",
+        ))?;
+        let (reply, completion) = tokio::sync::oneshot::channel();
+        // Register the retained driver before retiring the route, so a
+        // draining adapter refuses the end with the route still mapped for
+        // its drain.
+        if !self.retained_tasks.spawn(async move {
+            let result = adapter.finish_inbound_end(epoch, reason).await;
+            let _ = reply.send(result);
+        }) {
+            return Err(RvoipError::InvalidState("SIP adapter is draining"));
         }
-        let lifecycle_handle = epoch
-            .admitted_handle()
-            .cloned()
-            .ok_or(RvoipError::InvalidState(
-                "SIP inbound route has no exact lifecycle authority",
-            ))?;
-        let network_result = self
-            .coordinator
-            .hangup_exact(&lifecycle_handle)
-            .await
-            .map_err(Self::map_session_err);
-        self.deliver_terminal_event(
-            AdapterEvent::Ended {
-                connection_id: conn,
-                reason,
-            },
-            "end",
-        )
-        .await;
-        network_result
+        completion.await.map_err(|_| {
+            RvoipError::InvalidState("retained SIP inbound end stopped unexpectedly")
+        })?
     }
 
     async fn hold(&self, conn: ConnectionId) -> CoreResult<()> {
@@ -5804,15 +5915,73 @@ Signal=5\r\nDuration=160\r\n";
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn inbound_accept_reserved_connected_survives_queue_fill_before_ack() {
-        reserved_inbound_handoff_then_hangup("adapter-reserved-handoff", false).await;
+        reserved_inbound_handoff_then_hangup("adapter-reserved-handoff", ReservedHangup::Remote)
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn inbound_accept_reserved_connected_crossed_bye_reclaims_exact_call() {
-        reserved_inbound_handoff_then_hangup("adapter-reserved-crossed-bye", true).await;
+        reserved_inbound_handoff_then_hangup(
+            "adapter-reserved-crossed-bye",
+            ReservedHangup::CrossedLocal,
+        )
+        .await;
     }
 
-    async fn reserved_inbound_handoff_then_hangup(name: &str, crossed_bye: bool) {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbound_end_cancellation_preserves_terminal_handoff() {
+        reserved_inbound_handoff_then_hangup(
+            "adapter-end-waiter-cancelled",
+            ReservedHangup::CancelledLocal,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn inbound_end_closed_owner_keeps_exact_route_for_drain() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("end-owner-closed", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session_id = SessionId::new();
+        let handle = admit_test_session(&coordinator, &session_id).await;
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id)
+            .expect("exact inbound route");
+        adapter.retained_tasks.close();
+        assert!(
+            ConnectionAdapter::end(
+                adapter.as_ref(),
+                epoch.connection_id.clone(),
+                EndReason::Normal
+            )
+            .await
+            .is_err(),
+            "a closed retained owner must refuse the end before retiring the route"
+        );
+        assert!(adapter.by_connection.contains_key(&epoch.connection_id));
+        assert!(coordinator.get_state_exact(&handle).await.is_ok());
+        retire_test_session(&coordinator, &handle).await;
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
+    /// How the reserved-handoff test ends its established call.
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ReservedHangup {
+        /// The peer sends BYE.
+        Remote,
+        /// A local `end` whose BYE the peer's own BYE crosses.
+        CrossedLocal,
+        /// A local `end` whose caller is cancelled once its BYE is sent.
+        CancelledLocal,
+    }
+
+    async fn reserved_inbound_handoff_then_hangup(name: &str, hangup: ReservedHangup) {
         let mut call = InboundTestCall::start(name).await;
         let adapter = Arc::clone(&call.adapter);
         let connection_id = call.connection_id.clone();
@@ -5853,7 +6022,7 @@ Signal=5\r\nDuration=160\r\n";
         }
         assert_eq!(connected, 1, "exactly one establishment handoff");
 
-        let ending = if crossed_bye {
+        let ending = if hangup != ReservedHangup::Remote {
             let session_id = call
                 .adapter
                 .lookup_session(&call.connection_id)
@@ -5888,9 +6057,22 @@ Signal=5\r\nDuration=160\r\n";
             })
             .await
             .expect("local hangup committed Terminating");
-            // Cross the in-flight local BYE with the peer's own BYE, then
-            // confirm the local one.
-            call.send_request("BYE", 2, &to).await;
+            let ending = if hangup == ReservedHangup::CancelledLocal {
+                // The end caller goes away while its BYE is on the wire; the
+                // retained driver still owns the confirmation and terminal.
+                assert!(
+                    !ending.is_finished(),
+                    "end must await the exact BYE confirmation"
+                );
+                ending.abort();
+                assert!(ending.await.expect_err("aborted end caller").is_cancelled());
+                None
+            } else {
+                // Cross the in-flight local BYE with the peer's own BYE, then
+                // confirm the local one.
+                call.send_request("BYE", 2, &to).await;
+                Some(ending)
+            };
             let headers = local_bye
                 .lines()
                 .filter(|line| {
@@ -5905,11 +6087,30 @@ Signal=5\r\nDuration=160\r\n";
                 .send_to(ok.as_bytes(), &call.destination)
                 .await
                 .expect("confirm local BYE");
-            Some(ending)
+            ending
         } else {
             call.send_request("BYE", 2, &to).await;
             None
         };
+        if hangup == ReservedHangup::CancelledLocal {
+            let handoff = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match call.events.recv().await {
+                        Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                            connection_id,
+                            ..
+                        })) if connection_id == call.connection_id => break,
+                        Some(_) => {}
+                        None => panic!("adapter event stream closed"),
+                    }
+                }
+            })
+            .await;
+            assert!(
+                handoff.is_ok(),
+                "the terminal handoff must survive cancellation of the end caller"
+            );
+        }
         call.wait_released().await;
         if let Some(ending) = ending {
             tokio::time::timeout(Duration::from_secs(5), ending)
@@ -10642,5 +10843,83 @@ Signal=5\r\nDuration=160\r\n";
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+}
+
+#[cfg(test)]
+mod reject_terminal_owner_tests {
+    use super::*;
+
+    fn reject_owner(
+        out_tx: &mpsc::Sender<OrchestratorAdapterEvent>,
+        retained: &Arc<RetainedTasks>,
+        connection_id: &ConnectionId,
+    ) -> RejectTerminalOwner {
+        RejectTerminalOwner {
+            lifecycle: AdapterLifecycleSinkSlot::default(),
+            out_tx: out_tx.clone(),
+            retained_tasks: Arc::clone(retained),
+            event: Some(AdapterEvent::Failed {
+                connection_id: connection_id.clone(),
+                detail: "session rejected locally: ServerError".to_owned(),
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_reject_still_delivers_its_core_terminal_once() {
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let retained = RetainedTasks::new();
+        let cancelled = ConnectionId::new();
+        let before = crate::cleanup_diag::session_cleanup_counters().cancelled_reject_terminals;
+        // Model the orchestrator's attempt timeout dropping `reject` after
+        // `forget_epoch` but before the network reject returned.
+        let stalled_reject = async {
+            let _owner = reject_owner(&out_tx, &retained, &cancelled);
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), stalled_reject)
+                .await
+                .is_err()
+        );
+        let delivered = tokio::time::timeout(Duration::from_secs(1), out_rx.recv())
+            .await
+            .expect("compensating terminal must be delivered")
+            .expect("adapter event channel open");
+        assert!(matches!(
+            delivered,
+            OrchestratorAdapterEvent::Public(AdapterEvent::Failed { ref connection_id, .. })
+                if *connection_id == cancelled
+        ));
+        assert!(
+            crate::cleanup_diag::session_cleanup_counters().cancelled_reject_terminals > before
+        );
+        retained.wait_idle().await;
+        assert!(
+            out_rx.try_recv().is_err(),
+            "exactly one terminal per cancelled reject"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_reject_delivers_once_and_disarms_the_compensation() {
+        let (out_tx, mut out_rx) = mpsc::channel(4);
+        let retained = RetainedTasks::new();
+        let connection_id = ConnectionId::new();
+        reject_owner(&out_tx, &retained, &connection_id)
+            .deliver("reject")
+            .await;
+        retained.wait_idle().await;
+        assert_eq!(retained.count(), 0);
+        assert!(matches!(
+            out_rx.try_recv(),
+            Ok(OrchestratorAdapterEvent::Public(AdapterEvent::Failed { connection_id: ref id, .. }))
+                if *id == connection_id
+        ));
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a completed reject must not deliver twice"
+        );
     }
 }
