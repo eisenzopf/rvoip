@@ -6,13 +6,16 @@
 //! against it. Two in-process endpoints place a call over loopback and stream
 //! PCMU both ways: both RTP transports must receive on their lane pollers,
 //! account RTP inline on the socket owner, and audio must flow in both
-//! directions, paced at 20 ms although both lanes run on v2's 2 ms lane tick.
+//! directions, paced at 20 ms although both lanes run on v2's 2 ms lane tick
+//! with the lane timing wheel and the pass clock.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rvoip_media_core::types::AudioFrame;
-use rvoip_rtp_core::executor::{inline_executor_counters, media_executor_config};
+use rvoip_rtp_core::executor::{
+    inline_executor_counters, lane_wheel_counters, media_executor_config,
+};
 use rvoip_rtp_core::lane_tick::lane_tick_counters;
 use rvoip_sip::api::unified::Config;
 use rvoip_sip::{
@@ -159,7 +162,10 @@ async fn call_media_flows_both_ways_on_executor_v2() {
     let tick = MediaExecutorConfig::v2().lane_tick.expect("v2 ticks");
     assert_eq!(tick.quantum, Duration::from_millis(2));
     assert!(tick.grid_timers);
+    let v2 = MediaExecutorConfig::v2();
+    assert!(v2.lane_timer_wheel_active() && v2.lane_pass_clock_active());
     let before = inline_executor_counters();
+    let wheel_before = lane_wheel_counters();
     let tick_before = lane_tick_counters();
     let (alice_sip, bob_sip) = (37_710, 37_711);
     let mut bob = StreamPeer::with_config(config("bob", bob_sip, (37_750, 37_769)))
@@ -229,6 +235,18 @@ async fn call_media_flows_both_ways_on_executor_v2() {
     );
     assert!(tick_after.tick_passes > tick_before.tick_passes);
     assert!(tick_after.tick_sleeps > tick_before.tick_sleeps);
+    // Each lane pass served one clock reading to the loops it polled (the
+    // timing wheel's equivalence with the heap is proven in rtp-core; an
+    // in-order call files few lane-clock deadlines).
+    let wheel_after = lane_wheel_counters();
+    assert!(
+        wheel_after.pass_clock_fresh_reads > wheel_before.pass_clock_fresh_reads,
+        "pass clock readings: {wheel_before:?} -> {wheel_after:?}"
+    );
+    assert!(
+        wheel_after.pass_clock_cached_reads > wheel_before.pass_clock_cached_reads,
+        "reads served from a pass reading: {wheel_before:?} -> {wheel_after:?}"
+    );
 
     alice_handle.hangup().await.ok();
     tokio::time::sleep(Duration::from_millis(200)).await;
