@@ -4207,8 +4207,8 @@ impl DialogManager {
 
     /// Store dialog mapping for incoming call
     ///
-    /// The request is not used; [`Self::store_incoming_call_mapping`] stores
-    /// the same mapping without requiring the caller to copy it.
+    /// The request is not used; the crate-internal `store_incoming_call_mapping`
+    /// stores the same mapping without requiring the caller to copy it.
     pub fn store_dialog_mapping(
         &self,
         session_id: &str,
