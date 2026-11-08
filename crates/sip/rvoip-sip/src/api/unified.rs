@@ -702,6 +702,10 @@ impl Ord for SetupTeardownDeadline {
 struct SetupTeardownDeadlineQueue {
     deadlines: BinaryHeap<SetupTeardownDeadline>,
     live_sequences_by_lifetime: HashMap<SessionRegistryHandle, Vec<u64>>,
+    /// The number of live sequences across `live_sequences_by_lifetime`.
+    /// Every lifetime close consults it under the scheduler mutex, so it is
+    /// kept in step with the map instead of summed over every live call.
+    live_count: usize,
     cancelled_sequences: HashSet<u64>,
     closing_lifetimes: HashSet<SessionRegistryHandle>,
     next_sequence: u64,
@@ -713,6 +717,7 @@ impl Default for SetupTeardownDeadlineQueue {
         Self {
             deadlines: BinaryHeap::new(),
             live_sequences_by_lifetime: HashMap::new(),
+            live_count: 0,
             cancelled_sequences: HashSet::new(),
             closing_lifetimes: HashSet::new(),
             next_sequence: 0,
@@ -737,6 +742,7 @@ impl SetupTeardownDeadlineQueue {
             .entry(handle.clone())
             .or_default()
             .push(sequence);
+        self.live_count += 1;
         self.deadlines.push(SetupTeardownDeadline {
             deadline,
             sequence,
@@ -759,6 +765,7 @@ impl SetupTeardownDeadlineQueue {
             .remove(handle)
             .unwrap_or_default();
         let cancelled = sequences.len();
+        self.live_count -= cancelled;
         self.cancelled_sequences.extend(sequences);
         self.prune_cancelled_records();
         cancelled
@@ -788,11 +795,21 @@ impl SetupTeardownDeadlineQueue {
         if remove_lifetime {
             self.live_sequences_by_lifetime.remove(handle);
         }
+        if found {
+            self.live_count -= 1;
+        }
         found
     }
 
     fn live_deadline_count(&self) -> usize {
-        self.live_sequences_by_lifetime.values().map(Vec::len).sum()
+        debug_assert_eq!(
+            self.live_count,
+            self.live_sequences_by_lifetime
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        );
+        self.live_count
     }
 
     fn prune_cancelled_head(&mut self) {
@@ -858,6 +875,7 @@ impl SetupTeardownDeadlineQueue {
             }
         }
         self.live_sequences_by_lifetime.clear();
+        self.live_count = 0;
         self.cancelled_sequences.clear();
         self.closing_lifetimes.clear();
         live
@@ -7737,6 +7755,69 @@ mod config_tests {
             scheduler.fire_slots.available_permits(),
             SETUP_TEARDOWN_TIMEOUT_CONCURRENCY
         );
+    }
+
+    #[tokio::test]
+    async fn live_deadline_count_follows_push_close_fire_and_drain() {
+        let store = SessionStore::with_capacity(8);
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let session_id = SessionId::new();
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact timeout fixture");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("fixture lifecycle handle"),
+            );
+        }
+        let now = Instant::now();
+        let mut queue = SetupTeardownDeadlineQueue::default();
+        let sum = |queue: &SetupTeardownDeadlineQueue| {
+            queue
+                .live_sequences_by_lifetime
+                .values()
+                .map(Vec::len)
+                .sum::<usize>()
+        };
+        // Two deadlines on the first lifetime, one on each of the others.
+        for (index, handle) in handles.iter().enumerate() {
+            queue.push(
+                now + Duration::from_secs(1 + index as u64),
+                handle.clone(),
+                now,
+                SetupTeardownWatchdogKind::InboundSetup,
+            );
+        }
+        queue.push(
+            now + Duration::from_secs(10),
+            handles[0].clone(),
+            now,
+            SetupTeardownWatchdogKind::AcceptedCall,
+        );
+        assert_eq!(queue.live_count, 5);
+        assert_eq!(queue.live_count, sum(&queue));
+
+        // Closing a lifetime cancels both of its deadlines at once.
+        assert_eq!(queue.begin_lifetime_close(&handles[0]), 2);
+        assert_eq!(queue.live_count, 3);
+        assert_eq!(queue.live_count, sum(&queue));
+        // Closing it again, or closing a lifetime with none, cancels nothing.
+        assert_eq!(queue.begin_lifetime_close(&handles[0]), 0);
+        assert_eq!(queue.live_count, 3);
+
+        // A fired deadline leaves the live count; a cancelled one is skipped.
+        let due = queue.take_due(now + Duration::from_secs(2), 8);
+        assert_eq!(due.len(), 1);
+        assert_eq!(queue.live_count, 2);
+        assert_eq!(queue.live_count, sum(&queue));
+
+        let drained = queue.drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(queue.live_count, 0);
+        assert_eq!(queue.live_deadline_count(), 0);
     }
 
     #[tokio::test]
