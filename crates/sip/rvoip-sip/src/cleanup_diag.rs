@@ -566,6 +566,7 @@ static RECLAIM_FORCED: AtomicU64 = AtomicU64::new(0);
 static RECLAIM_TIMED_OUT: AtomicU64 = AtomicU64::new(0);
 static FORCED_SESSION_RELEASES: AtomicU64 = AtomicU64::new(0);
 static FORCED_SESSION_RELEASE_FAILURES: AtomicU64 = AtomicU64::new(0);
+static PENDING_HANGUP_WATCHDOGS_ARMED: AtomicU64 = AtomicU64::new(0);
 static INBOUND_END_BACKSTOP_LOG: RateLimitedLog = RateLimitedLog::new();
 static RECLAIM_TIMED_OUT_LOG: RateLimitedLog = RateLimitedLog::new();
 static FORCED_RELEASE_LOG: RateLimitedLog = RateLimitedLog::new();
@@ -607,6 +608,10 @@ pub struct SessionCleanupCounters {
     /// Forced slot releases the lifecycle authority refused. Each one is a
     /// slot still held, so a nonzero value at quiescence is a leak.
     pub forced_session_release_failures: u64,
+    /// Local hangups that waited for an ACK in `AnsweringHangupPending` and
+    /// armed the accepted-call watchdog
+    /// (`SessionCleanupConfig::pending_hangup_watchdog`).
+    pub pending_hangup_watchdogs_armed: u64,
 }
 
 /// Read the session cleanup counters.
@@ -622,6 +627,7 @@ pub fn session_cleanup_counters() -> SessionCleanupCounters {
         inbound_end_reclaims_timed_out: RECLAIM_TIMED_OUT.load(Ordering::Relaxed),
         forced_session_releases: FORCED_SESSION_RELEASES.load(Ordering::Relaxed),
         forced_session_release_failures: FORCED_SESSION_RELEASE_FAILURES.load(Ordering::Relaxed),
+        pending_hangup_watchdogs_armed: PENDING_HANGUP_WATCHDOGS_ARMED.load(Ordering::Relaxed),
     }
 }
 
@@ -638,6 +644,10 @@ pub(crate) fn record_inline_hangup_deadline_expired() {
 pub(crate) fn record_inbound_end_backstop_expired() -> Option<u64> {
     INBOUND_END_BACKSTOP_EXPIRED.fetch_add(1, Ordering::Relaxed);
     INBOUND_END_BACKSTOP_LOG.admit()
+}
+
+pub(crate) fn record_pending_hangup_watchdog_armed() {
+    PENDING_HANGUP_WATCHDOGS_ARMED.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_inbound_end_reclaim() {

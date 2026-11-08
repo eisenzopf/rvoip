@@ -479,6 +479,15 @@ pub struct SessionCleanupConfig {
     /// returns an error and hands the call to the retained reclaim.
     /// Default: `Some(10 s)`. Valid values are 1 s to 600 s.
     pub inbound_end_backstop: Option<Duration>,
+
+    /// Arm the accepted-call watchdog for a local hangup that has to wait
+    /// for the ACK. A UAS that hangs up after its 200 OK and before the ACK
+    /// waits in `AnsweringHangupPending` before it may send BYE; with the ACK
+    /// lost, only this watchdog
+    /// ([`Config::setup_teardown_timeout_secs`]) ends the call and releases
+    /// its session and media port. `false` keeps the cancellation watchdog,
+    /// which does not watch that state. Default: `true`.
+    pub pending_hangup_watchdog: bool,
 }
 
 impl Default for SessionCleanupConfig {
@@ -486,6 +495,7 @@ impl Default for SessionCleanupConfig {
         Self {
             inline_hangup_deadline: Some(Self::DEFAULT_INLINE_HANGUP_DEADLINE),
             inbound_end_backstop: Some(Self::DEFAULT_INBOUND_END_BACKSTOP),
+            pending_hangup_watchdog: true,
         }
     }
 }
@@ -509,6 +519,12 @@ impl SessionCleanupConfig {
     /// Set or clear [`Self::inbound_end_backstop`].
     pub const fn with_inbound_end_backstop(mut self, backstop: Option<Duration>) -> Self {
         self.inbound_end_backstop = backstop;
+        self
+    }
+
+    /// Set [`Self::pending_hangup_watchdog`].
+    pub const fn with_pending_hangup_watchdog(mut self, enabled: bool) -> Self {
+        self.pending_hangup_watchdog = enabled;
         self
     }
 
@@ -578,6 +594,26 @@ impl SipRuntimeConfig {
 enum SetupTeardownTimeoutTerminal {
     Cancelled,
     Failed,
+}
+
+/// The watchdog a local hangup arms once its transition has committed.
+///
+/// A UAS hangup after 200 OK waits in `AnsweringHangupPending` for the ACK
+/// before it may send BYE. That state needs the accepted-call watchdog (its
+/// `DialogTimeout` row ends the call and cleans dialog and media); every other
+/// non-terminal hangup outcome keeps the cancellation watchdog. With
+/// `pending_hangup_watchdog` off the cancellation watchdog is armed in every
+/// case, and it watches nothing in `AnsweringHangupPending`.
+fn local_hangup_watchdog_kind(
+    state_after_hangup: Option<CallState>,
+    pending_hangup_watchdog: bool,
+) -> SetupTeardownWatchdogKind {
+    match state_after_hangup {
+        Some(CallState::AnsweringHangupPending) if pending_hangup_watchdog => {
+            SetupTeardownWatchdogKind::AcceptedCall
+        }
+        _ => SetupTeardownWatchdogKind::Cancellation,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7268,6 +7304,120 @@ mod config_tests {
         assert!(registry.by_lifetime.is_empty());
     }
 
+    /// Only `AnsweringHangupPending` needs the accepted-call watchdog after a
+    /// local hangup, and turning the watchdog off restores the cancellation
+    /// watchdog.
+    #[test]
+    fn local_hangup_watchdog_kind_covers_pending_hangup() {
+        use super::local_hangup_watchdog_kind;
+        assert_eq!(
+            local_hangup_watchdog_kind(Some(CallState::AnsweringHangupPending), true),
+            SetupTeardownWatchdogKind::AcceptedCall
+        );
+        assert!(SetupTeardownWatchdogKind::AcceptedCall
+            .watched_states()
+            .contains(&CallState::AnsweringHangupPending));
+        assert!(!SetupTeardownWatchdogKind::Cancellation
+            .watched_states()
+            .contains(&CallState::AnsweringHangupPending));
+        assert_eq!(
+            local_hangup_watchdog_kind(Some(CallState::AnsweringHangupPending), false),
+            SetupTeardownWatchdogKind::Cancellation
+        );
+        for state in [
+            Some(CallState::CancelPending),
+            Some(CallState::Ringing),
+            Some(CallState::Terminating),
+            None,
+        ] {
+            assert_eq!(
+                local_hangup_watchdog_kind(state, true),
+                SetupTeardownWatchdogKind::Cancellation,
+                "{state:?}"
+            );
+        }
+    }
+
+    /// A setup abandoned after 200 OK: the local hangup moves the session to
+    /// `AnsweringHangupPending` and the ACK never comes. The accept watchdog
+    /// armed for `Answering` is stale after that transition, so the hangup's
+    /// own watchdog must end the call and return the session slot and its
+    /// media port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_hangup_after_answer_is_released_with_its_media_port() {
+        let coordinator = UnifiedCoordinator::new(
+            Config::local("pending-hangup-watchdog", 0)
+                .with_setup_teardown_timeout_secs(1)
+                .with_media_ports(31_000, 31_400),
+        )
+        .await
+        .expect("start pending-hangup coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let ports_before = coordinator.allocated_media_port_count().await;
+        let session_id = SessionId("pending-hangup-watchdog".into());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("admit inbound lifetime");
+        coordinator
+            .allocate_media_for_test(&session_id)
+            .await
+            .expect("allocate inbound media");
+        let handle = store
+            .lifecycle_handle(&session_id)
+            .expect("exact inbound lifetime");
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Answering;
+                session.entered_state_at = Instant::now();
+            })
+            .expect("place the lifetime in Answering");
+        assert!(coordinator.allocated_media_port_count().await > ports_before);
+        // What accepting the call arms after sending 200 OK.
+        coordinator
+            .schedule_setup_teardown_timeout_exact_if_current(
+                &handle,
+                SetupTeardownWatchdogKind::AcceptedCall,
+            )
+            .await;
+        let armed_before =
+            crate::cleanup_diag::session_cleanup_counters().pending_hangup_watchdogs_armed;
+
+        coordinator
+            .hangup_exact(&handle)
+            .await
+            .expect("local hangup before ACK is accepted");
+        assert_eq!(
+            store
+                .get_session_snapshot_exact(&handle)
+                .expect("lifetime waits for ACK")
+                .call_state,
+            CallState::AnsweringHangupPending
+        );
+        assert!(
+            crate::cleanup_diag::session_cleanup_counters().pending_hangup_watchdogs_armed
+                > armed_before
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.get_session_retained_snapshot_exact(&handle).is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the abandoned setup was not released");
+        assert_eq!(
+            coordinator.allocated_media_port_count().await,
+            ports_before,
+            "the abandoned setup's media port is returned"
+        );
+        assert!(coordinator.list_sessions().await.is_empty());
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("pending-hangup coordinator shut down");
+    }
+
     #[test]
     fn session_cleanup_bounds_default_on_and_are_validated() {
         use super::SessionCleanupConfig;
@@ -7278,6 +7428,12 @@ mod config_tests {
             Some(Duration::from_secs(5))
         );
         assert_eq!(defaults.inbound_end_backstop, Some(Duration::from_secs(10)));
+        assert!(defaults.pending_hangup_watchdog);
+        assert!(
+            !defaults
+                .with_pending_hangup_watchdog(false)
+                .pending_hangup_watchdog
+        );
         assert_eq!(Config::default().session_cleanup, defaults);
 
         let validate = |cleanup: SessionCleanupConfig| {
@@ -12062,12 +12218,38 @@ impl UnifiedCoordinator {
             self.release_after_observed_terminal_exact(handle).await;
             return Ok(());
         }
-        self.schedule_setup_teardown_timeout_exact_if_current(
-            handle,
-            SetupTeardownWatchdogKind::Cancellation,
-        )
-        .await;
+        // A hangup after 200 OK and before ACK moves the session to
+        // `AnsweringHangupPending`, which re-stamps `entered_state_at`. The
+        // accept watchdog armed for `Answering` then finds itself stale and
+        // disarms, and a cancellation watchdog does not watch this state, so
+        // with the ACK lost nothing would ever end the call or release its
+        // session and media port.
+        let state_after_hangup = self
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+            .ok()
+            .map(|session| session.call_state);
+        let watchdog = local_hangup_watchdog_kind(
+            state_after_hangup,
+            self.config.session_cleanup.pending_hangup_watchdog,
+        );
+        if watchdog == SetupTeardownWatchdogKind::AcceptedCall {
+            crate::cleanup_diag::record_pending_hangup_watchdog_armed();
+        }
+        self.schedule_setup_teardown_timeout_exact_if_current(handle, watchdog)
+            .await;
         Ok(())
+    }
+
+    /// Allocate real media (and so a media port) for a test lifetime.
+    #[cfg(test)]
+    pub(crate) async fn allocate_media_for_test(&self, session_id: &SessionId) -> Result<()> {
+        self.media_adapter
+            .create_session(session_id)
+            .await
+            .map(|_| ())
     }
 
     async fn release_after_observed_terminal(&self, session_id: &SessionId) {
