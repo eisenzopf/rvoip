@@ -18,7 +18,7 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::error::{Error, Result};
 use crate::types::{AudioFrame, DialogId, MediaDirection};
@@ -494,9 +494,11 @@ impl MediaSessionController {
             result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         }
 
-        info!(
+        trace!(
             "📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)",
-            dialog_id, timestamp, payload_len
+            dialog_id,
+            timestamp,
+            payload_len
         );
         Ok(())
     }
