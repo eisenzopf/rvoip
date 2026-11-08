@@ -11275,6 +11275,12 @@ impl UnifiedCoordinator {
         self.config.session_cleanup
     }
 
+    /// The configured overload backoff, also stamped on application 503s so
+    /// every capacity rejection tells the caller when to retry.
+    pub(crate) fn server_overload_retry_after_secs(&self) -> Option<u32> {
+        self.config.server_overload_retry_after_secs
+    }
+
     pub(crate) async fn claim_session_control_events(
         &self,
     ) -> Result<mpsc::UnboundedReceiver<crate::adapters::SessionControlEvent>> {

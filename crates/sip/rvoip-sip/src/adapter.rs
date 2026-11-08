@@ -1082,6 +1082,38 @@ fn failed_inbound_termination(
     }
 }
 
+/// The final response of a locally rejected inbound INVITE: status, reason
+/// phrase and `Retry-After` seconds.
+///
+/// `ServiceUnavailable` carries its own backoff. Any other 503 (for example a
+/// `Custom` 503 for an application's call-slot cap or drain) gets the same
+/// backoff the coordinator puts on its own overload 503s
+/// ([`ApiConfig::server_overload_retry_after_secs`]), so every capacity
+/// rejection tells the caller when to retry.
+fn reject_response(
+    reason: &RejectReason,
+    overload_retry_after_secs: Option<u32>,
+) -> (u16, &str, Option<u32>) {
+    let (status, phrase, retry_after_secs) = match reason {
+        RejectReason::Busy => (486, "Busy Here", None),
+        RejectReason::Decline => (603, "Decline", None),
+        RejectReason::NotFound => (404, "Not Found", None),
+        RejectReason::Forbidden => (403, "Forbidden", None),
+        RejectReason::NotAcceptable => (488, "Not Acceptable Here", None),
+        RejectReason::ServerError => (500, "Server Internal Error", None),
+        RejectReason::Custom { code, phrase } => (*code, phrase.as_str(), None),
+        RejectReason::ServiceUnavailable { retry_after_secs } => {
+            (503, "Service Unavailable", *retry_after_secs)
+        }
+    };
+    let retry_after_secs = match retry_after_secs {
+        Some(seconds) => Some(seconds),
+        None if status == 503 => overload_retry_after_secs,
+        None => None,
+    };
+    (status, phrase, retry_after_secs)
+}
+
 /// How an inbound end's hangup join finished.
 #[derive(Debug, PartialEq, Eq)]
 enum InboundHangupJoin<T> {
@@ -4977,15 +5009,8 @@ impl ConnectionAdapter for SipAdapter {
             );
             return route.wait_cleanup().await;
         }
-        let (status, phrase) = match reason {
-            RejectReason::Busy => (486, "Busy Here"),
-            RejectReason::Decline => (603, "Decline"),
-            RejectReason::NotFound => (404, "Not Found"),
-            RejectReason::Forbidden => (403, "Forbidden"),
-            RejectReason::NotAcceptable => (488, "Not Acceptable Here"),
-            RejectReason::ServerError => (500, "Server Internal Error"),
-            RejectReason::Custom { code, ref phrase } => (code, phrase.as_str()),
-        };
+        let (status, phrase, retry_after_secs) =
+            reject_response(&reason, self.coordinator.server_overload_retry_after_secs());
         if !self.forget_epoch(&epoch) {
             return Err(RvoipError::ConnectionNotFound(conn));
         }
@@ -5004,16 +5029,17 @@ impl ConnectionAdapter for SipAdapter {
             .ok_or(RvoipError::InvalidState(
                 "SIP inbound route has no exact lifecycle authority",
             ))?;
-        let network_result = crate::api::respond::RejectBuilder::new_captured(
+        let mut rejection = crate::api::respond::RejectBuilder::new_captured(
             Arc::clone(&self.coordinator),
             session_id,
             Some(lifecycle_handle),
         )
         .with_status(status)
-        .with_reason(phrase)
-        .send()
-        .await
-        .map_err(Self::map_session_err);
+        .with_reason(phrase);
+        if let Some(seconds) = retry_after_secs {
+            rejection = rejection.with_retry_after(seconds);
+        }
+        let network_result = rejection.send().await.map_err(Self::map_session_err);
         terminal.deliver("reject").await;
         network_result
     }
@@ -5918,11 +5944,15 @@ Signal=5\r\nDuration=160\r\n";
 
     impl InboundTestCall {
         async fn start(name: &str) -> Self {
+            Self::start_with(name, |config| config).await
+        }
+
+        async fn start_with(name: &str, configure: impl FnOnce(ApiConfig) -> ApiConfig) -> Self {
             let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
             let port = probe.local_addr().expect("probe address").port();
             drop(probe);
 
-            let mut config = ApiConfig::local(name, port);
+            let mut config = configure(ApiConfig::local(name, port));
             config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
             let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
             let adapter = SipAdapter::new(Arc::clone(&coordinator))
@@ -9780,6 +9810,88 @@ Signal=5\r\nDuration=160\r\n";
                 no_outcome,
                 "no lane outcome {snapshot:?}"
             );
+        }
+    }
+
+    /// An explicit service-unavailable rejection carries its own backoff;
+    /// any other 503 falls back to the coordinator's overload backoff; every
+    /// other reason keeps its status and sends no `Retry-After`.
+    #[test]
+    fn service_unavailable_rejections_carry_retry_after() {
+        let unavailable = |retry_after_secs| RejectReason::ServiceUnavailable { retry_after_secs };
+        let custom_503 = RejectReason::Custom {
+            code: 503,
+            phrase: "Draining".into(),
+        };
+        assert_eq!(
+            reject_response(&unavailable(Some(17)), Some(3)),
+            (503, "Service Unavailable", Some(17))
+        );
+        assert_eq!(
+            reject_response(&unavailable(None), Some(3)),
+            (503, "Service Unavailable", Some(3))
+        );
+        assert_eq!(
+            reject_response(&unavailable(None), None),
+            (503, "Service Unavailable", None)
+        );
+        assert_eq!(
+            reject_response(&custom_503, Some(3)),
+            (503, "Draining", Some(3))
+        );
+        assert_eq!(reject_response(&custom_503, None), (503, "Draining", None));
+        assert_eq!(
+            reject_response(&RejectReason::Busy, Some(3)),
+            (486, "Busy Here", None)
+        );
+        assert_eq!(
+            reject_response(&RejectReason::ServerError, Some(3)),
+            (500, "Server Internal Error", None)
+        );
+    }
+
+    /// Wire check: a rejected inbound INVITE's 503 carries `Retry-After`,
+    /// either the rejection's own or the configured overload backoff.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rejected_inbound_503_carries_retry_after_on_the_wire() {
+        for (name, reason, expected) in [
+            (
+                "adapter-reject-503-explicit",
+                RejectReason::ServiceUnavailable {
+                    retry_after_secs: Some(17),
+                },
+                "Retry-After: 17",
+            ),
+            (
+                "adapter-reject-503-custom",
+                RejectReason::Custom {
+                    code: 503,
+                    phrase: "Service Unavailable".into(),
+                },
+                "Retry-After: 4",
+            ),
+        ] {
+            let call = InboundTestCall::start_with(name, |config| {
+                config.with_server_overload_retry_after_secs(4)
+            })
+            .await;
+            let adapter = Arc::clone(&call.adapter);
+            let connection_id = call.connection_id.clone();
+            let rejecting = tokio::spawn(async move {
+                ConnectionAdapter::reject(adapter.as_ref(), connection_id, reason).await
+            });
+            let (status, wire) = call.final_response().await;
+            assert_eq!(status, 503, "{name}");
+            assert!(
+                wire.lines().any(|line| line.trim_end() == expected),
+                "{name}: expected `{expected}` on the 503, got:\n{wire}"
+            );
+            tokio::time::timeout(Duration::from_secs(5), rejecting)
+                .await
+                .expect("bounded reject")
+                .expect("reject task")
+                .expect("reject succeeds");
+            call.adapter.shutdown().await.expect("adapter shutdown");
         }
     }
 
