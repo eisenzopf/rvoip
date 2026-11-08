@@ -9482,4 +9482,49 @@ mod tests {
         manager.shutdown().await;
         Ok(())
     }
+
+    #[tokio::test]
+    async fn server_transaction_request_shares_the_transactions_request() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+        let request = create_test_invite_with_identity(
+            "shared-server-request",
+            "z9hG4bK-shared-server-request",
+            "UDP",
+        )
+        .map_err(|e| Error::Other(e.to_string()))?;
+        let tx = manager
+            .create_server_transaction(
+                request.clone(),
+                SocketAddr::from_str("192.168.1.100:5060").unwrap(),
+            )
+            .await?;
+        let tx_id = tx.id().clone();
+
+        let shared = manager
+            .server_transaction_request(&tx_id)
+            .expect("active server transaction request");
+        assert!(Arc::ptr_eq(&shared, &tx.data().request));
+        assert!(Arc::ptr_eq(
+            &shared,
+            &manager
+                .server_transaction_request(&tx_id)
+                .expect("second lookup"),
+        ));
+        assert_eq!(*shared, request);
+        assert_eq!(
+            manager.original_request(&tx_id).await?,
+            Some((*shared).clone())
+        );
+
+        let client_key = TransactionKey::new(
+            "z9hG4bK-shared-server-request".to_string(),
+            Method::Invite,
+            false,
+        );
+        assert!(manager.server_transaction_request(&client_key).is_none());
+        Ok(())
+    }
 }

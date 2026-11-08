@@ -5394,9 +5394,7 @@ impl TransactionManager {
         use crate::transaction::server::TransactionExt;
         if let Some(server_tx) = tx.as_server_transaction() {
             let original_method = if is_200_ok {
-                server_tx
-                    .original_request_sync()
-                    .map(|request| request.method().clone())
+                Some(server_tx.data().request.method().clone())
             } else {
                 None
             };
@@ -5748,6 +5746,23 @@ impl TransactionManager {
     /// * `Arc<dyn Transport>` - The transport layer
     pub fn transport(&self) -> Arc<dyn Transport> {
         self.transport.clone()
+    }
+
+    /// Return the request held by an active server transaction.
+    ///
+    /// This is the transaction's own shared copy of the request the
+    /// transport parsed, so transaction users can read it without the deep
+    /// copy [`Self::original_request`] makes. Returns `None` once the
+    /// transaction has left the active transaction map (for example after it
+    /// terminated or compacted); callers that must also cover retired
+    /// transactions fall back to [`Self::original_request`].
+    pub fn server_transaction_request(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<Arc<Request>> {
+        self.server_transactions
+            .get(transaction_id)
+            .map(|transaction| Arc::clone(&transaction.value().data().request))
     }
 
     /// Return the exact ingress route retained by an active server

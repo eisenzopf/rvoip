@@ -37,25 +37,54 @@ static SRTP_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
 static RTP_DIAGNOSTICS_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "memory-diagnostics")]
-fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> JoinHandle<F::Output>
+fn spawn_memory_tracked_on<F>(
+    runtime: &tokio::runtime::Handle,
+    kind: &'static str,
+    future: F,
+) -> JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
     let guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(kind, 0);
-    crate::task_runtime::spawn_media_task(async move {
+    runtime.spawn(async move {
         let _guard = guard;
         future.await
     })
 }
 
 #[cfg(not(feature = "memory-diagnostics"))]
-fn spawn_memory_tracked<F>(_: &'static str, future: F) -> JoinHandle<F::Output>
+fn spawn_memory_tracked_on<F>(
+    runtime: &tokio::runtime::Handle,
+    _: &'static str,
+    future: F,
+) -> JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    crate::task_runtime::spawn_media_task(future)
+    runtime.spawn(future)
+}
+
+/// Move a bound socket's readiness registration onto `runtime`'s reactor.
+///
+/// Only the registration moves: the descriptor, its bound address and every
+/// socket option are kept. A socket bound on the signaling runtime otherwise
+/// stays on that runtime's reactor even though its receive task runs on a
+/// media lane, so every media datagram would wake the signaling reactor.
+fn register_socket_on_media(
+    socket: UdpSocket,
+    runtime: &tokio::runtime::Handle,
+) -> Result<UdpSocket> {
+    let socket = socket
+        .into_std()
+        .map_err(|error| Error::Transport(format!("Failed to deregister media socket: {error}")))?;
+    let _entered = runtime.enter();
+    UdpSocket::from_std(socket).map_err(|error| {
+        Error::Transport(format!(
+            "Failed to register media socket on its reactor: {error}"
+        ))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -446,6 +475,10 @@ pub struct UdpRtpTransport {
     /// Event broadcaster
     event_tx: broadcast::Sender<RtpEvent>,
 
+    /// The media lane that owns this transport's socket registrations and
+    /// receive tasks. Chosen once per transport, never per packet.
+    media_runtime: tokio::runtime::Handle,
+
     /// Receiver task. Only touched on lifecycle (start/stop) so a
     /// `tokio::Mutex` is fine — never on the per-packet path.
     receiver_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -548,6 +581,7 @@ impl UdpRtpTransport {
             .validate()
             .map_err(|detail| Error::Transport(detail.to_string()))?;
         let buffer_config = config.buffer_config;
+        let media_runtime = crate::task_runtime::next_media_io_runtime_handle();
 
         // Use platform-specific socket strategy
         let socket_strategy = PlatformSocketStrategy::for_current_platform();
@@ -599,6 +633,12 @@ impl UdpRtpTransport {
             } else {
                 None
             };
+
+            // Keep the allocation guard armed through fallible registration.
+            let socket_rtp = register_socket_on_media(socket_rtp, &media_runtime)?;
+            let socket_rtcp = socket_rtcp
+                .map(|socket| register_socket_on_media(socket, &media_runtime))
+                .transpose()?;
 
             // The live transport now owns release through `config.session_id`.
             allocation_guard.disarm();
@@ -661,6 +701,11 @@ impl UdpRtpTransport {
                 (None, None)
             };
 
+            let socket_rtp = register_socket_on_media(socket_rtp, &media_runtime)?;
+            let socket_rtcp = socket_rtcp
+                .map(|socket| register_socket_on_media(socket, &media_runtime))
+                .transpose()?;
+
             (socket_rtp, socket_rtcp, local_rtp_addr, local_rtcp_addr)
         };
 
@@ -681,6 +726,7 @@ impl UdpRtpTransport {
             remote_rtp_addr: Arc::new(ArcSwapOption::from(None)),
             remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
+            media_runtime,
             receiver_tasks: Arc::new(Mutex::new(Vec::with_capacity(2))),
             active: Arc::new(AtomicBool::new(false)),
             secure_media_required: Arc::new(AtomicBool::new(false)),
@@ -712,6 +758,16 @@ impl UdpRtpTransport {
         transport.start_receiver().await?;
 
         Ok(transport)
+    }
+
+    /// Spawn one of this transport's receive tasks on its media lane, beside
+    /// the reactor that serves its sockets.
+    fn spawn_on_lane<F>(&self, kind: &'static str, future: F) -> JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        spawn_memory_tracked_on(&self.media_runtime, kind, future)
     }
 
     /// Start the packet receiver task
@@ -749,7 +805,7 @@ impl UdpRtpTransport {
         let local_rtp_addr = rtp_socket.local_addr().ok();
         let recv_buffer_size = self.config.buffer_config.recv_buffer_size;
 
-        let rtp_receiver = spawn_memory_tracked(
+        let rtp_receiver = self.spawn_on_lane(
             "rtp_core.udp_transport.rtp_receiver_task",
             async move {
                 let mut first_inbound_rtp_logged = false;
@@ -1183,7 +1239,7 @@ impl UdpRtpTransport {
         #[cfg(feature = "dtls-webrtc")]
         let rtcp_dtls_tx = self.rtcp_dtls_tx.clone();
 
-        spawn_memory_tracked("rtp_core.udp_transport.rtcp_receiver_task", async move {
+        self.spawn_on_lane("rtp_core.udp_transport.rtcp_receiver_task", async move {
             let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
             let mut rtcp_moves = 0_u8;
             loop {
@@ -2180,6 +2236,179 @@ mod tests {
     use super::*;
     use crate::packet::RtpHeader;
     use bytes::Bytes;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn media_socket_moves_to_an_independent_epoll_reactor_without_rebinding() {
+        use std::os::fd::AsRawFd;
+        fn epoll_owners(socket: i32) -> std::collections::BTreeSet<String> {
+            // fdinfo keeps the descriptor number used at registration. That
+            // number can be reused while a duplicated old socket lives, so
+            // match the socket inode too and never count another socket.
+            let target = std::fs::read_link(format!("/proc/self/fd/{socket}")).unwrap();
+            let target = target.to_string_lossy();
+            let inode = target
+                .strip_prefix("socket:[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|inode| inode.parse::<u64>().ok())
+                .unwrap();
+            std::fs::read_dir("/proc/self/fdinfo")
+                .unwrap()
+                .filter_map(|entry| {
+                    let info = std::fs::read_to_string(entry.ok()?.path()).ok()?;
+                    let owns_socket = info.lines().any(|line| {
+                        let words = line.split_whitespace().collect::<Vec<_>>();
+                        words.first() == Some(&"tfd:")
+                            && words.get(1).and_then(|word| word.parse::<i32>().ok())
+                                == Some(socket)
+                            && line
+                                .split_once("ino:")
+                                .and_then(|(_, tail)| tail.split_whitespace().next())
+                                .and_then(|value| u64::from_str_radix(value, 16).ok())
+                                == Some(inode)
+                    });
+                    // Mio clones its registry by duplicating the epoll
+                    // descriptor, and both aliases show the same kernel watch
+                    // list: deduplicate the list, not the descriptor numbers.
+                    owns_socket.then(|| {
+                        let mut watches = info
+                            .lines()
+                            .filter(|line| line.starts_with("tfd:"))
+                            .collect::<Vec<_>>();
+                        watches.sort_unstable();
+                        watches.join("\n")
+                    })
+                })
+                .collect()
+        }
+
+        let signaling = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let lane = || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap()
+        };
+        let (lane_a, lane_b) = (lane(), lane());
+        signaling.block_on(async {
+            let a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            a.set_ttl(47).unwrap();
+            a.set_broadcast(true).unwrap();
+            let (address, descriptor) = (a.local_addr().unwrap(), a.as_raw_fd());
+            let initial = epoll_owners(descriptor);
+            assert_eq!(initial.len(), 1);
+
+            let a = register_socket_on_media(a, lane_a.handle()).unwrap();
+            let b = register_socket_on_media(b, lane_b.handle()).unwrap();
+            assert_eq!(a.local_addr().unwrap(), address);
+            assert_eq!(a.as_raw_fd(), descriptor);
+            assert_eq!(a.ttl().unwrap(), 47);
+            assert!(a.broadcast().unwrap());
+            let a_owner = epoll_owners(a.as_raw_fd());
+            let b_owner = epoll_owners(b.as_raw_fd());
+            assert_eq!(a_owner.len(), 1);
+            assert_eq!(b_owner.len(), 1);
+            assert_ne!(
+                a_owner, initial,
+                "registration must leave the signaling reactor"
+            );
+            assert_ne!(
+                a_owner, b_owner,
+                "independent lanes need independent reactors"
+            );
+
+            tokio::time::timeout(Duration::from_secs(1), async {
+                for _ in 0..32 {
+                    a.send_to(b"mux-media", b.local_addr().unwrap())
+                        .await
+                        .unwrap();
+                    let mut payload = [0; 32];
+                    let (length, source) = b.recv_from(&mut payload).await.unwrap();
+                    assert_eq!(&payload[..length], b"mux-media");
+                    assert_eq!(source, address);
+                }
+            })
+            .await
+            .unwrap();
+        });
+    }
+
+    #[test]
+    fn transport_sockets_and_receivers_outlive_the_creating_runtime() {
+        // The transport's sockets are served by its media lane, so shutting
+        // down the (signaling) runtime that created it must not silence its
+        // receive tasks, for RTP or for a separate RTCP socket.
+        let signaling = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let transport = signaling.block_on(async {
+            UdpRtpTransport::new(RtpTransportConfig {
+                local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                local_rtcp_addr: None,
+                symmetric_rtp: false,
+                rtcp_mux: false,
+                session_id: Some("lane_owned_sockets".to_string()),
+                use_port_allocator: false,
+                buffer_config: Default::default(),
+            })
+            .await
+            .unwrap()
+        });
+        drop(signaling);
+
+        let rtp_addr = transport.local_rtp_addr().unwrap();
+        let rtcp_addr = transport
+            .local_rtcp_socket_addr()
+            .expect("separate RTCP socket");
+        let mut events = transport.subscribe();
+        let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rtp = RtpPacket::new(
+            RtpHeader::new(0, 7, 160, 0x1234_5678),
+            Bytes::from_static(b"lane"),
+        );
+        peer.send_to(&rtp.serialize().unwrap(), rtp_addr).unwrap();
+        let rtcp = [0x80, 201, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44];
+        peer.send_to(&rtcp, rtcp_addr).unwrap();
+
+        let observer = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let received = observer.block_on(async {
+            let (mut media, mut control) = (false, false);
+            // One deadline for both: a receive loop whose socket lost its
+            // reactor reports errors instead of packets.
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                while !(media && control) {
+                    match events.recv().await.expect("event") {
+                        RtpEvent::MediaReceived { payload, .. } => {
+                            assert_eq!(&payload[..], b"lane");
+                            media = true;
+                        }
+                        RtpEvent::RtcpReceived { data, .. } => {
+                            assert_eq!(&data[..], &rtcp);
+                            control = true;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await;
+            (media, control)
+        });
+        assert_eq!(
+            received,
+            (true, true),
+            "RTP and RTCP keep arriving after the creating runtime stopped"
+        );
+        drop(transport);
+    }
 
     #[test]
     fn classify_rtp_mux_packet_demuxes_known_ranges() {

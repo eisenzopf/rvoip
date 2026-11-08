@@ -120,36 +120,51 @@ impl DialogEventHub {
             session_coordination_event_kind(&event)
         );
 
+        let publish_kind = session_coordination_event_kind(&event);
+
+        // STIR/SHAKEN verification is the only reader of the coordination
+        // event after conversion. Without an installed verifier it returns
+        // `Publish(None)`, the value conversion already sets, so the event is
+        // moved into the conversion instead of being deep-copied.
+        let (converted, verification_event) = if self.dialog_manager.identity_verifier().is_some() {
+            (
+                self.convert_coordination_to_cross_crate(event.clone()),
+                Some(event),
+            )
+        } else {
+            (self.convert_coordination_to_cross_crate(event), None)
+        };
+
         // Convert to cross-crate event
-        if let Some(mut cross_crate_event) = self.convert_coordination_to_cross_crate(event.clone())
-        {
+        if let Some(mut cross_crate_event) = converted {
             // STIR/SHAKEN (RFC 8224): run the installed verifier on
             // IncomingCall events before publishing. Uses the shared
             // `DialogManager::run_identity_verification` helper so the
             // adapter's publish path and this one apply the same
             // policy + reject contract — no drift between bridges.
-            if let RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingCall {
-                ref raw_request,
-                identity_verification: ref mut iv,
-                ..
-            }) = cross_crate_event
-            {
-                match self
-                    .dialog_manager
-                    .run_identity_verification(&event, raw_request)
-                    .await
+            if let Some(event) = verification_event.as_ref() {
+                if let RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingCall {
+                    ref raw_request,
+                    identity_verification: ref mut iv,
+                    ..
+                }) = cross_crate_event
                 {
-                    crate::manager::IdentityVerificationDecision::Drop => {
-                        debug!("STIR/SHAKEN rejected event; not publishing");
-                        return Ok(false);
-                    }
-                    crate::manager::IdentityVerificationDecision::Publish(status) => {
-                        *iv = status;
+                    match self
+                        .dialog_manager
+                        .run_identity_verification(event, raw_request)
+                        .await
+                    {
+                        crate::manager::IdentityVerificationDecision::Drop => {
+                            debug!("STIR/SHAKEN rejected event; not publishing");
+                            return Ok(false);
+                        }
+                        crate::manager::IdentityVerificationDecision::Publish(status) => {
+                            *iv = status;
+                        }
                     }
                 }
             }
 
-            let publish_kind = session_coordination_event_kind(&event);
             let publish_started =
                 crate::diagnostics::dialog_timing_enabled().then(std::time::Instant::now);
             let handler_count = if crate::diagnostics::dialog_timing_enabled() {
@@ -315,11 +330,10 @@ impl DialogEventHub {
                 let session_id = format!("session-{}", uuid::Uuid::new_v4());
 
                 // Store mapping
-                self.dialog_manager.store_dialog_mapping(
+                self.dialog_manager.store_incoming_call_mapping(
                     &session_id,
                     dialog_id.clone(),
                     transaction_id.clone(),
-                    request.clone(),
                     source,
                 );
 
@@ -1278,6 +1292,89 @@ mod safe_diagnostic_tests {
         )
     }
 
+    #[derive(Clone, Default)]
+    struct IncomingCallCapture {
+        events: Arc<std::sync::Mutex<Vec<DialogToSessionEvent>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CrossCrateEventHandler for IncomingCallCapture {
+        async fn handle(
+            &self,
+            event: Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>,
+        ) -> anyhow::Result<()> {
+            if let Some(RvoipCrossCrateEvent::DialogToSession(event)) =
+                event.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+            {
+                self.events.lock().unwrap().push(event.clone());
+            }
+            Ok(())
+        }
+    }
+
+    /// Annotates every request it is asked about as unsigned.
+    struct UnsignedVerifier;
+
+    #[async_trait::async_trait]
+    impl crate::manager::PASSporTVerifier for UnsignedVerifier {
+        async fn verify(
+            &self,
+            _raw_bytes: &bytes::Bytes,
+            _identity: &rvoip_sip_core::types::identity::Identity,
+            _request: &Request,
+        ) -> crate::manager::VerificationOutcome {
+            crate::manager::VerificationOutcome::NoIdentity
+        }
+    }
+
+    const INCOMING_BRANCH: &str = "z9hG4bK-incoming-call-publish";
+
+    fn incoming_invite() -> Request {
+        rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-publish"))
+            .to("Bob", "sip:bob@example.com", None)
+            .call_id("incoming-call-publish")
+            .cseq(1)
+            .via("192.0.2.10:5060", "UDP", Some(INCOMING_BRANCH))
+            .max_forwards(70)
+            .body(bytes::Bytes::from_static(b"v=0\r\n"))
+            .build()
+    }
+
+    /// Publish one IncomingCall through the hub and return whether it was
+    /// delivered, the delivered events, and the hub for mapping checks.
+    async fn publish_incoming_call(
+        verifier: Option<crate::manager::SharedVerifier>,
+        policy: crate::manager::VerificationPolicy,
+    ) -> (bool, Vec<DialogToSessionEvent>, DialogEventHub, DialogId) {
+        let (hub, dialog_id) = test_hub().await;
+        hub.dialog_manager.dialog_to_session.remove(&dialog_id);
+        hub.dialog_manager.set_identity_verifier(verifier);
+        hub.dialog_manager.set_verification_policy(policy);
+        let capture = IncomingCallCapture::default();
+        hub.global_coordinator
+            .register_handler("dialog_to_session", capture.clone())
+            .await
+            .unwrap();
+
+        let delivered = hub
+            .try_publish_session_coordination_event(SessionCoordinationEvent::IncomingCall {
+                dialog_id: dialog_id.clone(),
+                transaction_id: TransactionKey::new(
+                    INCOMING_BRANCH.to_string(),
+                    Method::Invite,
+                    true,
+                ),
+                request: incoming_invite(),
+                source: "192.0.2.10:5060".parse().unwrap(),
+            })
+            .await
+            .unwrap();
+        let events = capture.events.lock().unwrap().clone();
+        (delivered, events, hub, dialog_id)
+    }
+
     fn transaction(method: Method) -> TransactionKey {
         TransactionKey::new("z9hG4bK-exact-terminal-test".to_string(), method, false)
     }
@@ -1805,5 +1902,151 @@ mod safe_diagnostic_tests {
                 ..
             }) if emitted_transaction == &reinvite_transaction
         ));
+    }
+
+    #[tokio::test]
+    async fn incoming_call_without_a_verifier_publishes_the_converted_request() {
+        let (delivered, events, hub, dialog_id) =
+            publish_incoming_call(None, crate::manager::VerificationPolicy::default()).await;
+        assert!(delivered);
+        let [DialogToSessionEvent::IncomingCall {
+            session_id,
+            call_id,
+            from,
+            to,
+            sdp_offer,
+            headers,
+            transaction_id,
+            source_addr,
+            raw_request,
+            transport,
+            identity_verification,
+        }] = events.as_slice()
+        else {
+            panic!("expected exactly one IncomingCall, got {}", events.len());
+        };
+        let invite = incoming_invite();
+        let key = TransactionKey::new(INCOMING_BRANCH.to_string(), Method::Invite, true);
+        assert_eq!(call_id, "incoming-call-publish");
+        assert_eq!(from, &invite.from().unwrap().to_string());
+        assert_eq!(to, &invite.to().unwrap().to_string());
+        assert_eq!(sdp_offer.as_deref(), Some("v=0\r\n"));
+        assert_eq!(
+            headers.get("X-Dialog-Id").map(String::as_str),
+            Some(dialog_id.to_string().as_str())
+        );
+        assert_eq!(transaction_id, &key.to_string());
+        assert_eq!(source_addr, "192.0.2.10:5060");
+        assert_eq!(
+            raw_request.as_ref(),
+            Some(&bytes::Bytes::from(Message::Request(invite).to_bytes()))
+        );
+        assert!(transport.is_none());
+        assert_eq!(identity_verification, &None);
+
+        let manager = &hub.dialog_manager;
+        assert_eq!(
+            manager.get_session_id(&dialog_id).as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(
+            manager
+                .session_to_dialog
+                .get(session_id)
+                .map(|entry| entry.value().clone()),
+            Some(dialog_id.clone())
+        );
+        assert_eq!(
+            manager
+                .pending_response_transaction_by_dialog
+                .get(&dialog_id)
+                .map(|entry| entry.value().clone()),
+            Some(key)
+        );
+    }
+
+    #[tokio::test]
+    async fn incoming_call_verifier_only_changes_the_identity_annotation() {
+        fn without_identity_and_session(event: &DialogToSessionEvent) -> DialogToSessionEvent {
+            let mut event = event.clone();
+            if let DialogToSessionEvent::IncomingCall {
+                session_id,
+                identity_verification,
+                ..
+            } = &mut event
+            {
+                session_id.clear();
+                *identity_verification = None;
+            }
+            event
+        }
+
+        let (_, unverified, _, _) =
+            publish_incoming_call(None, crate::manager::VerificationPolicy::Annotate).await;
+        let (delivered, verified, _, _) = publish_incoming_call(
+            Some(Arc::new(UnsignedVerifier)),
+            crate::manager::VerificationPolicy::Annotate,
+        )
+        .await;
+        assert!(delivered);
+        assert_eq!(unverified.len(), 1);
+        assert_eq!(verified.len(), 1);
+        let DialogToSessionEvent::IncomingCall {
+            identity_verification,
+            ..
+        } = &verified[0]
+        else {
+            panic!("expected IncomingCall");
+        };
+        assert_eq!(
+            identity_verification,
+            &Some(rvoip_infra_common::events::cross_crate::IdentityVerificationStatus::NoIdentity)
+        );
+        // X-Dialog-Id differs per hub; compare everything else.
+        let strip_dialog = |event: DialogToSessionEvent| match event {
+            DialogToSessionEvent::IncomingCall {
+                session_id,
+                call_id,
+                from,
+                to,
+                sdp_offer,
+                mut headers,
+                transaction_id,
+                source_addr,
+                raw_request,
+                transport,
+                identity_verification,
+            } => {
+                headers.remove("X-Dialog-Id");
+                (
+                    session_id,
+                    call_id,
+                    from,
+                    to,
+                    sdp_offer,
+                    headers
+                        .into_iter()
+                        .collect::<std::collections::BTreeMap<_, _>>(),
+                    transaction_id,
+                    source_addr,
+                    raw_request,
+                    transport.is_none(),
+                    identity_verification,
+                )
+            }
+            _ => panic!("expected IncomingCall"),
+        };
+        assert_eq!(
+            strip_dialog(without_identity_and_session(&unverified[0])),
+            strip_dialog(without_identity_and_session(&verified[0]))
+        );
+
+        let (delivered, rejected, _, _) = publish_incoming_call(
+            Some(Arc::new(UnsignedVerifier)),
+            crate::manager::VerificationPolicy::StrictReject,
+        )
+        .await;
+        assert!(!delivered);
+        assert!(rejected.is_empty());
     }
 }

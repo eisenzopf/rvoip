@@ -758,6 +758,8 @@ impl YamlTableLoader {
             "ResumeCall" => Ok(EventType::ResumeCall),
 
             // Dialog events (abstracted)
+            "Dialog100Trying" => Ok(EventType::Dialog100Trying),
+            "CancelAfterTrying" => Ok(EventType::CancelAfterTrying),
             "DialogProgress" | "Dialog180Ringing" => Ok(EventType::Dialog180Ringing),
             "Dialog183SessionProgress" => Ok(EventType::Dialog183SessionProgress),
             "DialogEstablished" | "Dialog200OK" => Ok(EventType::Dialog200OK),

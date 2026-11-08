@@ -2402,6 +2402,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendINVITE => {
+            session.initial_invite_trying_received = false;
             info!("Action::SendINVITE for session {}", session.session_id);
             // Get session details for send_invite_with_details
             let from = session
@@ -2602,6 +2603,7 @@ pub(crate) async fn execute_action(
             ));
         }
         Action::RetryWithContact => {
+            session.initial_invite_trying_received = false;
             // RFC 3261 §8.1.3.4 / §19.1.5 — follow a 3xx redirect's Contact URI.
             // The executor pre-process has already pushed the response's targets
             // onto session.redirect_targets. Cap total follow-ups at 5 hops per
@@ -3735,6 +3737,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendINVITEWithAuth => {
+            session.initial_invite_trying_received = false;
             let observation = Box::pin(async {
                 // RFC 3261 §22.2 — compute an Authorization header and
                 // re-issue the INVITE on the same dialog (same Call-ID, bumped
@@ -4479,6 +4482,7 @@ pub(crate) async fn execute_action(
         }
 
         Action::SendINVITEWithBumpedSessionExpires => {
+            session.initial_invite_trying_received = false;
             Box::pin(async {
             // RFC 4028 §6 — on 422 Session Interval Too Small the UAS's
             // `Min-SE` header dictates the required floor. Bump the retry
@@ -5287,6 +5291,7 @@ pub(crate) async fn execute_action(
             .await;
         }
         Action::SendINVITEWithOptions => {
+            session.initial_invite_trying_received = false;
             // INVITE uses `.clone()` (not `.take()`) so the snapshot
             // persists through the 401/407 auth-retry hop —
             // `Action::SendINVITEWithAuth` reads from the same stash to

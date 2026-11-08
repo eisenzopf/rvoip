@@ -55,6 +55,9 @@ const PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL: Duration = Duration::from_sec
 #[cfg(test)]
 const SIP_INBOUND_EVENT_DELIVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const SIP_ADAPTER_EVENT_CAPACITY: usize = 256;
+/// Retained inbound rejections that may run at once before the event
+/// translator falls back to rejecting inline.
+const SIP_INBOUND_REJECTION_CONCURRENCY: usize = 256;
 const DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET: usize = 262_144;
 const SIP_OUTBOUND_EVENT_STAGE_CAPACITY: usize = 32;
 const MAX_SIP_OUTBOUND_TARGET_BYTES: usize = 4_096;
@@ -1093,6 +1096,32 @@ enum SipInboundBinding {
     Missing,
 }
 
+/// Bounds of one adapter's event handoff and pending inbound observations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SipInboundLimits {
+    event_capacity: usize,
+    pending_context_capacity: usize,
+}
+
+impl SipInboundLimits {
+    /// Each call may hold one reserved slot across its answer/ACK handoff,
+    /// plus one for queued inbound or terminal events. Both bounds stay
+    /// finite and never drop below the defaults; this is not an overflow
+    /// queue or an admission bypass.
+    fn for_call_capacity(calls: Option<usize>) -> Self {
+        match calls {
+            None => Self {
+                event_capacity: SIP_ADAPTER_EVENT_CAPACITY,
+                pending_context_capacity: MAX_PENDING_SIP_INBOUND_CONTEXTS,
+            },
+            Some(calls) => Self {
+                event_capacity: calls.saturating_mul(2).max(SIP_ADAPTER_EVENT_CAPACITY),
+                pending_context_capacity: calls.max(MAX_PENDING_SIP_INBOUND_CONTEXTS),
+            },
+        }
+    }
+}
+
 struct SipInboundContextStore {
     pending_by_session: StdMutex<HashMap<SessionId, PendingSipInboundObservation>>,
     by_connection: DashMap<ConnectionId, SipInboundContextState>,
@@ -1344,6 +1373,10 @@ pub struct SipAdapter {
     lifecycle: AdapterLifecycleSinkSlot,
     translator_cancel: watch::Sender<bool>,
     retained_tasks: Arc<RetainedTasks>,
+    /// Bounds concurrently retained inbound rejections.
+    inbound_rejection_slots: Arc<tokio::sync::Semaphore>,
+    /// Exact lifetimes whose rejection a retained task owns.
+    inbound_rejections: Arc<DashMap<SessionRegistryHandle, ()>>,
     draining: AtomicBool,
     drained: AtomicBool,
     /// The first destructive drain failure is sticky. Once route ownership
@@ -1352,9 +1385,59 @@ pub struct SipAdapter {
     drain_failure: StdMutex<Option<String>>,
     #[cfg(test)]
     force_drain_compensation_failure: AtomicBool,
+    #[cfg(test)]
+    inbound_rejection_test_gate: StdMutex<Option<InboundRejectionTestGate>>,
     drain_gate: AsyncMutex<()>,
     observer_registered: AtomicBool,
     inbound_invite_observer_id: u64,
+}
+
+/// Marks one exact lifetime as owned by a retained inbound rejection.
+///
+/// Removal on drop survives task cancellation and panic, and keying by the
+/// exact handle means a newer incarnation of the same call is never erased.
+struct InboundRejectionOwner {
+    jobs: Arc<DashMap<SessionRegistryHandle, ()>>,
+    handle: SessionRegistryHandle,
+}
+
+impl Drop for InboundRejectionOwner {
+    fn drop(&mut self) {
+        self.jobs.remove(&self.handle);
+    }
+}
+
+/// Holds inbound rejections inside their exact teardown until a test
+/// releases them, so tests can observe translator progress meanwhile.
+#[cfg(test)]
+#[derive(Clone)]
+struct InboundRejectionTestGate {
+    entered: Arc<tokio::sync::Semaphore>,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl InboundRejectionTestGate {
+    fn install(adapter: &SipAdapter) -> Self {
+        let gate = Self {
+            entered: Arc::new(tokio::sync::Semaphore::new(0)),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+        };
+        *adapter
+            .inbound_rejection_test_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate.clone());
+        gate
+    }
+
+    async fn pass(&self) {
+        self.entered.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("inbound rejection test gate closed")
+            .forget();
+    }
 }
 
 impl SipAdapter {
@@ -1433,11 +1516,15 @@ impl SipAdapter {
         // context; calls observed after installation cannot outrun this
         // receiver and lose their matching IncomingCall event.
         let mut events = coordinator.events_with_control().await?;
-        let (out_tx, out_rx) = mpsc::channel(SIP_ADAPTER_EVENT_CAPACITY);
+        let limits = SipInboundLimits::for_call_capacity(coordinator.sip_adapter_call_capacity());
+        let (out_tx, out_rx) = mpsc::channel(limits.event_capacity);
         let (translator_cancel, mut translator_cancel_rx) = watch::channel(false);
         let context_reaper_cancel_rx = translator_cancel.subscribe();
         let retained_tasks = RetainedTasks::new();
-        let inbound_contexts = Arc::new(SipInboundContextStore::default());
+        let inbound_contexts = Arc::new(SipInboundContextStore {
+            max_pending: limits.pending_context_capacity,
+            ..SipInboundContextStore::default()
+        });
         let contexts_for_observer = Arc::downgrade(&inbound_contexts);
         let inbound_invite_observer_id = coordinator.add_inbound_invite_observer(Arc::new(
             move |observation: InboundInviteObservation| {
@@ -1483,11 +1570,17 @@ impl SipAdapter {
             lifecycle: AdapterLifecycleSinkSlot::default(),
             translator_cancel,
             retained_tasks: Arc::clone(&retained_tasks),
+            inbound_rejection_slots: Arc::new(tokio::sync::Semaphore::new(
+                SIP_INBOUND_REJECTION_CONCURRENCY,
+            )),
+            inbound_rejections: Arc::new(DashMap::new()),
             draining: AtomicBool::new(false),
             drained: AtomicBool::new(false),
             drain_failure: StdMutex::new(None),
             #[cfg(test)]
             force_drain_compensation_failure: AtomicBool::new(false),
+            #[cfg(test)]
+            inbound_rejection_test_gate: StdMutex::new(None),
             drain_gate: AsyncMutex::new(()),
             observer_registered: AtomicBool::new(true),
             inbound_invite_observer_id,
@@ -2246,18 +2339,18 @@ impl SipAdapter {
         }
     }
 
-    async fn terminate_failed_inbound(
+    /// Capture the exact lifetime of a failed inbound route.
+    ///
+    /// Call this before the first await and before route retirement can make
+    /// the raw identifier reusable. An admitted epoch is authoritative; an
+    /// unpublished observation has no epoch yet, so capture its current
+    /// coordinator owner at this synchronous boundary.
+    fn failed_inbound_handle(
         &self,
         session_id: &SessionId,
         epoch: Option<&SipRouteEpoch>,
-        status: u16,
-        reason: &'static str,
-    ) {
-        // Capture the exact lifetime before the first await and before route
-        // retirement can make the raw identifier reusable. An admitted epoch
-        // is authoritative; an unpublished observation has no epoch yet, so
-        // capture its current coordinator owner at this synchronous boundary.
-        let lifecycle_handle = epoch
+    ) -> Option<SessionRegistryHandle> {
+        epoch
             .and_then(SipRouteEpoch::admitted_handle)
             .cloned()
             .or_else(|| {
@@ -2265,7 +2358,114 @@ impl SipAdapter {
                     .is_none()
                     .then(|| self.current_session_handle(session_id))
                     .flatten()
+            })
+    }
+
+    /// Reject a failed inbound route without blocking the event translator.
+    ///
+    /// A rejection authors a final response and can fall back to a hangup and
+    /// a forced cleanup, each bounded only by `SIP_RETAINED_TASK_TIMEOUT`.
+    /// Run inline, that stalled every later event of every call behind one
+    /// rejected INVITE. The exact lifetime is captured before scheduling and
+    /// the rejection runs as a retained task, which shutdown joins. At most
+    /// `SIP_INBOUND_REJECTION_CONCURRENCY` run at once; past that bound the
+    /// rejection runs inline, so the translator is backpressured instead of
+    /// spawning unbounded work.
+    async fn schedule_failed_inbound(
+        &self,
+        session_id: &SessionId,
+        epoch: Option<&SipRouteEpoch>,
+        status: u16,
+        reason: &'static str,
+    ) {
+        let handle = self.failed_inbound_handle(session_id, epoch);
+        let Some(exact) = handle.clone() else {
+            self.cleanup_failed_inbound_route(session_id, epoch);
+            return;
+        };
+        match self.inbound_rejections.entry(exact.clone()) {
+            // An earlier rejection already owns this exact lifetime.
+            dashmap::mapref::entry::Entry::Occupied(_) => return,
+            dashmap::mapref::entry::Entry::Vacant(entry) => {
+                entry.insert(());
+            }
+        }
+        let owner = InboundRejectionOwner {
+            jobs: Arc::clone(&self.inbound_rejections),
+            handle: exact,
+        };
+        let permit = Arc::clone(&self.inbound_rejection_slots).try_acquire_owned();
+        if let (Ok(permit), Some(adapter)) = (permit, self.self_weak.upgrade()) {
+            let task_session = session_id.clone();
+            let task_epoch = epoch.cloned();
+            let task_handle = handle.clone();
+            let spawned = self.retained_tasks.spawn(async move {
+                let _owned = (permit, owner);
+                adapter
+                    .terminate_failed_inbound_captured(
+                        &task_session,
+                        task_epoch.as_ref(),
+                        task_handle,
+                        status,
+                        reason,
+                    )
+                    .await;
             });
+            if spawned {
+                return;
+            }
+            // Retained admission closed for drain and dropped the future with
+            // its permit and owner. Finish the captured work inline.
+            self.terminate_failed_inbound_captured(session_id, epoch, handle, status, reason)
+                .await;
+            return;
+        }
+        let _owner = owner;
+        self.terminate_failed_inbound_captured(session_id, epoch, handle, status, reason)
+            .await;
+    }
+
+    async fn terminate_failed_inbound(
+        &self,
+        session_id: &SessionId,
+        epoch: Option<&SipRouteEpoch>,
+        status: u16,
+        reason: &'static str,
+    ) {
+        let handle = self.failed_inbound_handle(session_id, epoch);
+        self.terminate_failed_inbound_captured(session_id, epoch, handle, status, reason)
+            .await;
+    }
+
+    async fn terminate_failed_inbound_captured(
+        &self,
+        session_id: &SessionId,
+        epoch: Option<&SipRouteEpoch>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+        status: u16,
+        reason: &'static str,
+    ) {
+        #[cfg(test)]
+        {
+            let gate = self
+                .inbound_rejection_test_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(gate) = gate {
+                gate.pass().await;
+            }
+        }
+        // A retained rejection can start after its exact lifetime retired.
+        // Never act on the raw identifier then: it may already name a newly
+        // admitted call, and a terminal for it would reach that call.
+        if lifecycle_handle
+            .as_ref()
+            .is_some_and(|handle| self.current_session_handle(session_id).as_ref() != Some(handle))
+        {
+            self.cleanup_failed_inbound_route(session_id, epoch);
+            return;
+        }
         let state = lifecycle_handle.as_ref().and_then(|handle| {
             self.coordinator
                 .helpers
@@ -2744,11 +2944,21 @@ impl SipAdapter {
     }
 
     async fn translate_api_event(&self, event: ApiEvent) {
+        // A retained rejection owns this exact unpublished route. Publish no
+        // later event for the same call while that owner settles it.
+        if !self.inbound_rejections.is_empty()
+            && event
+                .call_id()
+                .and_then(|call_id| self.current_session_handle(call_id))
+                .is_some_and(|handle| self.inbound_rejections.contains_key(&handle))
+        {
+            return;
+        }
         match event {
             ApiEvent::IncomingCall { call_id, .. } => {
                 let Some(epoch) = self.ensure_mapped_epoch(call_id.clone()) else {
                     warn!("SipAdapter rejected inbound route after lifecycle retirement/capacity");
-                    self.terminate_failed_inbound(
+                    self.schedule_failed_inbound(
                         &call_id,
                         None,
                         503,
@@ -2765,7 +2975,7 @@ impl SipAdapter {
                             ?error,
                             "SipAdapter rejected invalid authenticated inbound route"
                         );
-                        self.terminate_failed_inbound(
+                        self.schedule_failed_inbound(
                             &call_id,
                             Some(&epoch),
                             403,
@@ -2781,7 +2991,7 @@ impl SipAdapter {
                         // startup race; fail closed instead of publishing a
                         // route without its authentication state.
                         warn!("SipAdapter rejected inbound route without its observation");
-                        self.terminate_failed_inbound(
+                        self.schedule_failed_inbound(
                             &call_id,
                             Some(&epoch),
                             503,
@@ -2800,7 +3010,7 @@ impl SipAdapter {
                             ?error,
                             "SipAdapter principal expired or became invalid before publication"
                         );
-                        self.terminate_failed_inbound(
+                        self.schedule_failed_inbound(
                             &call_id,
                             Some(&epoch),
                             403,
@@ -2827,7 +3037,7 @@ impl SipAdapter {
                         // Keep the consumed tombstone until terminal cleanup so a
                         // replayed IncomingCall cannot recreate the secret.
                         self.inbound_contexts.discard(&conn_id);
-                        self.terminate_failed_inbound(
+                        self.schedule_failed_inbound(
                             &call_id,
                             Some(&epoch),
                             503,
@@ -4244,6 +4454,27 @@ impl ConnectionAdapter for SipAdapter {
             .as_ref()
             .map(|epoch| epoch.session_id.clone())
             .unwrap_or(self.lookup_session(&conn)?);
+        // Reserve the Connected handoff before answering. A full event queue
+        // must reject the still-unanswered call with 503; answering first
+        // would strand an answered call without its Connected event.
+        let connected_permit = match inbound_epoch.as_ref() {
+            Some(epoch) => match self.out_tx.try_reserve() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    self.terminate_failed_inbound(
+                        &session_id,
+                        Some(epoch),
+                        503,
+                        "Signaling Event Backpressure",
+                    )
+                    .await;
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP connected event capacity unavailable before answer",
+                    ));
+                }
+            },
+            None => None,
+        };
         let accept_result = if let Some(epoch) = inbound_epoch.as_ref() {
             let lifecycle_handle = epoch.admitted_handle().ok_or(RvoipError::InvalidState(
                 "SIP inbound route has no exact lifecycle authority",
@@ -4255,6 +4486,7 @@ impl ConnectionAdapter for SipAdapter {
             self.coordinator.accept_call(&session_id).await
         };
         if let Err(error) = accept_result {
+            drop(connected_permit);
             if let Some(epoch) = inbound_epoch.as_ref() {
                 let (status, reason) = failed_inbound_accept_response(&error);
                 self.terminate_failed_inbound(&session_id, Some(epoch), status, reason)
@@ -4262,9 +4494,10 @@ impl ConnectionAdapter for SipAdapter {
             }
             return Err(Self::map_session_err(error));
         }
-        if outbound {
+        let Some(connected_permit) = connected_permit else {
+            // Outbound routes publish Connected from their answer event.
             return Ok(());
-        }
+        };
 
         // `accept_call` completes after sending the inbound UAS 200 response;
         // the SIP connection is not established until the peer's ACK moves
@@ -4287,16 +4520,21 @@ impl ConnectionAdapter for SipAdapter {
                         .existing_mapped_epoch(&session_id)
                         .filter(|epoch| epoch.connection_id == conn)
                         .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
-                    if !self.try_send_for_epoch(
-                        &epoch,
+                    // As in `try_send_for_epoch`, the epoch check and the
+                    // enqueue share `mapping_lock`, so retirement cannot slip
+                    // between them. The reserved slot cannot be full.
+                    let _mapping = self
+                        .mapping_lock
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if !self.epoch_is_current_locked(&epoch) {
+                        return Err(RvoipError::ConnectionNotFound(conn));
+                    }
+                    connected_permit.send(OrchestratorAdapterEvent::Public(
                         AdapterEvent::Connected {
                             connection_id: conn.clone(),
                         },
-                    ) {
-                        return Err(RvoipError::AdmissionRejected(
-                            "SIP connected event was backpressured",
-                        ));
-                    }
+                    ));
                     return Ok(());
                 }
                 Ok(state) if state.is_final() || state == CallState::Terminating => {
@@ -5005,6 +5243,586 @@ Signal=5\r\nDuration=160\r\n";
         }
 
         adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rejected_inbound_burst_does_not_stall_unrelated_terminal_translation() {
+        const REJECTED: usize = 16;
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("rejection-burst", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter.try_subscribe_atomic_events().expect("events");
+        let mut rejected = Vec::with_capacity(REJECTED);
+        for _ in 0..REJECTED {
+            let session = SessionId::new();
+            let handle = admit_test_session(&coordinator, &session).await;
+            rejected.push((session, handle));
+        }
+        let other = SessionId::new();
+        let other_handle = admit_test_session(&coordinator, &other).await;
+        let other_epoch = adapter
+            .ensure_mapped_epoch(other.clone())
+            .expect("other epoch");
+        let gate = InboundRejectionTestGate::install(&adapter);
+
+        // None of these calls has an INVITE observation, so each must fail
+        // closed with a 503. Hold every rejection inside its exact teardown.
+        for (session, handle) in &rejected {
+            coordinator
+                .publish_app_event_exact_for_test(
+                    handle,
+                    ApiEvent::IncomingCall {
+                        call_id: session.clone(),
+                        from: "sip:a@example.test".into(),
+                        to: "sip:b@example.test".into(),
+                        sdp: None,
+                    },
+                )
+                .expect("incoming publication");
+        }
+        let all_entered = tokio::time::timeout(
+            Duration::from_secs(2),
+            gate.entered.acquire_many(REJECTED as u32),
+        )
+        .await
+        .map(|permits| permits.expect("test gate open").forget())
+        .is_ok();
+        // An unrelated terminal must still cross the real translator.
+        coordinator
+            .publish_app_event_exact_for_test(
+                &other_handle,
+                ApiEvent::CallEnded {
+                    call_id: other.clone(),
+                    reason: "peer BYE".into(),
+                },
+            )
+            .expect("terminal publication");
+        let ended = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                match events.recv().await {
+                    Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                        connection_id,
+                        ..
+                    })) if connection_id == other_epoch.connection_id => break true,
+                    Some(_) => continue,
+                    None => break false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        gate.release.add_permits(REJECTED);
+        assert!(
+            all_entered,
+            "inbound rejections ran one at a time on the event translator"
+        );
+        assert!(
+            ended,
+            "rejected inbound calls blocked an unrelated terminal event"
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !adapter.inbound_rejections.is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retained rejections completed");
+        assert_eq!(
+            adapter.inbound_rejection_slots.available_permits(),
+            SIP_INBOUND_REJECTION_CONCURRENCY
+        );
+        retire_test_session_if_current(&coordinator, &other_handle).await;
+    }
+
+    #[tokio::test]
+    async fn configured_event_capacity_covers_answer_reservations_and_inbound_handoffs() {
+        assert_eq!(
+            SipInboundLimits::for_call_capacity(None),
+            SipInboundLimits {
+                event_capacity: SIP_ADAPTER_EVENT_CAPACITY,
+                pending_context_capacity: MAX_PENDING_SIP_INBOUND_CONTEXTS,
+            }
+        );
+        assert_eq!(
+            SipInboundLimits::for_call_capacity(Some(1)),
+            SipInboundLimits::for_call_capacity(None)
+        );
+        let limits = SipInboundLimits::for_call_capacity(Some(2_000));
+        assert_eq!(
+            limits.pending_context_capacity,
+            MAX_PENDING_SIP_INBOUND_CONTEXTS
+        );
+        // Every call can hold a reserved Connected slot while one more event
+        // per call is queued, and the reservations still deliver in order.
+        let (sender, mut receiver) = mpsc::channel(limits.event_capacity);
+        let reserved: Vec<_> = (0..2_000)
+            .map(|_| sender.try_reserve().expect("answer reservation"))
+            .collect();
+        for n in 0..2_000 {
+            sender.try_send(n).expect("queued event");
+        }
+        assert!(sender.try_reserve().is_err());
+        for (n, permit) in reserved.into_iter().enumerate() {
+            assert_eq!(receiver.recv().await, Some(n));
+            permit.send(n + 2_000);
+        }
+        for n in 2_000..4_000 {
+            assert_eq!(receiver.recv().await, Some(n));
+        }
+        assert_eq!(sender.capacity(), limits.event_capacity);
+
+        let mut config =
+            ApiConfig::local("adapter-capacity", 0).with_sip_adapter_call_capacity(2_000);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        assert_eq!(adapter.out_tx.max_capacity(), 4_000);
+        assert_eq!(
+            adapter.inbound_contexts.max_pending,
+            MAX_PENDING_SIP_INBOUND_CONTEXTS
+        );
+        adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    #[test]
+    fn sip_adapter_call_capacity_is_validated() {
+        let config = |calls| {
+            ApiConfig::local("adapter-capacity-validation", 0).with_sip_adapter_call_capacity(calls)
+        };
+        assert!(config(0).validate().is_err());
+        assert!(config(1).validate().is_ok());
+        assert!(config(ApiConfig::MAX_SIP_ADAPTER_CALL_CAPACITY)
+            .validate()
+            .is_ok());
+        assert!(config(ApiConfig::MAX_SIP_ADAPTER_CALL_CAPACITY + 1)
+            .validate()
+            .is_err());
+        assert_eq!(ApiConfig::default().sip_adapter_call_capacity, None);
+    }
+
+    #[tokio::test]
+    async fn delayed_inbound_rejection_cannot_retire_reused_session() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("rejection-exact-owner", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter.try_subscribe_atomic_events().expect("events");
+        let session = SessionId::new();
+        let old_handle = admit_test_session(&coordinator, &session).await;
+        let old_epoch = adapter
+            .ensure_mapped_epoch(session.clone())
+            .expect("old epoch");
+        let gate = InboundRejectionTestGate::install(&adapter);
+        adapter
+            .schedule_failed_inbound(&session, Some(&old_epoch), 503, "test rejection")
+            .await;
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.acquire())
+            .await
+            .expect("rejection entered")
+            .expect("test gate open")
+            .forget();
+        // A duplicate stays owned by the first retained rejection.
+        adapter
+            .schedule_failed_inbound(&session, Some(&old_epoch), 503, "duplicate")
+            .await;
+        assert_eq!(adapter.inbound_rejections.len(), 1);
+        assert_eq!(
+            adapter.inbound_rejection_slots.available_permits(),
+            SIP_INBOUND_REJECTION_CONCURRENCY - 1
+        );
+        retire_test_session(&coordinator, &old_handle).await;
+        adapter.forget_epoch(&old_epoch);
+        elapse_test_reuse_horizon(&coordinator, &session);
+        let new_handle = admit_test_session(&coordinator, &session).await;
+        let new_epoch = adapter
+            .ensure_mapped_epoch(session.clone())
+            .expect("new epoch");
+        adapter
+            .translate_api_event(ApiEvent::CallAnswered {
+                call_id: session.clone(),
+                sdp: None,
+            })
+            .await;
+        gate.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !adapter.inbound_rejections.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained rejection completed");
+        assert_eq!(
+            adapter.current_session_handle(&session),
+            Some(new_handle.clone())
+        );
+        assert!(adapter.is_connection_live(&new_epoch.connection_id));
+        assert_eq!(
+            adapter.inbound_rejection_slots.available_permits(),
+            SIP_INBOUND_REJECTION_CONCURRENCY
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Ok(OrchestratorAdapterEvent::Public(AdapterEvent::Connected { connection_id }))
+                if connection_id == new_epoch.connection_id
+        ));
+        retire_test_session(&coordinator, &new_handle).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saturated_inbound_rejections_backpressure_the_caller() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("rejection-saturated", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session = SessionId::new();
+        let handle = admit_test_session(&coordinator, &session).await;
+        let epoch = adapter.ensure_mapped_epoch(session.clone()).expect("epoch");
+        let occupied = Arc::clone(&adapter.inbound_rejection_slots)
+            .try_acquire_many_owned(SIP_INBOUND_REJECTION_CONCURRENCY as u32)
+            .expect("occupy every rejection slot");
+        let gate = InboundRejectionTestGate::install(&adapter);
+        let rejecting = {
+            let adapter = Arc::clone(&adapter);
+            tokio::spawn(async move {
+                adapter
+                    .schedule_failed_inbound(&session, Some(&epoch), 503, "saturated")
+                    .await;
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), gate.entered.acquire())
+            .await
+            .expect("inline rejection entered")
+            .expect("test gate open")
+            .forget();
+        // With no free slot the caller runs the rejection itself and keeps
+        // exact ownership until it finishes.
+        assert!(!rejecting.is_finished());
+        assert!(adapter.inbound_rejections.contains_key(&handle));
+        gate.release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(10), rejecting)
+            .await
+            .expect("inline rejection completed")
+            .expect("rejecting task");
+        assert!(adapter.inbound_rejections.is_empty());
+        drop(occupied);
+        assert_eq!(
+            adapter.inbound_rejection_slots.available_permits(),
+            SIP_INBOUND_REJECTION_CONCURRENCY
+        );
+        retire_test_session_if_current(&coordinator, &handle).await;
+    }
+
+    /// One inbound INVITE with an SDP offer, sent over raw UDP to a
+    /// signaling-only coordinator and published for generic acceptance.
+    struct InboundTestCall {
+        coordinator: Arc<UnifiedCoordinator>,
+        adapter: Arc<SipAdapter>,
+        events: mpsc::Receiver<OrchestratorAdapterEvent>,
+        uac: tokio::net::UdpSocket,
+        uac_addr: std::net::SocketAddr,
+        destination: String,
+        connection_id: ConnectionId,
+    }
+
+    const INBOUND_TEST_CALL_ID: &str = "inbound-handoff@localhost";
+
+    impl InboundTestCall {
+        async fn start(name: &str) -> Self {
+            let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
+            let port = probe.local_addr().expect("probe address").port();
+            drop(probe);
+
+            let mut config = ApiConfig::local(name, port);
+            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+            let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
+            let adapter = SipAdapter::new(Arc::clone(&coordinator))
+                .await
+                .expect("adapter");
+            let mut events = adapter
+                .try_subscribe_atomic_events()
+                .expect("adapter events");
+            let uac = tokio::net::UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("UAC socket");
+            let uac_addr = uac.local_addr().expect("UAC address");
+            let destination = format!("127.0.0.1:{port}");
+            let body = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=handoff\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 9 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+            let invite = format!(
+                "INVITE sip:bridge@{destination} SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP {uac_addr};branch=z9hG4bK-handoff-invite;rport\r\n\
+                 From: <sip:caller@{uac_addr}>;tag=handoff-caller\r\n\
+                 To: <sip:bridge@{destination}>\r\n\
+                 Call-ID: {INBOUND_TEST_CALL_ID}\r\n\
+                 CSeq: 1 INVITE\r\n\
+                 Max-Forwards: 70\r\n\
+                 Contact: <sip:caller@{uac_addr}>\r\n\
+                 Content-Type: application/sdp\r\n\
+                 Content-Length: {}\r\n\r\n\
+                 {body}",
+                body.len()
+            );
+            uac.send_to(invite.as_bytes(), &destination)
+                .await
+                .expect("send INVITE");
+            let connection_id = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let OrchestratorAdapterEvent::Public(AdapterEvent::InboundConnection {
+                        connection,
+                    }) = events.recv().await.expect("adapter event stream closed")
+                    {
+                        break connection.id.clone();
+                    }
+                }
+            })
+            .await
+            .expect("INVITE was not published for generic acceptance");
+            Self {
+                coordinator,
+                adapter,
+                events,
+                uac,
+                uac_addr,
+                destination,
+                connection_id,
+            }
+        }
+
+        /// Occupy every adapter event slot that is not already reserved.
+        fn fill_adapter_events(&self) {
+            while self.adapter.out_tx.capacity() > 0 {
+                self.adapter
+                    .out_tx
+                    .try_send(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
+                        kind: "backpressure-test-filler",
+                        detail: String::new(),
+                    }))
+                    .expect("fill adapter event queue");
+            }
+        }
+
+        /// The next final response the UAC receives, with its wire text.
+        async fn final_response(&self) -> (u16, String) {
+            use rvoip_sip_core::{parse_message, Message as SipMessage};
+
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut packet = [0_u8; 8_192];
+                loop {
+                    let (bytes, _) = self.uac.recv_from(&mut packet).await.expect("SIP response");
+                    let Ok(SipMessage::Response(response)) = parse_message(&packet[..bytes]) else {
+                        continue;
+                    };
+                    let status = response.status.as_u16();
+                    if status >= 200 {
+                        break (
+                            status,
+                            String::from_utf8_lossy(&packet[..bytes]).into_owned(),
+                        );
+                    }
+                }
+            })
+            .await
+            .expect("UAC received only provisional responses or timed out")
+        }
+
+        async fn send_request(&self, method: &str, sequence: u32, to: &str) {
+            let (destination, uac_addr) = (&self.destination, self.uac_addr);
+            let request = format!(
+                "{method} sip:bridge@{destination} SIP/2.0\r\n\
+                 Via: SIP/2.0/UDP {uac_addr};branch=z9hG4bK-handoff-{method}-{sequence};rport\r\n\
+                 From: <sip:caller@{uac_addr}>;tag=handoff-caller\r\n\
+                 {to}\r\n\
+                 Call-ID: {INBOUND_TEST_CALL_ID}\r\n\
+                 CSeq: {sequence} {method}\r\n\
+                 Max-Forwards: 70\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            self.uac
+                .send_to(request.as_bytes(), destination)
+                .await
+                .expect("send in-dialog request");
+        }
+
+        async fn wait_released(&mut self) {
+            let released = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    while self.events.try_recv().is_ok() {}
+                    if self.adapter.by_connection.is_empty()
+                        && self.adapter.by_session.is_empty()
+                        && self.adapter.streams_cache.is_empty()
+                        && self.coordinator.list_sessions().await.is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if released.is_err() {
+                panic!(
+                    "inbound call retained exact ownership: by_connection={}, by_session={}, streams={}, sessions={:?}",
+                    self.adapter.by_connection.len(),
+                    self.adapter.by_session.len(),
+                    self.adapter.streams_cache.len(),
+                    self.coordinator.list_sessions().await,
+                );
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn backpressured_inbound_accept_sends_503_before_answer_and_releases_resources() {
+        let mut call = InboundTestCall::start("adapter-backpressured-accept").await;
+        // A full handoff queue must reject the call before it is answered,
+        // not answer it and then lose its Connected event.
+        call.fill_adapter_events();
+        let adapter = Arc::clone(&call.adapter);
+        let connection_id = call.connection_id.clone();
+        let accepting = tokio::spawn(async move {
+            ConnectionAdapter::accept(adapter.as_ref(), connection_id).await
+        });
+        let (status, _) = call.final_response().await;
+        assert_eq!(
+            status, 503,
+            "a backpressured accept must not answer the call"
+        );
+        let accept = tokio::time::timeout(Duration::from_secs(5), accepting)
+            .await
+            .expect("backpressured accept exceeded its bounded failure path")
+            .expect("accept task");
+        assert!(
+            matches!(accept, Err(RvoipError::AdmissionRejected(_))),
+            "unexpected accept result: {accept:?}"
+        );
+        call.wait_released().await;
+        call.adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbound_accept_reserved_connected_survives_queue_fill_before_ack() {
+        reserved_inbound_handoff_then_hangup("adapter-reserved-handoff", false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbound_accept_reserved_connected_crossed_bye_reclaims_exact_call() {
+        reserved_inbound_handoff_then_hangup("adapter-reserved-crossed-bye", true).await;
+    }
+
+    async fn reserved_inbound_handoff_then_hangup(name: &str, crossed_bye: bool) {
+        let mut call = InboundTestCall::start(name).await;
+        let adapter = Arc::clone(&call.adapter);
+        let connection_id = call.connection_id.clone();
+        let mut accepting = tokio::spawn(async move {
+            ConnectionAdapter::accept(adapter.as_ref(), connection_id).await
+        });
+        let (status, answer) = call.final_response().await;
+        assert_eq!(status, 200);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut accepting)
+                .await
+                .is_err(),
+            "200 OK alone must not complete inbound establishment"
+        );
+        let to = answer
+            .lines()
+            .find(|line| line.to_ascii_lowercase().starts_with("to:"))
+            .expect("answer To header")
+            .trim_end_matches('\r')
+            .to_owned();
+        // The answer proves accept already holds its Connected slot. Fill the
+        // rest of the queue while the ACK is withheld, then establish.
+        call.fill_adapter_events();
+        call.send_request("ACK", 1, &to).await;
+        tokio::time::timeout(Duration::from_secs(5), accepting)
+            .await
+            .expect("accept must not wait for consumer capacity")
+            .expect("accept task")
+            .expect("accept succeeds");
+        let mut connected = 0;
+        while let Ok(event) = call.events.try_recv() {
+            if let OrchestratorAdapterEvent::Public(AdapterEvent::Connected { connection_id }) =
+                event
+            {
+                assert_eq!(connection_id, call.connection_id);
+                connected += 1;
+            }
+        }
+        assert_eq!(connected, 1, "exactly one establishment handoff");
+
+        let ending = if crossed_bye {
+            let session_id = call
+                .adapter
+                .lookup_session(&call.connection_id)
+                .expect("exact session before hangup");
+            let adapter = Arc::clone(&call.adapter);
+            let connection_id = call.connection_id.clone();
+            let ending = tokio::spawn(async move {
+                ConnectionAdapter::end(adapter.as_ref(), connection_id, EndReason::Normal).await
+            });
+            let local_bye = tokio::time::timeout(Duration::from_secs(5), async {
+                let mut packet = [0_u8; 8_192];
+                loop {
+                    let (bytes, _) = call.uac.recv_from(&mut packet).await.expect("local BYE");
+                    let wire = String::from_utf8_lossy(&packet[..bytes]).into_owned();
+                    if wire.starts_with("BYE ") {
+                        break wire;
+                    }
+                }
+            })
+            .await
+            .expect("server dispatched BYE");
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while call
+                    .coordinator
+                    .get_state(&session_id)
+                    .await
+                    .expect("state before peer BYE")
+                    != CallState::Terminating
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("local hangup committed Terminating");
+            // Cross the in-flight local BYE with the peer's own BYE, then
+            // confirm the local one.
+            call.send_request("BYE", 2, &to).await;
+            let headers = local_bye
+                .lines()
+                .filter(|line| {
+                    let name = line.split(':').next().unwrap_or("").to_ascii_lowercase();
+                    matches!(name.as_str(), "via" | "from" | "to" | "call-id" | "cseq")
+                })
+                .map(|line| line.trim_end_matches('\r'))
+                .collect::<Vec<_>>()
+                .join("\r\n");
+            let ok = format!("SIP/2.0 200 OK\r\n{headers}\r\nContent-Length: 0\r\n\r\n");
+            call.uac
+                .send_to(ok.as_bytes(), &call.destination)
+                .await
+                .expect("confirm local BYE");
+            Some(ending)
+        } else {
+            call.send_request("BYE", 2, &to).await;
+            None
+        };
+        call.wait_released().await;
+        if let Some(ending) = ending {
+            tokio::time::timeout(Duration::from_secs(5), ending)
+                .await
+                .expect("crossed hangup completion")
+                .expect("hangup task")
+                .expect("confirmed hangup succeeds");
+        }
+        call.adapter.shutdown().await.expect("adapter shutdown");
     }
 
     #[async_trait::async_trait]

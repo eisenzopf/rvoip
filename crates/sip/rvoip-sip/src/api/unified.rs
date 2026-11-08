@@ -92,6 +92,7 @@ use tokio::sync::{mpsc, RwLock};
 pub use rvoip_media_core::relay::controller::{
     AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
 };
+pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
 pub use rvoip_sip_dialog::api::RelUsage;
@@ -1176,12 +1177,24 @@ impl Default for ExactResponseDeadlineQueue {
 
 /// Single-writer owners for generation-scoped INFO and standalone REGISTER
 /// final responses.
+///
+/// `by_lifetime` indexes the transactions of session-scoped `entries` by
+/// session lifetime. Exact call teardown reads its lifetime's pending
+/// obligations one to three times; the index makes each read one shard lookup
+/// instead of a walk over every pending obligation of every call. An
+/// obligation's lifetime is fixed before it can register, so the index is
+/// maintained by `register` and `remove_owner` alone. Lock order: a
+/// `by_lifetime` guard may be held while reading `entries`, never the reverse.
 pub(crate) struct PendingExactResponseRegistry {
     entries: dashmap::DashMap<
         rvoip_sip_dialog::transaction::TransactionKey,
         Arc<crate::api::incoming::ExactResponseObligation>,
     >,
     retry_attempts: dashmap::DashMap<rvoip_sip_dialog::transaction::TransactionKey, u8>,
+    by_lifetime: dashmap::DashMap<
+        SessionRegistryHandle,
+        HashSet<rvoip_sip_dialog::transaction::TransactionKey>,
+    >,
     deadlines: StdMutex<ExactResponseDeadlineQueue>,
     changed: tokio::sync::Notify,
     fire_in_flight: Arc<AtomicUsize>,
@@ -1227,6 +1240,7 @@ impl Default for PendingExactResponseRegistry {
         Self {
             entries: dashmap::DashMap::new(),
             retry_attempts: dashmap::DashMap::new(),
+            by_lifetime: dashmap::DashMap::new(),
             deadlines: StdMutex::new(ExactResponseDeadlineQueue::default()),
             changed: tokio::sync::Notify::new(),
             fire_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -1283,7 +1297,18 @@ impl PendingExactResponseRegistry {
                 ExactResponseRegistration::Collision
             };
         }
+        let lifetime = obligation.lifecycle_handle().cloned();
+        // Insert into `entries` before indexing: a concurrent `remove_owner`
+        // of an earlier obligation for the same transaction then finds this
+        // one registered and keeps the index entry. `deadlines` is held, so a
+        // lifetime close cannot observe the gap between the two inserts.
         self.entries.insert(transaction.clone(), obligation);
+        if let Some(lifetime) = lifetime {
+            self.by_lifetime
+                .entry(lifetime)
+                .or_default()
+                .insert(transaction.clone());
+        }
         let previous = deadlines.deadlines.peek().map(|entry| entry.deadline);
         let deadline = Instant::now() + EXACT_RESPONSE_OWNER_DEADLINE;
         let sequence = deadlines.next_sequence;
@@ -1310,6 +1335,32 @@ impl PendingExactResponseRegistry {
             .is_some()
         {
             self.retry_attempts.remove(transaction);
+            if let Some(lifetime) = obligation.lifecycle_handle() {
+                self.unindex_lifetime(lifetime, transaction);
+            }
+        }
+    }
+
+    /// Drop `transaction` from `lifetime`'s index entry unless an obligation
+    /// of that lifetime has registered the transaction again.
+    fn unindex_lifetime(
+        &self,
+        lifetime: &SessionRegistryHandle,
+        transaction: &rvoip_sip_dialog::transaction::TransactionKey,
+    ) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut transactions) =
+            self.by_lifetime.entry(lifetime.clone())
+        {
+            let registered_again = self
+                .entries
+                .get(transaction)
+                .is_some_and(|current| current.lifecycle_handle() == Some(lifetime));
+            if !registered_again {
+                transactions.get_mut().remove(transaction);
+            }
+            if transactions.get().is_empty() {
+                transactions.remove();
+            }
         }
     }
 
@@ -1443,8 +1494,12 @@ impl PendingExactResponseRegistry {
         &self,
         handle: &SessionRegistryHandle,
     ) -> Vec<Arc<crate::api::incoming::ExactResponseObligation>> {
-        self.entries
+        let Some(transactions) = self.by_lifetime.get(handle) else {
+            return Vec::new();
+        };
+        transactions
             .iter()
+            .filter_map(|transaction| self.entries.get(transaction))
             .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
             .map(|entry| Arc::clone(entry.value()))
             .collect()
@@ -1538,6 +1593,7 @@ impl PendingExactResponseRegistry {
     fn clear(&self) {
         self.entries.clear();
         self.retry_attempts.clear();
+        self.by_lifetime.clear();
         let mut deadlines = self
             .deadlines
             .lock()
@@ -1554,6 +1610,7 @@ impl PendingExactResponseRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         serde_json::json!({
             "pending_obligations": self.entries.len(),
+            "indexed_lifetimes": self.by_lifetime.len(),
             "retry_attempts": self.retry_attempts.len(),
             "pending_deadlines": deadlines.deadlines.len(),
             "closing_lifetimes": deadlines.closing_lifetimes.len(),
@@ -2811,6 +2868,17 @@ pub struct Config {
     /// Media-core controller pool and capacity tuning for SIP media calls.
     pub media_session_controller_config: MediaSessionControllerConfig,
 
+    /// Layout of the process-wide media executor (shared lanes and their
+    /// worker threads, or dedicated single-threaded lanes, optionally pinned
+    /// to CPUs); `None` leaves it at the default single shared lane.
+    ///
+    /// The media executor is shared by every coordinator in the process and
+    /// starts on first use, so the layout is installed when the coordinator
+    /// is created: before the first call. A coordinator whose layout differs
+    /// from the one already in effect fails to start with a configuration
+    /// error. See [`MediaRuntimeConfig`].
+    pub media_runtime: Option<MediaRuntimeConfig>,
+
     /// STUN server (RFC 8489 §14) used to discover each RTP socket's exact
     /// public mapping before its SDP is rendered. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
@@ -3066,6 +3134,19 @@ pub struct Config {
     /// tying that memory reservation to the larger event-queue capacities.
     pub server_call_capacity: Option<usize>,
 
+    /// Concurrent calls the `SipAdapter` event handoff is sized for.
+    ///
+    /// While an inbound call is answered and awaits its ACK, the adapter
+    /// reserves one event slot for its `Connected` handoff; a call that
+    /// finds no free slot is rejected with `503` before it is answered.
+    /// `None` keeps the default queue of 256 events and 4096 pending inbound
+    /// observations. When set, the queue holds two events per call and the
+    /// pending observations one per call, never fewer than those defaults.
+    /// Servers that answer more than about 128 calls at once should set this
+    /// to their expected concurrent call count. Valid values are 1 to
+    /// [`Config::MAX_SIP_ADAPTER_CALL_CAPACITY`].
+    pub sip_adapter_call_capacity: Option<usize>,
+
     /// Maximum active, quarantined, and retired SIP lifecycle records retained
     /// by the session authority.
     ///
@@ -3310,6 +3391,7 @@ impl std::fmt::Debug for Config {
                 &self.global_event_channel_capacity,
             )
             .field("server_call_capacity", &self.server_call_capacity)
+            .field("sip_adapter_call_capacity", &self.sip_adapter_call_capacity)
             .field(
                 "server_retained_lifecycle_capacity",
                 &self.server_retained_lifecycle_capacity,
@@ -3318,6 +3400,7 @@ impl std::fmt::Debug for Config {
                 "server_call_admission_limit",
                 &self.server_call_admission_limit,
             )
+            .field("media_runtime", &self.media_runtime)
             .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
             .field(
                 "sip_transaction_timing_diagnostics",
@@ -3353,6 +3436,9 @@ impl Config {
     /// transaction defaults so ordinary client/server apps do not reserve a
     /// large broadcast ring unless they opt into a high-CPS profile.
     pub const DEFAULT_APP_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+    /// Largest accepted [`Config::sip_adapter_call_capacity`].
+    pub const MAX_SIP_ADAPTER_CALL_CAPACITY: usize = 131_072;
 
     /// Default per-transaction command channel capacity.
     pub const DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize =
@@ -3477,6 +3563,7 @@ impl Config {
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
+            media_runtime: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -3504,6 +3591,7 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
+            sip_adapter_call_capacity: None,
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -3613,6 +3701,7 @@ impl Config {
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
+            media_runtime: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -3640,6 +3729,7 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
+            sip_adapter_call_capacity: None,
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -4362,6 +4452,13 @@ impl Config {
         self
     }
 
+    /// Size the `SipAdapter` event handoff for `calls` concurrent calls.
+    /// See [`Config::sip_adapter_call_capacity`].
+    pub fn with_sip_adapter_call_capacity(mut self, calls: usize) -> Self {
+        self.sip_adapter_call_capacity = Some(calls);
+        self
+    }
+
     /// Set the bound for active and retained SIP lifecycle records.
     ///
     /// Configure [`Config::server_call_capacity`] as well. The retained bound
@@ -4697,6 +4794,34 @@ impl Config {
         self.rtp_session_buffer_config = config.rtp_session_buffer_config;
         self.rtp_transport_buffer_config = config.rtp_transport_buffer_config;
         self.media_session_controller_config = config;
+        self
+    }
+
+    /// Lay out the process-wide media executor, for example to split its
+    /// worker threads into several independent lanes on a large host, or to
+    /// run one single-threaded lane per core.
+    ///
+    /// ```
+    /// use rvoip_sip::{Config, MediaLanes, MediaRuntimeConfig};
+    ///
+    /// let config = Config::local("alice", 5060).with_media_runtime(MediaRuntimeConfig::new(
+    ///     MediaLanes::Shared {
+    ///         worker_threads: Some(16),
+    ///         lanes: 4,
+    ///     },
+    /// ));
+    /// config.validate().unwrap();
+    ///
+    /// // One dedicated lane on each of CPUs 1 to 7.
+    /// let config = Config::local("alice", 5060)
+    ///     .with_media_runtime(MediaRuntimeConfig::new(MediaLanes::pinned(1..8)));
+    /// config.validate().unwrap();
+    /// ```
+    ///
+    /// `rvoip_rtp_core::host_plan::ExecutorPlan::media_runtime_config` derives
+    /// a dedicated layout from the cores of the host.
+    pub fn with_media_runtime(mut self, config: MediaRuntimeConfig) -> Self {
+        self.media_runtime = Some(config);
         self
     }
 
@@ -5431,6 +5556,14 @@ impl Config {
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
+        if let Some(calls) = self.sip_adapter_call_capacity {
+            if calls == 0 || calls > Self::MAX_SIP_ADAPTER_CALL_CAPACITY {
+                return Err(SessionError::ConfigError(format!(
+                    "sip_adapter_call_capacity must be between 1 and {} when set",
+                    Self::MAX_SIP_ADAPTER_CALL_CAPACITY
+                )));
+            }
+        }
         if matches!(self.server_retained_lifecycle_capacity, Some(0)) {
             return Err(SessionError::ConfigError(
                 "server_retained_lifecycle_capacity must be at least 1 when set".to_string(),
@@ -5507,6 +5640,11 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "rtp_session_buffer_config.event_channel_capacity must be at least 1".to_string(),
             ));
+        }
+        if let Some(media_runtime) = &self.media_runtime {
+            media_runtime
+                .validate()
+                .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
         }
         if self.rtp_transport_buffer_config.event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
@@ -6399,6 +6537,7 @@ mod config_tests {
         assert_eq!(drained_scheduler["accepting"], false);
         let drained_responses = coordinator.pending_exact_responses.perf_diagnostic_counts();
         assert_eq!(drained_responses["pending_obligations"], 0);
+        assert_eq!(drained_responses["indexed_lifetimes"], 0);
         assert_eq!(drained_responses["pending_deadlines"], 0);
         assert_eq!(drained_responses["fire_in_flight"], 0);
         assert_eq!(drained_responses["accepting"], false);
@@ -6625,6 +6764,273 @@ mod config_tests {
             registry.register(stale),
             ExactResponseRegistration::Closed
         ));
+    }
+
+    fn exact_response_transaction(label: &str) -> rvoip_sip_dialog::transaction::TransactionKey {
+        rvoip_sip_dialog::transaction::TransactionKey::new(
+            label.to_string(),
+            rvoip_sip_core::Method::Info,
+            true,
+        )
+    }
+
+    /// Reference answer: the full scan of `entries` the index replaces.
+    fn scanned_lifetime(
+        registry: &PendingExactResponseRegistry,
+        handle: &crate::session_registry::SessionRegistryHandle,
+    ) -> Vec<usize> {
+        let mut owners = registry
+            .entries
+            .iter()
+            .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
+            .map(|entry| Arc::as_ptr(entry.value()) as usize)
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners
+    }
+
+    fn indexed_lifetime(
+        registry: &PendingExactResponseRegistry,
+        handle: &crate::session_registry::SessionRegistryHandle,
+    ) -> Vec<usize> {
+        let mut owners = registry
+            .snapshot_lifetime(handle)
+            .iter()
+            .map(|owner| Arc::as_ptr(owner) as usize)
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners
+    }
+
+    /// `snapshot_lifetime` equals the scan for every lifetime, and
+    /// `by_lifetime` holds exactly the session-scoped transactions of
+    /// `entries`, each under its own lifetime, with no empty sets.
+    fn assert_lifetime_index_matches_scan(
+        registry: &PendingExactResponseRegistry,
+        handles: &[crate::session_registry::SessionRegistryHandle],
+    ) {
+        for handle in handles {
+            assert_eq!(
+                indexed_lifetime(registry, handle),
+                scanned_lifetime(registry, handle)
+            );
+        }
+        let mut indexed = std::collections::HashSet::new();
+        for entry in registry.by_lifetime.iter() {
+            assert!(!entry.value().is_empty(), "empty lifetime sets are removed");
+            for transaction in entry.value() {
+                let owner = registry.entries.get(transaction).expect("indexed entry");
+                assert_eq!(owner.lifecycle_handle(), Some(entry.key()));
+                assert!(indexed.insert(transaction.clone()));
+            }
+        }
+        let session_scoped = registry
+            .entries
+            .iter()
+            .filter(|entry| entry.value().lifecycle_handle().is_some())
+            .map(|entry| entry.key().clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(indexed, session_scoped);
+    }
+
+    #[tokio::test]
+    async fn exact_response_by_lifetime_index_follows_register_remove_rekey_and_clear() {
+        let store = Arc::new(SessionStore::new());
+        let registry = PendingExactResponseRegistry::default();
+        registry.attach_session_store(&store);
+        let mut handles = Vec::new();
+        for name in ["by-lifetime-a", "by-lifetime-b"] {
+            let session_id = SessionId(name.to_string());
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact response owner");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("capture exact response owner"),
+            );
+        }
+        let register = |handle: &crate::session_registry::SessionRegistryHandle, label: &str| {
+            let owner = Arc::new(ExactResponseObligation::new(
+                handle.session_id().clone(),
+                exact_response_transaction(label),
+            ));
+            assert!(owner.bind_lifecycle_handle(handle));
+            assert!(matches!(
+                registry.register(Arc::clone(&owner)),
+                ExactResponseRegistration::Registered
+            ));
+            owner
+        };
+
+        let a1 = register(&handles[0], "z9hG4bK-by-lifetime-a1");
+        let a2 = register(&handles[0], "z9hG4bK-by-lifetime-a2");
+        let b1 = register(&handles[1], "z9hG4bK-by-lifetime-b1");
+        let standalone = Arc::new(ExactResponseObligation::new_standalone(
+            exact_response_transaction("z9hG4bK-by-lifetime-standalone"),
+            503,
+        ));
+        assert!(matches!(
+            registry.register(Arc::clone(&standalone)),
+            ExactResponseRegistration::Registered
+        ));
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
+        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 1);
+        assert_eq!(
+            registry.by_lifetime.len(),
+            2,
+            "standalone owners are not indexed"
+        );
+
+        // Re-registering the same owner is idempotent; a different owner for
+        // a registered transaction collides and leaves the index alone.
+        assert!(matches!(
+            registry.register(Arc::clone(&a1)),
+            ExactResponseRegistration::Registered
+        ));
+        let impostor = Arc::new(ExactResponseObligation::new(
+            handles[0].session_id().clone(),
+            a1.transaction().clone(),
+        ));
+        assert!(impostor.bind_lifecycle_handle(&handles[0]));
+        assert!(matches!(
+            registry.register(Arc::clone(&impostor)),
+            ExactResponseRegistration::Collision
+        ));
+        registry.remove_owner(impostor.as_ref());
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
+
+        // Removing one owner leaves its lifetime's others indexed.
+        registry.remove_owner(a1.as_ref());
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 1);
+
+        // Re-key: a new owner for a removed transaction is indexed again.
+        let a1_again = register(&handles[0], "z9hG4bK-by-lifetime-a1");
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
+
+        // The same transaction re-registered under another lifetime moves
+        // to that lifetime's index entry.
+        registry.remove_owner(a1_again.as_ref());
+        registry.remove_owner(a2.as_ref());
+        assert!(registry.by_lifetime.get(&handles[0]).is_none());
+        let moved = register(&handles[1], "z9hG4bK-by-lifetime-a1");
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert!(registry.snapshot_lifetime(&handles[0]).is_empty());
+        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 2);
+
+        registry.remove_owner(moved.as_ref());
+        registry.remove_owner(b1.as_ref());
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert!(
+            registry.by_lifetime.is_empty(),
+            "the index empties with its entries"
+        );
+        assert_eq!(registry.len(), 1, "only the standalone owner remains");
+
+        // Teardown clears the index with the entries.
+        let b2 = register(&handles[1], "z9hG4bK-by-lifetime-b2");
+        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 1);
+        registry.clear();
+        assert!(registry.by_lifetime.is_empty());
+        assert!(registry.snapshot_lifetime(&handles[1]).is_empty());
+        registry.remove_owner(b2.as_ref());
+        registry.remove_owner(standalone.as_ref());
+        assert!(registry.by_lifetime.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_response_lifetime_snapshot_visits_only_that_lifetimes_obligations() {
+        let store = Arc::new(SessionStore::new());
+        let registry = PendingExactResponseRegistry::default();
+        registry.attach_session_store(&store);
+        let mut handles = Vec::new();
+        for index in 0..256 {
+            let session_id = SessionId(format!("by-lifetime-scale-{index}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact response owner");
+            let handle = store
+                .lifecycle_handle(&session_id)
+                .expect("capture exact response owner");
+            let owner = Arc::new(ExactResponseObligation::new(
+                session_id,
+                exact_response_transaction(&format!("z9hG4bK-by-lifetime-scale-{index}")),
+            ));
+            assert!(owner.bind_lifecycle_handle(&handle));
+            assert!(matches!(
+                registry.register(owner),
+                ExactResponseRegistration::Registered
+            ));
+            handles.push(handle);
+        }
+
+        // One lifetime's snapshot walks its own index entry (one transaction)
+        // regardless of the 256 pending obligations.
+        assert_eq!(registry.len(), 256);
+        for handle in [&handles[0], &handles[255]] {
+            assert_eq!(registry.by_lifetime.get(handle).expect("indexed").len(), 1);
+            assert_eq!(registry.snapshot_lifetime(handle).len(), 1);
+        }
+        assert_lifetime_index_matches_scan(&registry, &handles);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exact_response_lifetime_index_survives_concurrent_register_and_remove() {
+        let store = Arc::new(SessionStore::new());
+        let registry = Arc::new(PendingExactResponseRegistry::default());
+        registry.attach_session_store(&store);
+        let mut handles = Vec::new();
+        for name in ["by-lifetime-race-a", "by-lifetime-race-b"] {
+            let session_id = SessionId(name.to_string());
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact response owner");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("capture exact response owner"),
+            );
+        }
+        // Workers share two transactions across both lifetimes, so a removal
+        // races re-registration of its transaction by the same and by the
+        // other lifetime.
+        let mut workers = Vec::new();
+        for worker in 0..8usize {
+            let registry = Arc::clone(&registry);
+            let handle = handles[(worker / 2) % 2].clone();
+            workers.push(tokio::spawn(async move {
+                let transaction =
+                    exact_response_transaction(&format!("z9hG4bK-by-lifetime-race-{}", worker % 2));
+                for _ in 0..500 {
+                    let owner = Arc::new(ExactResponseObligation::new(
+                        handle.session_id().clone(),
+                        transaction.clone(),
+                    ));
+                    assert!(owner.bind_lifecycle_handle(&handle));
+                    if matches!(
+                        registry.register(Arc::clone(&owner)),
+                        ExactResponseRegistration::Registered
+                    ) {
+                        tokio::task::yield_now().await;
+                        registry.remove_owner(owner.as_ref());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for worker in workers {
+            worker.await.expect("worker");
+        }
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.len(), 0);
+        assert!(registry.by_lifetime.is_empty());
     }
 
     #[test]
@@ -9735,6 +10141,11 @@ impl UnifiedCoordinator {
                     .to_string(),
             ));
         }
+        if let Some(media_runtime) = config.media_runtime.clone() {
+            // Before any media task or transport starts the shared executor.
+            rvoip_rtp_core::task_runtime::install_media_runtime_config(media_runtime)
+                .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
+        }
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_transaction_timing_enabled(
@@ -10202,6 +10613,10 @@ impl UnifiedCoordinator {
 
     pub(crate) fn fast_auto_accept_incoming_calls(&self) -> bool {
         self.config.fast_auto_accept_incoming_calls
+    }
+
+    pub(crate) fn sip_adapter_call_capacity(&self) -> Option<usize> {
+        self.config.sip_adapter_call_capacity
     }
 
     pub(crate) async fn claim_session_control_events(

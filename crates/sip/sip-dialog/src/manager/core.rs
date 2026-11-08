@@ -4206,12 +4206,28 @@ impl DialogManager {
     }
 
     /// Store dialog mapping for incoming call
+    ///
+    /// The request is not used; [`Self::store_incoming_call_mapping`] stores
+    /// the same mapping without requiring the caller to copy it.
     pub fn store_dialog_mapping(
         &self,
         session_id: &str,
         dialog_id: DialogId,
         transaction_id: TransactionKey,
         _request: rvoip_sip_core::Request,
+        source: SocketAddr,
+    ) {
+        self.store_incoming_call_mapping(session_id, dialog_id, transaction_id, source);
+    }
+
+    /// Store the session, dialog and transaction mapping for an incoming
+    /// call. Same effect as [`Self::store_dialog_mapping`], without the
+    /// unused request argument.
+    pub(crate) fn store_incoming_call_mapping(
+        &self,
+        session_id: &str,
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
         source: SocketAddr,
     ) {
         // A wildcard Contact is useful while a UAC is binding its socket, but

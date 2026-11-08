@@ -372,21 +372,24 @@ struct OperationalEventStreamHealthState {
     updates: watch::Sender<OperationalEventStreamHealth>,
 }
 
-pub(crate) struct OperationalSendGuard<'a> {
-    stream: &'a OperationalEventStream,
+/// Owns the stream health rather than borrowing the stream, so an armed guard
+/// can move into a supervised task that completes a publication on behalf of
+/// a caller that may be cancelled.
+pub(crate) struct OperationalSendGuard {
+    health: Arc<OperationalEventStreamHealthState>,
     armed: bool,
 }
 
-impl OperationalSendGuard<'_> {
+impl OperationalSendGuard {
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for OperationalSendGuard<'_> {
+impl Drop for OperationalSendGuard {
     fn drop(&mut self) {
         if self.armed {
-            self.stream
+            self.health
                 .mark_degraded(OperationalEventStreamFailure::DeliveryCancelled);
         }
     }
@@ -462,9 +465,9 @@ impl OperationalEventStream {
     /// authoritative event was owed). Dropping an armed guard permanently
     /// degrades the stream so cancellation cannot erase a lifecycle outcome
     /// while leaving the process apparently healthy.
-    pub(crate) fn delivery_guard(&self) -> OperationalSendGuard<'_> {
+    pub(crate) fn delivery_guard(&self) -> OperationalSendGuard {
         OperationalSendGuard {
-            stream: self,
+            health: Arc::clone(&self.health),
             armed: true,
         }
     }
@@ -486,9 +489,22 @@ impl OperationalEventStream {
         let mut cancellation_guard = self.delivery_guard();
         // Reserve bounded capacity before assigning the global sequence. A
         // cancelled waiter therefore cannot create a visible sequence gap.
-        let permit = match self.sender.reserve().await {
+        //
+        // Callers usually hold the global publication-order lock. Even with
+        // free capacity, `reserve().await` can return `Pending` once the task
+        // has spent its cooperative budget, which would park every other
+        // connection's publication behind this one. Take available capacity
+        // without suspending; only a full stream waits, under the same guard.
+        let permit = match self.sender.try_reserve() {
             Ok(permit) => permit,
-            Err(_) => {
+            Err(mpsc::error::TrySendError::Full(())) => match self.sender.reserve().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    self.mark_degraded(OperationalEventStreamFailure::SendFailed);
+                    return false;
+                }
+            },
+            Err(mpsc::error::TrySendError::Closed(())) => {
                 self.mark_degraded(OperationalEventStreamFailure::SendFailed);
                 return false;
             }
@@ -559,6 +575,41 @@ mod tests {
             assert!(!debug.contains(secret));
             assert!(debug.contains("[redacted]"));
         }
+    }
+
+    #[tokio::test]
+    async fn available_publication_does_not_yield_with_exhausted_cooperative_budget() {
+        use std::future::Future;
+        use std::task::Poll;
+
+        let (stream, mut receiver) = OperationalEventStream::new(2);
+        std::future::poll_fn(|cx| {
+            // Model a busy adapter task that enters publication, holding the
+            // global order lock, after consuming its scheduling budget.
+            let mut exhausted = false;
+            for _ in 0..1024 {
+                let mut consume = std::pin::pin!(tokio::task::consume_budget());
+                if consume.as_mut().poll(cx).is_pending() {
+                    exhausted = true;
+                    break;
+                }
+            }
+            assert!(exhausted, "test must reach the cooperative yield boundary");
+            let mut send = std::pin::pin!(stream.send(
+                ConnectionId::new(),
+                Transport::Sip,
+                Utc::now(),
+                OperationalEventKind::Connected,
+            ));
+            assert!(
+                matches!(send.as_mut().poll(cx), Poll::Ready(true)),
+                "available publication must not suspend the order-lock holder"
+            );
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(receiver.try_recv().unwrap().sequence, 1);
+        assert_eq!(stream.health(), OperationalEventStreamHealth::Healthy);
     }
 
     #[tokio::test]
