@@ -92,6 +92,7 @@ use tokio::sync::{mpsc, RwLock};
 pub use rvoip_media_core::relay::controller::{
     AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
 };
+pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
 pub use rvoip_sip_dialog::api::RelUsage;
@@ -2768,6 +2769,16 @@ pub struct Config {
     /// Media-core controller pool and capacity tuning for SIP media calls.
     pub media_session_controller_config: MediaSessionControllerConfig,
 
+    /// Layout of the process-wide media executor (its lanes and worker
+    /// threads); `None` leaves it at the default single lane.
+    ///
+    /// The media executor is shared by every coordinator in the process and
+    /// starts on first use, so the layout is installed when the coordinator
+    /// is created: before the first call. A coordinator whose layout differs
+    /// from the one already in effect fails to start with a configuration
+    /// error. See [`MediaRuntimeConfig`].
+    pub media_runtime: Option<MediaRuntimeConfig>,
+
     /// STUN server (RFC 8489 §14) used to discover each RTP socket's exact
     /// public mapping before its SDP is rendered. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
@@ -3274,6 +3285,7 @@ impl std::fmt::Debug for Config {
                 "server_call_admission_limit",
                 &self.server_call_admission_limit,
             )
+            .field("media_runtime", &self.media_runtime)
             .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
             .field(
                 "sip_transaction_timing_diagnostics",
@@ -3430,6 +3442,7 @@ impl Config {
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
+            media_runtime: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -3563,6 +3576,7 @@ impl Config {
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
+            media_runtime: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -4650,6 +4664,25 @@ impl Config {
         self
     }
 
+    /// Lay out the process-wide media executor, for example to split its
+    /// worker threads into several independent lanes on a large host.
+    ///
+    /// ```
+    /// use rvoip_sip::{Config, MediaLanes, MediaRuntimeConfig};
+    ///
+    /// let config = Config::local("alice", 5060).with_media_runtime(MediaRuntimeConfig::new(
+    ///     MediaLanes::Shared {
+    ///         worker_threads: Some(16),
+    ///         lanes: 4,
+    ///     },
+    /// ));
+    /// config.validate().unwrap();
+    /// ```
+    pub fn with_media_runtime(mut self, config: MediaRuntimeConfig) -> Self {
+        self.media_runtime = Some(config);
+        self
+    }
+
     /// Enable or disable real media-core RTP allocation.
     ///
     /// Disabling media switches to [`MediaMode::SignalingOnly`] with SDP port
@@ -5450,6 +5483,11 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "rtp_session_buffer_config.event_channel_capacity must be at least 1".to_string(),
             ));
+        }
+        if let Some(media_runtime) = &self.media_runtime {
+            media_runtime
+                .validate()
+                .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
         }
         if self.rtp_transport_buffer_config.event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
@@ -9677,6 +9715,11 @@ impl UnifiedCoordinator {
                 "SIP listener mTLS fingerprint mappings require transport-level TLS client-certificate verification"
                     .to_string(),
             ));
+        }
+        if let Some(media_runtime) = config.media_runtime.clone() {
+            // Before any media task or transport starts the shared executor.
+            rvoip_rtp_core::task_runtime::install_media_runtime_config(media_runtime)
+                .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
         }
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
