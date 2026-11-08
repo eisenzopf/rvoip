@@ -4658,17 +4658,31 @@ async fn terminal_core_cleanup_precedes_blocked_operational_publication() {
     })
     .await
     .expect("terminal core state was removed before publication capacity opened");
-    assert!(!terminal.is_finished());
+    // The fallback acknowledges retirement and supervised cleanup ownership;
+    // the adapter translator does not wait for publication capacity.
+    tokio::time::timeout(Duration::from_secs(1), terminal)
+        .await
+        .expect("terminal fallback returned while publication was blocked")
+        .unwrap();
+    assert_eq!(
+        operational.len(),
+        1,
+        "terminal publication waits for capacity"
+    );
 
     assert!(matches!(
         operational.recv().await.unwrap().kind,
         OperationalEventKind::Dtmf { .. }
     ));
-    terminal.await.unwrap();
-    assert!(matches!(
-        operational.recv().await.unwrap().kind,
-        OperationalEventKind::Ended { .. }
-    ));
+    let terminal = tokio::time::timeout(Duration::from_secs(1), operational.recv())
+        .await
+        .expect("supervised terminal publication completed")
+        .unwrap();
+    assert!(matches!(terminal.kind, OperationalEventKind::Ended { .. }));
+    assert_eq!(
+        orchestrator.operational_event_stream_health(),
+        OperationalEventStreamHealth::Healthy
+    );
 }
 
 #[tokio::test]
