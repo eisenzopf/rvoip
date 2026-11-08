@@ -5050,6 +5050,21 @@ impl ConnectionAdapter for SipAdapter {
                     .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?,
             )
         };
+        // Subscribe before the 200 OK can reach the peer: its ACK may commit
+        // before accept returns, and the watch retains that committed state.
+        let mut inbound_states = match inbound_epoch.as_ref() {
+            Some(epoch) => Some(
+                self.coordinator
+                    .subscribe_call_state_exact(epoch.admitted_handle().ok_or(
+                        RvoipError::InvalidState(
+                            "SIP inbound route has no exact lifecycle authority",
+                        ),
+                    )?)
+                    .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?,
+            ),
+            None => None,
+        };
+        let mut draining = self.translator_cancel.subscribe();
         let session_id = inbound_epoch
             .as_ref()
             .map(|epoch| epoch.session_id.clone())
@@ -5106,16 +5121,25 @@ impl ConnectionAdapter for SipAdapter {
         // event is emitted for an inbound ACK. Waiting here keeps that
         // protocol distinction out of the public event stream and lets the
         // adapter publish exactly the transport-neutral Connected event at
-        // the real establishment boundary.
-        let deadline = Instant::now() + self.coordinator.setup_teardown_timeout_duration();
+        // the real establishment boundary. The wait wakes on committed
+        // call-state changes of this exact lifetime, drain, or the deadline,
+        // instead of polling the session map every 10 ms.
+        let Some(states) = inbound_states.as_mut() else {
+            return Err(RvoipError::InvalidState(
+                "SIP inbound route has no exact lifecycle authority",
+            ));
+        };
+        let deadline = tokio::time::sleep(self.coordinator.setup_teardown_timeout_duration());
+        tokio::pin!(deadline);
         loop {
             if self.draining.load(Ordering::Acquire) {
                 return Err(RvoipError::AdmissionRejected(
                     "SIP adapter began draining while an inbound accept awaited ACK",
                 ));
             }
-            match self.coordinator.get_state(&session_id).await {
-                Ok(CallState::Active | CallState::Bridged) => {
+            let state = *states.borrow_and_update();
+            match state {
+                Some(CallState::Active | CallState::Bridged) => {
                     let epoch = self
                         .existing_mapped_epoch(&session_id)
                         .filter(|epoch| epoch.connection_id == conn)
@@ -5137,23 +5161,32 @@ impl ConnectionAdapter for SipAdapter {
                     ));
                     return Ok(());
                 }
-                Ok(state) if state.is_final() || state == CallState::Terminating => {
+                Some(state) if state.is_final() || state == CallState::Terminating => {
                     return Err(RvoipError::InvalidState(
                         "SIP inbound session ended before ACK establishment",
                     ));
                 }
-                Ok(_) => {}
-                Err(_) if self.lookup_session(&conn).is_err() => {
-                    return Err(RvoipError::ConnectionNotFound(conn));
+                Some(_) => {}
+                // The exact lifetime was removed.
+                None => return Err(RvoipError::ConnectionNotFound(conn)),
+            }
+            tokio::select! {
+                changed = states.changed() => {
+                    if changed.is_err() {
+                        return Err(RvoipError::ConnectionNotFound(conn));
+                    }
                 }
-                Err(_) => {}
+                _ = draining.changed() => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP adapter began draining while an inbound accept awaited ACK",
+                    ));
+                }
+                () = &mut deadline => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP inbound accept timed out awaiting ACK",
+                    ));
+                }
             }
-            if Instant::now() >= deadline {
-                return Err(RvoipError::AdmissionRejected(
-                    "SIP inbound accept timed out awaiting ACK",
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 

@@ -906,6 +906,10 @@ pub(crate) struct SessionStateCell {
     /// control. Keeping it on the cell makes raw-ID reuse allocate a distinct
     /// lane and lets ordinary sessions pay only for an empty `OnceLock`.
     hangup_control: OnceLock<Arc<SessionHangupControl>>,
+    /// Committed call-state changes of this exact lifetime, allocated only
+    /// when something waits for one (an inbound accept awaiting its ACK).
+    /// Revisions that leave the call state unchanged wake nobody.
+    call_state_updates: OnceLock<tokio::sync::watch::Sender<Option<CallState>>>,
 }
 
 impl SessionStateCell {
@@ -915,6 +919,7 @@ impl SessionStateCell {
             update_lock: StdMutex::new(()),
             state_machine_lane: OnceLock::new(),
             hangup_control: OnceLock::new(),
+            call_state_updates: OnceLock::new(),
         }
     }
 
@@ -933,6 +938,38 @@ impl SessionStateCell {
             self.hangup_control
                 .get_or_init(|| Arc::new(SessionHangupControl::new())),
         )
+    }
+
+    /// Subscribe to committed call-state changes. Call with `lock_update`
+    /// held, so the initial value cannot be a revision that a failed
+    /// lifecycle commit later rolls back.
+    pub(crate) fn subscribe_call_state(&self) -> tokio::sync::watch::Receiver<Option<CallState>> {
+        self.call_state_updates
+            .get_or_init(|| tokio::sync::watch::channel(Some(self.snapshot().call_state)).0)
+            .subscribe()
+    }
+
+    /// Wake call-state subscribers after a lifecycle commit succeeded, with
+    /// `lock_update` still held. Never call this from `publish`: a published
+    /// revision can still roll back.
+    pub(crate) fn notify_call_state_committed(&self, state: CallState) {
+        if let Some(updates) = self.call_state_updates.get() {
+            updates.send_if_modified(|previous| {
+                if *previous == Some(state) {
+                    false
+                } else {
+                    *previous = Some(state);
+                    true
+                }
+            });
+        }
+    }
+
+    /// Tell call-state subscribers this lifetime is gone.
+    pub(crate) fn close_call_state_updates(&self) {
+        if let Some(updates) = self.call_state_updates.get() {
+            updates.send_replace(None);
+        }
     }
 
     pub(crate) fn state_machine_lane(&self) -> Arc<tokio::sync::Mutex<()>> {

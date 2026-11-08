@@ -14073,6 +14073,17 @@ impl UnifiedCoordinator {
         self.helpers.get_state(session_id).await
     }
 
+    /// Committed call-state changes of one exact session lifetime.
+    pub(crate) fn subscribe_call_state_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Option<tokio::sync::watch::Receiver<Option<CallState>>> {
+        self.helpers
+            .state_machine
+            .store
+            .subscribe_call_state_exact(handle)
+    }
+
     pub(crate) async fn get_state_exact(
         &self,
         handle: &SessionRegistryHandle,
