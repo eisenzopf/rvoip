@@ -1787,6 +1787,34 @@ impl MediaAdapter {
         Ok(exact)
     }
 
+    /// Fuse the reader of `session_id`'s decoded-audio channel (the one
+    /// registered by [`Self::subscribe_to_audio_frames`]) onto the dialog's
+    /// RTP socket owner (media executor v2). The consumer is handed back when
+    /// the session has no current media lifetime or no subscription, or the
+    /// controller refuses (v1, non-G.711, not inline).
+    pub(crate) fn install_inline_audio_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer: Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
+        backlog: &mut dyn FnMut() -> Option<AudioFrame>,
+    ) -> std::result::Result<
+        rvoip_media_core::relay::controller::InlineAudioConsumerGuard,
+        Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
+    > {
+        let Some(exact) = self.current_media(session_id) else {
+            return Err(consumer);
+        };
+        let Some(channel) = self
+            .audio_receivers
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return Err(consumer);
+        };
+        self.controller
+            .install_inline_audio_consumer(&exact.dialog_id, &channel, consumer, backlog)
+    }
+
     fn media_is_still_exact(&self, expected: &ExactMediaSession) -> bool {
         self.media_for_handle_exact(&expected.handle)
             .is_some_and(|current| {

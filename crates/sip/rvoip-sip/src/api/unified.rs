@@ -14122,6 +14122,22 @@ impl UnifiedCoordinator {
             .await
     }
 
+    /// Fuse the reader of `session_id`'s decoded-audio channel onto the RTP
+    /// socket owner (media executor v2; see
+    /// `MediaAdapter::install_inline_audio_consumer`).
+    pub(crate) fn install_inline_audio_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer: Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
+        backlog: &mut dyn FnMut() -> Option<AudioFrame>,
+    ) -> std::result::Result<
+        rvoip_media_core::relay::controller::InlineAudioConsumerGuard,
+        Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
+    > {
+        self.media_adapter
+            .install_inline_audio_consumer(session_id, consumer, backlog)
+    }
+
     pub(crate) async fn subscribe_to_audio_exact(
         &self,
         handle: &SessionRegistryHandle,

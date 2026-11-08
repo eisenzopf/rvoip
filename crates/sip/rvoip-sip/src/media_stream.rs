@@ -30,7 +30,8 @@ use rvoip_core::connection::Direction;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{
-    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+    InboundFrameSink, MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot,
+    StreamKind,
 };
 use rvoip_core_traits::peer_media::PeerMediaFrame;
 
@@ -450,6 +451,23 @@ struct SipMediaStreamInner {
     /// `None` until the first report, so a caller can tell "no measurement
     /// yet" from "measured, and it is fine".
     last_quality: Mutex<Option<QualitySnapshot>>,
+    /// Media executor v2 state shared with the media driver.
+    executor: Arc<SipStreamExecutorState>,
+}
+
+/// Media executor v2 state a stream shares with its media driver.
+struct SipStreamExecutorState {
+    /// A direct inbound sink offered by the consumer, adopted by the fused
+    /// pump on the RTP socket owner.
+    inbound_sink: Arc<fused::InboundSinkSlot>,
+}
+
+impl SipStreamExecutorState {
+    fn new() -> Self {
+        Self {
+            inbound_sink: Arc::new(fused::InboundSinkSlot::new()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -643,6 +661,7 @@ impl SipMediaStream {
                 lifecycle: Arc::new(SipMediaLifecycleState::new()),
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
                 last_quality: Mutex::new(None),
+                executor: Arc::new(SipStreamExecutorState::new()),
                 cancel,
                 codec_updates,
             }),
@@ -785,6 +804,7 @@ impl SipMediaStream {
                         frames_in_tx,
                         frames_out_rx,
                         peer_out_rx,
+                        Arc::clone(&self.inner.executor),
                     ));
                     *self
                         .inner
@@ -1049,10 +1069,72 @@ where
 use rvoip_media_core::processing::audio::playout::{PlayoutBuffer, PlayoutConfig};
 use rvoip_media_core::types::AudioFrame;
 
+mod fused;
+
 enum InboundPumpEvent {
     CodecChanged,
     Audio(Option<AudioFrame>),
     PlayoutTick,
+    /// The fused pump on the socket owner stopped with this reason (`None`:
+    /// it was detached without failing).
+    FusedStopped(Option<&'static str>),
+}
+
+/// Same depth as the adapter's decoded-audio channel, which the fused pump's
+/// backlog stands in for while `frames_in` is full.
+const FUSED_BACKLOG_FRAMES: usize = 128;
+
+/// Fuse this stream's inbound pump onto the RTP socket owner
+/// ([`MediaExecutorConfig::fused_inbound_pump`]). Frames already queued in
+/// the subscriber's channel move into the fused pump first. On refusal (v1,
+/// the switch off, a non-G.711 dialog, a dialog no longer inline) the
+/// regular inbound pump task does all the work.
+///
+/// [`MediaExecutorConfig::fused_inbound_pump`]: rvoip_rtp_core::executor::MediaExecutorConfig::fused_inbound_pump
+#[allow(clippy::too_many_arguments)]
+fn fuse_inbound_pump(
+    coordinator: &UnifiedCoordinator,
+    session_id: &SessionId,
+    runtime: &SipMediaCodecRuntime,
+    codec_updates: &watch::Sender<Option<SipMediaCodecRuntime>>,
+    stream_id: &StreamId,
+    frames_in_tx: &mpsc::Sender<MediaFrame>,
+    playout: Option<PlayoutConfig>,
+    subscriber: &mut crate::types::AudioFrameSubscriber,
+    inbound_sink: &Arc<fused::InboundSinkSlot>,
+) -> Option<(
+    rvoip_media_core::relay::controller::InlineAudioConsumerGuard,
+    tokio::sync::oneshot::Receiver<&'static str>,
+)> {
+    if !rvoip_rtp_core::executor::fused_inbound_pump_enabled() {
+        return None;
+    }
+    let (pump, stopped) = fused::FusedInboundPump::new(
+        runtime.clone(),
+        codec_updates.subscribe(),
+        stream_id.clone(),
+        frames_in_tx.clone(),
+        playout,
+        FUSED_BACKLOG_FRAMES,
+        Arc::clone(inbound_sink),
+    )
+    .ok()?;
+    let receiver = &mut subscriber.receiver;
+    let mut backlog = || receiver.try_recv().ok();
+    match coordinator.install_inline_audio_consumer(session_id, Box::new(pump), &mut backlog) {
+        Ok(guard) => Some((guard, stopped)),
+        Err(_refused) => None,
+    }
+}
+
+/// Resolve when the fused pump reports, never while there is none.
+async fn fused_pump_stopped(
+    stopped: &mut Option<tokio::sync::oneshot::Receiver<&'static str>>,
+) -> Option<&'static str> {
+    match stopped.as_mut() {
+        Some(receiver) => receiver.await.ok(),
+        None => std::future::pending().await,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1068,6 +1150,7 @@ async fn run_media_driver(
     frames_in_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: mpsc::Receiver<MediaFrame>,
     peer_out_rx: mpsc::Receiver<PeerMediaFrame>,
+    executor: Arc<SipStreamExecutorState>,
 ) {
     let playout = coordinator.playout_policy();
     let setup_deadline =
@@ -1181,7 +1264,7 @@ async fn run_media_driver(
     codec_updates.send_replace(Some(runtime.clone()));
     let subscription = coordinator.subscribe_to_audio(&session_id);
     tokio::pin!(subscription);
-    let subscriber = tokio::select! {
+    let mut subscriber = tokio::select! {
         _ = wait_for_media_cancel(&mut cancel_rx) => return,
         result = &mut subscription => match result {
             Ok(subscriber) => subscriber,
@@ -1196,10 +1279,29 @@ async fn run_media_driver(
             }
         }
     };
+    let fused = fuse_inbound_pump(
+        &coordinator,
+        &session_id,
+        &runtime,
+        &codec_updates,
+        &stream_id,
+        &frames_in_tx,
+        playout,
+        &mut subscriber,
+        &executor.inbound_sink,
+    );
+    let (fused_guard, fused_stopped) = match fused {
+        Some((guard, stopped)) => (Some(guard), Some(stopped)),
+        None => (None, None),
+    };
     if !lifecycle.mark_bound() {
         return;
     }
 
+    // The fused pump lives exactly as long as these pumps: when they end
+    // (failure, cancellation, abort) the guard detaches it from the owner,
+    // dropping its `frames_in` sender with the inbound pump's own.
+    let _fused_guard = fused_guard;
     let inbound = run_inbound_pump(
         subscriber,
         runtime.clone(),
@@ -1207,6 +1309,7 @@ async fn run_media_driver(
         stream_id,
         frames_in_tx,
         playout,
+        fused_stopped,
     );
     let outbound = run_outbound_pump(
         Arc::clone(&coordinator),
@@ -1269,6 +1372,12 @@ impl InboundPcmFramer {
         }
     }
 
+    /// Whether [`Self::push`] returns every frame unchanged (every codec but
+    /// Opus).
+    fn is_pass_through(&self) -> bool {
+        self.samples_per_frame.is_none()
+    }
+
     fn push(&mut self, frame: AudioFrame) -> Vec<AudioFrame> {
         let Some(required) = self.samples_per_frame else {
             return vec![frame];
@@ -1316,6 +1425,13 @@ impl InboundPcmFramer {
     }
 }
 
+/// The SIP inbound pump task.
+///
+/// With `fused_stopped` the same work runs on the RTP socket owner
+/// (`fused::FusedInboundPump`) and this task idles: it returns the fused
+/// pump's failure reason as its own, keeps watching codec changes, and builds
+/// its playout buffer only if frames ever reach its channel (after a
+/// demotion or a callback change).
 async fn run_inbound_pump(
     mut subscriber: crate::types::AudioFrameSubscriber,
     mut runtime: SipMediaCodecRuntime,
@@ -1323,13 +1439,19 @@ async fn run_inbound_pump(
     stream_id: StreamId,
     frames_in_tx: mpsc::Sender<MediaFrame>,
     playout: Option<PlayoutConfig>,
+    mut fused_stopped: Option<tokio::sync::oneshot::Receiver<&'static str>>,
 ) -> &'static str {
     // Without a playout buffer this pump forwards whatever arrives, in
     // arrival order, with a gap wherever a packet was lost — the behaviour
     // every release before this had. With one, frames are reordered onto the
     // media clock and losses are concealed rather than heard as clicks.
     let playout_policy = playout;
-    let mut playout = playout_policy.map(PlayoutBuffer::new);
+    let mut playout_deferred = fused_stopped.is_some() && playout_policy.is_some();
+    let mut playout = if playout_deferred {
+        None
+    } else {
+        playout_policy.map(PlayoutBuffer::new)
+    };
     let mut framer = InboundPcmFramer::new(&runtime.negotiated);
     let mut encoder =
         match SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type) {
@@ -1364,6 +1486,9 @@ async fn run_inbound_pump(
             }
             frame = subscriber.receiver.recv() => InboundPumpEvent::Audio(frame),
             () = &mut playout_timer, if deadline.is_some() => InboundPumpEvent::PlayoutTick,
+            stopped = fused_pump_stopped(&mut fused_stopped), if fused_stopped.is_some() => {
+                InboundPumpEvent::FusedStopped(stopped)
+            }
         };
 
         let mut ready = Vec::new();
@@ -1384,16 +1509,30 @@ async fn run_inbound_pump(
                     Err(_) => return "sip-codec-reconfigure-failed",
                 };
                 runtime = updated;
-                playout = playout_policy.map(PlayoutBuffer::new);
+                if !playout_deferred {
+                    playout = playout_policy.map(PlayoutBuffer::new);
+                }
                 framer = InboundPcmFramer::new(&runtime.negotiated);
                 continue;
             }
-            InboundPumpEvent::Audio(Some(audio_frame)) => match playout.as_mut() {
-                Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
-                None => ready.push(audio_frame),
-            },
+            InboundPumpEvent::Audio(Some(audio_frame)) => {
+                if playout_deferred {
+                    playout_deferred = false;
+                    playout = playout_policy.map(PlayoutBuffer::new);
+                }
+                match playout.as_mut() {
+                    Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
+                    None => ready.push(audio_frame),
+                }
+            }
             InboundPumpEvent::Audio(None) => return AUDIO_SOURCE_CLOSED,
             InboundPumpEvent::PlayoutTick => {}
+            InboundPumpEvent::FusedStopped(Some(reason)) => return reason,
+            InboundPumpEvent::FusedStopped(None) => {
+                // Detached without failing: this task carries on.
+                fused_stopped = None;
+                continue;
+            }
         }
 
         if let Some(buffer) = playout.as_mut() {
@@ -1682,6 +1821,22 @@ impl MediaStream for SipMediaStream {
         Ok(self.inner.peer_out_tx.clone())
     }
 
+    /// Offered sinks are adopted by the fused inbound pump on the RTP socket
+    /// owner ([`MediaExecutorConfig::direct_inbound_sink`]). Refused when
+    /// the switch is off and on a second offer. A stream whose pump is not
+    /// fused never adopts it and keeps using `frames_in`.
+    ///
+    /// [`MediaExecutorConfig::direct_inbound_sink`]: rvoip_rtp_core::executor::MediaExecutorConfig::direct_inbound_sink
+    fn offer_inbound_frame_sink(
+        &self,
+        sink: Box<dyn InboundFrameSink>,
+    ) -> std::result::Result<(), Box<dyn InboundFrameSink>> {
+        if !rvoip_rtp_core::executor::direct_inbound_sink_enabled() {
+            return Err(sink);
+        }
+        self.inner.executor.inbound_sink.offer(sink)
+    }
+
     fn quality_snapshot(&self) -> QualitySnapshot {
         // The last report the media layer pushed for this connection.
         //
@@ -1928,6 +2083,7 @@ mod negotiated_codec_tests {
             StreamId::new(),
             frames_tx,
             None,
+            None,
         ));
 
         audio_tx
@@ -1967,6 +2123,7 @@ mod negotiated_codec_tests {
             codec_rx,
             StreamId::new(),
             frames_tx,
+            None,
             None,
         ));
         let mut timestamp = 0;
@@ -2041,6 +2198,7 @@ mod negotiated_codec_tests {
                 adaptive: false,
                 ..PlayoutConfig::default()
             }),
+            None,
         ));
 
         audio_tx
@@ -2172,6 +2330,7 @@ mod negotiated_codec_tests {
                     adaptive: false,
                     ..PlayoutConfig::default()
                 }),
+                None,
             ));
             // Clocked playout needs at least two input packets to prime.
             let count = (960 / packet_samples).max(1) * 2;
