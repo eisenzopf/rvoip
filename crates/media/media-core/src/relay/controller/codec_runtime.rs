@@ -480,10 +480,13 @@ pub(super) struct DialogCodecRuntime {
     pub(super) format: NegotiatedAudioCodec,
     encoder: Mutex<StatefulCodec>,
     decoder: Mutex<StatefulCodec>,
-    /// Stateless G.711 decoder for the inline receive path (media executor
-    /// v2). `None` for codecs whose decoder keeps state behind the async
-    /// lock; those dialogs always decode on their receive task.
-    inline_g711: Option<G711Codec>,
+    /// G.711 keeps no state between frames, so a PCMU/PCMA generation
+    /// encodes and decodes through this shared codec without taking either
+    /// async codec mutex on the per-frame path, and decodes synchronously on
+    /// the inline receive path (media executor v2). `None` for codecs whose
+    /// coders keep state behind the async locks; those dialogs always
+    /// decode on their receive task.
+    stateless_g711: Option<G711Codec>,
     /// Whether this is still the dialog's current codec generation. Cleared
     /// (never set again) when a re-INVITE replaces it or the dialog stops,
     /// so a TX path cached for this generation can check it with one load.
@@ -494,7 +497,7 @@ impl DialogCodecRuntime {
     pub(super) fn new(format: NegotiatedAudioCodec) -> Result<Self> {
         let encoder = StatefulCodec::new(&format)?;
         let decoder = StatefulCodec::new(&format)?;
-        let inline_g711 = match decoder {
+        let stateless_g711 = match &decoder {
             StatefulCodec::Pcmu(_) => Some(G711Codec::mu_law(
                 format.clock_rate,
                 u16::from(format.channels),
@@ -539,7 +542,7 @@ impl DialogCodecRuntime {
             format,
             encoder: Mutex::new(encoder),
             decoder: Mutex::new(decoder),
-            inline_g711,
+            stateless_g711,
             encoded_generation_live: std::sync::atomic::AtomicBool::new(true),
         })
     }
@@ -547,7 +550,7 @@ impl DialogCodecRuntime {
     /// Whether this generation decodes synchronously on the inline receive
     /// path, i.e. stateless G.711.
     pub(super) fn decodes_inline(&self) -> bool {
-        self.inline_g711.is_some()
+        self.stateless_g711.is_some()
     }
 
     /// The synchronous twin of [`Self::decode_source`] for stateless G.711:
@@ -561,7 +564,7 @@ impl DialogCodecRuntime {
         payload: &[u8],
         timestamp: u32,
     ) -> Option<Result<AudioFrame>> {
-        let codec = self.inline_g711.as_ref()?;
+        let codec = self.stateless_g711.as_ref()?;
         Some(codec.decode_pooled(payload).map(|mut frame| {
             frame.timestamp = timestamp;
             frame
@@ -582,6 +585,9 @@ impl DialogCodecRuntime {
                 ),
             }
             .into());
+        }
+        if let Some(codec) = &self.stateless_g711 {
+            return codec.encode_read_only(frame);
         }
         self.encoder.lock().await.encode(frame)
     }
@@ -606,6 +612,15 @@ impl DialogCodecRuntime {
             }
             .into());
         }
+        if let Some(codec) = &self.stateless_g711 {
+            return codec.encode_read_only(frame).map(|payload| {
+                vec![EncodedAudioPacket {
+                    payload,
+                    timestamp: frame.timestamp,
+                    marker: false,
+                }]
+            });
+        }
         self.encoder.lock().await.encode_packets(frame)
     }
 
@@ -622,6 +637,13 @@ impl DialogCodecRuntime {
         timestamp: u32,
         source_changed: bool,
     ) -> Result<AudioFrame> {
+        // With no decoder state there is nothing to replace on a source
+        // change, and no mode request to hand to the encoder.
+        if let Some(codec) = &self.stateless_g711 {
+            let mut frame = codec.decode_read_only(payload)?;
+            frame.timestamp = timestamp;
+            return Ok(frame);
+        }
         let (mut frame, mode_request, automatic_cmr) = {
             let mut decoder = self.decoder.lock().await;
             let frame = if source_changed {
@@ -766,6 +788,59 @@ mod tests {
                     .unwrap_err()
                     .to_string()
             );
+        }
+    }
+
+    /// PCMU/PCMA generations encode and decode without either codec mutex
+    /// (the test holds both) and give the same packets, samples, timestamps
+    /// and errors as the stateful codec path.
+    #[tokio::test]
+    async fn stateless_g711_matches_the_codec_without_taking_codec_locks() {
+        for name in ["PCMU", "PCMA"] {
+            let runtime = DialogCodecRuntime::new(resolve_codec(&config(name)).unwrap()).unwrap();
+            let _encoder_guard = runtime.encoder.lock().await;
+            let _decoder_guard = runtime.decoder.lock().await;
+            let mut reference = if name == "PCMU" {
+                G711Codec::mu_law(8_000, 1).unwrap()
+            } else {
+                G711Codec::a_law(8_000, 1).unwrap()
+            };
+            let input =
+                AudioFrame::new(vec![-30_000, -2_000, -1, 0, 2_000, 30_000], 8_000, 1, 1234);
+            let expected = reference.encode(&input).unwrap();
+            let wait = std::time::Duration::from_millis(100);
+            let packets = tokio::time::timeout(wait, runtime.encode_packets(&input))
+                .await
+                .expect("encode must not wait for the codec mutex")
+                .unwrap();
+            assert_eq!(
+                packets,
+                vec![EncodedAudioPacket {
+                    payload: expected.clone(),
+                    timestamp: 1234,
+                    marker: false,
+                }]
+            );
+            for source_changed in [false, true] {
+                let decoded = tokio::time::timeout(
+                    wait,
+                    runtime.decode_source(&expected, 4321, source_changed),
+                )
+                .await
+                .expect("decode must not wait for the codec mutex")
+                .unwrap();
+                assert_eq!(
+                    decoded.samples,
+                    reference.decode(&expected).unwrap().samples
+                );
+                assert_eq!(decoded.timestamp, 4321);
+            }
+            assert!(runtime.decode(&[], 0).await.is_err());
+            assert!(reference.decode(&[]).is_err());
+            assert!(runtime
+                .encode_packets(&AudioFrame::new(vec![0], 16_000, 1, 0))
+                .await
+                .is_err());
         }
     }
 

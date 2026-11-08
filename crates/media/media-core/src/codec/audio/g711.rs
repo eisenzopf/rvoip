@@ -7,8 +7,9 @@
 use crate::codec::audio::common::{AudioCodec, CodecInfo};
 use crate::error::{Error, Result};
 use crate::types::AudioFrame;
-use codec_core::codecs::g711::{alaw_expand, ulaw_expand, G711Codec as CodecCoreG711, G711Variant};
-use codec_core::types::{AudioCodec as CodecCoreAudioCodec, AudioCodecExt};
+use codec_core::codecs::g711::{G711Codec as CodecCoreG711, G711Variant};
+use codec_core::types::AudioCodecExt;
+use codec_core::utils::tables::{decode_alaw_table, decode_mulaw_table};
 
 /// G.711 codec implementation using codec-core
 pub struct G711Codec {
@@ -63,11 +64,15 @@ impl G711Codec {
             return Err(self.empty_decode_error());
         }
         let mut samples = crate::pcm_pool::take_pcm_buffer(encoded_data.len());
+        // The decode tables `CodecCoreG711::expand` uses, so the samples are
+        // those of `decode`.
         match self.variant {
             G711Variant::MuLaw => {
-                samples.extend(encoded_data.iter().map(|byte| ulaw_expand(*byte)))
+                samples.extend(encoded_data.iter().map(|&byte| decode_mulaw_table(byte)))
             }
-            G711Variant::ALaw => samples.extend(encoded_data.iter().map(|byte| alaw_expand(*byte))),
+            G711Variant::ALaw => {
+                samples.extend(encoded_data.iter().map(|&byte| decode_alaw_table(byte)))
+            }
         }
         Ok(AudioFrame::new(
             samples,
@@ -134,9 +139,11 @@ impl G711Codec {
     }
 }
 
-impl AudioCodec for G711Codec {
-    fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
-        self.inner.encode(&audio_frame.samples).map_err(|e| {
+impl G711Codec {
+    /// [`AudioCodec::encode`] through a shared reference. G.711 keeps no
+    /// state between frames, so callers can encode without exclusive access.
+    pub(crate) fn encode_read_only(&self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
+        self.inner.compress(&audio_frame.samples).map_err(|e| {
             Error::Codec(crate::error::CodecError::EncodingFailed {
                 reason: format!(
                     "G.711 {} encoding failed: {}",
@@ -150,12 +157,13 @@ impl AudioCodec for G711Codec {
         })
     }
 
-    fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame> {
+    /// [`AudioCodec::decode`] through a shared reference.
+    pub(crate) fn decode_read_only(&self, encoded_data: &[u8]) -> Result<AudioFrame> {
         if encoded_data.is_empty() {
             return Err(self.empty_decode_error());
         }
 
-        let samples = self.inner.decode(encoded_data).map_err(|e| {
+        let samples = self.inner.expand(encoded_data).map_err(|e| {
             Error::Codec(crate::error::CodecError::DecodingFailed {
                 reason: format!(
                     "G.711 {} decoding failed: {}",
@@ -174,6 +182,16 @@ impl AudioCodec for G711Codec {
             self.channels as u8,
             0, // timestamp will be set by caller
         ))
+    }
+}
+
+impl AudioCodec for G711Codec {
+    fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
+        self.encode_read_only(audio_frame)
+    }
+
+    fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame> {
+        self.decode_read_only(encoded_data)
     }
 
     fn get_info(&self) -> CodecInfo {
