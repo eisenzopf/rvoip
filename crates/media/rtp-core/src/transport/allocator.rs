@@ -197,6 +197,24 @@ enum PortClaimOutcome {
     BindCollision,
 }
 
+/// The ports one media session reserves from a [`PortAllocator`] range.
+///
+/// Admission control sizes a range in sessions, not ports, and the two
+/// reservation shapes use a range differently: a multiplexed session takes
+/// any one free port, while an RFC 3550 §11 pair needs an even port whose odd
+/// neighbour is free too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SessionPortReservation {
+    /// What [`PortAllocator::allocate_port_pair`] takes under the
+    /// allocator's [`PairingStrategy`]: one port when muxed, two otherwise.
+    PortPair,
+    /// What [`PortAllocator::allocate_rtp_rtcp_pair`] takes: an even RTP
+    /// port and the odd port above it for RTCP, whatever the
+    /// [`PairingStrategy`].
+    RtpRtcpPair,
+}
+
 /// Aggregate allocator diagnostics safe for logs and health endpoints.
 /// Session identifiers, IP addresses, and exact port numbers are omitted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -205,6 +223,35 @@ pub struct PortAllocatorDiagnostics {
     pub allocated_ports: usize,
     pub active_sessions: usize,
     pub recently_released_ports: usize,
+}
+
+/// Even RTP ports in `start..=end` whose odd RTCP neighbour is in range too.
+fn rtp_rtcp_pair_capacity(start: u16, end: u16) -> usize {
+    let first_even = start.saturating_add(start % 2);
+    if first_even >= end {
+        0
+    } else {
+        usize::from((end - first_even - 1) / 2) + 1
+    }
+}
+
+/// Free aligned RTP/RTCP pairs (even port and the odd port above it) in
+/// `start..=end`.
+fn free_rtp_rtcp_pairs(pool: &SharedIndexedAllocatorState, start: u16, end: u16) -> usize {
+    let first_even = start.saturating_add(start % 2);
+    if first_even >= end {
+        return 0;
+    }
+    let free = |port: u16| !pool.allocated_ports.contains_key(&port);
+    let mut pairs = 0;
+    let mut previous = None;
+    for &port in pool.available_ports.range(first_even..=end) {
+        if port % 2 == 1 && previous == Some(port - 1) && free(port - 1) && free(port) {
+            pairs += 1;
+        }
+        previous = Some(port);
+    }
+    pairs
 }
 
 /// Port allocation manager
@@ -283,6 +330,89 @@ impl PortAllocator {
                 .port_range_end
                 .saturating_sub(self.config.port_range_start),
         ) + 1
+    }
+
+    /// Ports one session takes from the range under `reservation`.
+    pub fn ports_per_session(&self, reservation: SessionPortReservation) -> usize {
+        match reservation {
+            SessionPortReservation::PortPair => match self.config.pairing_strategy {
+                PairingStrategy::Muxed => 1,
+                PairingStrategy::Separate | PairingStrategy::Adjacent => 2,
+            },
+            SessionPortReservation::RtpRtcpPair => 2,
+        }
+    }
+
+    /// Sessions of `reservation` the configured range holds when every port
+    /// is free.
+    pub fn configured_session_slots(&self, reservation: SessionPortReservation) -> usize {
+        match (reservation, self.config.pairing_strategy) {
+            (SessionPortReservation::PortPair, PairingStrategy::Muxed) => {
+                self.configured_port_capacity()
+            }
+            (SessionPortReservation::PortPair, PairingStrategy::Separate) => {
+                self.configured_port_capacity() / 2
+            }
+            (SessionPortReservation::PortPair, PairingStrategy::Adjacent)
+            | (SessionPortReservation::RtpRtcpPair, _) => {
+                rtp_rtcp_pair_capacity(self.config.port_range_start, self.config.port_range_end)
+            }
+        }
+    }
+
+    /// Free ports in the shared pool for `ip`: neither reserved by any
+    /// allocator that shares the pool nor quarantined after a bind failure.
+    ///
+    /// A point-in-time snapshot. Concurrent reservations can still take the
+    /// last ports, so allocation remains the authoritative check. `None` for
+    /// allocators without an indexed pool (validated or port-reusing
+    /// configurations), whose free count is not tracked.
+    pub fn available_port_count(&self, ip: IpAddr) -> Option<usize> {
+        self.read_indexed_pool(ip, |pool| pool.available_ports.len())
+    }
+
+    /// Sessions of `reservation` that could still be reserved on `ip` now.
+    ///
+    /// For [`SessionPortReservation::RtpRtcpPair`] this counts free aligned
+    /// pairs, which can be far fewer than half the free ports once
+    /// multiplexed sessions share the range; counting them walks the free
+    /// ports once. Admission control reads this before creating a call, so a
+    /// full range is shed up front instead of failing inside media setup.
+    /// Like [`Self::available_port_count`] it is a point-in-time snapshot,
+    /// and `None` for allocators without an indexed pool.
+    pub fn available_session_slots(
+        &self,
+        ip: IpAddr,
+        reservation: SessionPortReservation,
+    ) -> Option<usize> {
+        let (start, end) = (self.config.port_range_start, self.config.port_range_end);
+        let pairing = self.config.pairing_strategy;
+        self.read_indexed_pool(ip, |pool| match (reservation, pairing) {
+            (SessionPortReservation::PortPair, PairingStrategy::Muxed) => {
+                pool.available_ports.len()
+            }
+            (SessionPortReservation::PortPair, PairingStrategy::Separate) => {
+                pool.available_ports.len() / 2
+            }
+            (SessionPortReservation::PortPair, PairingStrategy::Adjacent)
+            | (SessionPortReservation::RtpRtcpPair, _) => free_rtp_rtcp_pairs(pool, start, end),
+        })
+    }
+
+    /// Read the shared pool for `ip` after returning expired quarantines.
+    fn read_indexed_pool<T>(
+        &self,
+        ip: IpAddr,
+        read: impl FnOnce(&SharedIndexedAllocatorState) -> T,
+    ) -> Option<T> {
+        let local_state = self.indexed_state.as_ref()?;
+        let pool = {
+            let mut local_state = local_state.lock().ok()?;
+            self.indexed_pool_for(&mut local_state, ip).ok()?
+        };
+        let mut pool = pool.lock().ok()?;
+        self.release_expired_indexed_quarantine(&mut pool);
+        Some(read(&pool))
     }
 
     fn indexed_pool_enabled(config: &PortAllocatorConfig) -> bool {
@@ -1563,6 +1693,112 @@ mod tests {
             validate_ports: false,
             capacity_hint: usize::from(port_range_end - port_range_start) + 1,
         }
+    }
+
+    #[test]
+    fn available_session_slots_follow_the_reservation_shape() {
+        use SessionPortReservation::{PortPair, RtpRtcpPair};
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+            // A media controller's allocator: muxed, six ports, three pairs.
+            let allocator = PortAllocator::with_config(indexed_test_config(
+                21_400,
+                21_405,
+                PairingStrategy::Muxed,
+                ip,
+            ));
+            assert_eq!(allocator.ports_per_session(PortPair), 1);
+            assert_eq!(allocator.ports_per_session(RtpRtcpPair), 2);
+            assert_eq!(allocator.configured_session_slots(PortPair), 6);
+            assert_eq!(allocator.configured_session_slots(RtpRtcpPair), 3);
+            assert_eq!(allocator.available_port_count(ip), Some(6));
+            assert_eq!(allocator.available_session_slots(ip, PortPair), Some(6));
+            assert_eq!(allocator.available_session_slots(ip, RtpRtcpPair), Some(3));
+
+            // Non-mux: one pair takes two ports and one pair slot.
+            let (rtp, rtcp) = allocator
+                .allocate_rtp_rtcp_pair("non-mux", Some(ip))
+                .await
+                .expect("pair reservation");
+            assert_eq!((rtp.port(), rtcp.port()), (21_400, 21_401));
+            assert_eq!(allocator.available_port_count(ip), Some(4));
+            assert_eq!(allocator.available_session_slots(ip, PortPair), Some(4));
+            assert_eq!(allocator.available_session_slots(ip, RtpRtcpPair), Some(2));
+
+            // Mux accepted: the RTCP half goes back. It is a free port again,
+            // but not a pair while its RTP neighbour is held.
+            assert!(
+                allocator
+                    .release_session_port("non-mux", ip, rtcp.port())
+                    .await
+            );
+            assert_eq!(allocator.available_port_count(ip), Some(5));
+            assert_eq!(allocator.available_session_slots(ip, PortPair), Some(5));
+            assert_eq!(allocator.available_session_slots(ip, RtpRtcpPair), Some(2));
+
+            // Multiplexed sessions take single ports and break pairs: two free
+            // ports are left, but no pair, so half the free ports would admit
+            // a call whose pair reservation must fail.
+            for session in ["mux-a", "mux-b", "mux-c"] {
+                allocator
+                    .allocate_port_pair(session, Some(ip))
+                    .await
+                    .expect("muxed reservation");
+            }
+            assert_eq!(allocator.available_port_count(ip), Some(2));
+            assert_eq!(allocator.available_session_slots(ip, PortPair), Some(2));
+            assert_eq!(allocator.available_session_slots(ip, RtpRtcpPair), Some(0));
+            assert!(allocator
+                .allocate_rtp_rtcp_pair("no-pair", Some(ip))
+                .await
+                .is_err());
+
+            // Releasing neighbours restores a pair, and its reservation works.
+            allocator.release_session("mux-a").await.unwrap();
+            allocator.release_session("mux-b").await.unwrap();
+            assert_eq!(allocator.available_session_slots(ip, RtpRtcpPair), Some(1));
+            allocator
+                .allocate_rtp_rtcp_pair("pair-again", Some(ip))
+                .await
+                .expect("restored pair");
+            assert_eq!(allocator.available_session_slots(ip, RtpRtcpPair), Some(0));
+
+            // A bind-failure quarantine is not free capacity.
+            let before = allocator.available_port_count(ip).unwrap();
+            allocator.quarantine_session("mux-c").await.unwrap();
+            assert_eq!(allocator.available_port_count(ip), Some(before));
+
+            // Separate pairing takes two arbitrary ports per session.
+            let separate = PortAllocator::with_config(indexed_test_config(
+                21_410,
+                21_413,
+                PairingStrategy::Separate,
+                ip,
+            ));
+            assert_eq!(separate.ports_per_session(PortPair), 2);
+            assert_eq!(separate.configured_session_slots(PortPair), 2);
+            separate
+                .allocate_port_pair("separate", Some(ip))
+                .await
+                .expect("separate reservation");
+            assert_eq!(separate.available_session_slots(ip, PortPair), Some(1));
+
+            // An odd start still pairs from the first even port.
+            let odd = PortAllocator::with_config(indexed_test_config(
+                21_421,
+                21_426,
+                PairingStrategy::Muxed,
+                ip,
+            ));
+            assert_eq!(odd.configured_session_slots(RtpRtcpPair), 2);
+            assert_eq!(odd.available_session_slots(ip, RtpRtcpPair), Some(2));
+
+            // Allocators without an indexed pool do not track a free count.
+            let untracked = PortAllocator::new();
+            assert_eq!(untracked.available_port_count(ip), None);
+            assert_eq!(untracked.available_session_slots(ip, PortPair), None);
+        });
     }
 
     #[test]

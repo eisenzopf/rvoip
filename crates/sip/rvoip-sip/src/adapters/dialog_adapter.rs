@@ -4904,12 +4904,12 @@ impl DialogAdapter {
 
     /// Retire only rvoip-sip's generation-qualified adapter copies for a
     /// failed inbound initial INVITE while preserving dialog-core's exact
-    /// dialog and server transaction for its causal 503 fallback.
+    /// dialog and server transaction for the handler's classified 503.
     ///
     /// This boundary must never call a lower dialog cleanup API. The caller
-    /// returns a negative processing ACK only after this completes; dialog-
-    /// core still owns `(dialog_id, transaction_id)` and retires that lower
-    /// route after a classified Written/WireUnknown final response.
+    /// authors the 503 on the exact server transaction only after this
+    /// completes, and retires `(dialog_id, transaction_id)` after a
+    /// classified Written/WireUnknown final response.
     pub(crate) async fn cleanup_failed_inbound_session_preserving_lower_route_exact(
         &self,
         handle: &SessionRegistryHandle,

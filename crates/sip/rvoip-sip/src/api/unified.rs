@@ -488,6 +488,34 @@ pub struct SessionCleanupConfig {
     /// its session and media port. `false` keeps the cancellation watchdog,
     /// which does not watch that state. Default: `true`.
     pub pending_hangup_watchdog: bool,
+
+    /// How long a call session may go without an owner, and without
+    /// receiving RTP, before the [`SipAdapter`](crate::adapter::SipAdapter)
+    /// reclaims it.
+    ///
+    /// A session's owner is the adapter route that maps it to an
+    /// orchestrator connection, an in-flight inbound rejection, or a
+    /// retained reclaim. A setup abandoned on a path that loses all of them
+    /// would otherwise keep its session slot and media port for good. The
+    /// adapter checks every sixth of the TTL (1 s to 10 s). An ownerless
+    /// session past the TTL gets a bounded reclaim: a BYE first when the call
+    /// is established, then the forced local cleanup (dialog, media port,
+    /// session slot). Registration, subscription, messaging and `Idle`
+    /// sessions are never reclaimed, and neither is a session whose RTP is
+    /// still arriving.
+    ///
+    /// Only coordinators with a `SipAdapter` run the sweeper, and it treats
+    /// every call session the adapter does not route as ownerless. Calls
+    /// placed directly on a coordinator that also has a `SipAdapter` are
+    /// reclaimed once they have been silent for the TTL; turn the sweeper off
+    /// for such mixed use.
+    ///
+    /// The TTL should exceed every owner that ends a session on its own: the
+    /// setup/teardown watchdog ([`Config::setup_teardown_timeout_secs`]),
+    /// [`Self::inbound_end_backstop`] and INVITE Timer B/H (32 s).
+    /// Default: `Some(60 s)`. Valid values are 5 s to 1 h; `None` turns the
+    /// sweeper off.
+    pub orphan_session_ttl: Option<Duration>,
 }
 
 impl Default for SessionCleanupConfig {
@@ -496,6 +524,7 @@ impl Default for SessionCleanupConfig {
             inline_hangup_deadline: Some(Self::DEFAULT_INLINE_HANGUP_DEADLINE),
             inbound_end_backstop: Some(Self::DEFAULT_INBOUND_END_BACKSTOP),
             pending_hangup_watchdog: true,
+            orphan_session_ttl: Some(Self::DEFAULT_ORPHAN_SESSION_TTL),
         }
     }
 }
@@ -509,6 +538,12 @@ impl SessionCleanupConfig {
     pub const MIN_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(1);
     /// Largest accepted [`Self::inbound_end_backstop`].
     pub const MAX_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(600);
+    /// Default [`Self::orphan_session_ttl`].
+    pub const DEFAULT_ORPHAN_SESSION_TTL: Duration = Duration::from_secs(60);
+    /// Smallest accepted [`Self::orphan_session_ttl`].
+    pub const MIN_ORPHAN_SESSION_TTL: Duration = Duration::from_secs(5);
+    /// Largest accepted [`Self::orphan_session_ttl`].
+    pub const MAX_ORPHAN_SESSION_TTL: Duration = Duration::from_secs(3_600);
 
     /// Set or clear [`Self::inline_hangup_deadline`].
     pub const fn with_inline_hangup_deadline(mut self, deadline: Option<Duration>) -> Self {
@@ -528,6 +563,12 @@ impl SessionCleanupConfig {
         self
     }
 
+    /// Set or clear [`Self::orphan_session_ttl`].
+    pub const fn with_orphan_session_ttl(mut self, ttl: Option<Duration>) -> Self {
+        self.orphan_session_ttl = ttl;
+        self
+    }
+
     fn validate(&self) -> Result<()> {
         if self.inline_hangup_deadline == Some(Duration::ZERO) {
             return Err(SessionError::ConfigError(
@@ -542,6 +583,15 @@ impl SessionCleanupConfig {
                     "session_cleanup.inbound_end_backstop must be between {:?} and {:?} when set",
                     Self::MIN_INBOUND_END_BACKSTOP,
                     Self::MAX_INBOUND_END_BACKSTOP
+                )));
+            }
+        }
+        if let Some(ttl) = self.orphan_session_ttl {
+            if !(Self::MIN_ORPHAN_SESSION_TTL..=Self::MAX_ORPHAN_SESSION_TTL).contains(&ttl) {
+                return Err(SessionError::ConfigError(format!(
+                    "session_cleanup.orphan_session_ttl must be between {:?} and {:?} when set",
+                    Self::MIN_ORPHAN_SESSION_TTL,
+                    Self::MAX_ORPHAN_SESSION_TTL
                 )));
             }
         }
@@ -1237,6 +1287,14 @@ impl SetupTeardownDeadlineCancellation {
 }
 
 const SETUP_TEARDOWN_DEADLINE_BATCH: usize = 2_048;
+/// Bound on the BYE an ownerless established call is given before its forced
+/// reclaim. Only the waiter stops; the retained hangup keeps running.
+const ORPHAN_GRACEFUL_HANGUP_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound on an orphan's forced local reclaim. Like the inbound end reclaim,
+/// it covers two exact release attempts and the final slot release.
+const ORPHAN_RECLAIM_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on the direct slot release after an orphan reclaim timed out.
+const ORPHAN_SLOT_RELEASE_TIMEOUT: Duration = Duration::from_secs(12);
 const SETUP_TEARDOWN_TIMEOUT_CONCURRENCY: usize = 64;
 const SETUP_TEARDOWN_SCHEDULER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound for answered inbound BYEs to reach the session layer during shutdown.
@@ -7436,6 +7494,76 @@ mod config_tests {
             .expect("pending-hangup coordinator shut down");
     }
 
+    /// Every state a failed or abandoned setup can be left in is reclaimed
+    /// with its media port by the orphan reclaim, and a repeat is a no-op.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn orphan_reclaim_releases_failed_setups_with_their_media_ports() {
+        use crate::cleanup_diag::OrphanSessionReclaimOutcome;
+        let coordinator = UnifiedCoordinator::new(
+            Config::local("orphan-reclaim", 0)
+                .with_setup_teardown_timeout_secs(1)
+                .with_media_ports(32_000, 32_400),
+        )
+        .await
+        .expect("start orphan-reclaim coordinator");
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        let ports_before = coordinator.allocated_media_port_count().await;
+        let states = [
+            CallState::Ringing,
+            CallState::Answering,
+            CallState::AnsweringHangupPending,
+            CallState::EarlyMedia,
+            CallState::Terminating,
+            CallState::Terminated,
+        ];
+        let mut handles = Vec::new();
+        for (index, state) in states.into_iter().enumerate() {
+            let session_id = SessionId(format!("orphan-reclaim-{index}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("admit inbound lifetime");
+            coordinator
+                .allocate_media_for_test(&session_id)
+                .await
+                .expect("allocate inbound media");
+            let handle = store
+                .lifecycle_handle(&session_id)
+                .expect("exact inbound lifetime");
+            store
+                .update_session_exact_with(&handle, None, |session| {
+                    session.call_state = state;
+                    session.entered_state_at = Instant::now();
+                })
+                .expect("move inbound lifetime");
+            handles.push(handle);
+        }
+        assert_eq!(coordinator.list_sessions().await.len(), states.len());
+        assert!(coordinator.allocated_media_port_count().await > ports_before);
+
+        for (index, handle) in handles.iter().enumerate() {
+            let outcome = coordinator.reclaim_orphan_session_exact(handle).await;
+            assert!(
+                matches!(
+                    outcome,
+                    OrphanSessionReclaimOutcome::Forced
+                        | OrphanSessionReclaimOutcome::AlreadyReleased
+                ),
+                "session {index}: {outcome:?}"
+            );
+        }
+        assert!(coordinator.list_sessions().await.is_empty());
+        assert_eq!(coordinator.allocated_media_port_count().await, ports_before);
+        assert_eq!(
+            coordinator.reclaim_orphan_session_exact(&handles[0]).await,
+            OrphanSessionReclaimOutcome::AlreadyReleased
+        );
+        coordinator
+            .shutdown_gracefully(Some(Duration::ZERO))
+            .await
+            .expect("orphan-reclaim coordinator shut down");
+    }
+
     #[test]
     fn session_cleanup_bounds_default_on_and_are_validated() {
         use super::SessionCleanupConfig;
@@ -7452,6 +7580,7 @@ mod config_tests {
                 .with_pending_hangup_watchdog(false)
                 .pending_hangup_watchdog
         );
+        assert_eq!(defaults.orphan_session_ttl, Some(Duration::from_secs(60)));
         assert_eq!(Config::default().session_cleanup, defaults);
 
         let validate = |cleanup: SessionCleanupConfig| {
@@ -7480,6 +7609,20 @@ mod config_tests {
             );
         }
         assert!(validate(defaults.with_inline_hangup_deadline(Some(Duration::ZERO))).is_err());
+        assert!(validate(defaults.with_orphan_session_ttl(None)).is_ok());
+        for ttl in [Duration::from_secs(5), Duration::from_secs(3_600)] {
+            assert!(validate(defaults.with_orphan_session_ttl(Some(ttl))).is_ok());
+        }
+        for ttl in [
+            Duration::ZERO,
+            Duration::from_millis(4_999),
+            Duration::from_millis(3_600_001),
+        ] {
+            assert!(
+                validate(defaults.with_orphan_session_ttl(Some(ttl))).is_err(),
+                "{ttl:?}"
+            );
+        }
         assert!(
             validate(defaults.with_inline_hangup_deadline(Some(Duration::from_millis(1)))).is_ok()
         );
@@ -11143,6 +11286,24 @@ impl UnifiedCoordinator {
             media_adapter_inner.set_stun_server(config.stun_server.clone());
         }
         let media_adapter = Arc::new(media_adapter_inner);
+        // Inbound admission also sheds with 503 when the RTP range has no free
+        // slot, so a session limit above the range's slot count is never
+        // reached. Make that visible at startup.
+        if let (Some(admission_limit), Some(port_slots)) = (
+            config.server_call_admission_limit,
+            media_adapter.configured_media_port_slots(),
+        ) {
+            if port_slots < admission_limit {
+                tracing::warn!(
+                    admission_limit,
+                    port_slots,
+                    media_port_start = config.media_port_start,
+                    media_port_end = config.media_port_end,
+                    "RTP range holds fewer calls than the server admission limit; \
+                     media port admission will shed new INVITEs with 503 first"
+                );
+            }
+        }
         // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
         // onto the API bus whenever media-core signals a DTMF event.
         media_adapter
@@ -12328,6 +12489,68 @@ impl UnifiedCoordinator {
         self.schedule_setup_teardown_timeout_exact_if_current(handle, watchdog)
             .await;
         Ok(())
+    }
+
+    /// RTP packets received for an ownerless session, so the orphan sweeper
+    /// never reclaims a call whose media still flows.
+    pub(crate) async fn orphan_rtp_packets_received(&self, session_id: &SessionId) -> Option<u64> {
+        self.media_adapter
+            .media_activity_count(session_id, false)
+            .await
+    }
+
+    /// Identity and state of every current session-store lifetime.
+    pub(crate) fn orphan_sweep_entries(&self) -> Vec<crate::orphan_sweep::SweepEntry> {
+        self.helpers.state_machine.store.sweep_entries()
+    }
+
+    /// Release one session that has had no owner (no adapter route, no
+    /// in-flight rejection or reclaim) and no new RTP for the orphan TTL.
+    ///
+    /// An established call is first given a bounded BYE so the peer does not
+    /// keep it. Every lifetime then goes through the forced local reclaim:
+    /// dialog and media cleanup (which returns its media port) and slot
+    /// removal, ending in the counted slot force-release if lower cleanup
+    /// fails. Each step is bounded and only waiters stop, so a retained
+    /// hangup keeps running. Raw identifiers are never re-resolved.
+    pub(crate) async fn reclaim_orphan_session_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> crate::cleanup_diag::OrphanSessionReclaimOutcome {
+        use crate::cleanup_diag::OrphanSessionReclaimOutcome as Outcome;
+        let store = Arc::clone(&self.helpers.state_machine.store);
+        let Ok(state) = store
+            .get_session_snapshot_exact(handle)
+            .map(|session| session.call_state)
+        else {
+            return Outcome::AlreadyReleased;
+        };
+        if crate::orphan_sweep::established_state(state) {
+            let _ = tokio::time::timeout(
+                ORPHAN_GRACEFUL_HANGUP_TIMEOUT,
+                self.hangup_exact_with_reason(handle, "SIP session had no owner"),
+            )
+            .await;
+            if store.get_session_retained_snapshot_exact(handle).is_err() {
+                return Outcome::Graceful;
+            }
+        }
+        let reclaimed = tokio::time::timeout(ORPHAN_RECLAIM_FINISH_TIMEOUT, async {
+            self.begin_force_reclaim_local_session_exact(handle)
+                .await
+                .finish()
+                .await;
+        })
+        .await;
+        if reclaimed.is_ok() {
+            return Outcome::Forced;
+        }
+        let _ = tokio::time::timeout(
+            ORPHAN_SLOT_RELEASE_TIMEOUT,
+            self.force_release_session_slot_exact(handle, "orphan-session-reclaim-timed-out"),
+        )
+        .await;
+        Outcome::TimedOut
     }
 
     /// Allocate real media (and so a media port) for a test lifetime.

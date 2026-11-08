@@ -1047,6 +1047,26 @@ impl SessionStore {
             .collect()
     }
 
+    /// Identity and lifecycle state of every current lifetime, for the
+    /// orphan sweeper. Reads each cell's published snapshot once and copies
+    /// only the fields the sweeper needs, never the full session state.
+    pub(crate) fn sweep_entries(&self) -> Vec<crate::orphan_sweep::SweepEntry> {
+        self.sessions
+            .iter()
+            .filter_map(|entry| {
+                let snapshot = entry.value().snapshot();
+                let handle = snapshot.lifecycle_handle.as_ref()?;
+                self.authority
+                    .is_current(handle.key())
+                    .then(|| crate::orphan_sweep::SweepEntry {
+                        session_id: entry.key().clone(),
+                        handle: handle.clone(),
+                        call_state: snapshot.call_state,
+                    })
+            })
+            .collect()
+    }
+
     pub async fn has_session(&self) -> bool {
         self.sessions.iter().any(|entry| {
             entry
