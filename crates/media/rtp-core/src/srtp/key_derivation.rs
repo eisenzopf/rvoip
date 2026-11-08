@@ -171,6 +171,30 @@ pub fn create_srtp_iv(salt: &[u8], ssrc: u32, packet_index: u64) -> Result<Vec<u
     Ok(iv)
 }
 
+/// Stack twin of [`create_srtp_iv`] for the executor v2 inline receive path:
+/// the same RFC 3711 §4.1.2 IV and the same error, without a heap `Vec`.
+pub(crate) fn create_srtp_iv_array(salt: &[u8], ssrc: u32, packet_index: u64) -> Result<[u8; 16]> {
+    if salt.len() != 14 {
+        return Err(Error::SrtpError(format!(
+            "SRTP salt must be exactly 14 bytes, got {}",
+            salt.len()
+        )));
+    }
+    let mut iv = [0u8; 16];
+    iv[..14].copy_from_slice(&salt[0..14]);
+    iv[4] ^= ((ssrc >> 24) & 0xFF) as u8;
+    iv[5] ^= ((ssrc >> 16) & 0xFF) as u8;
+    iv[6] ^= ((ssrc >> 8) & 0xFF) as u8;
+    iv[7] ^= (ssrc & 0xFF) as u8;
+    iv[8] ^= ((packet_index >> 40) & 0xFF) as u8;
+    iv[9] ^= ((packet_index >> 32) & 0xFF) as u8;
+    iv[10] ^= ((packet_index >> 24) & 0xFF) as u8;
+    iv[11] ^= ((packet_index >> 16) & 0xFF) as u8;
+    iv[12] ^= ((packet_index >> 8) & 0xFF) as u8;
+    iv[13] ^= (packet_index & 0xFF) as u8;
+    Ok(iv)
+}
+
 /// Key rotation frequency
 /// This is used to determine when to rekey based on packet index
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +227,23 @@ impl KeyRotationFrequency {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stack_iv_matches_heap_iv_including_errors() {
+        let salt: Vec<u8> = (0u8..14).map(|i| i.wrapping_mul(37) ^ 0x5a).collect();
+        for (ssrc, index) in [
+            (0, 0),
+            (0xdead_beef, 1),
+            (0x0102_0304, 0xffff_ffff_ffff),
+            (u32::MAX, u64::MAX),
+        ] {
+            let heap = create_srtp_iv(&salt, ssrc, index).unwrap();
+            let stack = create_srtp_iv_array(&salt, ssrc, index).unwrap();
+            assert_eq!(&heap[..], &stack[..]);
+        }
+        assert!(create_srtp_iv(&salt[..13], 1, 1).is_err());
+        assert!(create_srtp_iv_array(&salt[..13], 1, 1).is_err());
+    }
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
         assert_eq!(hex.len() % 2, 0);

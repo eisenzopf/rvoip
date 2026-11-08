@@ -2,8 +2,6 @@
 //!
 //! This module provides encryption and authentication for RTP/RTCP packets.
 
-use std::collections::HashMap;
-
 pub mod auth;
 pub mod crypto;
 pub mod key_derivation;
@@ -231,16 +229,16 @@ pub struct SrtpContext {
     key_rotation: key_derivation::KeyRotationFrequency,
 
     /// Per-SSRC outbound RTP rollover and IV-reuse state.
-    outbound_rtp: HashMap<u32, RtpStreamState>,
+    outbound_rtp: crate::ssrc_hash::SsrcHashMap<RtpStreamState>,
 
     /// Per-SSRC inbound RTP rollover and replay state.
-    inbound_rtp: HashMap<u32, RtpStreamState>,
+    inbound_rtp: crate::ssrc_hash::SsrcHashMap<RtpStreamState>,
 
     /// Per-SSRC outbound SRTCP indexes.
-    outbound_srtcp: HashMap<u32, SrtcpSendState>,
+    outbound_srtcp: crate::ssrc_hash::SsrcHashMap<SrtcpSendState>,
 
     /// Per-SSRC inbound SRTCP replay windows.
-    inbound_srtcp: HashMap<u32, ReplayWindow>,
+    inbound_srtcp: crate::ssrc_hash::SsrcHashMap<ReplayWindow>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -425,6 +423,38 @@ fn validate_plaintext_rtcp(data: &[u8]) -> Result<(), crate::Error> {
     Ok(())
 }
 
+/// Executor v2: one outbound packet protected by
+/// [`SrtpContext::protect_rtp_into`] whose rollover/replay state is not yet
+/// committed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OutboundRtpCommit {
+    ssrc: u32,
+    roc: u32,
+    sequence: u16,
+    index: u64,
+}
+
+/// Size of the header [`write_minimal_rtp_header`] writes.
+pub(crate) const MINIMAL_RTP_HEADER_SIZE: usize = 12;
+
+/// Append the 12-byte header `RtpHeader::new(payload_type, sequence,
+/// timestamp, ssrc)` with `marker` serialises to: version 2, no padding, no
+/// extension, no CSRCs.
+pub(crate) fn write_minimal_rtp_header(
+    out: &mut Vec<u8>,
+    payload_type: u8,
+    marker: bool,
+    sequence: u16,
+    timestamp: u32,
+    ssrc: u32,
+) {
+    out.push(0x80);
+    out.push((u8::from(marker) << 7) | (payload_type & 0x7F));
+    out.extend_from_slice(&sequence.to_be_bytes());
+    out.extend_from_slice(&timestamp.to_be_bytes());
+    out.extend_from_slice(&ssrc.to_be_bytes());
+}
+
 /// Protected RTP packet with authentication tag
 pub struct ProtectedRtpPacket {
     /// The encrypted RTP packet
@@ -490,10 +520,10 @@ impl SrtpContext {
             outbound_crypto,
             inbound_crypto,
             key_rotation: key_derivation::KeyRotationFrequency::None,
-            outbound_rtp: HashMap::new(),
-            inbound_rtp: HashMap::new(),
-            outbound_srtcp: HashMap::new(),
-            inbound_srtcp: HashMap::new(),
+            outbound_rtp: crate::ssrc_hash::ssrc_hash_map(),
+            inbound_rtp: crate::ssrc_hash::ssrc_hash_map(),
+            outbound_srtcp: crate::ssrc_hash::ssrc_hash_map(),
+            inbound_srtcp: crate::ssrc_hash::ssrc_hash_map(),
         })
     }
 
@@ -537,10 +567,10 @@ impl SrtpContext {
             outbound_crypto,
             inbound_crypto,
             key_rotation: key_derivation::KeyRotationFrequency::None,
-            outbound_rtp: HashMap::new(),
-            inbound_rtp: HashMap::new(),
-            outbound_srtcp: HashMap::new(),
-            inbound_srtcp: HashMap::new(),
+            outbound_rtp: crate::ssrc_hash::ssrc_hash_map(),
+            inbound_rtp: crate::ssrc_hash::ssrc_hash_map(),
+            outbound_srtcp: crate::ssrc_hash::ssrc_hash_map(),
+            inbound_srtcp: crate::ssrc_hash::ssrc_hash_map(),
         })
     }
 
@@ -618,6 +648,94 @@ impl SrtpContext {
         })
     }
 
+    /// Executor v2 twin of [`Self::protect`] + `serialize_into` for the
+    /// synchronous TX path: appends the protected packet for a minimal,
+    /// unpadded header (`RtpHeader::new` plus the marker) and `payload` to
+    /// `out`, **without** committing the outbound rollover/replay state.
+    ///
+    /// `pending` are packets of the same batch protected earlier in this
+    /// call and not committed yet; index estimation and the reuse check see
+    /// them exactly as if they had been committed one by one. The caller
+    /// commits (with [`Self::commit_outbound`]) only the packets the kernel
+    /// accepted, so a packet that could not be sent leaves no trace and is
+    /// protected again, with the same index, by whichever path sends it.
+    /// Checks, their order and their errors are those of [`Self::protect`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn protect_rtp_into(
+        &mut self,
+        payload_type: u8,
+        marker: bool,
+        sequence: u16,
+        timestamp: u32,
+        ssrc: u32,
+        payload: &[u8],
+        pending: &[OutboundRtpCommit],
+        out: &mut Vec<u8>,
+    ) -> Result<OutboundRtpCommit, crate::Error> {
+        if !self.enabled {
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot pass RTP through as plaintext".to_string(),
+            ));
+        }
+        let mut scratch = self.outbound_rtp.get(&ssrc).cloned();
+        for earlier in pending.iter().filter(|earlier| earlier.ssrc == ssrc) {
+            commit_rtp_index(
+                scratch.get_or_insert_with(RtpStreamState::default),
+                earlier.roc,
+                earlier.sequence,
+                earlier.index,
+            );
+        }
+        let candidate = candidate_rtp_index(scratch.as_ref(), sequence);
+        if candidate.before_roc_zero {
+            return Err(crate::Error::SrtpError(
+                "outbound SRTP sequence maps before ROC zero".to_string(),
+            ));
+        }
+        if scratch
+            .as_ref()
+            .is_some_and(|state| !state.replay.accepts(candidate.index))
+        {
+            return Err(crate::Error::SrtpError(
+                "refusing to reuse an outbound SRTP packet index".to_string(),
+            ));
+        }
+        if self.key_rotation.should_rotate(candidate.index) {
+            return Err(crate::Error::UnsupportedFeature(
+                "SRTP key rotation is not implemented; refusing to reuse the old key after the configured rotation boundary"
+                    .to_string(),
+            ));
+        }
+        let start = out.len();
+        write_minimal_rtp_header(out, payload_type, marker, sequence, timestamp, ssrc);
+        out.extend_from_slice(payload);
+        if let Err(error) = self.outbound_crypto.encrypt_rtp_in_place_with_roc(
+            out,
+            start,
+            MINIMAL_RTP_HEADER_SIZE,
+            ssrc,
+            sequence,
+            candidate.roc,
+        ) {
+            out.truncate(start);
+            return Err(error);
+        }
+        Ok(OutboundRtpCommit {
+            ssrc,
+            roc: candidate.roc,
+            sequence,
+            index: candidate.index,
+        })
+    }
+
+    /// Commit packets protected by [`Self::protect_rtp_into`], in order.
+    pub(crate) fn commit_outbound(&mut self, commits: &[OutboundRtpCommit]) {
+        for commit in commits {
+            let state = self.outbound_rtp.entry(commit.ssrc).or_default();
+            commit_rtp_index(state, commit.roc, commit.sequence, commit.index);
+        }
+    }
+
     /// Unprotect an RTP packet (SRTP decryption)
     /// The input data should include the authentication tag if used
     pub fn unprotect(&mut self, data: &[u8]) -> Result<crate::packet::RtpPacket, crate::Error> {
@@ -638,6 +756,50 @@ impl SrtpContext {
         let packet = self
             .inbound_crypto
             .decrypt_rtp_with_roc(data, candidate.roc)?;
+        if candidate.before_roc_zero {
+            return Err(crate::Error::SrtpError(
+                "SRTP packet maps before ROC zero".to_string(),
+            ));
+        }
+        let roc = candidate.roc;
+        let packet_index = candidate.index;
+        if self
+            .inbound_rtp
+            .get(&ssrc)
+            .is_some_and(|state| !state.replay.accepts(packet_index))
+        {
+            return Err(crate::Error::SrtpError(
+                "SRTP packet is a duplicate or outside the replay window".to_string(),
+            ));
+        }
+        let state = self.inbound_rtp.entry(ssrc).or_default();
+        commit_rtp_index(state, roc, seq, packet_index);
+        Ok(packet)
+    }
+
+    /// In-place twin of [`Self::unprotect`] for the executor v2 inline receive
+    /// path: `data` is the caller's reusable buffer, authenticated and
+    /// decrypted where it lies, and the result points into it. ROC estimation,
+    /// authentication before any state change, the ROC-zero guard, the replay
+    /// window and the commit are the same steps in the same order.
+    pub(crate) fn unprotect_in_place(
+        &mut self,
+        data: &mut [u8],
+    ) -> Result<crate::packet::rtp::RtpPacketBounds, crate::Error> {
+        if !self.enabled {
+            return Err(crate::Error::InvalidState(
+                "disabled SRTP context cannot accept RTP as plaintext".to_string(),
+            ));
+        }
+
+        let (header, _) = crate::packet::RtpHeader::parse_without_consuming(data)?;
+        let ssrc = header.ssrc;
+        let seq = header.sequence_number;
+        let candidate = candidate_rtp_index(self.inbound_rtp.get(&ssrc), seq);
+
+        let packet = self
+            .inbound_crypto
+            .decrypt_rtp_in_place_with_roc(data, candidate.roc)?;
         if candidate.before_roc_zero {
             return Err(crate::Error::SrtpError(
                 "SRTP packet maps before ROC zero".to_string(),
@@ -760,6 +922,125 @@ mod tests {
 
     fn contexts() -> (SrtpContext, SrtpContext) {
         contexts_with_suite(SRTP_AES128_CM_SHA1_80)
+    }
+
+    /// `protect_rtp_into` + `commit_outbound` produce the bytes and the
+    /// state `protect` + `serialize` do, for every built-in suite, across a
+    /// sequence-number wrap (ROC 0 -> 1), with and without a marker.
+    #[test]
+    fn in_place_protect_matches_the_allocating_path_across_a_rollover() {
+        for suite in [
+            SRTP_AES128_CM_SHA1_80,
+            SRTP_AES128_CM_SHA1_32,
+            SRTP_AES256_CM_SHA1_80,
+            SRTP_AES256_CM_SHA1_32,
+        ] {
+            let key_len = suite.key_length;
+            let make = || {
+                SrtpContext::new_from_keys(
+                    vec![0x11; key_len],
+                    vec![0x33; key_len],
+                    vec![0x22; 14],
+                    vec![0x44; 14],
+                    suite.clone(),
+                )
+                .unwrap()
+            };
+            let (mut legacy, mut inline) = (make(), make());
+            let mut out = Vec::new();
+            for (step, seq) in (65_530u16..=65_535).chain(0..6).enumerate() {
+                let marker = step == 0;
+                let mut reference = packet(0x0bad_cafe, seq);
+                reference.header.marker = marker;
+                let expected = protect_bytes(&mut legacy, &reference);
+                out.clear();
+                let commit = inline
+                    .protect_rtp_into(
+                        96,
+                        marker,
+                        seq,
+                        u32::from(seq).wrapping_mul(160),
+                        0x0bad_cafe,
+                        b"authenticated media",
+                        &[],
+                        &mut out,
+                    )
+                    .unwrap();
+                inline.commit_outbound(&[commit]);
+                assert_eq!(&out[..], &expected[..], "seq {seq} differs");
+            }
+            let legacy_state = legacy.outbound_rtp.get(&0x0bad_cafe).cloned().unwrap();
+            let inline_state = inline.outbound_rtp.get(&0x0bad_cafe).cloned().unwrap();
+            assert_eq!(legacy_state.roc, 1);
+            assert_eq!(inline_state.roc, legacy_state.roc);
+            assert_eq!(inline_state.highest_seq, legacy_state.highest_seq);
+            assert_eq!(inline_state.replay.highest, legacy_state.replay.highest);
+            assert_eq!(inline_state.replay.bitmap, legacy_state.replay.bitmap);
+        }
+    }
+
+    /// a batch protected against uncommitted predecessors equals the
+    /// packets protected one by one, and an uncommitted packet leaves no
+    /// state: protecting it again yields the same bytes (same index).
+    #[test]
+    fn batch_protection_sees_pending_packets_and_uncommitted_packets_leave_no_trace() {
+        let (mut legacy, _) = contexts();
+        let (mut inline, _) = contexts();
+        let sequences = [65_534u16, 65_535, 0, 1];
+        let mut expected = Vec::new();
+        for seq in sequences {
+            expected.push(protect_bytes(&mut legacy, &packet(7, seq)));
+        }
+        let mut arena = Vec::new();
+        let mut commits = Vec::new();
+        let mut ranges = Vec::new();
+        for seq in sequences {
+            let start = arena.len();
+            let commit = inline
+                .protect_rtp_into(
+                    96,
+                    false,
+                    seq,
+                    u32::from(seq).wrapping_mul(160),
+                    7,
+                    b"authenticated media",
+                    &commits,
+                    &mut arena,
+                )
+                .unwrap();
+            commits.push(commit);
+            ranges.push(start..arena.len());
+        }
+        for (range, expected) in ranges.iter().zip(&expected) {
+            assert_eq!(&arena[range.clone()], &expected[..]);
+        }
+        // Only the first two "left": commit those; the last two are
+        // protected again later and must come out identical.
+        inline.commit_outbound(&commits[..2]);
+        for (offset, seq) in sequences[2..].iter().enumerate() {
+            let mut again = Vec::new();
+            let commit = inline
+                .protect_rtp_into(
+                    96,
+                    false,
+                    *seq,
+                    u32::from(*seq).wrapping_mul(160),
+                    7,
+                    b"authenticated media",
+                    &[],
+                    &mut again,
+                )
+                .unwrap();
+            inline.commit_outbound(&[commit]);
+            assert_eq!(&again[..], &expected[2 + offset][..]);
+        }
+        // Reuse is still refused exactly as `protect` refuses it.
+        let mut reused = Vec::new();
+        let error = inline
+            .protect_rtp_into(96, false, 0, 0, 7, b"x", &[], &mut reused)
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to reuse"), "{error}");
+        assert!(reused.is_empty(), "a refused packet writes nothing");
     }
 
     fn packet(ssrc: u32, seq: u16) -> crate::packet::RtpPacket {
@@ -1248,6 +1529,73 @@ mod tests {
         );
         a.protect_rtcp(&first).expect("last SRTCP index is usable");
         assert!(a.protect_rtcp(&first).is_err());
+    }
+
+    #[test]
+    fn in_place_unprotect_matches_allocating_unprotect_for_order_replay_tamper_and_padding() {
+        const SSRC: u32 = 0x5157_0001;
+        for suite in [SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32] {
+            let (mut sender, mut heap) = contexts_with_suite(suite.clone());
+            let (_, mut in_place) = contexts_with_suite(suite.clone());
+            let mut wires: Vec<Vec<u8>> = Vec::new();
+            for seq in [1_u16, 2, 4, 3] {
+                wires.push(protect_bytes(&mut sender, &packet(SSRC, seq)).to_vec());
+            }
+            // Replay of an already accepted packet.
+            wires.push(wires[1].clone());
+            // A tampered packet must fail without advancing state; the
+            // genuine one with the same sequence must then succeed.
+            let genuine = protect_bytes(&mut sender, &packet(SSRC, 5)).to_vec();
+            let mut tampered = genuine.clone();
+            let middle = tampered.len() / 2;
+            tampered[middle] ^= 0x01;
+            wires.push(tampered);
+            wires.push(genuine);
+            let mut padded = packet(SSRC, 6);
+            padded.set_padding(4);
+            wires.push(protect_bytes(&mut sender, &padded).to_vec());
+            // A late packet outside the 64-packet replay window.
+            let mut stale = Vec::new();
+            for seq in 7_u16..80 {
+                let wire = protect_bytes(&mut sender, &packet(SSRC, seq)).to_vec();
+                if seq == 8 {
+                    stale = wire.clone();
+                }
+                wires.push(wire);
+            }
+            wires.push(stale);
+
+            for (index, wire) in wires.iter().enumerate() {
+                let heap_result = heap.unprotect(wire);
+                let mut buffer = wire.clone();
+                let in_place_result = in_place.unprotect_in_place(&mut buffer);
+                match (heap_result, in_place_result) {
+                    (Ok(owned), Ok(bounds)) => {
+                        assert_eq!(owned.header, bounds.header, "wire {index}");
+                        assert_eq!(
+                            &owned.payload[..],
+                            &buffer[bounds.payload.clone()],
+                            "wire {index}"
+                        );
+                        assert_eq!(owned.padding_size, bounds.padding_size, "wire {index}");
+                    }
+                    (Err(_), Err(_)) => {}
+                    (heap_result, in_place_result) => panic!(
+                        "wire {index}: allocating ok={} in-place ok={}",
+                        heap_result.is_ok(),
+                        in_place_result.is_ok()
+                    ),
+                }
+                assert_eq!(
+                    inbound_state_snapshot(&heap, SSRC),
+                    inbound_state_snapshot(&in_place, SSRC),
+                    "wire {index}"
+                );
+            }
+            // Spot-check the expected verdicts: replay, tamper and stale fail.
+            let mut probe = wires[4].clone();
+            assert!(in_place.unprotect_in_place(&mut probe).is_err());
+        }
     }
 }
 

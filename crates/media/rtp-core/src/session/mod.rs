@@ -29,6 +29,18 @@ use crate::transport::{
 };
 use crate::{Result, RtpSsrc, RtpTimestamp};
 
+/// SSRC-keyed per-session map (receive streams, retained sender reports).
+/// With [`MediaExecutorConfig::fast_ssrc_hash`] active the `u32` key is hashed
+/// with the keyed fast mix (`crate::ssrc_hash`) instead of SipHash; v1 keeps
+/// SipHash.
+///
+/// [`MediaExecutorConfig::fast_ssrc_hash`]: crate::executor::MediaExecutorConfig::fast_ssrc_hash
+pub(crate) type SsrcMap<V> = DashMap<RtpSsrc, V, crate::ssrc_hash::SsrcHashBuilder>;
+
+pub(crate) fn new_ssrc_map<V>() -> SsrcMap<V> {
+    DashMap::with_hasher(crate::ssrc_hash::SsrcHashBuilder::new())
+}
+
 #[cfg(feature = "memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> JoinHandle<F::Output>
 where
@@ -66,7 +78,7 @@ pub const RTP_SESSION_CHANNEL_CAPACITY: usize = 64;
 pub const RTP_SESSION_RECEIVE_QUEUE_CAPACITY: usize = 32;
 
 fn take_rtcp_report_blocks(
-    streams: &DashMap<RtpSsrc, RtpStream>,
+    streams: &SsrcMap<RtpStream>,
 ) -> Vec<crate::packet::rtcp::RtcpReportBlock> {
     streams
         .iter_mut()
@@ -190,7 +202,7 @@ async fn rtcp_report_destination(
 async fn rtcp_source_is_expected(
     transport: &Arc<dyn RtpTransport>,
     packet_sender: &RtpPacketSender,
-    streams: &DashMap<RtpSsrc, RtpStream>,
+    streams: &SsrcMap<RtpStream>,
     source: SocketAddr,
     data: &[u8],
 ) -> bool {
@@ -702,7 +714,7 @@ struct RtcpReporter {
     generator: parking_lot::Mutex<crate::stats::reports::RtcpReportGenerator>,
     stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
     sender_octets: Arc<AtomicU64>,
-    streams: Arc<DashMap<RtpSsrc, RtpStream>>,
+    streams: Arc<SsrcMap<RtpStream>>,
     packet_sender: Arc<RtpPacketSender>,
     clock_rate: Arc<AtomicU32>,
     /// Remote SSRCs seen only through accepted RTCP (receive-only peers).
@@ -992,11 +1004,11 @@ pub struct RtpSession {
     /// demultiplex hot path (`session/mod.rs:620`+) doesn't serialise
     /// every receive through a single mutex, and so `get_stream` /
     /// `stream_count` readers don't block the demux task.
-    streams: Arc<DashMap<RtpSsrc, RtpStream>>,
+    streams: Arc<SsrcMap<RtpStream>>,
 
     /// Sender Reports retained even when RTCP arrives before the source's
     /// first RTP packet.
-    received_sender_reports: Arc<DashMap<RtpSsrc, ReceivedSenderReport>>,
+    received_sender_reports: Arc<SsrcMap<ReceivedSenderReport>>,
 
     /// Packet scheduler for sending packets
     scheduler: Option<RtpScheduler>,
@@ -1213,7 +1225,7 @@ impl RtpSession {
             crate::stats::reports::session_bandwidth_for_payload_type(config.payload_type)
                 .unwrap_or(crate::stats::reports::DEFAULT_SESSION_BANDWIDTH_BPS),
         );
-        let streams = Arc::new(DashMap::new());
+        let streams = Arc::new(new_ssrc_map());
         let rtcp_reporter = Arc::new(RtcpReporter {
             ssrc,
             generator: parking_lot::Mutex::new(rtcp_generator),
@@ -1240,7 +1252,7 @@ impl RtpSession {
             ssrc,
             transport,
             streams,
-            received_sender_reports: Arc::new(DashMap::new()),
+            received_sender_reports: Arc::new(new_ssrc_map()),
             scheduler,
             receiver: receiver_rx,
             packet_sender,
