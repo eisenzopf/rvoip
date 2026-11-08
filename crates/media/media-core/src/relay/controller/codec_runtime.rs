@@ -480,12 +480,28 @@ pub(super) struct DialogCodecRuntime {
     pub(super) format: NegotiatedAudioCodec,
     encoder: Mutex<StatefulCodec>,
     decoder: Mutex<StatefulCodec>,
+    /// Stateless G.711 decoder for the inline receive path (media executor
+    /// v2). `None` for codecs whose decoder keeps state behind the async
+    /// lock; those dialogs always decode on their receive task.
+    inline_g711: Option<G711Codec>,
 }
 
 impl DialogCodecRuntime {
     pub(super) fn new(format: NegotiatedAudioCodec) -> Result<Self> {
         let encoder = StatefulCodec::new(&format)?;
         let decoder = StatefulCodec::new(&format)?;
+        let inline_g711 = match decoder {
+            StatefulCodec::Pcmu(_) => Some(G711Codec::mu_law(
+                format.clock_rate,
+                u16::from(format.channels),
+            )?),
+            StatefulCodec::Pcma(_) => Some(G711Codec::a_law(
+                format.clock_rate,
+                u16::from(format.channels),
+            )?),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        };
         // One line per codec generation, naming what it was actually built
         // with. Every AMR field here has been silently wrong at some point on
         // this branch -- the framing from a dropped fmtp, DTX from a switch
@@ -519,7 +535,32 @@ impl DialogCodecRuntime {
             format,
             encoder: Mutex::new(encoder),
             decoder: Mutex::new(decoder),
+            inline_g711,
         })
+    }
+
+    /// Whether this generation decodes synchronously on the inline receive
+    /// path, i.e. stateless G.711.
+    pub(super) fn decodes_inline(&self) -> bool {
+        self.inline_g711.is_some()
+    }
+
+    /// The synchronous twin of [`Self::decode_source`] for stateless G.711:
+    /// the same samples, format, timestamp and errors, decoded into a PCM
+    /// buffer from the per-thread pool. A source change needs no work here:
+    /// a fresh G.711 decoder is the decoder in use, and G.711 carries no
+    /// codec mode requests. `None` for codecs whose decoder keeps state
+    /// behind the async lock.
+    pub(super) fn decode_g711_now(
+        &self,
+        payload: &[u8],
+        timestamp: u32,
+    ) -> Option<Result<AudioFrame>> {
+        let codec = self.inline_g711.as_ref()?;
+        Some(codec.decode_pooled(payload).map(|mut frame| {
+            frame.timestamp = timestamp;
+            frame
+        }))
     }
 
     #[cfg(test)]
@@ -682,6 +723,45 @@ mod tests {
             runtime.decode(&b_next, 1920).await.unwrap().samples,
             reference.decode(&b_next, 1920).await.unwrap().samples
         );
+    }
+
+    /// The inline G.711 decode is the async decode, frame for frame, for
+    /// both laws, with and without a source change, including its error.
+    #[tokio::test]
+    async fn inline_g711_decode_matches_the_async_decoder() {
+        for name in ["PCMU", "PCMA"] {
+            let runtime = DialogCodecRuntime::new(resolve_codec(&config(name)).unwrap()).unwrap();
+            assert!(runtime.decodes_inline(), "{name}");
+            let payload: Vec<u8> = (0..=u8::MAX).collect();
+            for (timestamp, source_changed) in [(160, false), (320, true), (u32::MAX, false)] {
+                let expected = runtime
+                    .decode_source(&payload, timestamp, source_changed)
+                    .await
+                    .unwrap();
+                let inline = runtime
+                    .decode_g711_now(&payload, timestamp)
+                    .expect("G.711 decodes inline")
+                    .unwrap();
+                assert_eq!(inline.samples, expected.samples, "{name}");
+                assert_eq!(inline.timestamp, timestamp);
+                assert_eq!(
+                    (inline.sample_rate, inline.channels, inline.duration),
+                    (expected.sample_rate, expected.channels, expected.duration)
+                );
+            }
+            assert_eq!(
+                runtime
+                    .decode_g711_now(&[], 0)
+                    .expect("G.711")
+                    .unwrap_err()
+                    .to_string(),
+                runtime
+                    .decode_source(&[], 0, false)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+            );
+        }
     }
 
     fn config(codec: &str) -> MediaConfig {
