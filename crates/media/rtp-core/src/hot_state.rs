@@ -325,7 +325,8 @@ pub struct HotStateCounters {
     /// entry stays in that lane's slab until the thread exits; runtime
     /// teardown only).
     pub rx_foreign_drops: u64,
-    /// Cache lines lane clocks prefetched for the entries they woke.
+    /// Cache lines lane clocks prefetched for the entries they woke, and lane
+    /// tables for the entries (and their sources) they fired.
     pub prefetches: u64,
 }
 
