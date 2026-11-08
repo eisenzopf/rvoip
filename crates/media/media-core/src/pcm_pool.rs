@@ -15,13 +15,21 @@
 //! samples each). With the switch off (always under v1) every function here
 //! behaves exactly like the allocation it replaces and the pool stays empty.
 //!
+//! With [`MediaExecutorConfig::counter_pool_cleanup`] active as well (also
+//! part of v2), a thread keeps up to [`PCM_POOL_CLEANUP_CAPACITY`] buffers of
+//! at most [`PCM_POOL_CLEANUP_MAX_SAMPLES`] samples (larger ones keep the
+//! [`PCM_POOL_CAPACITY`] bound), and misses are counted through
+//! [`add_lane_deferred`], batched with the lane pass that took them.
+//!
 //! [`MediaExecutorConfig::pcm_pool`]: rvoip_rtp_core::executor::MediaExecutorConfig::pcm_pool
+//! [`MediaExecutorConfig::counter_pool_cleanup`]: rvoip_rtp_core::executor::MediaExecutorConfig::counter_pool_cleanup
+//! [`add_lane_deferred`]: rvoip_rtp_core::executor::add_lane_deferred
 //! [`MediaExecutorConfig::v2`]: rvoip_rtp_core::executor::MediaExecutorConfig::v2
 
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use rvoip_rtp_core::executor::pcm_pool_enabled;
+use rvoip_rtp_core::executor::{add_lane_deferred, counter_pool_cleanup_enabled, pcm_pool_enabled};
 
 /// Buffers one thread keeps for reuse. A 20 ms G.711 frame needs 160
 /// samples, and a media lane holds only a few frames in flight per call
@@ -32,6 +40,21 @@ pub const PCM_POOL_CAPACITY: usize = 32;
 /// Largest buffer (in samples of capacity) the pool keeps; larger buffers
 /// are freed when returned.
 pub const PCM_POOL_MAX_SAMPLES: usize = 4096;
+
+/// With [`MediaExecutorConfig::counter_pool_cleanup`], the number of buffers
+/// of at most [`PCM_POOL_CLEANUP_MAX_SAMPLES`] samples one thread keeps. A
+/// 2 ms lane pass whose arrivals (takes) and playout ticks (returns) do not
+/// interleave swings a lane's pool by more than [`PCM_POOL_CAPACITY`]
+/// buffers, so the smaller pool missed on a share of decodes in every pass.
+///
+/// [`MediaExecutorConfig::counter_pool_cleanup`]: rvoip_rtp_core::executor::MediaExecutorConfig::counter_pool_cleanup
+pub const PCM_POOL_CLEANUP_CAPACITY: usize = 1024;
+
+/// The largest buffer (in samples of capacity) that may use
+/// [`PCM_POOL_CLEANUP_CAPACITY`] (128 ms at 8 kHz); larger buffers keep the
+/// [`PCM_POOL_CAPACITY`] bound, so a thread's pool never holds more than
+/// about 2 MiB of small buffers.
+pub const PCM_POOL_CLEANUP_MAX_SAMPLES: usize = 1024;
 
 /// How many reuses a thread counts locally before publishing them.
 const FLUSH_EVERY: u64 = 64;
@@ -104,8 +127,9 @@ pub fn take_pcm_buffer(samples: usize) -> Vec<i16> {
             return buffer;
         }
         // An allocation the pool could not avoid; one atomic next to a
-        // malloc is noise.
-        MISSES.fetch_add(1, Ordering::Relaxed);
+        // malloc is noise (with the cleanup switch, batched with the lane
+        // pass that took it).
+        add_lane_deferred(&MISSES, 1);
         THREAD_MISSES.with(|misses| misses.set(misses.get() + 1));
     }
     Vec::with_capacity(samples)
@@ -120,10 +144,23 @@ pub fn recycle_pcm_buffer(buffer: Vec<i16>) {
     }
     POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
-        if pool.len() < PCM_POOL_CAPACITY {
+        // Past the historical bound only with the cleanup switch.
+        if pool.len() < PCM_POOL_CAPACITY || pool.len() < pcm_pool_limit(buffer.capacity()) {
             pool.push(buffer);
         }
     });
+}
+
+/// The number of buffers this thread's pool may hold when a buffer with
+/// `capacity` samples comes back: [`PCM_POOL_CAPACITY`], or with
+/// `counter_pool_cleanup` [`PCM_POOL_CLEANUP_CAPACITY`] for a small buffer.
+#[inline]
+fn pcm_pool_limit(capacity: usize) -> usize {
+    if capacity <= PCM_POOL_CLEANUP_MAX_SAMPLES && counter_pool_cleanup_enabled() {
+        PCM_POOL_CLEANUP_CAPACITY
+    } else {
+        PCM_POOL_CAPACITY
+    }
 }
 
 /// `vec![0; samples]` (a concealment frame), from the pool when enabled.
@@ -165,7 +202,8 @@ pub fn pcm_pool_misses_on_this_thread() -> u64 {
 mod tests {
     use super::*;
     use rvoip_rtp_core::executor::{
-        override_media_executor_config_on_this_thread, MediaExecutorConfig,
+        defer_lane_counters_on_this_thread, override_media_executor_config_on_this_thread,
+        pending_lane_deferred_on_this_thread, MediaExecutorConfig,
     };
 
     fn drain_pool() {
@@ -225,7 +263,9 @@ mod tests {
 
     #[test]
     fn the_pool_is_bounded_in_count_and_buffer_size() {
-        let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+        let _v2 = override_media_executor_config_on_this_thread(
+            MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
+        );
         drain_pool();
         recycle_pcm_buffer(Vec::new());
         recycle_pcm_buffer(Vec::with_capacity(PCM_POOL_MAX_SAMPLES + 1));
@@ -239,5 +279,133 @@ mod tests {
         }
         assert_eq!(pcm_pool_len_on_this_thread(), PCM_POOL_CAPACITY);
         drain_pool();
+    }
+
+    /// Take `swing` buffers, then return them all, `rounds` times on a fresh
+    /// thread (a lane pass whose arrivals and playout ticks do not
+    /// interleave). Returns (misses in the first round, misses in total,
+    /// misses held for the lane batch before the deferral ends, every
+    /// buffer's length and contents as handed out).
+    fn swing(
+        config: MediaExecutorConfig,
+        swing: usize,
+        rounds: usize,
+    ) -> (u64, u64, u64, Vec<Vec<i16>>) {
+        std::thread::spawn(move || {
+            let _config = override_media_executor_config_on_this_thread(config.clone());
+            // As inside a lane poller pass, which defers only with the switch.
+            let deferral = config
+                .counter_pool_cleanup_active()
+                .then(defer_lane_counters_on_this_thread);
+            let mut seen = Vec::new();
+            let mut first_round = 0;
+            for round in 0..rounds {
+                let taken: Vec<Vec<i16>> = (0..swing)
+                    .map(|index| match index % 3 {
+                        0 => take_pcm_buffer(160),
+                        1 => take_zeroed_pcm_buffer(160),
+                        _ => take_pcm_copy(&[index as i16; 80]),
+                    })
+                    .collect();
+                if round == 0 {
+                    first_round = pcm_pool_misses_on_this_thread();
+                }
+                for buffer in taken {
+                    seen.push(buffer.clone());
+                    recycle_pcm_buffer(buffer);
+                }
+            }
+            let misses = pcm_pool_misses_on_this_thread();
+            let held = pending_lane_deferred_on_this_thread(&MISSES);
+            drop(deferral);
+            assert_eq!(
+                pending_lane_deferred_on_this_thread(&MISSES),
+                0,
+                "the end of the deferral published every held miss"
+            );
+            (first_round, misses, held, seen)
+        })
+        .join()
+        .unwrap()
+    }
+
+    /// A pass-sized swing of 100 buffers: with the 32-buffer pool every round
+    /// after the first misses on 68 takes (and frees 68 returns); with
+    /// `counter_pool_cleanup` only the first round allocates. The buffers
+    /// handed out are identical either way, and every miss is counted
+    /// exactly once (held for the lane batch with the switch, added at once
+    /// without it).
+    #[test]
+    fn the_cleanup_pool_absorbs_a_pass_sized_swing_with_identical_buffers() {
+        const SWING: usize = 100;
+        const ROUNDS: usize = 5;
+        let before = pcm_pool_counters().misses;
+        let (warm_off, off, held_off, buffers_off) = swing(
+            MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
+            SWING,
+            ROUNDS,
+        );
+        let (warm_on, on, held_on, buffers_on) = swing(MediaExecutorConfig::v2(), SWING, ROUNDS);
+        assert_eq!((warm_off, warm_on), (SWING as u64, SWING as u64));
+        assert_eq!(
+            off,
+            (SWING + (ROUNDS - 1) * (SWING - PCM_POOL_CAPACITY)) as u64
+        );
+        assert_eq!(on, SWING as u64, "only the first round allocates");
+        assert_eq!(buffers_on, buffers_off, "same buffers handed out");
+        assert_eq!(
+            held_off, 0,
+            "without the switch every miss is added at once"
+        );
+        assert_eq!(held_on, on, "with it every miss waits for the lane batch");
+        assert!(
+            pcm_pool_counters().misses >= before + off + on,
+            "both arms reached the process total"
+        );
+    }
+
+    /// With `counter_pool_cleanup` small buffers fill the pool past the
+    /// historical bound, large ones only up to it; never under v1 or without
+    /// the pool.
+    #[test]
+    fn the_cleanup_bound_applies_to_small_buffers_only() {
+        std::thread::spawn(|| {
+            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+            for _ in 0..40 {
+                recycle_pcm_buffer(Vec::with_capacity(4096));
+            }
+            assert_eq!(
+                pcm_pool_len_on_this_thread(),
+                PCM_POOL_CAPACITY,
+                "large buffers keep the historical bound"
+            );
+            for _ in 0..PCM_POOL_CLEANUP_CAPACITY + 10 {
+                recycle_pcm_buffer(Vec::with_capacity(PCM_POOL_CLEANUP_MAX_SAMPLES));
+            }
+            assert_eq!(pcm_pool_len_on_this_thread(), PCM_POOL_CLEANUP_CAPACITY);
+            recycle_pcm_buffer(Vec::with_capacity(160));
+            recycle_pcm_buffer(Vec::with_capacity(4096));
+            assert_eq!(pcm_pool_len_on_this_thread(), PCM_POOL_CLEANUP_CAPACITY);
+            drain_pool();
+            for config in [
+                MediaExecutorConfig::v1().with_counter_pool_cleanup(true),
+                MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
+                MediaExecutorConfig::v2().with_pcm_pool(false),
+            ] {
+                let _config = override_media_executor_config_on_this_thread(config.clone());
+                for _ in 0..PCM_POOL_CAPACITY + 10 {
+                    recycle_pcm_buffer(Vec::with_capacity(160));
+                }
+                let expected = if config.pcm_pool_active() {
+                    PCM_POOL_CAPACITY
+                } else {
+                    0
+                };
+                assert_eq!(pcm_pool_len_on_this_thread(), expected, "{config:?}");
+                drain_pool();
+            }
+        })
+        .join()
+        .unwrap();
     }
 }
