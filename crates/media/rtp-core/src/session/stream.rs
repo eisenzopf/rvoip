@@ -223,6 +223,13 @@ impl RtpStream {
         is_first_packet
     }
 
+    /// Hot call state: stop maintaining the loss tracker's write-only
+    /// history (a heap line and a shift per packet); every statistic is
+    /// unchanged.
+    pub(crate) fn disable_loss_history(&mut self) {
+        self.loss_tracker.disable_history();
+    }
+
     /// Whether the legacy per-stream jitter buffer is enabled. Session-owned
     /// streams are always unbuffered.
     pub(crate) fn has_jitter_buffer(&self) -> bool {

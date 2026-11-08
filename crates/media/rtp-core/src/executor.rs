@@ -65,6 +65,13 @@
 //!   keeps up to 1024 small buffers instead of 32, and a lane poller on a
 //!   current-thread runtime publishes the per-event counters its passes add
 //!   (PCM pool misses, owner RTCP) once per batch of passes.
+//! - [`MediaExecutorConfig::hot_state`]: per-call state the socket owner
+//!   touches for every packet is packed onto fewer cache lines (the SRTP
+//!   context's per-direction keys and rollover state, the receive loop's
+//!   control entry in its lane's slab, the synchronous TX path's
+//!   destination), the receive loop checks its control-plane fences through
+//!   one doorbell line, and lane clocks prefetch the state of the futures
+//!   they are about to wake (see [`crate::hot_state`]).
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -227,6 +234,19 @@ pub struct MediaExecutorConfig {
     /// [`add_lane_deferred`]).
     pub counter_pool_cleanup: bool,
     // ---- End counter and PCM pool cleanup ----
+    // ---- Hot call state ----
+    /// Per-call state the socket owner touches for every packet is packed
+    /// onto fewer cache lines, without changing any output: the SRTP
+    /// context's per-direction keys, keyed HMAC and active stream's
+    /// rollover/replay state (three lines per direction), the receive loop's
+    /// control entry (in its lane's slab on a dedicated current-thread lane),
+    /// and the synchronous TX path's destination. The receive loop reads one
+    /// doorbell line per datagram instead of the transport's control-plane
+    /// atomics, which it re-reads only after a control-plane change. Lane
+    /// clocks prefetch the state of the futures they are about to wake. See
+    /// [`crate::hot_state`].
+    pub hot_state: bool,
+    // ---- End hot call state ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -258,6 +278,8 @@ impl MediaExecutorConfig {
             owner_receive_stats: false,
             // Counter and PCM pool cleanup.
             counter_pool_cleanup: false,
+            // Hot call state.
+            hot_state: false,
         }
     }
 
@@ -284,6 +306,8 @@ impl MediaExecutorConfig {
             owner_receive_stats: true,
             // Counter and PCM pool cleanup.
             counter_pool_cleanup: true,
+            // Hot call state.
+            hot_state: true,
         }
     }
 
@@ -390,6 +414,16 @@ impl MediaExecutorConfig {
         self
     }
     // ---- End counter and PCM pool cleanup ----
+
+    // ---- Hot call state ----
+
+    /// Set [`Self::hot_state`].
+    pub fn with_hot_state(mut self, enabled: bool) -> Self {
+        self.hot_state = enabled;
+        self
+    }
+
+    // ---- End hot call state ----
 
     /// Check the configuration without installing it.
     ///
@@ -516,6 +550,15 @@ impl MediaExecutorConfig {
         self.is_v2() && self.counter_pool_cleanup
     }
     // ---- End counter and PCM pool cleanup ----
+
+    // ---- Hot call state ----
+
+    /// Whether objects built now pack and gate their per-call hot state.
+    pub fn hot_state_active(&self) -> bool {
+        self.is_v2() && self.hot_state
+    }
+
+    // ---- End hot call state ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -737,6 +780,18 @@ pub fn counter_pool_cleanup_enabled() -> bool {
 
 // ---- End counter and PCM pool cleanup ----
 
+// ---- Hot call state ----
+
+/// Whether objects built now pack and gate their per-call hot state
+/// ([`MediaExecutorConfig::hot_state_active`]). Read when an SRTP context,
+/// transport, packet writer, session ingress or lane clock is built, never
+/// per packet.
+pub fn hot_state_enabled() -> bool {
+    with_config(MediaExecutorConfig::hot_state_active)
+}
+
+// ---- End hot call state ----
+
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
 pub struct MediaExecutorConfigOverride {
@@ -886,6 +941,13 @@ pub(crate) trait InlineRtpIngress: Send + 'static {
     /// to the transport broadcast, as v1 does.
     fn on_rtcp(&mut self, _data: &[u8], _source: SocketAddr, _now: Instant) -> bool {
         false
+    }
+
+    /// Hot call state: the address of the state the ingress's deadlines are
+    /// served from (its inline sink), which the lane clock prefetches when
+    /// the owner timer falls due; 0: none.
+    fn prefetch_hint(&self) -> usize {
+        0
     }
 }
 
@@ -1263,6 +1325,9 @@ pub(crate) struct OwnerTimer {
     /// The instant the runtime entry was last set to and not yet observed to
     /// fire. `None` when there is no entry or it fired.
     live: Option<Instant>,
+    /// Hot call state: the address the lane clock prefetches when this
+    /// timer falls due (0: none); see [`Self::set_prefetch_hint`].
+    hint: usize,
 }
 
 impl OwnerTimer {
@@ -1271,6 +1336,21 @@ impl OwnerTimer {
             sleep: None,
             armed: None,
             live: None,
+            hint: 0,
+        }
+    }
+
+    /// Have the lane clock prefetch `address` (the owner's deadline
+    /// consumer) when this timer falls due. Applied to the current sleep now
+    /// and to a sleep created later; a sleep not filed in a lane clock
+    /// ignores it.
+    pub(crate) fn set_prefetch_hint(&mut self, address: usize) {
+        if self.hint == address {
+            return;
+        }
+        self.hint = address;
+        if let Some(sleep) = self.sleep.as_mut() {
+            sleep.as_mut().set_prefetch_hint(address);
         }
     }
 
@@ -1294,7 +1374,13 @@ impl OwnerTimer {
         let extends = self.live.is_some_and(|live| live > now && deadline >= live);
         match self.sleep.as_mut() {
             Some(sleep) => sleep.as_mut().reset(when),
-            None => self.sleep = Some(Box::pin(crate::media_clock::sleep_until(when))),
+            None => {
+                let mut sleep = Box::pin(crate::media_clock::sleep_until(when));
+                if self.hint != 0 {
+                    sleep.as_mut().set_prefetch_hint(self.hint);
+                }
+                self.sleep = Some(sleep);
+            }
         }
         self.live = Some(deadline);
         if extends {
@@ -2283,6 +2369,39 @@ mod tests {
         record_owner_receive_stats();
         assert!(inline_executor_counters().owner_receive_stats > before.owner_receive_stats);
     }
+
+    // ---- Hot call state ----
+
+    #[test]
+    fn hot_state_is_off_in_v1_on_in_v2_and_never_applies_under_v1() {
+        assert!(!MediaExecutorConfig::v1().hot_state);
+        assert!(!MediaExecutorConfig::v1().hot_state_active());
+        assert!(MediaExecutorConfig::v2().hot_state);
+        assert!(MediaExecutorConfig::v2().hot_state_active());
+        assert!(MediaExecutorConfig::v2().validate().is_ok());
+        assert!(
+            !MediaExecutorConfig::v1()
+                .with_hot_state(true)
+                .hot_state_active(),
+            "never under v1"
+        );
+        let off = MediaExecutorConfig::v2().with_hot_state(false);
+        assert!(!off.hot_state_active());
+        assert!(off.validate().is_ok());
+        // No prerequisite: it applies without the lane poller (the receive
+        // loop's entry then stays local to the loop).
+        assert!(MediaExecutorConfig::v2()
+            .with_lane_poller(false)
+            .hot_state_active());
+        {
+            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+            assert!(hot_state_enabled());
+            let _off = override_media_executor_config_on_this_thread(off);
+            assert!(!hot_state_enabled());
+        }
+    }
+
+    // ---- End hot call state ----
 
     #[test]
     fn mode_names_parse_and_reject_unknown_values() {

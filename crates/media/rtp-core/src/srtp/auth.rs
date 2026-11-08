@@ -19,23 +19,62 @@ impl HmacSha1Tag {
     }
 }
 
+/// An HMAC-SHA1 state already keyed (the inner and outer pads absorbed),
+/// without a block buffer.
+pub(crate) type HmacSha1Core = hmac::HmacCore<Sha1>;
+
+/// The key of one HMAC-SHA1 tag.
+#[derive(Clone, Copy)]
+pub(crate) enum HmacSha1Key<'a> {
+    /// The raw authentication key, keyed for this tag (two SHA-1
+    /// compressions for the pads).
+    Raw(&'a [u8]),
+    /// A state keyed once with the authentication key (hot call state keeps
+    /// one per SRTP direction); the tag is the same.
+    Keyed(&'a HmacSha1Core),
+}
+
+/// Key an HMAC-SHA1 state with `key` once, for [`HmacSha1Key::Keyed`].
+pub(crate) fn hmac_sha1_core(key: &[u8]) -> Result<HmacSha1Core> {
+    HmacSha1::new_from_slice(key)
+        .map(|mac| mac.decompose().0)
+        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))
+}
+
 /// HMAC-SHA1 over `data` followed by `trailer` (the ROC for SRTP, nothing
-/// for SRTCP), truncated to `tag_length`: the one computation behind every
-/// SRTP and SRTCP authentication tag this crate creates or verifies.
-///
-/// Deliberately kept out of line. The SHA extensions' compression is
-/// legacy-SSE code: inlined into the AVX code of a packet path (the socket
-/// owner's receive loop, the synchronous TX path, SRTCP) under fat LTO or
-/// PGO it causes SSE/AVX transition stalls that cost more than the call.
-#[inline(never)]
+/// for SRTCP), truncated to `tag_length`, with a raw key; see
+/// [`hmac_sha1_tag_with`].
+#[inline]
 pub(crate) fn hmac_sha1_tag(
     key: &[u8],
     data: &[u8],
     trailer: &[u8],
     tag_length: usize,
 ) -> Result<HmacSha1Tag> {
-    let mut mac = HmacSha1::new_from_slice(key)
-        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
+    hmac_sha1_tag_with(HmacSha1Key::Raw(key), data, trailer, tag_length)
+}
+
+/// HMAC-SHA1 over `data` followed by `trailer` (the ROC for SRTP, nothing
+/// for SRTCP), truncated to `tag_length`: the one computation behind every
+/// SRTP and SRTCP authentication tag this crate creates or verifies, from a
+/// raw key or from a keyed state (hot call state's packed SRTP block).
+///
+/// Deliberately kept out of line. The SHA extensions' compression is
+/// legacy-SSE code: inlined into the AVX code of a packet path (the socket
+/// owner's receive loop, the synchronous TX path, SRTCP) under fat LTO or
+/// PGO it causes SSE/AVX transition stalls that cost more than the call.
+#[inline(never)]
+pub(crate) fn hmac_sha1_tag_with(
+    key: HmacSha1Key<'_>,
+    data: &[u8],
+    trailer: &[u8],
+    tag_length: usize,
+) -> Result<HmacSha1Tag> {
+    let mut mac = match key {
+        HmacSha1Key::Raw(key) => HmacSha1::new_from_slice(key)
+            .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?,
+        HmacSha1Key::Keyed(core) => HmacSha1::from_core(core.clone()),
+    };
     mac.update(data);
     mac.update(trailer);
     let result = mac.finalize().into_bytes();
@@ -140,7 +179,7 @@ impl SrtpAuthenticator {
     /// stack instead of being copied into a `Vec`.
     pub(crate) fn verify_auth_tag_in_place(
         algorithm: SrtpAuthenticationAlgorithm,
-        auth_key: &[u8],
+        key: HmacSha1Key<'_>,
         tag_length: usize,
         packet_data: &[u8],
         tag: &[u8],
@@ -149,7 +188,7 @@ impl SrtpAuthenticator {
         if algorithm == SrtpAuthenticationAlgorithm::Null {
             return Ok(true);
         }
-        let expected = hmac_sha1_tag(auth_key, packet_data, &roc.to_be_bytes(), tag_length)?;
+        let expected = hmac_sha1_tag_with(key, packet_data, &roc.to_be_bytes(), tag_length)?;
         let expected = expected.as_slice();
         if expected.len() != tag.len() {
             return Err(Error::SrtpError(format!(
@@ -171,7 +210,7 @@ impl SrtpAuthenticator {
     /// algorithm appends nothing (its tag is empty).
     pub(crate) fn append_auth_tag(
         algorithm: SrtpAuthenticationAlgorithm,
-        auth_key: &[u8],
+        key: HmacSha1Key<'_>,
         tag_length: usize,
         buffer: &mut Vec<u8>,
         start: usize,
@@ -180,7 +219,7 @@ impl SrtpAuthenticator {
         if algorithm == SrtpAuthenticationAlgorithm::Null {
             return Ok(());
         }
-        let tag = hmac_sha1_tag(auth_key, &buffer[start..], &roc.to_be_bytes(), tag_length)?;
+        let tag = hmac_sha1_tag_with(key, &buffer[start..], &roc.to_be_bytes(), tag_length)?;
         buffer.extend_from_slice(tag.as_slice());
         Ok(())
     }
@@ -312,6 +351,35 @@ impl SrtpReplayProtection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A keyed state (hot call state) produces exactly the raw key's tags
+    /// and errors, for random keys and data, at every tag length.
+    #[test]
+    fn a_keyed_hmac_state_tags_exactly_like_its_raw_key() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        for round in 0..64 {
+            let key: Vec<u8> = (0..20).map(|_| rng.gen()).collect();
+            let data: Vec<u8> = (0..rng.gen_range(0..300)).map(|_| rng.gen()).collect();
+            let roc: u32 = rng.gen();
+            let core = hmac_sha1_core(&key).unwrap();
+            for tag_length in [4, 10, 20] {
+                let raw = hmac_sha1_tag(&key, &data, &roc.to_be_bytes(), tag_length).unwrap();
+                let keyed = hmac_sha1_tag_with(
+                    HmacSha1Key::Keyed(&core),
+                    &data,
+                    &roc.to_be_bytes(),
+                    tag_length,
+                )
+                .unwrap();
+                assert_eq!(keyed.as_slice(), raw.as_slice(), "round {round}");
+            }
+            let raw = hmac_sha1_tag(&key, &data, &[], 21).map(|tag| tag.as_slice().to_vec());
+            let keyed = hmac_sha1_tag_with(HmacSha1Key::Keyed(&core), &data, &[], 21)
+                .map(|tag| tag.as_slice().to_vec());
+            assert_eq!(format!("{keyed:?}"), format!("{raw:?}"));
+        }
+    }
 
     #[test]
     fn test_null_authentication() {

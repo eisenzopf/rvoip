@@ -67,6 +67,14 @@ pub(super) struct InlineSessionIngress {
     /// With `owner_receive_stats`: the per-packet receive statistics are
     /// published here, without the `stats` mutex.
     receive: Option<ReceiveAccountingWriter>,
+    /// Hot call state, decided when the ingress is built: streams it creates
+    /// skip their write-only loss history, and the sink slot is no longer
+    /// polled once it is settled.
+    hot_state: bool,
+    /// Hot call state: the sink slot delivered its one value (a slot accepts
+    /// a single offer, so it can never become dirty again); its cache line
+    /// is not read per packet any more.
+    sink_settled: bool,
 }
 
 impl InlineSessionIngress {
@@ -95,18 +103,23 @@ impl InlineSessionIngress {
             counters: None,
             rtcp,
             receive,
+            hot_state: crate::executor::hot_state_enabled(),
+            sink_settled: false,
         }
     }
 
     /// Adopt a sink offered by the control plane, once, before any packet
     /// has been published to the v1 consumer.
     fn poll_sink_slot(&mut self) {
-        if !self.sink_slot.is_dirty() {
+        if self.sink_settled || !self.sink_slot.is_dirty() {
             return;
         }
         let Some(sink) = self.sink_slot.take() else {
             return;
         };
+        // Hot call state: `HandoffSlot::offer` succeeds once, so after this
+        // take the slot stays clean for the rest of the session.
+        self.sink_settled = self.hot_state;
         match self.downstream {
             Downstream::Broadcast if self.broadcast_packets == 0 => {
                 record_inline_sink_active();
@@ -160,11 +173,15 @@ impl InlineSessionIngress {
             .map_or(0, ReceiveAccountingWriter::begin);
         let received_sender_reports = &self.received_sender_reports;
         let clock_rate = &self.clock_rate;
+        let hot_state = self.hot_state;
         let mut created = false;
         let mut entry = self.streams.entry(ssrc).or_insert_with(|| {
             created = true;
             info!("New RTP stream detected with SSRC={:08x}", ssrc);
             let mut stream = RtpStream::new(ssrc, clock_rate.load(Ordering::Relaxed));
+            if hot_state {
+                stream.disable_loss_history();
+            }
             if let Some(sender_report) = received_sender_reports.get(&ssrc) {
                 stream.update_last_sr_info(sender_report.lsr, sender_report.received_at);
             }
@@ -280,6 +297,16 @@ impl InlineRtpIngress for InlineSessionIngress {
         self.apply(verdict, None);
     }
 
+    /// Hot call state: the inline sink's state, which serves every deadline.
+    fn prefetch_hint(&self) -> usize {
+        match &self.downstream {
+            Downstream::Sink(sink) if self.hot_state => {
+                &**sink as *const dyn InlineMediaSink as *const u8 as usize
+            }
+            _ => 0,
+        }
+    }
+
     /// With `owner_rtcp`: exactly the session task's `RtcpReceived` arm,
     /// run on the socket owner.
     fn on_rtcp(&mut self, data: &[u8], source: SocketAddr, _now: Instant) -> bool {
@@ -315,9 +342,21 @@ mod tests {
 
     const REMOTE_SSRC: u32 = 0x00e4_0001;
 
+    thread_local! {
+        /// Hot call state for the v2 sessions the helpers build on this
+        /// thread (`None`: the preset's own setting); see [`with_hot`].
+        static HOT_ARM: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    }
+
     fn config_for(mode: MediaExecutorMode) -> MediaExecutorConfig {
         match mode {
-            MediaExecutorMode::V2 => MediaExecutorConfig::v2(),
+            MediaExecutorMode::V2 => {
+                let v2 = MediaExecutorConfig::v2();
+                match HOT_ARM.with(std::cell::Cell::get) {
+                    Some(hot) => v2.with_hot_state(hot),
+                    None => v2,
+                }
+            }
             _ => MediaExecutorConfig::v1(),
         }
     }
@@ -755,6 +794,121 @@ mod tests {
         assert!(dropped.load(Ordering::Acquire));
         assert!(inline_executor_counters().fallbacks > before.fallbacks);
         session.close().await.unwrap();
+    }
+
+    // ---- Hot call state: v2 with it on equals v2 with it off -------------
+
+    /// Run `scenario` on executor v2 with hot call state forced to `hot` for
+    /// everything built on this thread (sessions, transports, SRTP
+    /// contexts); the receive loops themselves run on the media lanes.
+    async fn with_hot<T, F>(hot: bool, scenario: impl FnOnce() -> F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        HOT_ARM.with(|arm| arm.set(Some(hot)));
+        let result = {
+            let _config = override_media_executor_config_on_this_thread(
+                MediaExecutorConfig::v2().with_hot_state(hot),
+            );
+            scenario().await
+        };
+        HOT_ARM.with(|arm| arm.set(None));
+        result
+    }
+
+    #[tokio::test]
+    async fn hot_state_matches_for_loss_reorder_duplicates_and_late_packets() {
+        let sequence = [10_u16, 11, 13, 12, 12, 16, 14, 17, 20, 19, 19, 21];
+        let before = crate::hot_state::hot_state_counters();
+        let off = with_hot(false, || run_plain(MediaExecutorMode::V2, &sequence)).await;
+        let on = with_hot(true, || run_plain(MediaExecutorMode::V2, &sequence)).await;
+        assert_eq!(off, on);
+        assert_eq!(on.published, sequence.to_vec());
+        let after = crate::hot_state::hot_state_counters();
+        assert!(
+            after.rx_lane_entries + after.rx_local_entries
+                > before.rx_lane_entries + before.rx_local_entries,
+            "the hot run placed a receive-loop entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn hot_state_matches_for_srtp_reorder_replay_and_tamper() {
+        let before = crate::hot_state::hot_state_counters().srtp_contexts;
+        let off = with_hot(false, || run_srtp(MediaExecutorMode::V2)).await;
+        let on = with_hot(true, || run_srtp(MediaExecutorMode::V2)).await;
+        assert_eq!(off, on);
+        assert_eq!(on.published, vec![1, 2, 4, 3, 5]);
+        assert!(
+            crate::hot_state::hot_state_counters().srtp_contexts > before,
+            "the hot run packed its SRTP contexts"
+        );
+    }
+
+    /// A rekey and a rollback move the inbound SRTP epoch; with hot call
+    /// state the receive loop sees them only through the doorbell, so this
+    /// is the test that a ring is never missed.
+    #[tokio::test]
+    async fn hot_state_sees_srtp_rekey_and_rollback_through_the_doorbell() {
+        let off = with_hot(false, || run_srtp_rekey(MediaExecutorMode::V2)).await;
+        let on = with_hot(true, || run_srtp_rekey(MediaExecutorMode::V2)).await;
+        assert_eq!(off, on);
+    }
+
+    #[tokio::test]
+    async fn hot_state_matches_for_owner_rtcp() {
+        for srtp in [false, true] {
+            let off = with_hot(false, || run_inbound_rtcp(MediaExecutorMode::V2, srtp)).await;
+            let on = with_hot(true, || run_inbound_rtcp(MediaExecutorMode::V2, srtp)).await;
+            assert_eq!(off, on, "srtp={srtp}");
+        }
+    }
+
+    /// A latch move (the far end changes its source port mid-call, passes
+    /// probation and is rebound), then teardown: the inline sink sees the
+    /// same packets in the same order, the session the same statistics, the
+    /// transport the same destination, and close releases the sink.
+    async fn run_latch_move_and_teardown(hot: bool) -> (Vec<u16>, (u64, u64, u64), bool, bool) {
+        let mut session = session_in(MediaExecutorMode::V2).await;
+        assert_eq!(udp(&session).hot_state_enabled(), hot);
+        let (sink, seen, dropped) = recording_sink(None, Vec::new());
+        assert!(session.install_inline_media_sink(sink).is_ok());
+        let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let moved = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = session.local_addr().unwrap();
+        send_all(&first, destination, &[1, 2, 3]).await;
+        wait_for(|| seen.lock().len() == 3).await;
+        // Probation on the new port, then established.
+        send_all(&moved, destination, &[4, 5, 6, 7, 8]).await;
+        wait_for(|| seen.lock().len() >= 6).await;
+        // The old source is now a stranger.
+        send_all(&first, destination, &[9]).await;
+        send_all(&moved, destination, &[10]).await;
+        wait_for(|| seen.lock().contains(&10)).await;
+        let stats = session.get_stats();
+        let rebound = udp(&session).current_remote_rtp_addr() == Some(moved.local_addr().unwrap());
+        assert!(!dropped.load(Ordering::Acquire));
+        session.close().await.unwrap();
+        let observed = seen.lock().clone();
+        (
+            observed,
+            (
+                stats.packets_received,
+                stats.packets_lost,
+                stats.packets_out_of_order,
+            ),
+            rebound,
+            dropped.load(Ordering::Acquire),
+        )
+    }
+
+    #[tokio::test]
+    async fn hot_state_matches_for_a_latch_move_and_teardown() {
+        let off = with_hot(false, || run_latch_move_and_teardown(false)).await;
+        let on = with_hot(true, || run_latch_move_and_teardown(true)).await;
+        assert_eq!(off, on);
+        assert!(on.2, "the rebind took effect");
+        assert!(on.3, "close released the sink");
     }
 
     // ---- Owner SRTP: v1/v2 equivalence through the transport's real API ---

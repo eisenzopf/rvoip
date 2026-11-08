@@ -810,6 +810,9 @@ struct RtpPacketSenderState {
     /// Protected datagrams of the synchronous TX path
     /// ([`RtpSendHandle::try_send_now`]), reused for every frame.
     wire: Vec<u8>,
+    /// Hot call state: the transport's remote address and latch state,
+    /// re-read only when its doorbell rang (inert while hot state is off).
+    dest_cache: crate::transport::TxDestCache,
 }
 
 impl RtpPacketSender {
@@ -837,6 +840,7 @@ impl RtpPacketSender {
             state: Mutex::new(RtpPacketSenderState {
                 send_buffer: BytesMut::with_capacity(crate::DEFAULT_MAX_PACKET_SIZE),
                 wire: Vec::new(),
+                dest_cache: crate::transport::TxDestCache::new(),
             }),
             slots: Arc::new(Semaphore::new(capacity)),
             capacity,
@@ -958,8 +962,12 @@ impl RtpPacketSender {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::SessionError("RTP session is closed".to_string()));
         }
-        let destination = udp
-            .current_remote_rtp_addr()
+        let state = &mut *state;
+        // Hot call state: served from the writer's cache while the
+        // transport's doorbell is unchanged (the plain load otherwise).
+        let (transport_destination, latched_hint) =
+            udp.remote_rtp_now_cached(&mut state.dest_cache);
+        let destination = transport_destination
             .or_else(|| *self.remote_addr.read())
             .ok_or_else(|| {
                 Error::SessionError("No destination address for RTP packet".to_string())
@@ -983,7 +991,6 @@ impl RtpPacketSender {
         // `send_payload`), so reading the cursor here and advancing it by
         // exactly the consumed packets below is the same assignment.
         let first_sequence = self.sequence.load(Ordering::Relaxed);
-        let state = &mut *state;
         let Some(outcome) = udp.try_send_rtp_now(
             &payloads[..count],
             self.ssrc,
@@ -991,6 +998,7 @@ impl RtpPacketSender {
             destination,
             &mut state.wire,
             batch,
+            latched_hint,
         ) else {
             return Ok(deferred);
         };
@@ -4960,10 +4968,14 @@ mod sync_tx_tests {
     }
 
     async fn rig(srtp: bool, first_sequence: u16) -> Rig {
+        rig_with(srtp, first_sequence, false).await
+    }
+
+    async fn rig_with(srtp: bool, first_sequence: u16, symmetric_rtp: bool) -> Rig {
         let transport = UdpRtpTransport::new(RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
             local_rtcp_addr: None,
-            symmetric_rtp: false,
+            symmetric_rtp,
             rtcp_mux: true,
             session_id: Some("sync-tx".to_string()),
             use_port_allocator: false,
@@ -5007,6 +5019,90 @@ mod sync_tx_tests {
             peer,
             transport,
         }
+    }
+
+    /// Hot call state: what one run of [`destination_script`] put on each
+    /// peer.
+    #[derive(Debug, PartialEq, Eq)]
+    struct DestinationWire {
+        first_peer: Vec<Vec<u8>>,
+        moved_peer: Vec<Vec<u8>>,
+        latched_peer: Vec<Vec<u8>>,
+        next_sequence: u16,
+    }
+
+    fn send_one(rig: &Rig, frames: &[Frame], index: usize) {
+        let report = rig
+            .sender
+            .try_send_now(&as_now(frames, index..index + 1), false)
+            .unwrap();
+        assert_eq!(
+            (report.sent, report.error.is_none()),
+            (1, true),
+            "frame {index}"
+        );
+    }
+
+    /// SRTP frames with symmetric RTP on: pre-latch sends to the session's
+    /// peer (each seeds the transport's target), a signalled move of the
+    /// destination, then an inbound SRTP packet from a third address that
+    /// the receive loop latches. The writer's destination must follow every
+    /// change exactly as the uncached path does.
+    async fn destination_script(hot: bool) -> DestinationWire {
+        let _config = crate::executor::override_media_executor_config_on_this_thread(
+            crate::executor::MediaExecutorConfig::v2().with_hot_state(hot),
+        );
+        let rig = rig_with(true, 65_532, true).await;
+        let udp = &rig.transport;
+        assert_eq!(udp.hot_state_enabled(), hot);
+        let frames = frames();
+        for index in 0..4 {
+            send_one(&rig, &frames, index);
+        }
+        let moved = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.set_remote_rtp_addr(moved.local_addr().unwrap()).await;
+        for index in 4..8 {
+            send_one(&rig, &frames, index);
+        }
+        let latched = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut remote = srtp_context();
+        let inbound = remote
+            .protect(&RtpPacket::new(
+                RtpHeader::new(0, 4_000, 0, 0x0c0c_0c0c),
+                Bytes::from(vec![0x42; 160]),
+            ))
+            .unwrap()
+            .serialize()
+            .unwrap();
+        latched
+            .send_to(&inbound, udp.local_rtp_addr().unwrap())
+            .await
+            .unwrap();
+        let latched_addr = latched.local_addr().unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while udp.current_remote_rtp_addr() != Some(latched_addr) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the receive loop latches the inbound source");
+        for index in 8..frames.len() {
+            send_one(&rig, &frames, index);
+        }
+        DestinationWire {
+            first_peer: drain(&rig.peer, 4).await,
+            moved_peer: drain(&moved, 4).await,
+            latched_peer: drain(&latched, frames.len() - 8).await,
+            next_sequence: rig.sequence.load(Ordering::Relaxed),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_cached_destination_follows_seeding_moves_and_latches_exactly() {
+        let uncached = destination_script(false).await;
+        let cached = destination_script(true).await;
+        assert_eq!(cached, uncached);
+        assert_eq!(cached.next_sequence, 65_532u16.wrapping_add(12));
     }
 
     async fn drain(peer: &UdpSocket, count: usize) -> Vec<Vec<u8>> {
