@@ -98,6 +98,7 @@ mod lifecycle_scheduler;
 pub mod logic;
 pub mod runner;
 pub mod safe_diagnostics;
+pub(crate) mod slot_cleanup;
 pub mod state;
 pub mod timer_utils;
 pub mod validators;
@@ -120,6 +121,7 @@ pub use completion::{
 pub use error::{Error as TransactionError, Result as TransactionResult};
 pub use event::*;
 pub use key::*;
+pub use slot_cleanup::SlotCleanupStats;
 pub use state::*;
 
 /// Default capacity for each transaction runner's private command channel.

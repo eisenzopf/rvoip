@@ -2179,6 +2179,8 @@ pub struct TransactionManager {
     transaction_dispatch_queue_capacity: usize,
     transaction_command_channel_capacity: usize,
     stateless_overload_retry_after_secs: Arc<AtomicU32>,
+    /// Slot-cleanup decisions, reported by [`Self::slot_cleanup_stats`].
+    slot_cleanup: Arc<crate::transaction::slot_cleanup::SlotCleanupCounters>,
     transaction_dispatch_priority_burst_max: Arc<AtomicUsize>,
     invite_2xx_retransmit_max_due_per_tick: Arc<AtomicUsize>,
 }
@@ -2773,10 +2775,27 @@ impl TransactionManager {
 
     fn install_terminal_delivery_failure_hook(&self) {
         let lifecycle = Arc::clone(&self.admission_lifecycle);
+        let slot_cleanup = Arc::clone(&self.slot_cleanup);
         self.events_tx
             .install_terminal_delivery_failure_hook(Arc::new(move || {
-                lifecycle.begin_draining();
+                // This latch is permanent and refuses every later new
+                // transaction, inbound requests and local BYEs alike, so it
+                // must never be silent.
+                if lifecycle.begin_draining() {
+                    slot_cleanup.record_admission_fail_closed();
+                    error!(
+                        "Transaction manager closed new-transaction admission: a terminal event \
+                         could not reach the transaction user"
+                    );
+                }
             }));
+    }
+
+    /// Snapshot of this manager's slot-cleanup counters: terminal
+    /// publications continued in the background instead of closing
+    /// admission, and real fail-closed latches.
+    pub fn slot_cleanup_stats(&self) -> crate::transaction::SlotCleanupStats {
+        self.slot_cleanup.snapshot()
     }
 
     fn retained_client_deadline_context(&self) -> RetainedClientDeadlineContext {
@@ -4107,6 +4126,7 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4308,6 +4328,7 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4762,6 +4783,7 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4943,6 +4965,7 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: 100,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -5087,6 +5110,7 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: 10,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
