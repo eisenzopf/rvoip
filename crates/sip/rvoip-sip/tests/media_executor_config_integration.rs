@@ -10,7 +10,10 @@
 //! with the lane timing wheel and the pass clock. SRTP calls, with RTCP
 //! multiplexed and with a separate RTCP port, run on the same executor: the
 //! receive loop owns the inbound SRTP context only when RTCP shares the RTP
-//! socket.
+//! socket. A plain call binds `SipMediaStream`s: the inbound pump is fused
+//! onto the socket owner and feeds a direct inbound sink, and the outbound
+//! pump sends G.711 synchronously through the cached TX path on the RTP
+//! socket's lane.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -389,4 +392,157 @@ async fn dtls_srtp_call_flows_both_ways_on_executor_v2() {
     let after = inline_executor_counters();
     assert!(after.owner_srtp_loops >= before.owner_srtp_loops + 2);
     assert!(after.owner_srtp_handoffs >= before.owner_srtp_handoffs + 2);
+}
+
+/// What a direct inbound sink was lent: timestamp, payload, payload type.
+type Lent = Arc<std::sync::Mutex<Vec<(u32, Vec<u8>, Option<u8>)>>>;
+
+/// Records what a direct inbound sink is lent.
+struct RecordingSink(Lent);
+
+impl rvoip_core::stream::InboundFrameSink for RecordingSink {
+    fn on_frame(
+        &mut self,
+        frame: rvoip_core::stream::InboundFrameView<'_>,
+    ) -> rvoip_core::stream::InboundFrameDelivery {
+        self.0.lock().unwrap().push((
+            frame.timestamp_rtp,
+            frame.payload.to_vec(),
+            frame.payload_type,
+        ));
+        rvoip_core::stream::InboundFrameDelivery::Accepted
+    }
+}
+
+/// A PCMU payload with every code, rotated per frame (so frames differ),
+/// including the negative zero the PCM path rewrites.
+fn pcmu_payload(index: usize) -> Vec<u8> {
+    (0..FRAME_SAMPLES)
+        .map(|byte| ((byte + index * 7) % 256) as u8)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sip_media_streams_fuse_the_inbound_pump_and_send_g711_on_the_socket_lane() {
+    use rvoip_core::stream::{MediaFrame, MediaStream, StreamKind};
+    use rvoip_media_core::relay::controller::EncodedG711Format;
+    use rvoip_sip::media_stream::SipMediaStream;
+
+    let before = inline_executor_counters();
+    let (alice_sip, bob_sip) = (37_940, 37_941);
+    let mut bob = StreamPeer::with_config(config("bob-streams", bob_sip, (37_950, 37_969)))
+        .await
+        .expect("bob starts");
+    let mut alice = StreamPeer::with_config(config("alice-streams", alice_sip, (37_970, 37_989)))
+        .await
+        .expect("alice starts");
+    let bob_task = tokio::spawn(async move {
+        let incoming = tokio::time::timeout(Duration::from_secs(10), bob.wait_for_incoming())
+            .await
+            .expect("bob timed out waiting for the INVITE")
+            .expect("bob received the INVITE");
+        let handle = incoming.accept().await.expect("bob accepts");
+        (bob, handle)
+    });
+    let call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{bob_sip}"))
+        .send()
+        .await
+        .expect("alice sends the INVITE");
+    let alice_handle =
+        tokio::time::timeout(Duration::from_secs(10), alice.wait_for_answered(&call_id))
+            .await
+            .expect("alice timed out waiting for the answer")
+            .expect("call answered");
+    let (bob, bob_handle) = bob_task.await.unwrap();
+
+    let bob_stream = SipMediaStream::new(
+        Arc::clone(bob.coordinator()),
+        bob_handle.id().clone(),
+        rvoip_core::connection::Direction::Inbound,
+    )
+    .await
+    .expect("bob's stream binds");
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    assert!(bob_stream
+        .offer_inbound_frame_sink(Box::new(RecordingSink(Arc::clone(&seen))))
+        .is_ok());
+    let alice_stream = SipMediaStream::new(
+        Arc::clone(alice.coordinator()),
+        alice_handle.id().clone(),
+        rvoip_core::connection::Direction::Outbound,
+    )
+    .await
+    .expect("alice's stream binds");
+    let lane = alice_stream
+        .media_lane()
+        .expect("v2 publishes the socket lane");
+    assert!(lane.host_reader_graphs && lane.host_writer_graphs);
+
+    let frames_out = alice_stream
+        .try_frames_out()
+        .expect("alice's stream is writable");
+    let mut canonical = Vec::new();
+    for index in 0..FRAMES {
+        let payload = pcmu_payload(index);
+        let mut scratch = Vec::new();
+        canonical.push(
+            EncodedG711Format::MuLaw
+                .canonical_payload(&payload, &mut scratch)
+                .to_vec(),
+        );
+        frames_out
+            .send(MediaFrame {
+                stream_id: alice_stream.id(),
+                kind: StreamKind::Audio,
+                payload: bytes::Bytes::from(payload),
+                timestamp_rtp: (index * FRAME_SAMPLES) as u32,
+                captured_at: chrono::Utc::now(),
+                payload_type: Some(0),
+            })
+            .await
+            .expect("the outbound pump takes the frame");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Bob's sink was lent the frames alice wrote, re-encoded by the fused
+    // pump: a canonical G.711 payload round-trips, so every frame that was
+    // not concealed is byte-identical to what alice sent, in order.
+    let seen = seen.lock().unwrap().clone();
+    let matched: Vec<usize> = seen
+        .iter()
+        .filter_map(|(_, payload, payload_type)| {
+            assert_eq!(*payload_type, Some(0));
+            canonical.iter().position(|sent| sent == payload)
+        })
+        .collect();
+    assert!(
+        matched.len() >= FRAMES / 2,
+        "bob's sink got {} of {FRAMES} frames byte-identical ({} lent)",
+        matched.len(),
+        seen.len()
+    );
+    assert!(matched.windows(2).all(|pair| pair[0] < pair[1]), "in order");
+
+    let after = inline_executor_counters();
+    assert!(
+        after.direct_sinks > before.direct_sinks,
+        "bob's sink was adopted"
+    );
+    assert!(
+        after.ai_tx_pumps_on_lane >= before.ai_tx_pumps_on_lane + 2,
+        "both streams' pumps run on their socket lanes"
+    );
+    assert!(after.tx_handle_cache_misses > before.tx_handle_cache_misses);
+    assert!(
+        after.tx_sync_sends >= before.tx_sync_sends + (FRAMES / 2) as u64,
+        "alice's frames left synchronously: {} -> {}",
+        before.tx_sync_sends,
+        after.tx_sync_sends
+    );
+
+    alice_handle.hangup().await.ok();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop((alice_stream, bob_stream, alice, bob, bob_handle));
 }

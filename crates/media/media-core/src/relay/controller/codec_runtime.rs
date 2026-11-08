@@ -484,6 +484,10 @@ pub(super) struct DialogCodecRuntime {
     /// v2). `None` for codecs whose decoder keeps state behind the async
     /// lock; those dialogs always decode on their receive task.
     inline_g711: Option<G711Codec>,
+    /// Whether this is still the dialog's current codec generation. Cleared
+    /// (never set again) when a re-INVITE replaces it or the dialog stops,
+    /// so a TX path cached for this generation can check it with one load.
+    pub(super) encoded_generation_live: std::sync::atomic::AtomicBool,
 }
 
 impl DialogCodecRuntime {
@@ -536,6 +540,7 @@ impl DialogCodecRuntime {
             encoder: Mutex::new(encoder),
             decoder: Mutex::new(decoder),
             inline_g711,
+            encoded_generation_live: std::sync::atomic::AtomicBool::new(true),
         })
     }
 
