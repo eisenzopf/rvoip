@@ -26,7 +26,8 @@ use tracing::{debug, error, info, trace, warn};
 use crate::error::Error;
 use crate::packet::{RtpHeader, RtpPacket};
 use crate::transport::{
-    RtpTransport, RtpTransportBufferConfig, RtpTransportConfig, SymmetricRtpPolicy, UdpRtpTransport,
+    RemotePeerAddrs, RtpTransport, RtpTransportBufferConfig, RtpTransportConfig,
+    SymmetricRtpPolicy, UdpRtpTransport,
 };
 use crate::{Result, RtpSsrc, RtpTimestamp};
 
@@ -192,32 +193,223 @@ async fn rtcp_report_destination(
     Some(destination)
 }
 
-/// Whether inbound RTCP from `source` belongs to this session.
+/// Everything the session's inbound RTCP handling touches.
 ///
-/// Only the session's expected peer may feed its reports, statistics, and
-/// BYE handling: the (latched or signalled) remote address, or a sender SSRC
-/// this session already receives RTP from. With consecutive port allocation
-/// a peer of a neighbouring call that does not multiplex sends its RTCP to
-/// its RTP port plus one, which is this session's RTP port; that traffic
-/// matches neither and is dropped.
-async fn rtcp_source_is_expected(
-    transport: &Arc<dyn RtpTransport>,
-    packet_sender: &RtpPacketSender,
-    streams: &SsrcMap<RtpStream>,
-    source: SocketAddr,
-    data: &[u8],
-) -> bool {
-    if *packet_sender.remote_addr.read() == Some(source) {
-        return true;
-    }
-    if let Some(udp) = transport.as_any().downcast_ref::<UdpRtpTransport>() {
-        if udp.remote_rtp_addr().await == Some(source)
-            || udp.remote_rtcp_addr().await == Some(source)
-        {
+/// The v1 receive task and, with
+/// [`MediaExecutorConfig::owner_rtcp`](crate::executor::MediaExecutorConfig::owner_rtcp),
+/// the inline ingress on the socket owner process a compound through the
+/// same [`Self::process`], so both apply the same stranger filter and produce
+/// the same state changes and events in the same order.
+///
+/// It holds no strong reference to the transport, the packet writer or the
+/// report state: the socket owner's receive loop belongs to the transport, so
+/// a strong reference from the loop back to the transport would keep a
+/// dropped session's transport, and its loop, alive.
+#[derive(Clone)]
+struct RtcpIngress {
+    ssrc: RtpSsrc,
+    /// The signalled peer ([`RtpPacketSender`]'s remote address).
+    signalled_peer: Arc<parking_lot::RwLock<Option<SocketAddr>>>,
+    /// The UDP transport's (possibly latched) remote addresses.
+    transport_peer: Option<RemotePeerAddrs>,
+    reporter: std::sync::Weak<RtcpReporter>,
+    streams: Arc<SsrcMap<RtpStream>>,
+    received_sender_reports: Arc<SsrcMap<ReceivedSenderReport>>,
+    stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
+    clock_rate: Arc<AtomicU32>,
+    event_tx: broadcast::Sender<RtpSessionEvent>,
+    media_sync: Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>>,
+}
+
+impl RtcpIngress {
+    /// Whether inbound RTCP from `source` belongs to this session.
+    ///
+    /// Only the session's expected peer may feed its reports, statistics,
+    /// and BYE handling: the (latched or signalled) remote address, or a
+    /// sender SSRC this session already receives RTP from. With consecutive
+    /// port allocation a peer of a neighbouring call that does not multiplex
+    /// sends its RTCP to its RTP port plus one, which is this session's RTP
+    /// port; that traffic matches neither and is dropped.
+    fn source_is_expected(&self, source: SocketAddr, data: &[u8]) -> bool {
+        if *self.signalled_peer.read() == Some(source) {
             return true;
         }
+        if let Some(peer) = &self.transport_peer {
+            if peer.rtp() == Some(source) || peer.rtcp() == Some(source) {
+                return true;
+            }
+        }
+        rtcp_sender_ssrc(data).is_some_and(|ssrc| self.streams.contains_key(&ssrc))
     }
-    rtcp_sender_ssrc(data).is_some_and(|ssrc| streams.contains_key(&ssrc))
+
+    /// One received compound RTCP datagram from `source`, already
+    /// authenticated and decrypted when SRTCP is in use: the stranger filter,
+    /// then every member in order.
+    fn process(&self, data: &[u8], source: SocketAddr) {
+        use crate::packet::rtcp::{RtcpCompoundMember, RtcpCompoundPacket, RtcpPacket};
+
+        if !self.source_is_expected(source, data) {
+            self.stats.lock().rtcp_packets_rejected += 1;
+            debug!(
+                "Dropping RTCP from {} that is not this session's peer",
+                source
+            );
+            return;
+        }
+        // Parse the complete compound packet. Unknown but well-formed members
+        // are retained by the tolerant parser and ignored by the production
+        // handler.
+        let compound = match RtcpCompoundPacket::parse_tolerant(data) {
+            Ok(compound) => compound,
+            Err(error) => {
+                warn!("Failed to parse compound RTCP packet: {}", error);
+                return;
+            }
+        };
+        self.stats.lock().rtcp_packets_received += 1;
+        if let Some(reporter) = self.reporter.upgrade() {
+            reporter.observe_received(data);
+        }
+        let ssrc = self.ssrc;
+        for rtcp_member in compound.packets {
+            let rtcp_packet = match rtcp_member {
+                RtcpCompoundMember::Known(packet) => packet,
+                RtcpCompoundMember::Unknown(unknown) => {
+                    trace!(
+                        "Ignoring unimplemented RTCP packet type {}",
+                        unknown.packet_type
+                    );
+                    continue;
+                }
+            };
+            match rtcp_packet {
+                RtcpPacket::Goodbye(bye) => {
+                    // Extract the SSRC and reason
+                    if !bye.sources.is_empty() {
+                        let source_ssrc = bye.sources[0];
+
+                        self.stats.lock().peer_bye = Some(PeerRtcpBye {
+                            ssrc: source_ssrc,
+                            reason: bye.reason.clone(),
+                            received_at: Instant::now(),
+                        });
+
+                        // Broadcast BYE event
+                        let _ = self.event_tx.send(RtpSessionEvent::Bye {
+                            ssrc: source_ssrc,
+                            reason: bye.reason,
+                        });
+
+                        info!("Received RTCP BYE from SSRC={:08x}", source_ssrc);
+                    }
+                }
+                RtcpPacket::SenderReport(sr) => {
+                    // Process sender report
+                    let report_ssrc = sr.ssrc;
+
+                    debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
+
+                    let sender_report = ReceivedSenderReport {
+                        lsr: sr.ntp_timestamp.to_u32(),
+                        received_at: Instant::now(),
+                    };
+                    self.received_sender_reports
+                        .insert(report_ssrc, sender_report);
+
+                    // Update stream statistics if RTP for this source has
+                    // already created the stream. The retained map above
+                    // covers the SR-before-RTP ordering.
+                    if let Some(mut stream) = self.streams.get_mut(&report_ssrc) {
+                        stream.update_last_sr_info(sender_report.lsr, sender_report.received_at);
+
+                        debug!("Updated RTCP SR info for stream SSRC={:08x}", report_ssrc);
+                    }
+
+                    // If media sync is enabled, update it
+                    if let Some(sync) = &self.media_sync {
+                        if let Ok(mut media_sync) = sync.write() {
+                            // Update synchronization data
+                            media_sync.update_from_sr(
+                                report_ssrc,
+                                sr.ntp_timestamp,
+                                sr.rtp_timestamp,
+                            );
+                        }
+                    }
+
+                    // An SR may carry the same report blocks as an RR.
+                    // Measure RTT from either packet type; otherwise a
+                    // bidirectional peer that sends SRs never populates
+                    // quality RTT despite reflecting our timestamps.
+                    for block in &sr.report_blocks {
+                        if block.ssrc == ssrc {
+                            record_peer_reception_report(
+                                &self.stats,
+                                report_ssrc,
+                                block,
+                                self.clock_rate.load(Ordering::Relaxed),
+                            );
+                        }
+                    }
+
+                    // Emit SR event for external processing
+                    let _ = self.event_tx.send(RtpSessionEvent::RtcpSenderReport {
+                        ssrc: report_ssrc,
+                        ntp_timestamp: sr.ntp_timestamp,
+                        rtp_timestamp: sr.rtp_timestamp,
+                        packet_count: sr.sender_packet_count,
+                        octet_count: sr.sender_octet_count,
+                        report_blocks: sr.report_blocks,
+                    });
+                }
+                RtcpPacket::ReceiverReport(rr) => {
+                    // Process receiver report
+                    let report_ssrc = rr.ssrc;
+
+                    debug!(
+                        "Received RTCP RR from SSRC={:08x} with {} report blocks",
+                        report_ssrc,
+                        rr.report_blocks.len()
+                    );
+
+                    // If there's a report block about our SSRC, process it
+                    for block in &rr.report_blocks {
+                        if block.ssrc == ssrc {
+                            debug!("Processing report block about our SSRC={:08x}", ssrc);
+
+                            // This block describes loss of our outbound
+                            // stream. Keep the session's `packets_lost`
+                            // counter reserved for locally observed inbound
+                            // sequence gaps.
+                            let fraction_lost = block.fraction_lost as f64 / 256.0;
+                            debug!(
+                                "Remote-reported outbound packet loss: {}% (fraction={}, cumulative={})",
+                                fraction_lost * 100.0,
+                                block.fraction_lost,
+                                block.cumulative_lost
+                            );
+                            record_peer_reception_report(
+                                &self.stats,
+                                report_ssrc,
+                                block,
+                                self.clock_rate.load(Ordering::Relaxed),
+                            );
+                        }
+                    }
+
+                    // Emit RR event for external processing
+                    let _ = self.event_tx.send(RtpSessionEvent::RtcpReceiverReport {
+                        ssrc: report_ssrc,
+                        report_blocks: rr.report_blocks,
+                    });
+                }
+                // Handle other RTCP packet types as needed.
+                other => {
+                    trace!("Received RTCP packet: {:?}", other);
+                }
+            }
+        }
+    }
 }
 
 fn build_voip_metrics_xr(
@@ -527,7 +719,8 @@ impl Default for RtpSessionConfig {
 
 struct RtpPacketSender {
     transport: Arc<dyn RtpTransport>,
-    remote_addr: parking_lot::RwLock<Option<SocketAddr>>,
+    /// The signalled peer, shared with the session's [`RtcpIngress`].
+    remote_addr: Arc<parking_lot::RwLock<Option<SocketAddr>>>,
     ssrc: RtpSsrc,
     sequence: Arc<AtomicU16>,
     stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
@@ -581,7 +774,7 @@ impl RtpPacketSender {
         let capacity = capacity.max(1);
         Self {
             transport,
-            remote_addr: parking_lot::RwLock::new(remote_addr),
+            remote_addr: Arc::new(parking_lot::RwLock::new(remote_addr)),
             ssrc,
             sequence,
             stats,
@@ -1510,6 +1703,27 @@ impl RtpSession {
         }
     }
 
+    /// The session's inbound RTCP handling, for the receive task or the
+    /// socket owner.
+    fn rtcp_ingress(&self) -> RtcpIngress {
+        RtcpIngress {
+            ssrc: self.ssrc,
+            signalled_peer: self.packet_sender.remote_addr.clone(),
+            transport_peer: self
+                .transport
+                .as_any()
+                .downcast_ref::<UdpRtpTransport>()
+                .map(UdpRtpTransport::remote_peer_addrs),
+            reporter: Arc::downgrade(&self.rtcp_reporter),
+            streams: self.streams.clone(),
+            received_sender_reports: self.received_sender_reports.clone(),
+            stats: self.stats.clone(),
+            clock_rate: self.clock_rate.clone(),
+            event_tx: self.event_tx.clone(),
+            media_sync: self.media_sync.clone(),
+        }
+    }
+
     /// The media runtime lane that owns this session's transport.
     pub fn media_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
         self.transport.media_runtime_handle()
@@ -1562,11 +1776,7 @@ impl RtpSession {
         let _jitter_size = self.config.jitter_buffer_size.unwrap_or(50);
         let _max_age_ms = self.config.max_packet_age_ms.unwrap_or(200);
         let receive_queue_enabled = self.receive_queue_enabled;
-        let rtcp_ingress_transport = self.transport.clone();
-        let rtcp_ingress_sender = self.packet_sender.clone();
-        let rtcp_ingress_reporter = self.rtcp_reporter.clone();
-
-        let media_sync = self.media_sync.clone();
+        let rtcp_ingress = self.rtcp_ingress();
 
         // If we have a remote address, set it on the transport
         if let Some(addr) = remote_addr {
@@ -1605,198 +1815,7 @@ impl RtpSession {
                     // bus, not to the RTP session.
                     Ok(crate::traits::RtpEvent::StunPacket { .. }) => continue,
                     Ok(crate::traits::RtpEvent::RtcpReceived { data, source }) => {
-                        if !rtcp_source_is_expected(
-                            &rtcp_ingress_transport,
-                            &rtcp_ingress_sender,
-                            &streams_map,
-                            source,
-                            &data,
-                        )
-                        .await
-                        {
-                            stats_recv.lock().rtcp_packets_rejected += 1;
-                            debug!(
-                                "Dropping RTCP from {} that is not this session's peer",
-                                source
-                            );
-                            continue;
-                        }
-                        // Parse the complete compound packet. Unknown but
-                        // well-formed members are retained by the tolerant
-                        // parser and ignored by the production handler.
-                        match crate::packet::rtcp::RtcpCompoundPacket::parse_tolerant(&data) {
-                            Ok(compound) => {
-                                stats_recv.lock().rtcp_packets_received += 1;
-                                rtcp_ingress_reporter.observe_received(&data);
-                                for rtcp_member in compound.packets {
-                                    let rtcp_packet = match rtcp_member {
-                                        crate::packet::rtcp::RtcpCompoundMember::Known(packet) => {
-                                            packet
-                                        }
-                                        crate::packet::rtcp::RtcpCompoundMember::Unknown(
-                                            unknown,
-                                        ) => {
-                                            trace!(
-                                                "Ignoring unimplemented RTCP packet type {}",
-                                                unknown.packet_type
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    match rtcp_packet {
-                                        crate::packet::rtcp::RtcpPacket::Goodbye(bye) => {
-                                            // Extract the SSRC and reason
-                                            if !bye.sources.is_empty() {
-                                                let source_ssrc = bye.sources[0];
-
-                                                stats_recv.lock().peer_bye = Some(PeerRtcpBye {
-                                                    ssrc: source_ssrc,
-                                                    reason: bye.reason.clone(),
-                                                    received_at: Instant::now(),
-                                                });
-
-                                                // Broadcast BYE event
-                                                let _ = event_tx_recv.send(RtpSessionEvent::Bye {
-                                                    ssrc: source_ssrc,
-                                                    reason: bye.reason,
-                                                });
-
-                                                info!(
-                                                    "Received RTCP BYE from SSRC={:08x}",
-                                                    source_ssrc
-                                                );
-                                            }
-                                        }
-                                        crate::packet::rtcp::RtcpPacket::SenderReport(sr) => {
-                                            // Process sender report
-                                            let report_ssrc = sr.ssrc;
-
-                                            debug!(
-                                                "Received RTCP SR from SSRC={:08x}",
-                                                report_ssrc
-                                            );
-
-                                            let sender_report = ReceivedSenderReport {
-                                                lsr: sr.ntp_timestamp.to_u32(),
-                                                received_at: Instant::now(),
-                                            };
-                                            received_sender_reports
-                                                .insert(report_ssrc, sender_report);
-
-                                            // Update stream statistics if RTP for this source
-                                            // has already created the stream. The retained map
-                                            // above covers the SR-before-RTP ordering.
-                                            if let Some(mut stream) =
-                                                streams_map.get_mut(&report_ssrc)
-                                            {
-                                                stream.update_last_sr_info(
-                                                    sender_report.lsr,
-                                                    sender_report.received_at,
-                                                );
-
-                                                debug!(
-                                                    "Updated RTCP SR info for stream SSRC={:08x}",
-                                                    report_ssrc
-                                                );
-                                            }
-
-                                            // If media sync is enabled, update it
-                                            if let Some(sync) = &media_sync {
-                                                if let Ok(mut media_sync) = sync.write() {
-                                                    // Update synchronization data
-                                                    media_sync.update_from_sr(
-                                                        report_ssrc,
-                                                        sr.ntp_timestamp,
-                                                        sr.rtp_timestamp,
-                                                    );
-                                                }
-                                            }
-
-                                            // An SR may carry the same report blocks as an RR.
-                                            // Measure RTT from either packet type; otherwise a
-                                            // bidirectional peer that sends SRs never populates
-                                            // quality RTT despite reflecting our timestamps.
-                                            for block in &sr.report_blocks {
-                                                if block.ssrc == ssrc {
-                                                    record_peer_reception_report(
-                                                        &stats_recv,
-                                                        report_ssrc,
-                                                        block,
-                                                        clock_rate.load(Ordering::Relaxed),
-                                                    );
-                                                }
-                                            }
-
-                                            // Emit SR event for external processing
-                                            let _ = event_tx_recv.send(
-                                                RtpSessionEvent::RtcpSenderReport {
-                                                    ssrc: report_ssrc,
-                                                    ntp_timestamp: sr.ntp_timestamp,
-                                                    rtp_timestamp: sr.rtp_timestamp,
-                                                    packet_count: sr.sender_packet_count,
-                                                    octet_count: sr.sender_octet_count,
-                                                    report_blocks: sr.report_blocks,
-                                                },
-                                            );
-                                        }
-                                        crate::packet::rtcp::RtcpPacket::ReceiverReport(rr) => {
-                                            // Process receiver report
-                                            let report_ssrc = rr.ssrc;
-
-                                            debug!(
-                                        "Received RTCP RR from SSRC={:08x} with {} report blocks",
-                                        report_ssrc,
-                                        rr.report_blocks.len()
-                                    );
-
-                                            // If there's a report block about our SSRC, process it
-                                            for block in &rr.report_blocks {
-                                                if block.ssrc == ssrc {
-                                                    debug!(
-                                                "Processing report block about our SSRC={:08x}",
-                                                ssrc
-                                            );
-
-                                                    // This block describes loss of our outbound
-                                                    // stream. Keep the session's `packets_lost`
-                                                    // counter reserved for locally observed
-                                                    // inbound sequence gaps.
-                                                    let fraction_lost =
-                                                        block.fraction_lost as f64 / 256.0;
-                                                    debug!(
-                                                        "Remote-reported outbound packet loss: {}% (fraction={}, cumulative={})",
-                                                        fraction_lost * 100.0,
-                                                        block.fraction_lost,
-                                                        block.cumulative_lost
-                                                    );
-                                                    record_peer_reception_report(
-                                                        &stats_recv,
-                                                        report_ssrc,
-                                                        block,
-                                                        clock_rate.load(Ordering::Relaxed),
-                                                    );
-                                                }
-                                            }
-
-                                            // Emit RR event for external processing
-                                            let _ = event_tx_recv.send(
-                                                RtpSessionEvent::RtcpReceiverReport {
-                                                    ssrc: report_ssrc,
-                                                    report_blocks: rr.report_blocks,
-                                                },
-                                            );
-                                        }
-                                        // Handle other RTCP packet types as needed.
-                                        other => {
-                                            trace!("Received RTCP packet: {:?}", other);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                warn!("Failed to parse compound RTCP packet: {}", error);
-                            }
-                        }
+                        rtcp_ingress.process(&data, source);
                     }
                     Ok(crate::traits::RtpEvent::MediaReceived {
                         payload_type,

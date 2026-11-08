@@ -93,6 +93,26 @@ where
     future
 }
 
+/// The transport's current remote RTP and RTCP addresses (signalled or
+/// latched), readable without awaiting and without holding the transport.
+#[derive(Clone)]
+pub(crate) struct RemotePeerAddrs {
+    rtp: Arc<ArcSwapOption<SocketAddr>>,
+    rtcp: Arc<ArcSwapOption<SocketAddr>>,
+}
+
+impl RemotePeerAddrs {
+    /// The current remote RTP address.
+    pub(crate) fn rtp(&self) -> Option<SocketAddr> {
+        self.rtp.load().as_deref().copied()
+    }
+
+    /// The current remote RTCP address.
+    pub(crate) fn rtcp(&self) -> Option<SocketAddr> {
+        self.rtcp.load().as_deref().copied()
+    }
+}
+
 /// A transport receive loop: its own task (v1), or hosted on its lane's
 /// poller (executor v2 with the lane poller). Only touched on lifecycle.
 enum ReceiverTask {
@@ -1218,7 +1238,7 @@ impl UdpRtpTransport {
                                     Bytes::copy_from_slice(&buffer[..size])
                                 };
                                 if let Some(rx) = inline.as_mut() {
-                                    if rx.ingress.on_rtcp(&rtcp_data, Instant::now()) {
+                                    if rx.ingress.on_rtcp(&rtcp_data, addr, Instant::now()) {
                                         continue;
                                     }
                                 }
@@ -1750,6 +1770,15 @@ impl UdpRtpTransport {
     /// awaiting; the load is atomic.
     pub(crate) fn current_remote_rtp_addr(&self) -> Option<SocketAddr> {
         self.remote_rtp_addr.load().as_deref().copied()
+    }
+
+    /// The remote RTP and RTCP addresses as they change, for a reader that
+    /// must not keep the transport alive.
+    pub(crate) fn remote_peer_addrs(&self) -> RemotePeerAddrs {
+        RemotePeerAddrs {
+            rtp: self.remote_rtp_addr.clone(),
+            rtcp: self.remote_rtcp_addr.clone(),
+        }
     }
 
     /// Set the remote RTCP address without awaiting; the store is atomic.

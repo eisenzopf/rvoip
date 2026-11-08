@@ -738,11 +738,11 @@ pub(crate) trait InlineRtpIngress: Send + 'static {
     fn next_deadline(&mut self, now: Instant) -> Option<Instant>;
     fn on_deadline(&mut self, now: Instant);
 
-    /// One RTCP compound received on the RTP socket (multiplexed), after the
-    /// transport's source check and SRTCP unprotect. Returns whether it was
-    /// processed here; `false` (the default) sends it to the transport
-    /// broadcast, as v1 does. Owner-side RTCP processing builds on this.
-    fn on_rtcp(&mut self, _data: &[u8], _now: Instant) -> bool {
+    /// One RTCP compound received on the RTP socket (multiplexed) from
+    /// `source`, after the transport's latch check and SRTCP unprotect.
+    /// Returns whether it was processed here; `false` (the default) sends it
+    /// to the transport broadcast, as v1 does.
+    fn on_rtcp(&mut self, _data: &[u8], _source: SocketAddr, _now: Instant) -> bool {
         false
     }
 }
