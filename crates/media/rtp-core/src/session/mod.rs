@@ -65,6 +65,59 @@ where
     crate::task_runtime::spawn_media_task(future)
 }
 
+/// A session background task: its own Tokio task, or a future hosted on the
+/// media lane's poller. Only touched on lifecycle.
+enum SessionTask {
+    Task(JoinHandle<()>),
+    Lane(crate::lane_poller::LaneTaskHandle),
+}
+
+impl SessionTask {
+    fn abort(&self) {
+        match self {
+            Self::Task(task) => task.abort(),
+            Self::Lane(hosted) => hosted.abort(),
+        }
+    }
+
+    /// Wait until the task's future has been dropped.
+    async fn join(self) {
+        match self {
+            Self::Task(task) => {
+                let _ = task.await;
+            }
+            Self::Lane(hosted) => hosted.join().await,
+        }
+    }
+}
+
+/// The memory accounting of `spawn_memory_tracked`, for a future hosted on a
+/// lane poller instead of its own task.
+#[cfg(feature = "memory-diagnostics")]
+fn lane_memory_tracked<F>(
+    kind: &'static str,
+    future: F,
+) -> impl std::future::Future<Output = F::Output> + Send + 'static
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let guard = rvoip_infra_common::memory_diagnostics::ObjectGuard::new(kind, 0);
+    async move {
+        let _guard = guard;
+        future.await
+    }
+}
+
+#[cfg(not(feature = "memory-diagnostics"))]
+fn lane_memory_tracked<F>(_: &'static str, future: F) -> F
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    future
+}
+
 /// Bounded queue depth for per-session RTP send/event channels.
 ///
 /// RTP is real-time traffic; keeping many seconds of packet backlog per call
@@ -1121,15 +1174,21 @@ impl RtcpReporter {
     }
 
     /// Serialize and send a compound report, recording it for the interval
-    /// and sender-state calculation when it leaves.
+    /// and sender-state calculation when it leaves. `synchronous` writes it
+    /// from the caller's poll when the socket takes it (UDP transports;
+    /// identical bytes, see `UdpRtpTransport::send_rtcp_bytes_now`).
     async fn send(
         &self,
         transport: &Arc<dyn RtpTransport>,
         compound: &crate::packet::rtcp::RtcpCompoundPacket,
         destination: SocketAddr,
+        synchronous: bool,
     ) -> Result<()> {
         let data = compound.serialize()?;
-        transport.send_rtcp_bytes(&data, destination).await?;
+        match transport.as_any().downcast_ref::<UdpRtpTransport>() {
+            Some(udp) if synchronous => udp.send_rtcp_bytes_now(&data, destination).await?,
+            _ => transport.send_rtcp_bytes(&data, destination).await?,
+        }
         self.generator.lock().on_report_sent(data.len());
         Ok(())
     }
@@ -1415,8 +1474,9 @@ pub struct RtpSession {
     /// RTCP report state shared with the periodic report task.
     rtcp_reporter: Arc<RtcpReporter>,
 
-    /// RTCP sender task
-    rtcp_task: Option<JoinHandle<()>>,
+    /// RTCP sender task (with owner RTCP and the lane poller, hosted on the
+    /// socket's lane poller)
+    rtcp_task: Option<SessionTask>,
 
     /// Whether [`Self::set_bandwidth`] fixed the session bandwidth; otherwise
     /// it follows the payload type.
@@ -1697,6 +1757,9 @@ impl RtpSession {
             self.event_tx.clone(),
             receive_queue,
             sink_slot.clone(),
+            // The receive task captures the same handling at `start`, right
+            // after this; nothing it reads changes in between.
+            crate::executor::owner_rtcp_enabled().then(|| self.rtcp_ingress()),
         );
         if transport.attach_inline_ingress(Box::new(ingress)) {
             self.inline_sink_slot = Some(sink_slot);
@@ -1983,8 +2046,18 @@ impl RtpSession {
             let event_tx = self.event_tx.clone();
             let reporter = self.rtcp_reporter.clone();
             let rtcp_mux = self.rtcp_mux.clone();
+            // With owner RTCP, reports leave with a synchronous send, and with
+            // the lane poller the task is hosted on the socket's lane, where
+            // its interval sleep uses the lane clock. Interval, content and
+            // accounting are unchanged.
+            let synchronous_reports = crate::executor::owner_rtcp_enabled();
+            let report_lane = if crate::executor::owner_rtcp_on_lane_enabled() {
+                self.transport.media_runtime_handle()
+            } else {
+                None
+            };
 
-            let rtcp_task = spawn_memory_tracked("rtp_core.rtp_session.rtcp_task", async move {
+            let rtcp_future = async move {
                 debug!("RTCP scheduling task started");
 
                 let mut previous = tokio::time::Instant::now();
@@ -1996,7 +2069,7 @@ impl RtpSession {
                     trace!("Next RTCP report in {:?}", interval);
                     let deadline = previous + interval;
                     tokio::select! {
-                        _ = tokio::time::sleep_until(deadline) => {}
+                        _ = crate::media_clock::sleep_until(deadline) => {}
                         // A policy change redraws the pending interval from
                         // the same starting point.
                         _ = reporter.reschedule.notified() => continue,
@@ -2017,7 +2090,10 @@ impl RtpSession {
                     };
 
                     let compound = reporter.build(None, true);
-                    match reporter.send(&transport, &compound, remote_addr).await {
+                    match reporter
+                        .send(&transport, &compound, remote_addr, synchronous_reports)
+                        .await
+                    {
                         Ok(()) => {
                             debug!("Sent periodic RTCP compound report to {}", remote_addr);
                             if let Some(sr) = compound.get_sr() {
@@ -2037,7 +2113,26 @@ impl RtpSession {
                         Err(e) => warn!("Failed to send RTCP compound packet: {}", e),
                     }
                 }
-            });
+            };
+
+            const RTCP_TASK_KIND: &str = "rtp_core.rtp_session.rtcp_task";
+            let rtcp_task = match report_lane {
+                Some(lane) => match crate::lane_poller::host_task_on_lane(
+                    &lane,
+                    lane_memory_tracked(RTCP_TASK_KIND, rtcp_future),
+                ) {
+                    Ok(hosted) => {
+                        crate::executor::record_rtcp_lane_task();
+                        SessionTask::Lane(hosted)
+                    }
+                    // The lane's runtime is shutting down: spawn it as v1
+                    // does (it already carries its memory guard).
+                    Err(rtcp_future) => {
+                        SessionTask::Task(crate::task_runtime::spawn_media_task(rtcp_future))
+                    }
+                },
+                None => SessionTask::Task(spawn_memory_tracked(RTCP_TASK_KIND, rtcp_future)),
+            };
 
             self.rtcp_task = Some(rtcp_task);
         }
@@ -2245,7 +2340,7 @@ impl RtpSession {
             let compound = self.rtcp_reporter.build(Some(bye), false);
             match self
                 .rtcp_reporter
-                .send(&self.transport, &compound, remote_addr)
+                .send(&self.transport, &compound, remote_addr, false)
                 .await
             {
                 Ok(()) => {}
@@ -2272,7 +2367,7 @@ impl RtpSession {
         // Stop the RTCP task
         if let Some(handle) = self.rtcp_task.take() {
             handle.abort();
-            let _ = handle.await;
+            handle.join().await;
         }
 
         // Close the transport
@@ -2511,7 +2606,7 @@ impl RtpSession {
             .unwrap_or(remote_addr);
         let compound = self.rtcp_reporter.build(Some(bye), false);
         self.rtcp_reporter
-            .send(&self.transport, &compound, destination)
+            .send(&self.transport, &compound, destination, false)
             .await
     }
 
@@ -4742,6 +4837,61 @@ mod tests {
         assert!(session.get_stats().rtt_ms.is_some());
         assert_silent(&peer_rtp, "SRTCP reached the RTP port of a non-mux peer").await;
         session.close().await.unwrap();
+    }
+
+    /// The session's RTCP, SRTCP, stranger-filter and rtcp-mux tests above,
+    /// again with every session built on executor v2 (inline receive, owner
+    /// SRTP, owner RTCP, reports from the lane): the same assertions hold.
+    mod on_executor_v2 {
+        macro_rules! on_v2 {
+            ($($name:ident),* $(,)?) => {
+                $(
+                    #[test]
+                    fn $name() {
+                        let _v2 = crate::executor::override_media_executor_config_on_this_thread(
+                            crate::executor::MediaExecutorConfig::v2(),
+                        );
+                        super::$name();
+                    }
+                )*
+            };
+        }
+
+        on_v2!(
+            periodic_rtcp_follows_late_sdp_peer_changes_and_stops_on_close,
+            late_sdp_peer_gets_no_periodic_rtcp_until_mux_is_negotiated,
+            close_sends_no_rtcp_bye_to_a_peer_without_rtcp_mux,
+            send_bye_uses_compound_rtcp_without_reduced_size_negotiation,
+            close_uses_compound_rtcp_without_reduced_size_negotiation,
+            live_session_tracks_wrap_reordering_and_duplicates_without_buffering,
+            precreated_stream_delivers_sequential_packets_promptly_and_in_order,
+            precreated_stream_reconciles_sender_report_during_insert_handoff,
+            plain_udp_session_preserves_rtp_padding_and_remote_ssrc,
+            srtp_session_preserves_encrypted_rtp_padding,
+            production_rtcp_ingress_processes_members_around_unknown_packet,
+            peer_reception_reports_about_our_ssrc_and_bye_are_retained_as_state,
+            malformed_compound_rtcp_is_rejected_atomically_in_production,
+            manual_reports_use_interval_loss_and_retain_cumulative_loss,
+            sr_before_rtp_populates_manual_and_periodic_lsr_dlsr,
+            sender_report_octet_count_excludes_rtp_header,
+            srtp_session_emits_authenticated_manual_rtcp,
+            clock_change_resets_session_jitter_diagnostics,
+            manual_sender_report_extrapolates_the_last_sent_media_timestamp,
+            periodic_sender_report_extrapolates_the_last_sent_media_timestamp,
+            silent_session_reports_rr_and_sender_state_lasts_two_intervals,
+            periodic_report_interval_follows_rfc3550_under_paused_time,
+            reduced_minimum_interval_is_a_per_session_opt_in,
+            close_bye_carries_the_sdes_cname,
+            rtcp_xr_is_absent_by_default_and_follows_the_session_switch,
+            neighbouring_calls_rtcp_is_dropped_and_leaves_stats_untouched,
+            rtcp_with_a_known_remote_ssrc_is_accepted_from_another_port,
+            non_mux_rtcp_uses_the_separate_socket_and_the_peers_rtp_port_plus_one,
+            non_mux_rtcp_follows_the_peers_a_rtcp_address,
+            negotiated_mux_moves_rtcp_to_the_rtp_socket_and_frees_the_rtcp_port,
+            neighbouring_rtcp_on_the_separate_rtcp_socket_is_rejected,
+            symmetric_rtcp_latches_the_peers_mapped_rtcp_source_only,
+            non_mux_rtcp_is_srtcp_protected_both_ways,
+        );
     }
 }
 

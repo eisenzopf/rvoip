@@ -53,6 +53,11 @@
 //! - [`MediaExecutorConfig::owner_srtp`]: the receive loop checks the
 //!   transport's inbound SRTP context out and uses it without the context
 //!   lock, which it takes again only after a rekey, rollback or removal.
+//! - [`MediaExecutorConfig::owner_rtcp`]: RTCP multiplexed on the RTP socket
+//!   is processed by the session's RTCP handling on the socket owner instead
+//!   of crossing the transport broadcast to the session task, and periodic
+//!   reports leave with a synchronous send (from a future hosted on the
+//!   socket's lane poller when the lane poller is on).
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -195,6 +200,12 @@ pub struct MediaExecutorConfig {
     /// uses it without the context lock. A transport with a separate RTCP
     /// socket (whose own receive task also unprotects SRTCP) keeps the lock.
     pub owner_srtp: bool,
+    /// Multiplexed inbound RTCP is processed on the socket owner (same
+    /// stranger filter and handling as the session task), and periodic
+    /// reports are sent synchronously; with [`Self::lane_poller`] the report
+    /// task is hosted on the socket's lane poller. RTCP on a separate RTCP
+    /// socket keeps its own receive task.
+    pub owner_rtcp: bool,
 }
 
 impl Default for MediaExecutorConfig {
@@ -222,6 +233,7 @@ impl MediaExecutorConfig {
             lane_timer_wheel: false,
             lane_pass_clock: false,
             owner_srtp: false,
+            owner_rtcp: false,
         }
     }
 
@@ -244,6 +256,7 @@ impl MediaExecutorConfig {
             lane_timer_wheel: true,
             lane_pass_clock: true,
             owner_srtp: true,
+            owner_rtcp: true,
         }
     }
 
@@ -328,6 +341,12 @@ impl MediaExecutorConfig {
     /// Set [`Self::owner_srtp`].
     pub fn with_owner_srtp(mut self, enabled: bool) -> Self {
         self.owner_srtp = enabled;
+        self
+    }
+
+    /// Set [`Self::owner_rtcp`].
+    pub fn with_owner_rtcp(mut self, enabled: bool) -> Self {
+        self.owner_rtcp = enabled;
         self
     }
 
@@ -429,6 +448,18 @@ impl MediaExecutorConfig {
     /// Whether receive loops started now own the inbound SRTP context.
     pub fn owner_srtp_active(&self) -> bool {
         self.is_v2() && self.owner_srtp
+    }
+
+    /// Whether sessions created now process multiplexed RTCP on the socket
+    /// owner and send periodic reports synchronously.
+    pub fn owner_rtcp_active(&self) -> bool {
+        self.is_v2() && self.owner_rtcp
+    }
+
+    /// Whether the periodic report task of a session created now is hosted
+    /// on its socket's lane poller.
+    pub fn owner_rtcp_on_lane_active(&self) -> bool {
+        self.owner_rtcp_active() && self.lane_poller_active()
     }
 }
 
@@ -618,6 +649,19 @@ pub fn lane_pass_clock_enabled() -> bool {
 /// context. Read when a transport starts.
 pub fn owner_srtp_enabled() -> bool {
     with_config(MediaExecutorConfig::owner_srtp_active)
+}
+
+/// Whether a session created now processes multiplexed RTCP on the socket
+/// owner and sends periodic reports synchronously. Read when a session is
+/// created.
+pub fn owner_rtcp_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_rtcp_active)
+}
+
+/// Whether a session created now hosts its periodic report task on its
+/// socket's lane poller. Read when a session starts.
+pub fn owner_rtcp_on_lane_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_rtcp_on_lane_active)
 }
 
 /// Restores the previous per-thread override when dropped.
@@ -878,6 +922,10 @@ static TX_BATCH_FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static OWNER_SRTP_LOOPS: AtomicU64 = AtomicU64::new(0);
 static OWNER_SRTP_HANDOFFS: AtomicU64 = AtomicU64::new(0);
 static SRTP_LOCKS_AVOIDED: AtomicU64 = AtomicU64::new(0);
+static OWNER_RTCP_INBOUND: AtomicU64 = AtomicU64::new(0);
+static RTCP_SYNC_SENDS: AtomicU64 = AtomicU64::new(0);
+static RTCP_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
+static RTCP_LANE_TASKS: AtomicU64 = AtomicU64::new(0);
 
 /// Media executor totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction.
@@ -950,6 +998,18 @@ pub struct InlineExecutorCounters {
     /// Inbound SRTP/SRTCP datagrams authenticated without taking the
     /// context lock.
     pub srtp_locks_avoided: u64,
+    /// Inbound RTCP compounds processed on the socket owner (each also
+    /// counts one avoided session-task wakeup in `wakeups_avoided`).
+    pub owner_rtcp_inbound: u64,
+    /// Periodic RTCP reports written with `try_send_to` from the report
+    /// task's poll.
+    pub rtcp_sync_sends: u64,
+    /// Periodic RTCP reports the socket did not take at once and that went
+    /// through the awaited send (already protected, so each SRTCP index is
+    /// still consumed once).
+    pub rtcp_sync_deferred: u64,
+    /// Periodic report tasks hosted on a lane poller.
+    pub rtcp_lane_tasks: u64,
 }
 
 /// The media executor totals since start.
@@ -979,6 +1039,10 @@ pub fn inline_executor_counters() -> InlineExecutorCounters {
         owner_srtp_loops: OWNER_SRTP_LOOPS.load(Ordering::Relaxed),
         owner_srtp_handoffs: OWNER_SRTP_HANDOFFS.load(Ordering::Relaxed),
         srtp_locks_avoided: SRTP_LOCKS_AVOIDED.load(Ordering::Relaxed),
+        owner_rtcp_inbound: OWNER_RTCP_INBOUND.load(Ordering::Relaxed),
+        rtcp_sync_sends: RTCP_SYNC_SENDS.load(Ordering::Relaxed),
+        rtcp_sync_deferred: RTCP_SYNC_DEFERRED.load(Ordering::Relaxed),
+        rtcp_lane_tasks: RTCP_LANE_TASKS.load(Ordering::Relaxed),
     }
 }
 
@@ -1521,6 +1585,28 @@ pub(crate) fn record_owner_srtp_handoff() {
     OWNER_SRTP_HANDOFFS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Count one inbound RTCP compound processed on the socket owner. RTCP rate
+/// (a few seconds apart per call).
+pub(crate) fn record_owner_rtcp_inbound() {
+    OWNER_RTCP_INBOUND.fetch_add(1, Ordering::Relaxed);
+    WAKEUPS_AVOIDED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one synchronous periodic report send (`synchronous`), or one the
+/// socket deferred to the awaited send.
+pub(crate) fn record_rtcp_send(synchronous: bool) {
+    if synchronous {
+        RTCP_SYNC_SENDS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        RTCP_SYNC_DEFERRED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Count one periodic report task hosted on a lane poller.
+pub(crate) fn record_rtcp_lane_task() {
+    RTCP_LANE_TASKS.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Lock-free SRTP datagrams of one owning receive loop, published in
 /// batches.
 #[derive(Default)]
@@ -1569,6 +1655,8 @@ mod tests {
         assert!(!v1.inline_decode_active());
         assert!(!v1.pcm_pool_active());
         assert!(!v1.owner_srtp_active());
+        assert!(!v1.owner_rtcp_active());
+        assert!(!v1.owner_rtcp_on_lane_active());
 
         let v2 = MediaExecutorConfig::v2();
         assert_eq!(v2.mode, MediaExecutorMode::V2);
@@ -1580,6 +1668,8 @@ mod tests {
         assert!(v2.inline_decode_active());
         assert!(v2.pcm_pool_active());
         assert!(v2.owner_srtp_active());
+        assert!(v2.owner_rtcp_active());
+        assert!(v2.owner_rtcp_on_lane_active());
         assert!(v2.validate().is_ok());
     }
 
@@ -1777,6 +1867,7 @@ mod tests {
         assert!(!v1_with_switches.inline_decode_active(), "never under v1");
         assert!(!v1_with_switches.pcm_pool_active(), "never under v1");
         assert!(!v1_with_switches.owner_srtp_active(), "never under v1");
+        assert!(!v1_with_switches.owner_rtcp_active(), "never under v1");
 
         let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
         assert!(no_poller.validate().is_ok());
@@ -1809,19 +1900,27 @@ mod tests {
             no_poller.owner_srtp_active(),
             "a receive task owns its context as well as a hosted loop"
         );
+        assert!(no_poller.owner_rtcp_active());
+        assert!(
+            !no_poller.owner_rtcp_on_lane_active(),
+            "without the poller the report task stays a task"
+        );
 
         let one_off = MediaExecutorConfig::v2()
             .with_lane_timer(false)
             .with_lane_tx(false)
             .with_tx_batch(false)
             .with_fast_ssrc_hash(false)
-            .with_owner_srtp(false);
+            .with_owner_srtp(false)
+            .with_owner_rtcp(false);
         assert!(one_off.lane_poller_active());
         assert!(!one_off.lane_timer_active());
         assert!(!one_off.lane_tx_active());
         assert!(!one_off.tx_batch_active());
         assert!(!one_off.fast_ssrc_hash_active());
         assert!(!one_off.owner_srtp_active());
+        assert!(!one_off.owner_rtcp_active());
+        assert!(!one_off.owner_rtcp_on_lane_active());
     }
 
     #[test]
@@ -1840,6 +1939,21 @@ mod tests {
         assert!(after.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY + 2);
         assert!(after.owner_srtp_loops > before.owner_srtp_loops);
         assert!(after.owner_srtp_handoffs > before.owner_srtp_handoffs);
+    }
+
+    #[test]
+    fn owner_rtcp_counters_reach_the_totals() {
+        let before = inline_executor_counters();
+        record_owner_rtcp_inbound();
+        record_rtcp_send(true);
+        record_rtcp_send(false);
+        record_rtcp_lane_task();
+        let after = inline_executor_counters();
+        assert!(after.owner_rtcp_inbound > before.owner_rtcp_inbound);
+        assert!(after.wakeups_avoided > before.wakeups_avoided);
+        assert!(after.rtcp_sync_sends > before.rtcp_sync_sends);
+        assert!(after.rtcp_sync_deferred > before.rtcp_sync_deferred);
+        assert!(after.rtcp_lane_tasks > before.rtcp_lane_tasks);
     }
 
     #[test]

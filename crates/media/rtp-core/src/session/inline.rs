@@ -11,9 +11,15 @@
 //! `PacketReceived` — or publishes `PacketReceived` exactly as v1 does when
 //! no sink is installed or the sink demoted itself.
 //!
-//! RTCP, DTMF, STUN and transport errors still reach the v1 receive task
-//! through the transport broadcast.
+//! DTMF, STUN and transport errors still reach the v1 receive task through
+//! the transport broadcast. Multiplexed RTCP does too, unless
+//! [`MediaExecutorConfig::owner_rtcp`] hands it to
+//! [`InlineSessionIngress`]'s `on_rtcp`, which runs the session task's RTCP
+//! handling (`RtcpIngress::process`) on the socket owner.
+//!
+//! [`MediaExecutorConfig::owner_rtcp`]: crate::executor::MediaExecutorConfig::owner_rtcp
 
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -21,10 +27,11 @@ use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, trace};
 
-use super::{ReceivedSenderReport, RtpSessionEvent, RtpSessionStats, RtpStream};
+use super::{ReceivedSenderReport, RtcpIngress, RtpSessionEvent, RtpSessionStats, RtpStream};
 use crate::executor::{
-    record_inline_fallback, record_inline_sink_active, HandoffSlot, InlineFallbackReason,
-    InlineMediaSink, InlinePacketCounters, InlineRtpIngress, InlineRtpPacket, InlineSinkVerdict,
+    record_inline_fallback, record_inline_sink_active, record_owner_rtcp_inbound, HandoffSlot,
+    InlineFallbackReason, InlineMediaSink, InlinePacketCounters, InlineRtpIngress, InlineRtpPacket,
+    InlineSinkVerdict,
 };
 use crate::packet::RtpPacket;
 
@@ -54,6 +61,8 @@ pub(super) struct InlineSessionIngress {
     /// this is non-zero would split one stream across two consumers.
     broadcast_packets: u64,
     counters: Option<InlinePacketCounters>,
+    /// The session's RTCP handling, with `owner_rtcp`.
+    rtcp: Option<RtcpIngress>,
 }
 
 impl InlineSessionIngress {
@@ -66,6 +75,7 @@ impl InlineSessionIngress {
         event_tx: broadcast::Sender<RtpSessionEvent>,
         receive_queue: Option<mpsc::Sender<RtpPacket>>,
         sink_slot: Arc<InlineSinkSlot>,
+        rtcp: Option<RtcpIngress>,
     ) -> Self {
         Self {
             streams,
@@ -78,6 +88,7 @@ impl InlineSessionIngress {
             downstream: Downstream::Broadcast,
             broadcast_packets: 0,
             counters: None,
+            rtcp,
         }
     }
 
@@ -235,6 +246,17 @@ impl InlineRtpIngress for InlineSessionIngress {
             Downstream::Broadcast | Downstream::Fallback => return,
         };
         self.apply(verdict, None);
+    }
+
+    /// With `owner_rtcp`: exactly the session task's `RtcpReceived` arm,
+    /// run on the socket owner.
+    fn on_rtcp(&mut self, data: &[u8], source: SocketAddr, _now: Instant) -> bool {
+        let Some(rtcp) = self.rtcp.as_ref() else {
+            return false;
+        };
+        rtcp.process(data, source);
+        record_owner_rtcp_inbound();
+        true
     }
 }
 
@@ -811,6 +833,436 @@ mod tests {
             assert_eq!(udp(&session).srtp_recv_location(), (false, true));
             session.close().await.unwrap();
         }
+    }
+
+    // ---- Owner RTCP: v1/v2 equivalence ----------------------------------------
+
+    const LOCAL_SSRC: u32 = 0x0102_0304;
+    const STRANGER_SSRC: u32 = 0x0bad_0bad;
+
+    /// The session events inbound RTCP from the peer produces, as comparable
+    /// text. The session's own periodic reports (local SSRC) are ignored.
+    fn remote_rtcp_event(event: &RtpSessionEvent) -> Option<String> {
+        match event {
+            RtpSessionEvent::RtcpSenderReport { ssrc, .. }
+            | RtpSessionEvent::RtcpReceiverReport { ssrc, .. }
+            | RtpSessionEvent::Bye { ssrc, .. }
+                if *ssrc != LOCAL_SSRC =>
+            {
+                Some(format!("{event:?}"))
+            }
+            _ => None,
+        }
+    }
+
+    async fn next_rtcp_events(
+        events: &mut broadcast::Receiver<RtpSessionEvent>,
+        count: usize,
+    ) -> Vec<String> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut seen = Vec::new();
+            while seen.len() < count {
+                if let Some(text) = remote_rtcp_event(&events.recv().await.unwrap()) {
+                    seen.push(text);
+                }
+            }
+            seen
+        })
+        .await
+        .expect("timed out waiting for RTCP events")
+    }
+
+    async fn assert_no_more_rtcp_events(events: &mut broadcast::Receiver<RtpSessionEvent>) {
+        let quiet = tokio::time::timeout(Duration::from_millis(150), async {
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        if let Some(text) = remote_rtcp_event(&event) {
+                            return Some(text);
+                        }
+                    }
+                    Err(_) => return None,
+                }
+            }
+        })
+        .await;
+        assert!(
+            !matches!(quiet, Ok(Some(_))),
+            "unexpected RTCP event {quiet:?}"
+        );
+    }
+
+    fn peer_sender_report() -> crate::packet::rtcp::RtcpSenderReport {
+        use crate::packet::rtcp::{NtpTimestamp, RtcpReportBlock, RtcpSenderReport};
+        let mut sr = RtcpSenderReport::new(REMOTE_SSRC);
+        sr.ntp_timestamp = NtpTimestamp {
+            seconds: 0xaaaa_1234,
+            fraction: 0x5678_bbbb,
+        };
+        sr.rtp_timestamp = 4_242;
+        sr.sender_packet_count = 17;
+        sr.sender_octet_count = 2_720;
+        let mut about_us = RtcpReportBlock::new(LOCAL_SSRC);
+        about_us.cumulative_lost = 3;
+        about_us.highest_seq = 77;
+        sr.report_blocks.push(about_us);
+        sr
+    }
+
+    /// (SR about us; RR about us + an unknown member + BYE; a stranger's RR).
+    fn inbound_compounds() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        use crate::packet::rtcp::{
+            RtcpCompoundMember, RtcpCompoundPacket, RtcpGoodbye, RtcpPacket, RtcpReceiverReport,
+            RtcpTolerantCompoundPacket, RtcpUnknownPacket,
+        };
+        let sr = peer_sender_report();
+        let about_us = sr.report_blocks[0].clone();
+        let sender_report = RtcpCompoundPacket::new_with_sr(sr)
+            .serialize()
+            .unwrap()
+            .to_vec();
+        let mut rr = RtcpReceiverReport::new(REMOTE_SSRC);
+        rr.add_report_block(about_us.clone());
+        let receiver_report_and_bye = RtcpTolerantCompoundPacket {
+            packets: vec![
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(rr)),
+                RtcpCompoundMember::Unknown(RtcpUnknownPacket {
+                    packet_type: 205,
+                    count: 1,
+                    payload: Bytes::from_static(&[0xaa, 0xbb, 0xcc, 0xdd]),
+                    padding: Bytes::new(),
+                }),
+                RtcpCompoundMember::Known(RtcpPacket::Goodbye(RtcpGoodbye::new_for_source(
+                    REMOTE_SSRC,
+                ))),
+            ],
+        }
+        .serialize()
+        .unwrap()
+        .to_vec();
+        let mut stranger = RtcpReceiverReport::new(STRANGER_SSRC);
+        stranger.add_report_block(about_us);
+        let stranger = RtcpCompoundPacket::new_with_rr(stranger)
+            .serialize()
+            .unwrap()
+            .to_vec();
+        (sender_report, receiver_report_and_bye, stranger)
+    }
+
+    type PeerReportKey = (u32, u8, i32, u32);
+
+    #[derive(Debug, PartialEq)]
+    struct RtcpObserved {
+        events: Vec<String>,
+        published: Vec<u16>,
+        rtcp_packets_received: u64,
+        rtcp_packets_rejected: u64,
+        peer_report: Option<PeerReportKey>,
+        peer_bye: Option<(u32, Option<String>)>,
+        retained_sender_reports: usize,
+        rtcp_members: usize,
+    }
+
+    /// A stranger's report (dropped), the peer's SR before its RTP, RTP, an
+    /// SRTCP replay of the SR (dropped), then RR + unknown member + BYE.
+    async fn run_inbound_rtcp(mode: MediaExecutorMode, srtp: bool) -> RtcpObserved {
+        let mut session = session_in(mode).await;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        // Only the session's peer may feed its RTCP handling.
+        session.set_remote_addr(peer.local_addr().unwrap()).await;
+        let mut sender = srtp_context();
+        if srtp {
+            udp(&session)
+                .set_srtp_contexts(srtp_context(), srtp_context())
+                .await
+                .unwrap();
+        }
+        let mut stranger_sender = srtp_context();
+        let mut events = session.subscribe();
+        let destination = session.local_addr().unwrap();
+        let (sender_report, receiver_report_and_bye, stranger_report) = inbound_compounds();
+        let wire = |context: &mut SrtpContext, plain: &[u8]| -> Vec<u8> {
+            if srtp {
+                context.protect_rtcp(plain).unwrap().to_vec()
+            } else {
+                plain.to_vec()
+            }
+        };
+        let stranger_wire = wire(&mut stranger_sender, &stranger_report);
+        let sr_wire = wire(&mut sender, &sender_report);
+        let rr_wire = wire(&mut sender, &receiver_report_and_bye);
+
+        stranger.send_to(&stranger_wire, destination).await.unwrap();
+        peer.send_to(&sr_wire, destination).await.unwrap();
+        let mut seen = next_rtcp_events(&mut events, 1).await;
+        let mut published = Vec::new();
+        for seq in [1_u16, 2] {
+            let rtp = if srtp {
+                protected(&mut sender, seq)
+            } else {
+                media_packet(seq).serialize().unwrap().to_vec()
+            };
+            peer.send_to(&rtp, destination).await.unwrap();
+        }
+        publish_all(&mut events, 2, &mut published).await;
+        if srtp {
+            peer.send_to(&sr_wire, destination).await.unwrap();
+        }
+        peer.send_to(&rr_wire, destination).await.unwrap();
+        seen.extend(next_rtcp_events(&mut events, 2).await);
+        assert_no_more_rtcp_events(&mut events).await;
+        let stats = session.get_stats();
+        let observed = RtcpObserved {
+            events: seen,
+            published,
+            rtcp_packets_received: stats.rtcp_packets_received,
+            rtcp_packets_rejected: stats.rtcp_packets_rejected,
+            peer_report: stats.peer_report.map(|report| {
+                (
+                    report.reporter_ssrc,
+                    report.fraction_lost,
+                    report.cumulative_lost,
+                    report.extended_highest_sequence,
+                )
+            }),
+            peer_bye: stats.peer_bye.map(|bye| (bye.ssrc, bye.reason)),
+            retained_sender_reports: session.received_sender_reports.len(),
+            rtcp_members: session.rtcp_reporter.rtcp_members.len(),
+        };
+        session.close().await.unwrap();
+        observed
+    }
+
+    #[tokio::test]
+    async fn inbound_rtcp_on_the_owner_matches_the_session_task() {
+        let before = inline_executor_counters();
+        for srtp in [false, true] {
+            let v1 = run_inbound_rtcp(MediaExecutorMode::V1, srtp).await;
+            let v2 = run_inbound_rtcp(MediaExecutorMode::V2, srtp).await;
+            assert_eq!(v1, v2, "srtp={srtp}");
+            assert_eq!(v2.events.len(), 3, "SR, RR and BYE once each");
+            assert_eq!(v2.published, vec![1, 2]);
+            assert_eq!(v2.rtcp_packets_received, 2, "the SRTCP replay is dropped");
+            assert_eq!(v2.rtcp_packets_rejected, 1, "the stranger is filtered");
+            assert_eq!(v2.peer_report, Some((REMOTE_SSRC, 0, 3, 77)));
+            assert_eq!(v2.peer_bye, Some((REMOTE_SSRC, None)));
+            assert_eq!(v2.retained_sender_reports, 1);
+            assert_eq!(v2.rtcp_members, 1, "the stranger is not a member");
+        }
+        let after = inline_executor_counters();
+        assert!(after.owner_rtcp_inbound >= before.owner_rtcp_inbound + 6);
+    }
+
+    /// What a periodic report carries: everything RFC 3550 puts in an SR/RR
+    /// except the clock-derived NTP/RTP timestamps, with jitter and DLSR
+    /// reduced to "small" and "elapsed" (they follow the arrival clock).
+    fn report_shape(datagram: &[u8]) -> Vec<String> {
+        use crate::packet::rtcp::{RtcpCompoundMember, RtcpCompoundPacket, RtcpPacket};
+        let blocks = |blocks: &[crate::packet::rtcp::RtcpReportBlock]| -> Vec<String> {
+            blocks
+                .iter()
+                .map(|block| {
+                    format!(
+                        "ssrc={:08x} fraction={} cumulative={} highest={} lsr={:08x} dlsr>0={} jitter<20ms={}",
+                        block.ssrc,
+                        block.fraction_lost,
+                        block.cumulative_lost,
+                        block.highest_seq,
+                        block.last_sr,
+                        block.delay_since_last_sr > 0,
+                        block.jitter < 160
+                    )
+                })
+                .collect()
+        };
+        RtcpCompoundPacket::parse_tolerant(datagram)
+            .expect("periodic report parses")
+            .packets
+            .into_iter()
+            .map(|member| match member {
+                RtcpCompoundMember::Known(RtcpPacket::SenderReport(sr)) => format!(
+                    "SR ssrc={:08x} packets={} octets={} blocks={:?}",
+                    sr.ssrc,
+                    sr.sender_packet_count,
+                    sr.sender_octet_count,
+                    blocks(&sr.report_blocks)
+                ),
+                RtcpCompoundMember::Known(RtcpPacket::ReceiverReport(rr)) => format!(
+                    "RR ssrc={:08x} blocks={:?}",
+                    rr.ssrc,
+                    blocks(&rr.report_blocks)
+                ),
+                RtcpCompoundMember::Known(RtcpPacket::SourceDescription(sdes)) => {
+                    format!("SDES chunks={}", sdes.chunks.len())
+                }
+                RtcpCompoundMember::Known(RtcpPacket::Goodbye(bye)) => {
+                    format!("BYE {:08x?} {:?}", bye.sources, bye.reason)
+                }
+                RtcpCompoundMember::Known(other) => format!("other {:?}", other.packet_type()),
+                RtcpCompoundMember::Unknown(unknown) => format!("unknown {}", unknown.packet_type),
+            })
+            .collect()
+    }
+
+    fn is_rtcp(datagram: &[u8]) -> bool {
+        datagram.len() >= 8 && (200..=206).contains(&datagram[1])
+    }
+
+    /// The next RTCP datagram the peer receives (RTP from the session is
+    /// skipped).
+    async fn next_report(peer: &UdpSocket) -> Vec<u8> {
+        let mut buffer = [0u8; 2048];
+        loop {
+            let (size, _) =
+                tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut buffer))
+                    .await
+                    .expect("an RTCP report")
+                    .unwrap();
+            if is_rtcp(&buffer[..size]) {
+                return buffer[..size].to_vec();
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct ReportsObserved {
+        periodic: Vec<Vec<String>>,
+        closing: Vec<String>,
+        interval_in_range: bool,
+    }
+
+    /// Inbound SR then RTP 1, 2, 4 from the peer, two media packets from the
+    /// session, then two periodic reports and the close.
+    async fn run_periodic_reports(mode: MediaExecutorMode, srtp: bool) -> ReportsObserved {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut session = {
+            let _mode = override_media_executor_config_on_this_thread(config_for(mode));
+            RtpSession::new_event_driven(RtpSessionConfig {
+                local_addr: "127.0.0.1:0".parse().unwrap(),
+                remote_addr: Some(peer.local_addr().unwrap()),
+                ssrc: Some(LOCAL_SSRC),
+                ..RtpSessionConfig::default()
+            })
+            .await
+            .unwrap()
+        };
+        let mut peer_tx = srtp_context();
+        let mut peer_rx = srtp_context();
+        if srtp {
+            udp(&session)
+                .set_srtp_contexts(srtp_context(), srtp_context())
+                .await
+                .unwrap();
+        }
+        let mut events = session.subscribe();
+        let destination = session.local_addr().unwrap();
+        let sender_report =
+            crate::packet::rtcp::RtcpCompoundPacket::new_with_sr(peer_sender_report())
+                .serialize()
+                .unwrap();
+        let sr_wire = if srtp {
+            peer_tx.protect_rtcp(&sender_report).unwrap().to_vec()
+        } else {
+            sender_report.to_vec()
+        };
+        peer.send_to(&sr_wire, destination).await.unwrap();
+        next_rtcp_events(&mut events, 1).await;
+        for seq in [1_u16, 2, 4] {
+            let rtp = if srtp {
+                protected(&mut peer_tx, seq)
+            } else {
+                media_packet(seq).serialize().unwrap().to_vec()
+            };
+            peer.send_to(&rtp, destination).await.unwrap();
+        }
+        let mut published = Vec::new();
+        publish_all(&mut events, 3, &mut published).await;
+        for timestamp in [160_u32, 320] {
+            session
+                .send_packet(timestamp, Bytes::from(vec![0xd5; 160]), false)
+                .await
+                .unwrap();
+        }
+
+        let mut buffer = [0u8; 2048];
+        // Everything above happened well inside the first interval (at least
+        // 1.25 s at the default bandwidth); now report fast.
+        session.set_bandwidth(2_000_000);
+        session.set_rtcp_reduced_minimum(true);
+        let mut wires = Vec::new();
+        let mut arrivals = Vec::new();
+        while wires.len() < 2 {
+            wires.push(next_report(&peer).await);
+            arrivals.push(std::time::Instant::now());
+        }
+        let gap = arrivals[1].duration_since(arrivals[0]);
+        session.close().await.unwrap();
+        // A report already in flight may precede the closing compound; the
+        // report task is gone after it.
+        let mut after_close = Vec::new();
+        while let Ok(Ok((size, _))) =
+            tokio::time::timeout(Duration::from_millis(600), peer.recv_from(&mut buffer)).await
+        {
+            if is_rtcp(&buffer[..size]) {
+                after_close.push(buffer[..size].to_vec());
+            }
+        }
+        let closing = after_close.pop().expect("the closing BYE compound");
+        let mut shape = |wire: &[u8]| -> Vec<String> {
+            if srtp {
+                report_shape(&peer_rx.unprotect_rtcp(wire).expect("authenticated SRTCP"))
+            } else {
+                report_shape(wire)
+            }
+        };
+        if srtp {
+            assert_ne!(wires[0], wires[1], "consecutive SRTCP indexes");
+        }
+        let periodic = wires.iter().map(|wire| shape(wire)).collect();
+        for extra in &after_close {
+            let _ = shape(extra);
+        }
+        let closing = shape(&closing);
+        ReportsObserved {
+            periodic,
+            closing,
+            interval_in_range: gap >= Duration::from_millis(30) && gap < Duration::from_secs(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn periodic_reports_match_v1_in_content_srtcp_interval_and_teardown() {
+        let before = inline_executor_counters();
+        for srtp in [false, true] {
+            let v1 = run_periodic_reports(MediaExecutorMode::V1, srtp).await;
+            let v2 = run_periodic_reports(MediaExecutorMode::V2, srtp).await;
+            assert_eq!(v1, v2, "srtp={srtp}");
+            assert!(v2.interval_in_range);
+            let block = "ssrc=00e40001 fraction=64 cumulative=1 highest=4 lsr=12345678 dlsr>0=true jitter<20ms=true";
+            assert_eq!(
+                v2.periodic[0],
+                vec![
+                    format!("SR ssrc={LOCAL_SSRC:08x} packets=2 octets=320 blocks=[{block:?}]"),
+                    "SDES chunks=1".to_string(),
+                ]
+            );
+            assert!(v2.periodic[1][0].contains("fraction=0 cumulative=1 highest=4"));
+            // SR or RR, depending on whether the session still counts as a
+            // sender two intervals after its media (RFC 3550 §6.4).
+            assert!(v2.closing[0].contains(&format!("R ssrc={LOCAL_SSRC:08x}")));
+            assert_eq!(v2.closing[1], "SDES chunks=1");
+            assert_eq!(
+                v2.closing[2],
+                format!("BYE [{LOCAL_SSRC:08x}] Some(\"Session closed\")")
+            );
+        }
+        let after = inline_executor_counters();
+        assert!(
+            after.rtcp_sync_sends + after.rtcp_sync_deferred
+                >= before.rtcp_sync_sends + before.rtcp_sync_deferred + 4
+        );
+        assert!(after.rtcp_lane_tasks >= before.rtcp_lane_tasks + 2);
     }
 
     #[tokio::test]

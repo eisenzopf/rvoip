@@ -447,6 +447,20 @@ impl InlineRx {
     }
 }
 
+/// Executor v2: adopt the session's inline ingress (offered once, before
+/// media flows) at the first datagram it can be given.
+#[inline]
+fn adopt_inline_ingress(
+    inline: &mut Option<InlineRx>,
+    slot: &HandoffSlot<Box<dyn InlineRtpIngress>>,
+) {
+    if inline.is_none() && slot.is_dirty() {
+        if let Some(ingress) = slot.take() {
+            *inline = Some(InlineRx::new(ingress));
+        }
+    }
+}
+
 /// The inbound SRTP/SRTCP context for one datagram: held by the receive loop
 /// itself ([`MediaExecutorConfig::owner_srtp`], no lock), or taken under the
 /// transport's lock (v1, and every other user).
@@ -1280,6 +1294,9 @@ impl UdpRtpTransport {
                                 } else {
                                     Bytes::copy_from_slice(&buffer[..size])
                                 };
+                                // Executor v2: the session's inline ingress
+                                // may process RTCP here (`owner_rtcp`).
+                                adopt_inline_ingress(&mut inline, &inline_slot);
                                 if let Some(rx) = inline.as_mut() {
                                     if rx.ingress.on_rtcp(&rtcp_data, addr, Instant::now()) {
                                         continue;
@@ -1303,11 +1320,7 @@ impl UdpRtpTransport {
                                 // Executor v2: adopt the session's inline
                                 // ingress before the first RTP packet it can
                                 // own.
-                                if inline.is_none() && inline_slot.is_dirty() {
-                                    if let Some(ingress) = inline_slot.take() {
-                                        inline = Some(InlineRx::new(ingress));
-                                    }
-                                }
+                                adopt_inline_ingress(&mut inline, &inline_slot);
                                 if let Some(rx) = inline.as_mut() {
                                     // Authenticate and decrypt in place in the
                                     // receive buffer: no copy and no
@@ -2153,15 +2166,35 @@ impl UdpRtpTransport {
         Ok(())
     }
 
-    async fn send_rtcp_wire_bytes_unchecked(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
+    /// Protect an outbound RTCP compound as `send_rtcp_bytes` does: `None`
+    /// when it leaves as plaintext.
+    fn protect_outbound_rtcp(&self, bytes: &[u8]) -> Result<Option<Bytes>> {
+        if !self.secure_media_required.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let mut guard = self.srtp_send.lock();
+        let context = guard.as_mut().ok_or_else(|| {
+            Error::InvalidState("SRTCP is required but no send context is installed".to_string())
+        })?;
+        Ok(Some(context.protect_rtcp(bytes)?))
+    }
+
+    /// The socket RTCP leaves from now (the separate RTCP socket while
+    /// multiplexing is off, else `None` for the RTP socket), after seeding
+    /// the pre-latch RTCP destination.
+    fn rtcp_wire_socket(&self, dest: SocketAddr) -> Option<Arc<UdpSocket>> {
         if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
             seed_prelatch_destination(&self.remote_rtcp_addr, dest);
         }
-        let rtcp_socket = if self.rtcp_mux.load(Ordering::Acquire) {
+        if self.rtcp_mux.load(Ordering::Acquire) {
             None
         } else {
             self.rtcp_socket.load_full()
-        };
+        }
+    }
+
+    async fn send_rtcp_wire_bytes_unchecked(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
+        let rtcp_socket = self.rtcp_wire_socket(dest);
         rtcp_socket
             .as_deref()
             .unwrap_or(&self.rtp_socket)
@@ -2169,6 +2202,39 @@ impl UdpRtpTransport {
             .await
             .map_err(|e| Error::Transport(format!("Failed to send RTCP packet: {}", e)))?;
         Ok(())
+    }
+
+    /// [`RtpTransport::send_rtcp_bytes`] with the datagram written by
+    /// `try_send_to` from the caller's poll (no readiness registration, no
+    /// await) when the socket takes it. Protection, the secure-media policy,
+    /// the pre-latch seed, the socket choice (RTP socket with multiplexing,
+    /// the separate RTCP socket otherwise) and errors are those of
+    /// `send_rtcp_bytes`. A datagram the socket would not take now goes
+    /// through the same awaited `send_to`, already protected, so its SRTCP
+    /// index is consumed exactly once.
+    pub(crate) async fn send_rtcp_bytes_now(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
+        let protected = self.protect_outbound_rtcp(bytes)?;
+        let wire = protected.as_deref().unwrap_or(bytes);
+        let rtcp_socket = self.rtcp_wire_socket(dest);
+        let socket = rtcp_socket.as_deref().unwrap_or(&self.rtp_socket);
+        match socket.try_send_to(wire, dest) {
+            Ok(_) => {
+                crate::executor::record_rtcp_send(true);
+                Ok(())
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                crate::executor::record_rtcp_send(false);
+                socket
+                    .send_to(wire, dest)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| Error::Transport(format!("Failed to send RTCP packet: {}", e)))
+            }
+            Err(error) => Err(Error::Transport(format!(
+                "Failed to send RTCP packet: {}",
+                error
+            ))),
+        }
     }
 
     /// Send an RTP packet using caller-provided scratch storage for
@@ -2506,19 +2572,10 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        if self.secure_media_required.load(Ordering::Acquire) {
-            let protected = {
-                let mut guard = self.srtp_send.lock();
-                let context = guard.as_mut().ok_or_else(|| {
-                    Error::InvalidState(
-                        "SRTCP is required but no send context is installed".to_string(),
-                    )
-                })?;
-                context.protect_rtcp(bytes)?
-            };
-            return self.send_rtcp_wire_bytes_unchecked(&protected, dest).await;
+        match self.protect_outbound_rtcp(bytes)? {
+            Some(protected) => self.send_rtcp_wire_bytes_unchecked(&protected, dest).await,
+            None => self.send_rtcp_wire_bytes_unchecked(bytes, dest).await,
         }
-        self.send_rtcp_wire_bytes_unchecked(bytes, dest).await
     }
 
     async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)> {
@@ -3795,6 +3852,104 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    /// Owner RTCP: the synchronous report send puts exactly the bytes on
+    /// the wire that the async `send_rtcp_bytes` does (plain RTCP, and SRTCP
+    /// with consecutive indexes), in the same order and from the same socket:
+    /// the RTP socket with multiplexing, the separate RTCP socket without.
+    #[tokio::test]
+    async fn synchronous_rtcp_send_is_byte_identical_to_the_async_send() {
+        let before = crate::executor::inline_executor_counters();
+        let report = crate::packet::rtcp::RtcpCompoundPacket::new_with_rr(
+            crate::packet::rtcp::RtcpReceiverReport::new(0x0102_0304),
+        )
+        .serialize()
+        .unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = peer.local_addr().unwrap();
+        // ((separate RTCP socket, synchronous, secure), datagram)
+        let mut wires: Vec<((bool, bool, bool), Vec<u8>)> = Vec::new();
+        for separate in [false, true] {
+            for synchronous in [false, true] {
+                for secure in [false, true] {
+                    let transport = UdpRtpTransport::new(RtpTransportConfig {
+                        local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+                        local_rtcp_addr: separate.then(|| "127.0.0.1:0".parse().unwrap()),
+                        symmetric_rtp: false,
+                        rtcp_mux: !separate,
+                        session_id: Some("rtcp-now".to_string()),
+                        use_port_allocator: false,
+                        buffer_config: Default::default(),
+                    })
+                    .await
+                    .unwrap();
+                    let expected_source = if separate {
+                        transport.local_rtcp_socket_addr().unwrap()
+                    } else {
+                        transport.local_rtp_addr().unwrap()
+                    };
+                    if secure {
+                        let (send, recv) = make_srtp_ctx_pair();
+                        transport.set_srtp_contexts(send, recv).await.unwrap();
+                    }
+                    for _ in 0..2 {
+                        if synchronous {
+                            transport
+                                .send_rtcp_bytes_now(&report, destination)
+                                .await
+                                .unwrap();
+                        } else {
+                            RtpTransport::send_rtcp_bytes(&transport, &report, destination)
+                                .await
+                                .unwrap();
+                        }
+                        let mut buffer = [0u8; 512];
+                        let (size, source) = tokio::time::timeout(
+                            Duration::from_secs(1),
+                            peer.recv_from(&mut buffer),
+                        )
+                        .await
+                        .expect("report on the wire")
+                        .unwrap();
+                        assert_eq!(source, expected_source, "separate={separate}");
+                        wires.push(((separate, synchronous, secure), buffer[..size].to_vec()));
+                    }
+                    transport.close().await.unwrap();
+                }
+            }
+        }
+        for separate in [false, true] {
+            for secure in [false, true] {
+                let pick = |synchronous: bool| -> Vec<Vec<u8>> {
+                    wires
+                        .iter()
+                        .filter(|(key, _)| *key == (separate, synchronous, secure))
+                        .map(|(_, wire)| wire.clone())
+                        .collect()
+                };
+                let (asynchronous, synchronous) = (pick(false), pick(true));
+                assert_eq!(asynchronous.len(), 2);
+                assert_eq!(
+                    asynchronous, synchronous,
+                    "separate={separate} secure={secure}"
+                );
+                if secure {
+                    assert_ne!(
+                        synchronous[0], synchronous[1],
+                        "each report takes its own SRTCP index"
+                    );
+                    assert_ne!(&synchronous[0][..], &report[..]);
+                } else {
+                    assert_eq!(&synchronous[0][..], &report[..]);
+                }
+            }
+        }
+        let after = crate::executor::inline_executor_counters();
+        assert!(
+            after.rtcp_sync_sends + after.rtcp_sync_deferred
+                >= before.rtcp_sync_sends + before.rtcp_sync_deferred + 8
+        );
     }
 
     #[tokio::test]
