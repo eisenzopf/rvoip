@@ -8473,6 +8473,15 @@ mod config_tests {
         };
         exact_terminal_completion_result(completion)
             .expect("firing watchdog exact release must complete");
+        // The changed-state deadline falls due together with the firing
+        // one. The runner disarms it on its own pass, which can trail the
+        // firing lifetime's release on a starved runtime.
+        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        while coordinator.setup_teardown_scheduler.len() != 0
+            && tokio::time::Instant::now() < drain_deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
         assert!(
             store.lifecycle_handle(&firing).is_none(),
