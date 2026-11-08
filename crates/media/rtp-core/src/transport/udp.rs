@@ -366,7 +366,9 @@ impl InlineRx {
     }
 
     fn on_timer(&mut self) {
-        let now = Instant::now();
+        // The lane pass reading when the pass clock is on (the owner timer
+        // just judged its deadline due by that same reading).
+        let now = crate::media_clock::now_std();
         self.timer.fired();
         self.counters.fire();
         self.ingress.on_deadline(now);
@@ -386,7 +388,7 @@ impl InlineRx {
             self.drained = 0;
             self.counters.budget_yield();
             tokio::task::yield_now().await;
-            if self.timer.is_due(Instant::now()) {
+            if self.timer.is_due(crate::media_clock::now_std()) {
                 self.on_timer();
                 return InlineWake::Timer;
             }
@@ -1313,7 +1315,10 @@ impl UdpRtpTransport {
                                         symmetric_rtp.reset();
                                         observed_symmetric_generation = generation;
                                     }
-                                    let now = Instant::now();
+                                    // One pass reading for the datagrams of
+                                    // a lane pass (bounded staleness; see
+                                    // `lane_clock`), else a clock read.
+                                    let now = crate::media_clock::now_std();
                                     let decision = symmetric_rtp.observe(
                                         addr,
                                         bounds.header.ssrc,

@@ -44,6 +44,12 @@
 //!   current-thread media lane serves its sockets and deadlines on a tick
 //!   grid instead of waking for every readiness event (see
 //!   [`crate::lane_tick`]). Needs the lane poller.
+//! - [`MediaExecutorConfig::lane_timer_wheel`]: lane clocks keep their
+//!   deadlines in a timing wheel (O(1) file, cancel and re-arm) instead of a
+//!   binary heap. Needs the lane clock.
+//! - [`MediaExecutorConfig::lane_pass_clock`]: a lane poller pass reads the
+//!   clock once and the futures it polls read that value through
+//!   [`crate::media_clock::now`]. Needs the lane poller.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -168,6 +174,20 @@ pub struct MediaExecutorConfig {
     /// [`MediaLanes::Dedicated`]: crate::task_runtime::MediaLanes::Dedicated
     pub lane_tick: Option<LaneTick>,
     // ---- End lane tick ----
+    // ---- Lane timing wheel and pass clock ----
+    /// Lane clocks keep their deadlines in a single-level timing wheel (O(1)
+    /// file, cancel and re-arm, no allocation; far deadlines wait in an
+    /// overflow heap) instead of a binary heap. Firing order and times are
+    /// the heap's. Needs [`Self::lane_timer`]; without it, it reads as off.
+    pub lane_timer_wheel: bool,
+    /// A lane poller pass reads the clock once and the futures it polls read
+    /// that value through [`crate::media_clock::now`] and
+    /// [`crate::media_clock::now_std`] instead of reading the clock
+    /// themselves. A pass reading is never later than the clock (deadline
+    /// checks can be late by a bounded amount of lane work, never early).
+    /// Needs [`Self::lane_poller`]; without it, it reads as off.
+    pub lane_pass_clock: bool,
+    // ---- End lane timing wheel and pass clock ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -191,11 +211,14 @@ impl MediaExecutorConfig {
             pcm_pool: false,
             // Lane tick.
             lane_tick: None,
+            // Lane timing wheel and pass clock.
+            lane_timer_wheel: false,
+            lane_pass_clock: false,
         }
     }
 
-    /// The inline executor with every switch on, and a 2 ms lane tick with
-    /// grid timers.
+    /// The inline executor with every switch on, a 2 ms lane tick with grid
+    /// timers, the lane timing wheel and the pass clock.
     pub fn v2() -> Self {
         Self {
             mode: MediaExecutorMode::V2,
@@ -209,6 +232,9 @@ impl MediaExecutorConfig {
             pcm_pool: true,
             // Lane tick.
             lane_tick: Some(LaneTick::new(Duration::from_millis(2)).with_grid_timers(true)),
+            // Lane timing wheel and pass clock.
+            lane_timer_wheel: true,
+            lane_pass_clock: true,
         }
     }
 
@@ -273,6 +299,22 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane tick ----
+
+    // ---- Lane timing wheel and pass clock ----
+
+    /// Set [`Self::lane_timer_wheel`].
+    pub fn with_lane_timer_wheel(mut self, enabled: bool) -> Self {
+        self.lane_timer_wheel = enabled;
+        self
+    }
+
+    /// Set [`Self::lane_pass_clock`].
+    pub fn with_lane_pass_clock(mut self, enabled: bool) -> Self {
+        self.lane_pass_clock = enabled;
+        self
+    }
+
+    // ---- End lane timing wheel and pass clock ----
 
     /// Check the configuration without installing it.
     ///
@@ -353,6 +395,22 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane tick ----
+
+    // ---- Lane timing wheel and pass clock ----
+
+    /// Whether lane clocks keep their deadlines in the timing wheel (needs
+    /// the lane clock).
+    pub fn lane_timer_wheel_active(&self) -> bool {
+        self.lane_timer_active() && self.lane_timer_wheel
+    }
+
+    /// Whether lane poller passes serve one clock reading to the futures
+    /// they poll (needs the lane poller).
+    pub fn lane_pass_clock_active(&self) -> bool {
+        self.lane_poller_active() && self.lane_pass_clock
+    }
+
+    // ---- End lane timing wheel and pass clock ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -518,6 +576,24 @@ pub fn lane_tick_grid_timers_enabled() -> bool {
 }
 
 // ---- End lane tick ----
+
+// ---- Lane timing wheel and pass clock ----
+
+/// Whether a lane clock built now keeps its deadlines in the timing wheel
+/// ([`MediaExecutorConfig::lane_timer_wheel_active`]). Read when a lane
+/// poller starts.
+pub fn lane_timer_wheel_enabled() -> bool {
+    with_config(MediaExecutorConfig::lane_timer_wheel_active)
+}
+
+/// Whether a lane poller started now serves one clock reading per pass
+/// ([`MediaExecutorConfig::lane_pass_clock_active`]). Read when a lane
+/// poller starts.
+pub fn lane_pass_clock_enabled() -> bool {
+    with_config(MediaExecutorConfig::lane_pass_clock_active)
+}
+
+// ---- End lane timing wheel and pass clock ----
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -1203,6 +1279,131 @@ impl Drop for LaneTimerCounters {
     }
 }
 
+// ---- Lane timing wheel and pass clock ----
+
+static WHEEL_INSERTS: AtomicU64 = AtomicU64::new(0);
+static WHEEL_FAR_INSERTS: AtomicU64 = AtomicU64::new(0);
+static WHEEL_CANCELS: AtomicU64 = AtomicU64::new(0);
+static WHEEL_CASCADES: AtomicU64 = AtomicU64::new(0);
+static WHEEL_SLOT_SCANS: AtomicU64 = AtomicU64::new(0);
+static PASS_CLOCK_CACHED: AtomicU64 = AtomicU64::new(0);
+static PASS_CLOCK_FRESH: AtomicU64 = AtomicU64::new(0);
+static PASS_CLOCK_STALE_SAMPLES: AtomicU64 = AtomicU64::new(0);
+static PASS_CLOCK_STALE_SUM_NS: AtomicU64 = AtomicU64::new(0);
+static PASS_CLOCK_STALE_MAX_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Lane timing wheel and pass clock totals since process start. Each field
+/// is individually atomic; the snapshot is not a transaction.
+///
+/// The lane-clock counters of [`InlineExecutorCounters`] keep their meaning
+/// with the wheel: `lane_timer_arms` counts filings (a new or moved key),
+/// `lane_timer_wakes` entries taken due, `lane_timer_fires` runtime timer
+/// expiries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LaneWheelCounters {
+    /// Deadlines linked into a wheel bucket when filed.
+    pub wheel_inserts: u64,
+    /// Deadlines filed beyond the wheel's span (overflow heap).
+    pub wheel_far_inserts: u64,
+    /// Filed deadlines removed before the wheel served them (re-armed,
+    /// observed due by their sleep, or dropped).
+    pub wheel_cancels: u64,
+    /// Far deadlines moved from the overflow heap into a bucket.
+    pub wheel_cascades: u64,
+    /// Entry-by-entry checks of the current bucket.
+    pub wheel_slot_scans: u64,
+    /// Clock reads answered from a pass reading (each a clock read saved).
+    pub pass_clock_cached_reads: u64,
+    /// Clock reads the pass clock made (each pass start and every refresh).
+    pub pass_clock_fresh_reads: u64,
+    /// Pass readings replaced by a fresh one.
+    pub pass_clock_staleness_samples: u64,
+    /// Sum of the ages pass readings reached when replaced, in nanoseconds.
+    pub pass_clock_staleness_sum_ns: u64,
+    /// The largest age a pass reading reached when replaced, in nanoseconds.
+    pub pass_clock_staleness_max_ns: u64,
+}
+
+/// Snapshot of the lane timing wheel and pass clock totals.
+pub fn lane_wheel_counters() -> LaneWheelCounters {
+    LaneWheelCounters {
+        wheel_inserts: WHEEL_INSERTS.load(Ordering::Relaxed),
+        wheel_far_inserts: WHEEL_FAR_INSERTS.load(Ordering::Relaxed),
+        wheel_cancels: WHEEL_CANCELS.load(Ordering::Relaxed),
+        wheel_cascades: WHEEL_CASCADES.load(Ordering::Relaxed),
+        wheel_slot_scans: WHEEL_SLOT_SCANS.load(Ordering::Relaxed),
+        pass_clock_cached_reads: PASS_CLOCK_CACHED.load(Ordering::Relaxed),
+        pass_clock_fresh_reads: PASS_CLOCK_FRESH.load(Ordering::Relaxed),
+        pass_clock_staleness_samples: PASS_CLOCK_STALE_SAMPLES.load(Ordering::Relaxed),
+        pass_clock_staleness_sum_ns: PASS_CLOCK_STALE_SUM_NS.load(Ordering::Relaxed),
+        pass_clock_staleness_max_ns: PASS_CLOCK_STALE_MAX_NS.load(Ordering::Relaxed),
+    }
+}
+
+/// Timing-wheel and pass-clock counters kept by one poller task and
+/// published in batches, like [`LaneTimerCounters`].
+#[derive(Default)]
+pub(crate) struct LaneWheelCounterBatch {
+    ops: crate::lane_clock::WheelOps,
+    pass: crate::lane_clock::PassClockStats,
+    passes: u64,
+}
+
+impl LaneWheelCounterBatch {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// One poller pass: its wheel operations and pass-clock statistics.
+    #[inline]
+    pub(crate) fn pass(
+        &mut self,
+        ops: crate::lane_clock::WheelOps,
+        pass: crate::lane_clock::PassClockStats,
+    ) {
+        self.ops.inserts += ops.inserts;
+        self.ops.far_inserts += ops.far_inserts;
+        self.ops.cancels += ops.cancels;
+        self.ops.cascades += ops.cascades;
+        self.ops.slot_scans += ops.slot_scans;
+        self.pass.cached += pass.cached;
+        self.pass.fresh += pass.fresh;
+        self.pass.stale_samples += pass.stale_samples;
+        self.pass.stale_sum_ns = self.pass.stale_sum_ns.saturating_add(pass.stale_sum_ns);
+        self.pass.stale_max_ns = self.pass.stale_max_ns.max(pass.stale_max_ns);
+        self.passes += 1;
+        if self.passes >= FLUSH_EVERY {
+            self.flush();
+        }
+    }
+
+    pub(crate) fn flush(&mut self) {
+        self.passes = 0;
+        publish(&WHEEL_INSERTS, &mut self.ops.inserts);
+        publish(&WHEEL_FAR_INSERTS, &mut self.ops.far_inserts);
+        publish(&WHEEL_CANCELS, &mut self.ops.cancels);
+        publish(&WHEEL_CASCADES, &mut self.ops.cascades);
+        publish(&WHEEL_SLOT_SCANS, &mut self.ops.slot_scans);
+        publish(&PASS_CLOCK_CACHED, &mut self.pass.cached);
+        publish(&PASS_CLOCK_FRESH, &mut self.pass.fresh);
+        publish(&PASS_CLOCK_STALE_SAMPLES, &mut self.pass.stale_samples);
+        publish(&PASS_CLOCK_STALE_SUM_NS, &mut self.pass.stale_sum_ns);
+        let max = std::mem::take(&mut self.pass.stale_max_ns);
+        if max > 0 {
+            PASS_CLOCK_STALE_MAX_NS.fetch_max(max, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for LaneWheelCounterBatch {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+// ---- End lane timing wheel and pass clock ----
+
 /// Synchronous TX counters owned by one writer (one call), published in
 /// batches so the per-frame path touches no shared cache line. Fed from
 /// `RtpSendNowReport`s by the caller of `RtpSendHandle::try_send_now`.
@@ -1385,6 +1586,103 @@ mod tests {
     }
 
     // ---- End lane tick ----
+
+    // ---- Lane timing wheel and pass clock ----
+
+    #[test]
+    fn the_timing_wheel_and_pass_clock_are_off_in_v1_and_on_in_v2() {
+        let v1 = MediaExecutorConfig::v1();
+        assert!(!v1.lane_timer_wheel && !v1.lane_pass_clock);
+        assert!(!v1.lane_timer_wheel_active());
+        assert!(!v1.lane_pass_clock_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.lane_timer_wheel && v2.lane_pass_clock);
+        assert!(v2.lane_timer_wheel_active());
+        assert!(v2.lane_pass_clock_active());
+        assert!(v2.validate().is_ok());
+
+        // Never under v1, whatever the fields say.
+        let v1_with_fields = v2.clone().with_mode(MediaExecutorMode::V1);
+        assert!(!v1_with_fields.lane_timer_wheel_active());
+        assert!(!v1_with_fields.lane_pass_clock_active());
+
+        // The wheel needs the lane clock; the pass clock only the poller.
+        // A missing prerequisite reads as off and is not an error.
+        let no_clock = MediaExecutorConfig::v2().with_lane_timer(false);
+        assert!(no_clock.validate().is_ok());
+        assert!(!no_clock.lane_timer_wheel_active());
+        assert!(no_clock.lane_pass_clock_active());
+        let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
+        assert!(no_poller.validate().is_ok());
+        assert!(!no_poller.lane_timer_wheel_active());
+        assert!(!no_poller.lane_pass_clock_active());
+
+        // Each part alone.
+        let wheel_only = MediaExecutorConfig::v2().with_lane_pass_clock(false);
+        assert!(wheel_only.lane_timer_wheel_active() && !wheel_only.lane_pass_clock_active());
+        let pass_only = MediaExecutorConfig::v2().with_lane_timer_wheel(false);
+        assert!(!pass_only.lane_timer_wheel_active() && pass_only.lane_pass_clock_active());
+
+        // The process accessors follow the configuration in effect.
+        let accessors = |config: MediaExecutorConfig| {
+            let _guard = override_media_executor_config_on_this_thread(config);
+            (lane_timer_wheel_enabled(), lane_pass_clock_enabled())
+        };
+        assert_eq!(accessors(MediaExecutorConfig::v1()), (false, false));
+        assert_eq!(accessors(MediaExecutorConfig::v2()), (true, true));
+        assert_eq!(accessors(no_clock), (false, true));
+        assert_eq!(accessors(wheel_only), (true, false));
+    }
+
+    #[test]
+    fn lane_wheel_counters_flush_in_batches_and_on_drop() {
+        let before = lane_wheel_counters();
+        let mut batch = LaneWheelCounterBatch::new();
+        let ops = crate::lane_clock::WheelOps {
+            inserts: 3,
+            far_inserts: 1,
+            cancels: 2,
+            cascades: 1,
+            slot_scans: 4,
+        };
+        let pass = crate::lane_clock::PassClockStats {
+            cached: 30,
+            fresh: 2,
+            stale_samples: 1,
+            stale_sum_ns: 40_000,
+            stale_max_ns: 40_000,
+        };
+        batch.pass(ops, pass);
+        drop(batch);
+        let after = lane_wheel_counters();
+        assert!(after.wheel_inserts >= before.wheel_inserts + 3);
+        assert!(after.wheel_far_inserts > before.wheel_far_inserts);
+        assert!(after.wheel_cancels >= before.wheel_cancels + 2);
+        assert!(after.wheel_cascades > before.wheel_cascades);
+        assert!(after.wheel_slot_scans >= before.wheel_slot_scans + 4);
+        assert!(after.pass_clock_cached_reads >= before.pass_clock_cached_reads + 30);
+        assert!(after.pass_clock_fresh_reads >= before.pass_clock_fresh_reads + 2);
+        assert!(after.pass_clock_staleness_samples > before.pass_clock_staleness_samples);
+        assert!(after.pass_clock_staleness_sum_ns >= before.pass_clock_staleness_sum_ns + 40_000);
+        assert!(after.pass_clock_staleness_max_ns >= 40_000);
+
+        // A full batch publishes without waiting for the drop.
+        let before = lane_wheel_counters();
+        let mut batch = LaneWheelCounterBatch::new();
+        for _ in 0..FLUSH_EVERY {
+            batch.pass(
+                crate::lane_clock::WheelOps {
+                    inserts: 1,
+                    ..Default::default()
+                },
+                crate::lane_clock::PassClockStats::default(),
+            );
+        }
+        assert!(lane_wheel_counters().wheel_inserts >= before.wheel_inserts + FLUSH_EVERY);
+        assert_eq!(batch.passes, 0, "flushed when full");
+    }
+
+    // ---- End lane timing wheel and pass clock ----
 
     #[test]
     fn switches_never_apply_under_v1_and_dependents_follow_the_lane_poller() {

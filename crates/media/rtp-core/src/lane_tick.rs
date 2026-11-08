@@ -190,6 +190,12 @@ impl TickGrid {
         self.quantum
     }
 
+    /// The grid's first boundary (a lane-clock timing wheel on this grid uses
+    /// it as its origin, so each bucket is one tick).
+    pub fn origin(&self) -> Instant {
+        self.origin
+    }
+
     fn at(&self, ticks: u128) -> Instant {
         let nanos = ticks.saturating_mul(self.quantum.as_nanos());
         self.origin + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
