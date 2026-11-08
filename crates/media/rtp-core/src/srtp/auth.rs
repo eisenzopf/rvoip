@@ -7,6 +7,53 @@ use sha1::Sha1;
 // Define type for HMAC-SHA1
 type HmacSha1 = Hmac<Sha1>;
 
+/// An HMAC-SHA1 tag truncated to the suite's tag length, on the stack.
+pub(crate) struct HmacSha1Tag {
+    bytes: hmac::digest::Output<HmacSha1>,
+    len: usize,
+}
+
+impl HmacSha1Tag {
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// HMAC-SHA1 over `data` followed by `trailer` (the ROC for SRTP, nothing
+/// for SRTCP), truncated to `tag_length`: the one computation behind every
+/// SRTP and SRTCP authentication tag this crate creates or verifies.
+///
+/// Deliberately kept out of line. The SHA extensions' compression is
+/// legacy-SSE code: inlined into the AVX code of a packet path (the socket
+/// owner's receive loop, the synchronous TX path, SRTCP) under fat LTO or
+/// PGO it causes SSE/AVX transition stalls that cost more than the call.
+#[inline(never)]
+pub(crate) fn hmac_sha1_tag(
+    key: &[u8],
+    data: &[u8],
+    trailer: &[u8],
+    tag_length: usize,
+) -> Result<HmacSha1Tag> {
+    let mut mac = HmacSha1::new_from_slice(key)
+        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
+    mac.update(data);
+    mac.update(trailer);
+    let result = mac.finalize().into_bytes();
+    // Guard against a misconfigured suite whose tag_length exceeds the
+    // 20-byte HMAC-SHA1 output (a slice would otherwise panic).
+    if tag_length > result.len() {
+        return Err(Error::SrtpError(format!(
+            "auth tag_length {} exceeds HMAC-SHA1 output {}",
+            tag_length,
+            result.len()
+        )));
+    }
+    Ok(HmacSha1Tag {
+        bytes: result,
+        len: tag_length,
+    })
+}
+
 /// SRTP Authentication Handler
 pub struct SrtpAuthenticator {
     /// Authentication algorithm
@@ -42,34 +89,15 @@ impl SrtpAuthenticator {
 
         match self.algorithm {
             SrtpAuthenticationAlgorithm::HmacSha1_80 | SrtpAuthenticationAlgorithm::HmacSha1_32 => {
-                // Create an authentication buffer with packet data + ROC
-                let mut auth_buf = Vec::with_capacity(packet_data.len() + 4);
-                auth_buf.extend_from_slice(packet_data);
-                auth_buf.extend_from_slice(&roc.to_be_bytes());
-
-                // Create HMAC-SHA1 instance
-                let mut mac = HmacSha1::new_from_slice(&self.auth_key)
-                    .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
-
-                // Update with data
-                mac.update(&auth_buf);
-
-                // Finalize and get the result
-                let result = mac.finalize().into_bytes();
-
-                // Truncate to the required tag length. Guard against a
-                // misconfigured suite whose tag_length exceeds the 20-byte
-                // HMAC-SHA1 output (otherwise the slice below panics).
-                if self.tag_length > result.len() {
-                    return Err(Error::SrtpError(format!(
-                        "auth tag_length {} exceeds HMAC-SHA1 output {}",
-                        self.tag_length,
-                        result.len()
-                    )));
-                }
-                let tag = result.as_slice()[..self.tag_length].to_vec();
-
-                Ok(tag)
+                // HMAC-SHA1 over the packet followed by the ROC, truncated
+                // to the suite's tag length.
+                let tag = hmac_sha1_tag(
+                    &self.auth_key,
+                    packet_data,
+                    &roc.to_be_bytes(),
+                    self.tag_length,
+                )?;
+                Ok(tag.as_slice().to_vec())
             }
             SrtpAuthenticationAlgorithm::Null => {
                 // Should not reach here due to the first check
@@ -121,19 +149,8 @@ impl SrtpAuthenticator {
         if algorithm == SrtpAuthenticationAlgorithm::Null {
             return Ok(true);
         }
-        let mut mac = HmacSha1::new_from_slice(auth_key)
-            .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
-        mac.update(packet_data);
-        mac.update(&roc.to_be_bytes());
-        let result = mac.finalize().into_bytes();
-        if tag_length > result.len() {
-            return Err(Error::SrtpError(format!(
-                "auth tag_length {} exceeds HMAC-SHA1 output {}",
-                tag_length,
-                result.len()
-            )));
-        }
-        let expected = &result.as_slice()[..tag_length];
+        let expected = hmac_sha1_tag(auth_key, packet_data, &roc.to_be_bytes(), tag_length)?;
+        let expected = expected.as_slice();
         if expected.len() != tag.len() {
             return Err(Error::SrtpError(format!(
                 "Authentication tag length mismatch: expected {}, got {}",
@@ -163,19 +180,8 @@ impl SrtpAuthenticator {
         if algorithm == SrtpAuthenticationAlgorithm::Null {
             return Ok(());
         }
-        let mut mac = HmacSha1::new_from_slice(auth_key)
-            .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
-        mac.update(&buffer[start..]);
-        mac.update(&roc.to_be_bytes());
-        let result = mac.finalize().into_bytes();
-        if tag_length > result.len() {
-            return Err(Error::SrtpError(format!(
-                "auth tag_length {} exceeds HMAC-SHA1 output {}",
-                tag_length,
-                result.len()
-            )));
-        }
-        buffer.extend_from_slice(&result.as_slice()[..tag_length]);
+        let tag = hmac_sha1_tag(auth_key, &buffer[start..], &roc.to_be_bytes(), tag_length)?;
+        buffer.extend_from_slice(tag.as_slice());
         Ok(())
     }
 

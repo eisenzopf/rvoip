@@ -7,7 +7,10 @@
 //! PCMU both ways: both RTP transports must receive on their lane pollers,
 //! account RTP inline on the socket owner, and audio must flow in both
 //! directions, paced at 20 ms although both lanes run on v2's 2 ms lane tick
-//! with the lane timing wheel and the pass clock.
+//! with the lane timing wheel and the pass clock. SRTP calls, with RTCP
+//! multiplexed and with a separate RTCP port, run on the same executor: the
+//! receive loop owns the inbound SRTP context only when RTCP shares the RTP
+//! socket.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -248,7 +251,142 @@ async fn call_media_flows_both_ways_on_executor_v2() {
         "reads served from a pass reading: {wheel_before:?} -> {wheel_after:?}"
     );
 
+    // Each session's periodic RTCP task runs on its socket's lane poller,
+    // and its socket owner publishes the receive statistics.
+    assert!(after.rtcp_lane_tasks >= before.rtcp_lane_tasks + 2);
+    assert!(after.owner_receive_stats >= before.owner_receive_stats + 2);
+
     alice_handle.hangup().await.ok();
     tokio::time::sleep(Duration::from_millis(200)).await;
     drop((alice, bob, bob_handle));
+}
+
+/// Place an SRTP call from `alice` to `bob` and stream a tone both ways;
+/// returns the frames each side received.
+async fn srtp_call(alice: Config, bob: Config, rtcp_mux: bool) -> (usize, usize) {
+    secure_call(alice, bob, rtcp_mux, |_| {}, false).await
+}
+
+/// [`srtp_call`] with extra per-endpoint configuration (the keying mode);
+/// with `handshake`, media starts once both ends installed their contexts.
+async fn secure_call(
+    mut alice: Config,
+    mut bob: Config,
+    rtcp_mux: bool,
+    configure: impl Fn(&mut Config),
+    handshake: bool,
+) -> (usize, usize) {
+    for config in [&mut alice, &mut bob] {
+        config.offer_srtp = true;
+        config.srtp_required = true;
+        configure(config);
+        if !rtcp_mux {
+            config.offer_rtcp_mux = false;
+            config.rtcp_mux_required = false;
+            config.rtcp_non_mux = true;
+        }
+    }
+    let bob_sip = bob.sip_port;
+    let mut bob = StreamPeer::with_config(bob).await.expect("bob starts");
+    let mut alice = StreamPeer::with_config(alice).await.expect("alice starts");
+    let bob_task = tokio::spawn(async move {
+        let incoming = tokio::time::timeout(Duration::from_secs(10), bob.wait_for_incoming())
+            .await
+            .expect("bob timed out waiting for the INVITE")
+            .expect("bob received the INVITE");
+        let handle = incoming.accept().await.expect("bob accepts");
+        (bob, handle)
+    });
+    let call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{bob_sip}"))
+        .send()
+        .await
+        .expect("alice sends the INVITE");
+    let alice_handle =
+        tokio::time::timeout(Duration::from_secs(10), alice.wait_for_answered(&call_id))
+            .await
+            .expect("alice timed out waiting for the answer")
+            .expect("call answered");
+    let (bob, bob_handle) = bob_task.await.unwrap();
+    if handshake {
+        for handle in [&alice_handle, &bob_handle] {
+            handle
+                .wait_for_media_security(Some(Duration::from_secs(12)))
+                .await
+                .expect("SRTP contexts installed from the handshake");
+        }
+    }
+    let alice_audio = tokio::spawn(stream_audio(alice_handle.clone(), 440.0));
+    let bob_audio = tokio::spawn(stream_audio(bob_handle.clone(), 880.0));
+    let received = (
+        alice_audio.await.unwrap().len(),
+        bob_audio.await.unwrap().len(),
+    );
+    alice_handle.hangup().await.ok();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    drop((alice, bob, bob_handle));
+    received
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn srtp_calls_with_and_without_rtcp_mux_flow_both_ways_on_executor_v2() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let before = inline_executor_counters();
+    let (alice_received, bob_received) = srtp_call(
+        config("alice-srtp", 37_801, (37_810, 37_829)),
+        config("bob-srtp", 37_802, (37_830, 37_849)),
+        true,
+    )
+    .await;
+    assert!(
+        alice_received >= FRAMES / 2 && bob_received >= FRAMES / 2,
+        "SRTP audio with rtcp-mux: alice received {alice_received}, bob {bob_received} of {FRAMES}"
+    );
+    let after = inline_executor_counters();
+    assert!(
+        after.owner_srtp_loops >= before.owner_srtp_loops + 2,
+        "both receive loops own their SRTP context: {} -> {}",
+        before.owner_srtp_loops,
+        after.owner_srtp_loops
+    );
+    assert!(after.srtp_locks_avoided > before.srtp_locks_avoided);
+
+    // A separate RTCP port: the RTCP socket's receive task shares the SRTP
+    // context, which stays behind its lock; media still flows both ways.
+    let (alice_received, bob_received) = srtp_call(
+        config("alice-srtp-non-mux", 37_803, (37_850, 37_869)),
+        config("bob-srtp-non-mux", 37_804, (37_870, 37_889)),
+        false,
+    )
+    .await;
+    assert!(
+        alice_received >= FRAMES / 2 && bob_received >= FRAMES / 2,
+        "SRTP audio without rtcp-mux: alice received {alice_received}, bob {bob_received} of {FRAMES}"
+    );
+}
+
+/// DTLS-SRTP: the keys arrive from the handshake on the RTP socket after the
+/// receive loop started; the owning loop adopts the installed context.
+#[cfg(feature = "dtls-srtp")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dtls_srtp_call_flows_both_ways_on_executor_v2() {
+    use rvoip_sip::api::unified::SrtpKeyingMode;
+
+    let _ = tracing_subscriber::fmt::try_init();
+    let before = inline_executor_counters();
+    let (alice_received, bob_received) = secure_call(
+        config("alice-dtls", 37_805, (37_890, 37_909)),
+        config("bob-dtls", 37_806, (37_910, 37_929)),
+        true,
+        |config| config.srtp_keying = SrtpKeyingMode::DtlsSrtp,
+        true,
+    )
+    .await;
+    assert!(
+        alice_received >= FRAMES / 2 && bob_received >= FRAMES / 2,
+        "DTLS-SRTP audio: alice received {alice_received}, bob {bob_received} of {FRAMES}"
+    );
+    let after = inline_executor_counters();
+    assert!(after.owner_srtp_loops >= before.owner_srtp_loops + 2);
+    assert!(after.owner_srtp_handoffs >= before.owner_srtp_handoffs + 2);
 }

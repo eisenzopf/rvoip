@@ -156,6 +156,7 @@ mod allocator;
 #[cfg(feature = "dtls-webrtc")]
 pub mod dtls_bridge;
 pub mod security_transport;
+mod srtp_rx;
 mod symmetric;
 mod tcp;
 mod udp;
@@ -170,7 +171,7 @@ pub use security_transport::SecurityRtpTransport;
 pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, SrtpContextRollback, UdpRtpTransport};
-pub(crate) use udp::{TxPayload, MAX_TX_BATCH};
+pub(crate) use udp::{RemotePeerAddrs, TxPayload, MAX_TX_BATCH};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
 
 #[cfg(test)]
