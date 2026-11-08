@@ -18,8 +18,8 @@ use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{AiSessionId, ConnectionId, ParticipantId, SessionId, StreamId};
 use rvoip_core::message::Message;
 use rvoip_core::stream::{
-    MediaFrame, MediaReceiverReservation, MediaStream, MediaStreamHandle, QualitySnapshot,
-    StreamKind,
+    GatedFrameAdmission, GatedFrameInput, MediaFrame, MediaReceiverReservation, MediaStream,
+    MediaStreamHandle, QualitySnapshot, StreamKind,
 };
 use rvoip_core::DataMessage;
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex as TokioMutex, Notify, RwLock};
@@ -28,7 +28,10 @@ use tokio_util::sync::CancellationToken;
 const PCM_S16LE_PAYLOAD_TYPE: u8 = 120;
 
 /// Bounded runtime settings for [`InProcessAiAdapter`].
+///
+/// Start from [`Default`] and set fields, or use the `with_*` builders.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct InProcessAiConfig {
     /// Canonical codec exposed at the AI boundary. MediaGraph transcodes SIP
     /// PCMU/PCMA and WebRTC Opus to this format.
@@ -47,6 +50,16 @@ pub struct InProcessAiConfig {
     /// Recently completed connection IDs retained to make repeated stop
     /// requests idempotent without retaining session resources indefinitely.
     pub terminal_history_capacity: usize,
+    /// Offer each AI stream's caller-audio input as a gated input
+    /// ([`MediaStream::try_gated_frames_out`]).
+    ///
+    /// When set, a media graph routing caller audio into the AI applies the
+    /// session's hold/stop gate itself and writes each frame straight into
+    /// the session's input channel. Without it, every frame goes through the
+    /// route's input pump task first. The session receives the same frames
+    /// in the same order either way, and hold, resume and end behave the
+    /// same. Off by default.
+    pub gated_input: bool,
 }
 
 impl Default for InProcessAiConfig {
@@ -63,6 +76,7 @@ impl Default for InProcessAiConfig {
             event_queue_capacity: 256,
             lifecycle_ack_timeout: Duration::from_secs(1),
             terminal_history_capacity: 1_024,
+            gated_input: false,
         }
     }
 }
@@ -76,11 +90,48 @@ impl fmt::Debug for InProcessAiConfig {
             .field("event_queue_capacity", &self.event_queue_capacity)
             .field("lifecycle_ack_timeout", &self.lifecycle_ack_timeout)
             .field("terminal_history_capacity", &self.terminal_history_capacity)
+            .field("gated_input", &self.gated_input)
             .finish()
     }
 }
 
 impl InProcessAiConfig {
+    /// Set [`Self::codec`].
+    pub fn with_codec(mut self, codec: CodecInfo) -> Self {
+        self.codec = codec;
+        self
+    }
+
+    /// Set [`Self::media_queue_capacity`].
+    pub fn with_media_queue_capacity(mut self, capacity: usize) -> Self {
+        self.media_queue_capacity = capacity;
+        self
+    }
+
+    /// Set [`Self::event_queue_capacity`].
+    pub fn with_event_queue_capacity(mut self, capacity: usize) -> Self {
+        self.event_queue_capacity = capacity;
+        self
+    }
+
+    /// Set [`Self::lifecycle_ack_timeout`].
+    pub fn with_lifecycle_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.lifecycle_ack_timeout = timeout;
+        self
+    }
+
+    /// Set [`Self::terminal_history_capacity`].
+    pub fn with_terminal_history_capacity(mut self, capacity: usize) -> Self {
+        self.terminal_history_capacity = capacity;
+        self
+    }
+
+    /// Set [`Self::gated_input`].
+    pub fn with_gated_input(mut self, enabled: bool) -> Self {
+        self.gated_input = enabled;
+        self
+    }
+
     fn validate(&self) -> Result<()> {
         if self.media_queue_capacity == 0
             || self.event_queue_capacity == 0
@@ -813,6 +864,75 @@ impl PendingInputGate {
     }
 }
 
+/// [`PendingInputGate`] applied by the producer
+/// ([`InProcessAiConfig::gated_input`]).
+///
+/// The media graph routing caller audio into this stream runs the pump's
+/// per-frame rules itself and writes into the provider input channel, so no
+/// task handles each frame in between:
+///
+/// - A frame is discarded unless the gate is `Running`.
+/// - Capacity on the provider channel is reserved while watching the gate.
+///   A transition while waiting discards the frame.
+/// - The frame crosses only under the read side of the transition fence,
+///   after rechecking `Running`.
+///
+/// A producer that cannot take the read side without waiting discards the
+/// frame. Only hold, the hold rollback, resume and stop take the write side:
+/// hold and stop leave `Running`, and the other two enter it from `Paused`,
+/// when the producer had already seen a closed gate. In each case the pump
+/// would wait, recheck and discard the frame too.
+///
+/// Hold and resume flush the provider channel exactly as before. The pump
+/// task still runs, idle, for a producer that uses `frames_out` instead.
+struct GatedCallerInput {
+    channel: mpsc::Sender<MediaFrame>,
+    gate: Arc<InProcessAiMediaGate>,
+    cancellation: CancellationToken,
+    closed: AtomicBool,
+}
+
+impl GatedFrameInput for GatedCallerInput {
+    fn channel(&self) -> &mpsc::Sender<MediaFrame> {
+        &self.channel
+    }
+
+    fn admission(&self) -> GatedFrameAdmission {
+        if self.closed.load(Ordering::Acquire) || self.cancellation.is_cancelled() {
+            return GatedFrameAdmission::Closed;
+        }
+        match self.gate.state() {
+            InProcessAiLifecycleState::Running => GatedFrameAdmission::Open,
+            InProcessAiLifecycleState::Paused => GatedFrameAdmission::Discard,
+            InProcessAiLifecycleState::Stopped => GatedFrameAdmission::Closed,
+        }
+    }
+
+    fn left_open(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let mut updates = self.gate.subscribe();
+        Box::pin(async move {
+            if self.gate.state() != InProcessAiLifecycleState::Running {
+                return;
+            }
+            tokio::select! {
+                _ = self.cancellation.cancelled() => {}
+                _ = updates.changed() => {}
+            }
+        })
+    }
+
+    fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool {
+        let Ok(_transition) = self.gate.transition.try_read() else {
+            return false;
+        };
+        if self.gate.state() != InProcessAiLifecycleState::Running {
+            return false;
+        }
+        permit.send(frame);
+        true
+    }
+}
+
 struct InProcessAiMediaStream {
     id: StreamId,
     codec: CodecInfo,
@@ -820,13 +940,18 @@ struct InProcessAiMediaStream {
     caller_audio: Mutex<Option<mpsc::Sender<MediaFrame>>>,
     active: AtomicBool,
     closed: AtomicBool,
+    /// The input a media graph uses instead of `frames_out`, when offered.
+    gated_input: Option<Arc<GatedCallerInput>>,
 }
 
 impl InProcessAiMediaStream {
+    /// With `gated_input` (the route's cancellation), the stream also offers
+    /// its caller-audio input as a [`GatedFrameInput`].
     fn new(
         codec: CodecInfo,
         capacity: usize,
         gate: Arc<InProcessAiMediaGate>,
+        gated_input: Option<CancellationToken>,
     ) -> (
         Arc<Self>,
         InProcessAiMedia,
@@ -838,6 +963,14 @@ impl InProcessAiMediaStream {
         let (provider_audio, provider_audio_rx) = mpsc::channel(capacity);
         let provider_audio_rx = Arc::new(TokioMutex::new(provider_audio_rx));
         let (commands, command_receiver) = mpsc::channel(1);
+        let gated_input = gated_input.map(|cancellation| {
+            Arc::new(GatedCallerInput {
+                channel: provider_audio.clone(),
+                gate: Arc::clone(&gate),
+                cancellation,
+                closed: AtomicBool::new(false),
+            })
+        });
         (
             Arc::new(Self {
                 id: StreamId::new(),
@@ -846,6 +979,7 @@ impl InProcessAiMediaStream {
                 caller_audio: Mutex::new(Some(caller_audio)),
                 active: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
+                gated_input,
             }),
             InProcessAiMedia {
                 caller_audio: Arc::clone(&provider_audio_rx),
@@ -868,6 +1002,9 @@ impl InProcessAiMediaStream {
     fn deactivate(&self) {
         self.active.store(false, Ordering::Release);
         self.closed.store(true, Ordering::Release);
+        if let Some(input) = &self.gated_input {
+            input.closed.store(true, Ordering::Release);
+        }
         self.caller_audio
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -945,6 +1082,15 @@ impl MediaStream for InProcessAiMediaStream {
             ))
     }
 
+    fn try_gated_frames_out(&self) -> Option<Arc<dyn GatedFrameInput>> {
+        if !self.source_ready() {
+            return None;
+        }
+        self.gated_input
+            .as_ref()
+            .map(|input| Arc::clone(input) as Arc<dyn GatedFrameInput>)
+    }
+
     fn quality_snapshot(&self) -> QualitySnapshot {
         QualitySnapshot::default()
     }
@@ -1010,10 +1156,16 @@ impl Route {
         capacity: usize,
         session: Box<dyn InProcessAiSession>,
         ai_events: broadcast::Sender<InProcessAiEvent>,
+        gated_input: bool,
     ) -> Arc<Self> {
         let gate = InProcessAiMediaGate::new();
-        let (stream, media, pending_input_gate, input_gate_control) =
-            InProcessAiMediaStream::new(codec, capacity, Arc::clone(&gate));
+        let cancellation = CancellationToken::new();
+        let (stream, media, pending_input_gate, input_gate_control) = InProcessAiMediaStream::new(
+            codec,
+            capacity,
+            Arc::clone(&gate),
+            gated_input.then(|| cancellation.clone()),
+        );
         let (lifecycle_requests, session_lifecycle) = mpsc::channel(2);
         let provider_input = Arc::clone(&media.caller_audio);
         Arc::new(Self {
@@ -1037,7 +1189,7 @@ impl Route {
             pending_input_gate: Mutex::new(Some(pending_input_gate)),
             input_gate_control,
             provider_input,
-            cancellation: CancellationToken::new(),
+            cancellation,
             task: Mutex::new(None),
             input_task: Mutex::new(None),
             requested_end: Mutex::new(None),
@@ -1589,6 +1741,7 @@ impl ConnectionAdapter for InProcessAiAdapter {
             self.config.media_queue_capacity,
             session,
             self.ai_events.clone(),
+            self.config.gated_input,
         );
         let connection = Connection {
             id: connection_id.clone(),
@@ -2492,8 +2645,12 @@ mod tests {
     #[tokio::test]
     async fn bounded_provider_output_queue_backpressures_without_dropping() {
         let gate = InProcessAiMediaGate::new();
-        let (stream, media, _input_gate, _input_control) =
-            InProcessAiMediaStream::new(InProcessAiConfig::default().codec, 1, Arc::clone(&gate));
+        let (stream, media, _input_gate, _input_control) = InProcessAiMediaStream::new(
+            InProcessAiConfig::default().codec,
+            1,
+            Arc::clone(&gate),
+            None,
+        );
         stream.activate();
         let mut output = stream
             .reserve_frames_in()
@@ -3113,6 +3270,210 @@ mod tests {
             .end(connection_id, EndReason::Normal)
             .await
             .expect("end echo connection");
+    }
+
+    /// Deliver one caller frame the way a media graph does: through the gated
+    /// input when the stream offers one, else through `frames_out` (the input
+    /// pump). Returns whether the frame crossed the gate; a frame sent to the
+    /// pump counts as crossed here.
+    async fn deliver_caller_frame(stream: &Arc<dyn MediaStream>, frame: MediaFrame) -> bool {
+        match stream.try_gated_frames_out() {
+            Some(input) => match input.admission() {
+                GatedFrameAdmission::Open => {
+                    let permit = input
+                        .channel()
+                        .reserve()
+                        .await
+                        .expect("provider input open");
+                    input.commit(permit, frame)
+                }
+                GatedFrameAdmission::Discard => false,
+                GatedFrameAdmission::Closed => panic!("gated input closed while live"),
+            },
+            None => {
+                stream
+                    .try_frames_out()
+                    .expect("caller input sender")
+                    .send(frame)
+                    .await
+                    .expect("send caller PCM");
+                true
+            }
+        }
+    }
+
+    async fn active_echo_route(
+        gated_input: bool,
+    ) -> (Arc<InProcessAiAdapter>, ConnectionId, Arc<dyn MediaStream>) {
+        let config = InProcessAiConfig::default().with_gated_input(gated_input);
+        let adapter = InProcessAiAdapter::echo(config.clone()).expect("valid echo adapter");
+        let mut events = adapter.subscribe_events();
+        let handle = adapter
+            .originate(originate_request(&config))
+            .await
+            .expect("prepare echo connection");
+        let connection_id = handle.connection.id;
+        let dormant = adapter
+            .routes
+            .get(&connection_id)
+            .map(|route| Arc::clone(&route.stream))
+            .expect("dormant route");
+        assert!(
+            dormant.try_gated_frames_out().is_none(),
+            "a dormant stream offers no input"
+        );
+        adapter
+            .activate_outbound(connection_id.clone())
+            .await
+            .expect("activate echo connection");
+        assert!(matches!(
+            events.recv().await,
+            Some(AdapterEvent::Connected { .. })
+        ));
+        let stream = adapter
+            .streams(connection_id.clone())
+            .await
+            .expect("query active stream")
+            .into_iter()
+            .next()
+            .expect("one audio stream");
+        (adapter, connection_id, stream)
+    }
+
+    /// The gated input hands the AI session the same caller frames, in
+    /// order, as the input pump. It discards while held (even a frame that
+    /// reserved room before the hold), flows again after resume without
+    /// replaying held audio, and closes with the route.
+    #[tokio::test]
+    async fn gated_input_matches_the_input_pump_and_honours_hold_and_end() {
+        assert!(!InProcessAiConfig::default().gated_input);
+        let mut received_by_mode = Vec::new();
+        for gated_input in [false, true] {
+            let (adapter, connection_id, stream) = active_echo_route(gated_input).await;
+            assert_eq!(stream.try_gated_frames_out().is_some(), gated_input);
+            let mut agent_output = stream
+                .reserve_frames_in()
+                .expect("reserve AI output receiver")
+                .commit();
+            let mut received = Vec::new();
+            for index in 1..=6u32 {
+                let frame = test_frame(stream.id(), b"pcm", index * 320);
+                assert!(deliver_caller_frame(&stream, frame).await);
+                let echoed = tokio::time::timeout(Duration::from_secs(1), agent_output.recv())
+                    .await
+                    .expect("echo deadline")
+                    .expect("echo frame");
+                received.push(echoed.timestamp_rtp);
+            }
+
+            adapter.hold(connection_id.clone()).await.expect("hold");
+            if let Some(input) = stream.try_gated_frames_out() {
+                assert_eq!(input.admission(), GatedFrameAdmission::Discard);
+                let permit = input.channel().reserve().await.expect("room");
+                assert!(
+                    !input.commit(permit, test_frame(stream.id(), b"held", 7 * 320)),
+                    "a frame crossed a held gate"
+                );
+            } else {
+                deliver_caller_frame(&stream, test_frame(stream.id(), b"held", 7 * 320)).await;
+            }
+            adapter.resume(connection_id.clone()).await.expect("resume");
+            assert!(deliver_caller_frame(&stream, test_frame(stream.id(), b"pcm", 8 * 320)).await);
+            let echoed = tokio::time::timeout(Duration::from_secs(1), agent_output.recv())
+                .await
+                .expect("echo deadline")
+                .expect("echo frame");
+            assert_eq!(
+                echoed.timestamp_rtp,
+                8 * 320,
+                "held audio was replayed after resume"
+            );
+            received.push(echoed.timestamp_rtp);
+
+            let gated = stream.try_gated_frames_out();
+            adapter
+                .end(connection_id, EndReason::Normal)
+                .await
+                .expect("end echo connection");
+            if let Some(input) = gated {
+                assert_eq!(input.admission(), GatedFrameAdmission::Closed);
+            }
+            assert!(stream.try_gated_frames_out().is_none());
+            assert_eq!(
+                adapter.resource_snapshot(),
+                InProcessAiResourceSnapshot::default()
+            );
+            received_by_mode.push(received);
+        }
+        assert_eq!(received_by_mode[0], received_by_mode[1]);
+    }
+
+    /// No per-frame task hop: the gated input does not go through the route's
+    /// input pump task. With that task stopped, `frames_out` has no consumer
+    /// left, yet every frame still reaches the AI session, in order, through
+    /// the gated input.
+    #[tokio::test]
+    async fn gated_input_bypasses_the_input_pump_task() {
+        for gated_input in [false, true] {
+            let (adapter, connection_id, stream) = active_echo_route(gated_input).await;
+            let mut agent_output = stream
+                .reserve_frames_in()
+                .expect("reserve AI output receiver")
+                .commit();
+            let pump_channel = stream.try_frames_out().expect("caller input sender");
+            let route = adapter
+                .routes
+                .get(&connection_id)
+                .map(|route| Arc::clone(route.value()))
+                .expect("active route");
+            let pump = route
+                .input_task
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take()
+                .expect("input pump task");
+            pump.abort();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !pump.is_finished() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("input pump stopped");
+            assert!(
+                pump_channel.is_closed(),
+                "the input pump is the only consumer of frames_out"
+            );
+
+            if gated_input {
+                for index in 1..=4u32 {
+                    assert!(
+                        deliver_caller_frame(&stream, test_frame(stream.id(), b"pcm", index * 320))
+                            .await
+                    );
+                }
+                for index in 1..=4u32 {
+                    let echoed = tokio::time::timeout(Duration::from_secs(1), agent_output.recv())
+                        .await
+                        .expect("echo deadline")
+                        .expect("echo frame");
+                    assert_eq!(echoed.timestamp_rtp, index * 320);
+                }
+            } else {
+                assert!(pump_channel
+                    .send(test_frame(stream.id(), b"pcm", 320))
+                    .await
+                    .is_err());
+            }
+            let _ = adapter.end(connection_id, EndReason::Normal).await;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while adapter.resource_snapshot() != InProcessAiResourceSnapshot::default() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("route resources released");
+        }
     }
 
     #[tokio::test]

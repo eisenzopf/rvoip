@@ -287,6 +287,54 @@ impl DataMessageBridgePolicy for PassThroughDataMessageBridgePolicy {
     }
 }
 
+/// Whether a [`GatedFrameInput`] currently lets frames cross.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GatedFrameAdmission {
+    /// Frames may cross: reserve capacity on [`GatedFrameInput::channel`],
+    /// then [`GatedFrameInput::commit`] the frame.
+    Open,
+    /// The stream's consumer is paused. The producer takes the frame and
+    /// discards it, exactly as the stream's own input pump would. The frame
+    /// counts as accepted.
+    Discard,
+    /// The consumer is gone. The producer stops, as it would on a closed
+    /// channel.
+    Closed,
+}
+
+/// A stream input whose consumer-side gate is applied by the producer.
+///
+/// A stream that buffers its input in front of a gate (for example a pump
+/// task that discards frames while the consumer is paused) can offer this
+/// through [`MediaStream::try_gated_frames_out`]. A media graph then applies
+/// the gate itself and writes each frame straight into the consumer's
+/// channel, so no intermediate task handles every frame.
+///
+/// The protocol for one frame:
+///
+/// 1. Check [`Self::admission`]. Only `Open` continues.
+/// 2. Reserve capacity on [`Self::channel`]. A producer that waits for
+///    capacity races [`Self::left_open`] and discards the frame (as accepted)
+///    when the gate leaves `Open` first.
+/// 3. [`Self::commit`] the frame through the permit. `commit` rechecks the
+///    gate under its transition fence and never blocks, so a producer may
+///    call it while holding its own lock.
+pub trait GatedFrameInput: Send + Sync + 'static {
+    /// The consumer's bounded channel.
+    fn channel(&self) -> &mpsc::Sender<MediaFrame>;
+
+    /// The gate state, checked before capacity is reserved.
+    fn admission(&self) -> GatedFrameAdmission;
+
+    /// Resolves once the gate is no longer `Open`, or the consumer is gone.
+    /// Only a producer that is waiting for capacity awaits this.
+    fn left_open(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+
+    /// Send `frame` through `permit` if the gate is still open; otherwise
+    /// discard it. Returns whether the frame crossed. Never blocks.
+    fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool;
+}
+
 /// Transport-agnostic media flow. Channel-based per INTERFACE_DESIGN §3.6 to
 /// avoid per-frame async overhead at high frame rates.
 #[async_trait::async_trait]
@@ -370,6 +418,16 @@ pub trait MediaStream: Send + Sync {
         Err(crate::error::RvoipError::NotImplemented(
             "MediaStream::try_peer_frames_out",
         ))
+    }
+
+    /// The stream's gated input (see [`GatedFrameInput`]), if it offers one.
+    ///
+    /// A media graph routing into this stream then writes into the consumer's
+    /// channel itself instead of sending through [`Self::try_frames_out`].
+    /// [`Self::try_peer_frames_out`] takes precedence when both are offered.
+    /// The default, for every stream without such a gate, is `None`.
+    fn try_gated_frames_out(&self) -> Option<Arc<dyn GatedFrameInput>> {
+        None
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot;
