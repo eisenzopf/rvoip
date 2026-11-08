@@ -622,9 +622,10 @@ pub use api::lifecycle::{
 
 // Configuration & registration
 pub use api::unified::{
-    AudioSource, BridgeError, BridgeHandle, MediaLanes, MediaRuntimeConfig,
-    MediaSessionControllerConfig, Registration, RelUsage, RtpSessionBufferConfig,
-    RtpTransportBufferConfig, SipNatConfig, SipRuntimeConfig, SymmetricRtpPolicy,
+    AudioSource, BridgeError, BridgeHandle, MediaExecutorConfig, MediaExecutorMode, MediaLanes,
+    MediaRuntimeConfig, MediaSessionControllerConfig, Registration, RelUsage,
+    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SipRuntimeConfig,
+    SymmetricRtpPolicy,
 };
 pub use api::{
     Config, DtlsSetupRole, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus,

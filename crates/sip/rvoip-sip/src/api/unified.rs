@@ -92,6 +92,7 @@ use tokio::sync::{mpsc, RwLock};
 pub use rvoip_media_core::relay::controller::{
     AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
 };
+pub use rvoip_rtp_core::executor::{MediaExecutorConfig, MediaExecutorMode};
 pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
@@ -2847,6 +2848,18 @@ pub struct Config {
     /// error. See [`MediaRuntimeConfig`].
     pub media_runtime: Option<MediaRuntimeConfig>,
 
+    /// The process-wide media executor: [`MediaExecutorConfig::v1`], the
+    /// per-call task graph, or [`MediaExecutorConfig::v2`], inline receive on
+    /// the socket owner with lane pollers, a lane clock and synchronous
+    /// sends, with per-feature switches. `None` leaves the default (v1).
+    ///
+    /// Like [`Self::media_runtime`] it is shared by every coordinator in the
+    /// process and captured when media objects are built, so it is installed
+    /// when the coordinator is created, before the first call. A coordinator
+    /// whose executor differs from the one already in effect fails to start
+    /// with a configuration error.
+    pub media_executor: Option<MediaExecutorConfig>,
+
     /// STUN server (RFC 8489 §14) used to discover each RTP socket's exact
     /// public mapping before its SDP is rendered. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
@@ -3405,6 +3418,7 @@ impl std::fmt::Debug for Config {
                 "server_call_admission_early_reject",
                 &self.server_call_admission_early_reject,
             )
+            .field("media_executor", &self.media_executor)
             .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
             .field(
                 "sip_transaction_timing_diagnostics",
@@ -3566,6 +3580,7 @@ impl Config {
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
             media_runtime: None,
+            media_executor: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -3705,6 +3720,7 @@ impl Config {
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
             media_runtime: None,
+            media_executor: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -4849,6 +4865,28 @@ impl Config {
         self
     }
 
+    /// Select the process-wide media executor.
+    ///
+    /// ```
+    /// use rvoip_sip::{Config, MediaExecutorConfig, MediaLanes, MediaRuntimeConfig};
+    ///
+    /// // Inline receive, lane pollers, the lane clock and synchronous sends,
+    /// // on one dedicated lane per core.
+    /// let config = Config::local("alice", 5060)
+    ///     .with_media_runtime(MediaRuntimeConfig::new(MediaLanes::pinned(1..8)))
+    ///     .with_media_executor(MediaExecutorConfig::v2());
+    /// config.validate().unwrap();
+    ///
+    /// // The same with receive loops on their own tasks.
+    /// let config = Config::local("alice", 5060)
+    ///     .with_media_executor(MediaExecutorConfig::v2().with_lane_poller(false));
+    /// config.validate().unwrap();
+    /// ```
+    pub fn with_media_executor(mut self, config: MediaExecutorConfig) -> Self {
+        self.media_executor = Some(config);
+        self
+    }
+
     /// Enable or disable real media-core RTP allocation.
     ///
     /// Disabling media switches to [`MediaMode::SignalingOnly`] with SDP port
@@ -5669,6 +5707,11 @@ impl Config {
             media_runtime
                 .validate()
                 .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
+        }
+        if let Some(media_executor) = &self.media_executor {
+            media_executor
+                .validate()
+                .map_err(|error| SessionError::ConfigError(format!("media_executor: {error}")))?;
         }
         if self.rtp_transport_buffer_config.event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
@@ -10169,6 +10212,11 @@ impl UnifiedCoordinator {
             // Before any media task or transport starts the shared executor.
             rvoip_rtp_core::task_runtime::install_media_runtime_config(media_runtime)
                 .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
+        }
+        if let Some(media_executor) = config.media_executor.clone() {
+            // Before any media transport or session captures the executor.
+            rvoip_rtp_core::executor::install_media_executor_config(media_executor)
+                .map_err(|error| SessionError::ConfigError(format!("media_executor: {error}")))?;
         }
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
