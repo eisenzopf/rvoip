@@ -3206,6 +3206,41 @@ pub struct Config {
     /// below the limit, and in-dialog requests are never affected.
     /// Default: `false`.
     pub server_call_admission_early_reject: bool,
+    /// Decide server call admission without the admission mutex.
+    ///
+    /// Applies only when [`Config::server_call_admission_limit`] is set. By
+    /// default every inbound INVITE takes one mutex to read the current
+    /// session count, apply the overload hysteresis and reserve a pending
+    /// slot, so concurrent INVITEs on different dialog workers queue on it.
+    /// When `true`, the slot is reserved first with one atomic add and
+    /// returned when the attempt does not admit. The hard limit still holds
+    /// and sequential decisions are identical, but when concurrent INVITEs
+    /// race exactly at the hard limit one of them may be rejected with `503`
+    /// where the serialized path would have admitted it. It never admits
+    /// more. Default `false`.
+    pub server_call_admission_lock_free: bool,
+
+    /// Record per-transition history for inbound (UAS) sessions.
+    ///
+    /// The history is a diagnostic ring that only shows in a session's
+    /// `Debug` output; outbound sessions never record it. Keeping it copies
+    /// the ring on every state transition and commits an extra session-store
+    /// revision for every rejected internal event. `false` creates inbound
+    /// sessions without history, as outbound ones are. Default `true`.
+    pub inbound_session_history: bool,
+
+    /// Process each inbound initial INVITE (`IncomingCall`) on the SIP dialog
+    /// worker that delivered it instead of a session event shard.
+    ///
+    /// The dialog worker waits for the shard to finish an initial INVITE
+    /// before it continues, so the hand-off costs a queue round trip and a
+    /// task wakeup without adding parallelism. When `true` the INVITE is
+    /// processed in place with the same result. What changes is placement:
+    /// the work runs inside the dialog worker's task (sharing its stack and
+    /// its cancellation) and is not bounded by the shard queue capacity.
+    /// Every other dialog event still goes through the shards. Default
+    /// `false`.
+    pub session_inline_incoming_call_dispatch: bool,
 
     /// Enable SIP UDP transport and duplicate-recovery diagnostics.
     ///
@@ -3419,6 +3454,15 @@ impl std::fmt::Debug for Config {
                 &self.server_call_admission_early_reject,
             )
             .field("media_executor", &self.media_executor)
+            .field(
+                "server_call_admission_lock_free",
+                &self.server_call_admission_lock_free,
+            )
+            .field("inbound_session_history", &self.inbound_session_history)
+            .field(
+                "session_inline_incoming_call_dispatch",
+                &self.session_inline_incoming_call_dispatch,
+            )
             .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
             .field(
                 "sip_transaction_timing_diagnostics",
@@ -3617,6 +3661,9 @@ impl Config {
             sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig::default(
             ),
             server_call_admission_early_reject: false,
+            server_call_admission_lock_free: false,
+            inbound_session_history: true,
+            session_inline_incoming_call_dispatch: false,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -3757,6 +3804,9 @@ impl Config {
             sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig::default(
             ),
             server_call_admission_early_reject: false,
+            server_call_admission_lock_free: false,
+            inbound_session_history: true,
+            session_inline_incoming_call_dispatch: false,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -4549,6 +4599,27 @@ impl Config {
     /// [`Config::server_call_admission_early_reject`].
     pub fn with_server_call_admission_early_reject(mut self, enabled: bool) -> Self {
         self.server_call_admission_early_reject = enabled;
+        self
+    }
+
+    /// Decide server call admission without the admission mutex. See
+    /// [`Config::server_call_admission_lock_free`].
+    pub fn with_server_call_admission_lock_free(mut self, enabled: bool) -> Self {
+        self.server_call_admission_lock_free = enabled;
+        self
+    }
+
+    /// Record (or skip) per-transition history for inbound sessions. See
+    /// [`Config::inbound_session_history`].
+    pub fn with_inbound_session_history(mut self, enabled: bool) -> Self {
+        self.inbound_session_history = enabled;
+        self
+    }
+
+    /// Process inbound initial INVITEs on the dialog worker that delivered
+    /// them. See [`Config::session_inline_incoming_call_dispatch`].
+    pub fn with_inline_incoming_call_dispatch(mut self, enabled: bool) -> Self {
+        self.session_inline_incoming_call_dispatch = enabled;
         self
     }
 
@@ -10544,6 +10615,9 @@ impl UnifiedCoordinator {
         let server_call_admission_soft_limit = config.server_call_admission_soft_limit;
         let server_call_admission_pacing_delay_ms = config.server_call_admission_pacing_delay_ms;
         let server_overload_retry_after_secs = config.server_overload_retry_after_secs;
+        let server_call_admission_lock_free = config.server_call_admission_lock_free;
+        let inbound_session_history = config.inbound_session_history;
+        let inline_incoming_call_dispatch = config.session_inline_incoming_call_dispatch;
         let pending_exact_responses = Arc::new(PendingExactResponseRegistry::default());
         pending_exact_responses.attach_session_store(&store);
 
@@ -10635,6 +10709,9 @@ impl UnifiedCoordinator {
                 server_call_admission_pacing_delay_ms,
                 server_overload_retry_after_secs,
             )
+            .with_server_call_admission_lock_free(server_call_admission_lock_free)
+            .with_inbound_session_history(inbound_session_history)
+            .with_inline_incoming_call_dispatch(inline_incoming_call_dispatch)
             .with_causal_dialog_ingress(causal_dialog_ingress);
 
         // SIP_API_DESIGN_2 Phase D — give the handler a weak handle
@@ -11100,21 +11177,20 @@ impl UnifiedCoordinator {
         Ok(crate::api::stream_peer::EventReceiver::new(rx))
     }
 
-    /// Claim the coordinator's single response-capable control stream and
-    /// merge it with the ordinary public observations.
+    /// Claim the coordinator's single response-capable control stream.
     ///
-    /// Only one control owner may exist. Response-bearing inbound requests
-    /// such as SIP INFO and exact session handles are yielded once through the
-    /// private stream. All public observational copies are sanitized and
-    /// suppressed by this owner. Further calls return an error. Libraries
-    /// that only monitor calls should continue to use [`events`](Self::events).
+    /// Only one control owner may exist. It receives every application event
+    /// once, through the private stream; response-bearing inbound requests
+    /// such as SIP INFO carry their exact session handles there. The owner
+    /// never yields the sanitized public observational copies, so it does not
+    /// subscribe to them, and its stream ends when the control stream closes.
+    /// Further calls return an error. Libraries that only monitor calls
+    /// should continue to use [`events`](Self::events).
     pub async fn events_with_control(
         self: &Arc<Self>,
     ) -> Result<crate::api::stream_peer::EventReceiver> {
-        let observations = self.subscribe_events().await?;
         let control = self.claim_session_control_events().await?;
-        Ok(crate::api::stream_peer::EventReceiver::with_control(
-            observations,
+        Ok(crate::api::stream_peer::EventReceiver::control_only(
             control,
             Arc::clone(self),
         ))

@@ -48,6 +48,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
 use tracing::{debug, warn};
 
+/// `tracing` target of the orchestrator's `debug!` for unmapped adapter events
+/// (it is emitted in `rvoip_core::orchestrator`).
+const ORCHESTRATOR_LOG_TARGET: &str = "rvoip_core::orchestrator";
+
 const MAX_SIP_INBOUND_ALLOWLIST_HEADERS: usize = 32;
 const MAX_PENDING_SIP_INBOUND_CONTEXTS: usize = 4_096;
 const PENDING_SIP_INBOUND_CONTEXT_TTL: Duration = Duration::from_secs(120);
@@ -1387,6 +1391,11 @@ pub struct SipAdapter {
     drain_gate: AsyncMutex<()>,
     observer_registered: AtomicBool,
     inbound_invite_observer_id: u64,
+    /// Set when the orchestrator takes the event stream
+    /// (`subscribe_orchestrator_events`). The orchestrator only logs
+    /// unmapped `Native` events at debug, so they are then formatted and
+    /// sent only while that log is enabled.
+    events_feed_orchestrator: AtomicBool,
 }
 
 /// Marks one exact lifetime as owned by a retained inbound rejection.
@@ -1580,6 +1589,7 @@ impl SipAdapter {
             drain_gate: AsyncMutex::new(()),
             observer_registered: AtomicBool::new(true),
             inbound_invite_observer_id,
+            events_feed_orchestrator: AtomicBool::new(false),
         });
 
         // Subscribe to the coordinator's typed event stream and spawn the
@@ -3353,6 +3363,11 @@ impl SipAdapter {
                 );
             }
             other => {
+                if self.events_feed_orchestrator.load(Ordering::Relaxed)
+                    && !tracing::enabled!(target: ORCHESTRATOR_LOG_TARGET, tracing::Level::DEBUG)
+                {
+                    return;
+                }
                 self.try_send(AdapterEvent::Native {
                     kind: "sip.api_event",
                     detail: format!("{:?}", other),
@@ -4953,8 +4968,11 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     fn subscribe_orchestrator_events(&self) -> mpsc::Receiver<OrchestratorAdapterEvent> {
-        self.try_subscribe_atomic_events()
-            .expect("SipAdapter atomic event stream already consumed")
+        let events = self
+            .try_subscribe_atomic_events()
+            .expect("SipAdapter atomic event stream already consumed");
+        self.events_feed_orchestrator.store(true, Ordering::Relaxed);
+        events
     }
 
     fn capabilities(&self) -> CapabilityDescriptor {
@@ -9985,6 +10003,57 @@ Signal=5\r\nDuration=160\r\n";
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn unmapped_events_skip_an_orchestrator_that_does_not_log_them() {
+        // No subscriber on this thread: the orchestrator's debug log is off.
+        let _no_logs =
+            tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+        let unmapped = || ApiEvent::CallEstablished {
+            call_id: SessionId::new(),
+        };
+
+        // A direct subscriber still receives every unmapped event.
+        let direct_coordinator = UnifiedCoordinator::new(ApiConfig::local("unmapped-direct", 0))
+            .await
+            .expect("coordinator");
+        let direct = SipAdapter::new(Arc::clone(&direct_coordinator))
+            .await
+            .expect("adapter");
+        let mut direct_events = direct.try_subscribe_atomic_events().expect("atomic events");
+        direct.translate_api_event(unmapped()).await;
+        assert!(matches!(
+            direct_events.try_recv(),
+            Ok(OrchestratorAdapterEvent::Public(AdapterEvent::Native {
+                kind: "sip.api_event",
+                ..
+            }))
+        ));
+
+        // The orchestrator only logs them at debug, so its stream skips them.
+        let orchestrated_coordinator =
+            UnifiedCoordinator::new(ApiConfig::local("unmapped-orchestrated", 0))
+                .await
+                .expect("coordinator");
+        let orchestrated = SipAdapter::new(Arc::clone(&orchestrated_coordinator))
+            .await
+            .expect("adapter");
+        let mut orchestrator_events = orchestrated.subscribe_orchestrator_events();
+        orchestrated.translate_api_event(unmapped()).await;
+        assert!(matches!(
+            orchestrator_events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        drop(direct);
+        drop(orchestrated);
+        for coordinator in [direct_coordinator, orchestrated_coordinator] {
+            coordinator
+                .shutdown_gracefully(Some(Duration::from_secs(1)))
+                .await
+                .expect("shutdown");
+        }
     }
 
     #[tokio::test]

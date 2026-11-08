@@ -1458,7 +1458,7 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         &strip_cfg_test_items(&lifecycle),
         "pub(crate) fn publish_exact",
     ));
-    assert!(publish_exact.contains("offer_to_control_owner(&event,Some(lifecycle_handle))"));
+    assert!(publish_exact.contains("offer_to_control_owner(event,Some(lifecycle_handle))"));
     assert!(publish_exact.contains("sanitize_session_api_observation(&event)"));
     assert!(publish_exact.contains("record_event_exact(lifecycle_handle,&event)"));
     assert!(lifecycle.contains("pub(crate) fn watcher_exact("));
@@ -1468,9 +1468,7 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         "pub(crate) fn publish_terminal_best_effort_exact",
     ));
     assert!(publish_terminal_exact.contains("record_event_exact(lifecycle_handle,&event)"));
-    assert!(
-        publish_terminal_exact.contains("offer_to_control_owner(&event,Some(lifecycle_handle))")
-    );
+    assert!(publish_terminal_exact.contains("offer_to_control_owner(event,Some(lifecycle_handle))"));
 
     let stream_path = manifest.join("src/api/stream_peer.rs");
     let stream = fs::read_to_string(&stream_path)
