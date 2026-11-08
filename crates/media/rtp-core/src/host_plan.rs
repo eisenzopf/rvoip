@@ -60,6 +60,9 @@
 //!
 //! [`HostPlanConfig::signaling_threads`] replaces the `σ` rule with an
 //! explicit count, clamped to the usable CPUs.
+//! [`HostPlanConfig::signaling_balance`] sizes the signaling runtime from
+//! per-call CPU costs instead when that gives it more threads (see
+//! [`SignalingBalance`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -111,6 +114,10 @@ pub struct HostPlanConfig {
     /// Explicit signaling thread count (1 to 1024), replacing the `σ` rule;
     /// clamped to the usable CPUs.
     pub signaling_threads: Option<usize>,
+    /// Per-call CPU costs that give the signaling runtime more threads than
+    /// the `σ` rule when it would otherwise saturate before the media lanes;
+    /// `None` (default) keeps the `σ` rule.
+    pub signaling_balance: Option<SignalingBalance>,
     /// Target media-lane utilization for the per-lane session estimate, from
     /// 0.05 to 1.0 (default 0.70).
     pub lane_utilization: f64,
@@ -133,6 +140,7 @@ impl Default for HostPlanConfig {
             housekeeping_min_cores: DEFAULT_HOUSEKEEPING_MIN_CORES,
             smt_policy: SmtPolicy::Siblings,
             signaling_threads: None,
+            signaling_balance: None,
             lane_utilization: DEFAULT_LANE_UTILIZATION,
             packet_cost_us: DEFAULT_PACKET_COST_US,
             session_pps: DEFAULT_SESSION_PPS,
@@ -187,6 +195,13 @@ impl HostPlanConfig {
         self
     }
 
+    /// Balance the signaling runtime against the media lanes by per-call
+    /// CPU cost.
+    pub fn with_signaling_balance(mut self, balance: SignalingBalance) -> Self {
+        self.signaling_balance = Some(balance);
+        self
+    }
+
     /// Set the cap of the signaling runtime's blocking pool.
     pub fn with_max_blocking_threads_cap(mut self, cap: usize) -> Self {
         self.max_blocking_threads_cap = cap;
@@ -212,6 +227,9 @@ impl HostPlanConfig {
         )?;
         if let Some(threads) = self.signaling_threads {
             check_usize("signaling_threads", threads, 1, MAX_SIGNALING_THREADS)?;
+        }
+        if let Some(balance) = &self.signaling_balance {
+            balance.validate()?;
         }
         check_f64("lane_utilization", self.lane_utilization, 0.05, 1.0)?;
         check_f64("packet_cost_us", self.packet_cost_us, 0.1, 1000.0)?;
@@ -250,6 +268,180 @@ fn check_usize(name: &str, value: usize, min: usize, max: usize) -> Result<(), H
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct HostPlanError(String);
+
+// ---------------------------------------------------------------------------
+// Per-call pool balance
+// ---------------------------------------------------------------------------
+
+const DEFAULT_SIGNALING_UTILIZATION: f64 = 0.5;
+
+/// Per-call CPU cost of the media lanes and of the signaling runtime.
+///
+/// Each pool reaches its target utilization at
+/// `CPS = utilization × threads ÷ CPU per call`: the media lanes at
+/// [`HostPlanConfig::lane_utilization`], the signaling runtime at
+/// [`Self::signaling_utilization`]. With a balance the planner computes the
+/// smallest signaling thread count at which the signaling runtime no longer
+/// saturates before the media lanes (SMT), or the dedicated-core split that
+/// maximises the lower of the two rates (no SMT), and uses it when it has
+/// more signaling threads than the `σ` rule. Workloads that do much of their
+/// per-call work on the signaling runtime (an in-process media bridge whose
+/// graphs run there, for example) need it; for light signaling work the `σ`
+/// rule already gives enough threads and the plan is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct SignalingBalance {
+    /// Media-lane CPU milliseconds per call, from 0.1 to 1000.
+    pub media_ms_per_call: f64,
+    /// Signaling-runtime CPU milliseconds per call, from 0.1 to 1000.
+    pub signaling_ms_per_call: f64,
+    /// Target busy share of the signaling threads, from 0.05 to 1.0
+    /// (default 0.5). It is lower than the lanes' because signaling threads
+    /// share cores with media lanes and call setup is latency sensitive.
+    pub signaling_utilization: f64,
+}
+
+impl SignalingBalance {
+    /// The given per-call costs with the default signaling utilization.
+    pub fn new(media_ms_per_call: f64, signaling_ms_per_call: f64) -> Self {
+        Self {
+            media_ms_per_call,
+            signaling_ms_per_call,
+            signaling_utilization: DEFAULT_SIGNALING_UTILIZATION,
+        }
+    }
+
+    /// Set the target busy share of the signaling threads.
+    pub fn with_signaling_utilization(mut self, utilization: f64) -> Self {
+        self.signaling_utilization = utilization;
+        self
+    }
+
+    fn validate(&self) -> Result<(), HostPlanError> {
+        check_f64(
+            "signaling_balance.media_ms_per_call",
+            self.media_ms_per_call,
+            0.1,
+            1000.0,
+        )?;
+        check_f64(
+            "signaling_balance.signaling_ms_per_call",
+            self.signaling_ms_per_call,
+            0.1,
+            1000.0,
+        )?;
+        check_f64(
+            "signaling_balance.signaling_utilization",
+            self.signaling_utilization,
+            0.05,
+            1.0,
+        )
+    }
+}
+
+/// An executor pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Pool {
+    /// The media lanes.
+    Media,
+    /// The signaling runtime.
+    Signaling,
+}
+
+/// Calls per second at which each pool reaches its target utilization.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct PoolRates {
+    /// `u_lane × M ÷ media CPU per call`.
+    pub media_cps: f64,
+    /// `u_sig × S ÷ signaling CPU per call`.
+    pub signaling_cps: f64,
+}
+
+impl PoolRates {
+    /// The pool that saturates first (media on a tie).
+    pub fn binding(&self) -> Pool {
+        if self.signaling_cps < self.media_cps {
+            Pool::Signaling
+        } else {
+            Pool::Media
+        }
+    }
+
+    /// Calls per second at which the binding pool saturates.
+    pub fn cps(&self) -> f64 {
+        self.media_cps.min(self.signaling_cps)
+    }
+}
+
+/// The balance the planner weighed (see [`SignalingBalance`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct BalancePlan {
+    /// `(signaling, media)` by the `σ` rule.
+    pub sigma_layout: (usize, usize),
+    /// `(signaling, media)` balanced by per-call cost.
+    pub balanced_layout: (usize, usize),
+    /// Pool rates of the `σ` layout.
+    pub sigma_rates: PoolRates,
+    /// Pool rates of the planned layout.
+    pub planned_rates: PoolRates,
+}
+
+fn pool_rates(
+    config: &HostPlanConfig,
+    balance: &SignalingBalance,
+    media: usize,
+    signaling: usize,
+) -> PoolRates {
+    PoolRates {
+        media_cps: config.lane_utilization * media as f64 * 1000.0 / balance.media_ms_per_call,
+        signaling_cps: balance.signaling_utilization * signaling as f64 * 1000.0
+            / balance.signaling_ms_per_call,
+    }
+}
+
+/// SMT: the smallest `S ≤ available` whose signaling rate reaches the media
+/// rate of `media` lanes (`available` when none does).
+fn balanced_smt_signaling(
+    config: &HostPlanConfig,
+    balance: &SignalingBalance,
+    media: usize,
+    available: usize,
+) -> usize {
+    let target = pool_rates(config, balance, media, 0).media_cps;
+    (1..=available.max(1))
+        .find(|threads| {
+            pool_rates(config, balance, media, *threads).signaling_cps >= target * (1.0 - EPSILON)
+        })
+        .unwrap_or(available.max(1))
+}
+
+/// Dedicated cores: the `(signaling, media)` split of `available` that
+/// maximises the binding rate (the fewest signaling threads on a tie).
+fn balanced_dedicated_split(
+    config: &HostPlanConfig,
+    balance: &SignalingBalance,
+    available: usize,
+) -> (usize, usize) {
+    if available < 2 {
+        return (1, 1);
+    }
+    // Seed with the first candidate, not -inf: with -inf the relative
+    // tolerance below is -inf + inf = NaN, no comparison holds, and the
+    // split would never move from (1, available - 1).
+    let mut best = (1, available - 1);
+    let mut best_cps = pool_rates(config, balance, available - 1, 1).cps();
+    for signaling in 2..available {
+        let cps = pool_rates(config, balance, available - signaling, signaling).cps();
+        if cps > best_cps + best_cps.abs() * EPSILON {
+            best = (signaling, available - signaling);
+            best_cps = cps;
+        }
+    }
+    best
+}
 
 // ---------------------------------------------------------------------------
 // Pure parsers
@@ -454,6 +646,9 @@ pub struct PlanCapacity {
 pub enum SignalingSizing {
     /// The `σ` / `σ_smt` share.
     Sigma,
+    /// [`HostPlanConfig::signaling_balance`], which asked for more threads
+    /// than the `σ` rule.
+    Balanced,
     /// [`HostPlanConfig::signaling_threads`].
     Explicit,
 }
@@ -490,6 +685,8 @@ pub struct ExecutorPlan {
     pub signaling_cpus: Vec<usize>,
     /// How `signaling_threads` was chosen.
     pub signaling_sizing: SignalingSizing,
+    /// The per-call cost balance, when one is configured.
+    pub signaling_balance: Option<BalancePlan>,
     /// Signaling runtime `max_blocking_threads`.
     pub max_blocking_threads: usize,
     /// `B`: memory budget, bytes.
@@ -658,15 +855,21 @@ fn split_dedicated(signaling: usize, available: usize) -> (usize, usize) {
 struct Layouts {
     /// The `σ` / `σ_smt` rule.
     sigma: (usize, usize),
+    /// [`HostPlanConfig::signaling_balance`].
+    balanced: Option<(usize, usize)>,
     /// [`HostPlanConfig::signaling_threads`], clamped to the usable CPUs.
     explicit: Option<(usize, usize)>,
 }
 
 impl Layouts {
     fn choose(&self) -> ((usize, usize), SignalingSizing) {
-        match self.explicit {
-            Some(layout) => (layout, SignalingSizing::Explicit),
-            None => (self.sigma, SignalingSizing::Sigma),
+        if let Some(layout) = self.explicit {
+            return (layout, SignalingSizing::Explicit);
+        }
+        // The balance only ever adds signaling threads to the σ rule.
+        match self.balanced {
+            Some(layout) if layout.0 > self.sigma.0 => (layout, SignalingSizing::Balanced),
+            _ => (self.sigma, SignalingSizing::Sigma),
         }
     }
 }
@@ -703,6 +906,9 @@ fn compute_plan(facts: &HostFacts, config: &HostPlanConfig) -> ExecutorPlan {
     // Candidate layouts for `available` dedicated threads (quota) or cores.
     let dedicated_layouts = |available: usize| Layouts {
         sigma: split_dedicated(round_share(config.sigma, available), available),
+        balanced: config
+            .signaling_balance
+            .map(|balance| balanced_dedicated_split(config, &balance, available)),
         explicit: config
             .signaling_threads
             .map(|threads| split_dedicated(threads, available)),
@@ -726,6 +932,12 @@ fn compute_plan(facts: &HostFacts, config: &HostPlanConfig) -> ExecutorPlan {
                     ceil_share(config.effective_sigma_smt(), effective).clamp(1, available),
                     available,
                 ),
+                balanced: config.signaling_balance.map(|balance| {
+                    (
+                        balanced_smt_signaling(config, &balance, available, available),
+                        available,
+                    )
+                }),
                 explicit: config
                     .signaling_threads
                     .map(|threads| (threads.clamp(1, available), available)),
@@ -735,6 +947,12 @@ fn compute_plan(facts: &HostFacts, config: &HostPlanConfig) -> ExecutorPlan {
         }
     };
     let ((signaling_threads, media_lanes), signaling_sizing) = layouts.choose();
+    let signaling_balance = config.signaling_balance.map(|balance| BalancePlan {
+        sigma_layout: layouts.sigma,
+        balanced_layout: layouts.balanced.unwrap_or(layouts.sigma),
+        sigma_rates: pool_rates(config, &balance, layouts.sigma.1, layouts.sigma.0),
+        planned_rates: pool_rates(config, &balance, media_lanes, signaling_threads),
+    });
     if let (Some(requested), SignalingSizing::Explicit) =
         (config.signaling_threads, signaling_sizing)
     {
@@ -832,6 +1050,7 @@ fn compute_plan(facts: &HostFacts, config: &HostPlanConfig) -> ExecutorPlan {
         signaling_threads,
         signaling_cpus,
         signaling_sizing,
+        signaling_balance,
         max_blocking_threads,
         memory_budget_bytes,
         memory_max_bytes: facts.memory_max,
@@ -1553,6 +1772,16 @@ mod tests {
         bad("lane_utilization", &|c| c.lane_utilization = 2.0);
         bad("packet_cost_us", &|c| c.packet_cost_us = -1.0);
         bad("session_pps", &|c| c.session_pps = 0.0);
+        bad("signaling_balance.media_ms_per_call", &|c| {
+            c.signaling_balance = Some(SignalingBalance::new(0.0, 1.0))
+        });
+        bad("signaling_balance.signaling_ms_per_call", &|c| {
+            c.signaling_balance = Some(SignalingBalance::new(1.0, f64::NAN))
+        });
+        bad("signaling_balance.signaling_utilization", &|c| {
+            c.signaling_balance =
+                Some(SignalingBalance::new(1.0, 1.0).with_signaling_utilization(1.5))
+        });
         bad("max_blocking_threads_cap", &|c| {
             c.max_blocking_threads_cap = 0
         });
@@ -1564,6 +1793,222 @@ mod tests {
                 Err(error),
                 "planning validates first"
             );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-call pool balance
+    // -----------------------------------------------------------------------
+
+    /// Light signaling: 11.9 ms media + 2.3 ms signaling CPU per call.
+    fn light() -> SignalingBalance {
+        SignalingBalance::new(11.9, 2.3)
+    }
+
+    /// Heavy signaling, bridge graphs on the signaling runtime: 30 + 19.3 ms.
+    fn heavy() -> SignalingBalance {
+        SignalingBalance::new(30.0, 19.3)
+    }
+
+    /// Bridge graphs on the media lanes: 23.8 + 9.6 ms.
+    fn on_lanes() -> SignalingBalance {
+        SignalingBalance::new(23.8, 9.6)
+    }
+
+    fn balanced(balance: SignalingBalance) -> HostPlanConfig {
+        HostPlanConfig::new().with_signaling_balance(balance)
+    }
+
+    fn close(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 0.05
+    }
+
+    #[test]
+    fn balance_adds_smt_signaling_threads_until_media_saturates_first() {
+        let plan = plan(&smt8(None), &balanced(on_lanes()));
+        assert_eq!(plan.media_lanes, 8);
+        assert_eq!(plan.media_cpus, (0..8).collect::<Vec<_>>());
+        assert_eq!(plan.signaling_threads, 5);
+        assert_eq!(plan.signaling_cpus, (8..16).collect::<Vec<_>>());
+        assert_eq!(plan.signaling_sizing, SignalingSizing::Balanced);
+        let balance = plan.signaling_balance.unwrap();
+        assert_eq!(balance.sigma_layout, (4, 8));
+        assert_eq!(balance.balanced_layout, (5, 8));
+        // 0.7 × 8 / 23.8 ms and 0.5 × 5 / 9.6 ms.
+        assert!(
+            close(balance.planned_rates.media_cps, 235.29),
+            "{balance:?}"
+        );
+        assert!(
+            close(balance.planned_rates.signaling_cps, 260.42),
+            "{balance:?}"
+        );
+        assert_eq!(balance.planned_rates.binding(), Pool::Media);
+        // With the σ layout signaling would saturate first (0.5 × 4 / 9.6 ms).
+        assert!(close(balance.sigma_rates.signaling_cps, 208.33));
+        assert_eq!(balance.sigma_rates.binding(), Pool::Signaling);
+        assert!(close(balance.sigma_rates.cps(), 208.33));
+        assert_no_shared_media_core(&plan, &smt8(None).core_siblings);
+
+        let heavy = plan_for(&smt8(None), heavy());
+        assert_eq!((heavy.signaling_threads, heavy.media_lanes), (8, 8));
+        let balance = heavy.signaling_balance.unwrap();
+        // σ's 4 threads saturate at 0.5 × 4 / 19.3 ms ≈ 104 CPS.
+        assert!(close(balance.sigma_rates.signaling_cps, 103.63));
+        assert!(close(balance.planned_rates.signaling_cps, 207.25));
+        assert!(close(balance.planned_rates.media_cps, 186.67));
+        assert_eq!(balance.planned_rates.binding(), Pool::Media);
+    }
+
+    fn plan_for(facts: &HostFacts, balance: SignalingBalance) -> ExecutorPlan {
+        plan(facts, &balanced(balance))
+    }
+
+    #[test]
+    fn light_signaling_keeps_the_sigma_layout_on_every_fixture() {
+        let quota = HostFacts {
+            cpu_quota: Some(6.5),
+            ..smt8(None)
+        };
+        let fixtures = [
+            smt8(None),
+            smt8(Some("0-3,8-11")),
+            smt8(Some("0-7")),
+            smt8(Some("0-1,8-9")),
+            cores16(),
+            smt24(),
+            quota,
+            facts("0", None, BTreeMap::new()),
+        ];
+        for facts in &fixtures {
+            let sigma = default_plan(facts);
+            assert_eq!(sigma.signaling_sizing, SignalingSizing::Sigma);
+            assert_eq!(sigma.signaling_balance, None);
+            let light = plan_for(facts, light());
+            assert_eq!(light.signaling_sizing, SignalingSizing::Sigma, "{facts:?}");
+            assert_eq!(
+                (
+                    light.media_lanes,
+                    light.signaling_threads,
+                    &light.media_cpus,
+                    &light.signaling_cpus,
+                    &light.housekeeping_cpus,
+                    light.max_blocking_threads,
+                    light.capacity,
+                ),
+                (
+                    sigma.media_lanes,
+                    sigma.signaling_threads,
+                    &sigma.media_cpus,
+                    &sigma.signaling_cpus,
+                    &sigma.housekeeping_cpus,
+                    sigma.max_blocking_threads,
+                    sigma.capacity,
+                ),
+                "{facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dedicated_cores_trade_media_lanes_only_when_it_raises_the_binding_rate() {
+        let heavy = plan_for(&cores16(), heavy());
+        assert_eq!(heavy.housekeeping_cpus, vec![0]);
+        assert_eq!((heavy.signaling_threads, heavy.media_lanes), (7, 8));
+        assert_eq!(heavy.media_cpus, (1..9).collect::<Vec<_>>());
+        assert_eq!(heavy.signaling_cpus, (9..16).collect::<Vec<_>>());
+        assert_eq!(heavy.signaling_sizing, SignalingSizing::Balanced);
+        let balance = heavy.signaling_balance.unwrap();
+        // min(0.5 × 7 / 19.3, 0.7 × 8 / 30) = 181 CPS beats σ's (6, 9) = 155.
+        assert_eq!(balance.sigma_layout, (6, 9));
+        assert!(balance.planned_rates.cps() > balance.sigma_rates.cps());
+        assert_no_shared_media_core(&heavy, &cores16().core_siblings);
+
+        let on_lanes = plan_for(&cores16(), on_lanes());
+        assert_eq!(on_lanes.signaling_balance.unwrap().balanced_layout, (6, 9));
+        assert_eq!(on_lanes.signaling_sizing, SignalingSizing::Sigma);
+        assert_eq!((on_lanes.signaling_threads, on_lanes.media_lanes), (6, 9));
+    }
+
+    #[test]
+    fn dedicated_split_search_moves_off_its_first_candidate() {
+        // Regression: the search once started from -inf, the tolerance
+        // became NaN and every host kept (1, available - 1), so the balance
+        // never applied on dedicated-core or quota-only hosts.
+        let config = HostPlanConfig::default();
+        assert_eq!(balanced_dedicated_split(&config, &heavy(), 15), (7, 8));
+        assert_eq!(balanced_dedicated_split(&config, &heavy(), 6), (3, 3));
+        assert_eq!(balanced_dedicated_split(&config, &on_lanes(), 15), (6, 9));
+        assert_eq!(balanced_dedicated_split(&config, &light(), 2), (1, 1));
+        assert_eq!(balanced_dedicated_split(&config, &light(), 1), (1, 1));
+        for available in 2..64 {
+            let (signaling, media) = balanced_dedicated_split(&config, &heavy(), available);
+            assert_eq!(signaling + media, available);
+            let best = pool_rates(&config, &heavy(), media, signaling).cps();
+            for other in 1..available {
+                let cps = pool_rates(&config, &heavy(), available - other, other).cps();
+                assert!(
+                    cps <= best * (1.0 + 1e-9),
+                    "{available}: {other} beats {signaling}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn smaller_shapes_and_quota_only_hosts_balance_too() {
+        let four = smt8(Some("0-3,8-11"));
+        let lanes = plan_for(&four, on_lanes());
+        assert_eq!((lanes.signaling_threads, lanes.media_lanes), (3, 4));
+        let four_heavy = plan_for(&four, heavy());
+        assert_eq!(
+            (four_heavy.signaling_threads, four_heavy.media_lanes),
+            (4, 4)
+        );
+        assert_eq!(four_heavy.signaling_cpus, vec![8, 9, 10, 11]);
+
+        let quota = HostFacts {
+            cpu_quota: Some(6.5),
+            ..smt8(None)
+        };
+        let quota_heavy = plan_for(&quota, heavy());
+        assert!(quota_heavy.quota_only && !quota_heavy.pinned());
+        assert_eq!(quota_heavy.signaling_balance.unwrap().sigma_layout, (2, 4));
+        assert_eq!(
+            (quota_heavy.signaling_threads, quota_heavy.media_lanes),
+            (3, 3)
+        );
+        assert_eq!(
+            quota_heavy.media_runtime_config(),
+            MediaRuntimeConfig::new(MediaLanes::dedicated(3))
+        );
+
+        let single = plan_for(&facts("0", None, BTreeMap::new()), heavy());
+        assert_eq!((single.media_lanes, single.signaling_threads), (1, 1));
+    }
+
+    #[test]
+    fn explicit_signaling_threads_beat_the_balance() {
+        let config = balanced(heavy()).with_signaling_threads(3);
+        let plan = plan(&smt8(None), &config);
+        assert_eq!(plan.signaling_threads, 3);
+        assert_eq!(plan.signaling_sizing, SignalingSizing::Explicit);
+        // The balance is still reported.
+        assert_eq!(plan.signaling_balance.unwrap().balanced_layout, (8, 8));
+    }
+
+    #[test]
+    fn sibling_signaling_already_covers_the_balance_on_smt() {
+        // σ_smt = 1.0 gives every media core a signaling sibling, more than
+        // either balance asks for.
+        for balance in [on_lanes(), heavy()] {
+            let config = HostPlanConfig::sibling_signaling().with_signaling_balance(balance);
+            let plan = plan(&smt24(), &config);
+            assert_eq!(plan.signaling_sizing, SignalingSizing::Sigma);
+            assert_eq!((plan.signaling_threads, plan.media_lanes), (23, 23));
+            let report = plan.signaling_balance.unwrap();
+            assert!(report.balanced_layout.0 <= 23);
+            assert_eq!(report.planned_rates.binding(), Pool::Media);
         }
     }
 
