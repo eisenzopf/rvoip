@@ -2316,6 +2316,17 @@ pub struct Config {
     /// mappings require `Optional` or `Required` with an explicit client CA.
     pub tls_server_client_auth: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
 
+    /// Per-flow behaviour of the SIP TLS transport: what a reader does while
+    /// the transaction layer's event queue is full, `TCP_NODELAY`, and an
+    /// optional ingress admission hook that can answer or drop messages
+    /// before they are queued.
+    ///
+    /// The default pauses reads (TCP backpressure to the peer) for at most
+    /// 600 s instead of closing a shared flow, sets `TCP_NODELAY`, and
+    /// installs no hook. Keep a clone to read
+    /// [`TlsFlowConfig::stats`](rvoip_sip_transport::TlsFlowConfig::stats).
+    pub sip_tls_flow: rvoip_sip_transport::TlsFlowConfig,
+
     /// **Dev only.** When `true`, server certs are accepted without
     /// identity verification. Required for self-signed test certs. The
     /// TLS handshake still runs end-to-end (encrypted), but a malicious
@@ -3255,6 +3266,7 @@ impl std::fmt::Debug for Config {
                 "tls_server_client_auth_mode",
                 &self.tls_server_client_auth.mode,
             )
+            .field("sip_tls_flow", &self.sip_tls_flow)
             .field("offer_srtp", &self.offer_srtp)
             .field("offer_rtcp_mux", &self.offer_rtcp_mux)
             .field("rtcp_mux_required", &self.rtcp_mux_required)
@@ -3442,6 +3454,7 @@ impl Config {
             tls_extra_ca_path: None,
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
+            sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -3577,6 +3590,7 @@ impl Config {
             tls_extra_ca_path: None,
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
+            sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -5076,6 +5090,13 @@ impl Config {
         policy: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
     ) -> Self {
         self.tls_server_client_auth = policy;
+        self
+    }
+
+    /// Configure SIP TLS flow behaviour: receive backpressure, `TCP_NODELAY`
+    /// and an optional ingress admission hook. See [`Config::sip_tls_flow`].
+    pub fn with_sip_tls_flow(mut self, flow: rvoip_sip_transport::TlsFlowConfig) -> Self {
+        self.sip_tls_flow = flow;
         self
     }
 
@@ -13174,6 +13195,7 @@ impl UnifiedCoordinator {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_server_client_auth: config.tls_server_client_auth.clone(),
+            tls_flow: config.sip_tls_flow.clone(),
             tls_extra_ca_path: config
                 .tls_extra_ca_path
                 .as_ref()

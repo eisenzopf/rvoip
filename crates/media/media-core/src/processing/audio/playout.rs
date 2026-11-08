@@ -27,6 +27,13 @@ use std::time::{Duration, Instant};
 
 use crate::types::AudioFrame;
 
+/// Late frames, arriving one frame apart while slots are being concealed,
+/// that prove the stream fell behind the playout clock: half a second at
+/// 20 ms. Shorter runs are transients the clock must not follow (a reorder
+/// hold releasing frames that waited for a lost packet), because following
+/// one adds latency for the rest of the call.
+const LATE_RUN_DELAYS_CLOCK: usize = 25;
+
 /// How a [`PlayoutBuffer`] trades latency against loss.
 ///
 /// Every depth is counted in **frames**: one decoded RTP packet, which is
@@ -161,6 +168,12 @@ pub struct PlayoutBuffer {
     /// drift from short-lived network jitter.
     clock_origin: Option<(Instant, u32)>,
     clock_skew_ppm: f64,
+    /// Late frames that arrived one frame apart while slots were being
+    /// concealed (see [`Self::delay_clock_behind`]).
+    late_run: usize,
+    last_late_arrival: Option<Instant>,
+    /// Times the playout clock was delayed behind a stream that fell behind.
+    clock_delays: u64,
     stats: PlayoutStats,
 }
 
@@ -192,6 +205,9 @@ impl PlayoutBuffer {
             last_arrival: None,
             clock_origin: None,
             clock_skew_ppm: 0.0,
+            late_run: 0,
+            last_late_arrival: None,
+            clock_delays: 0,
             stats: PlayoutStats::default(),
         }
     }
@@ -228,9 +244,14 @@ impl PlayoutBuffer {
                 // Its playout moment has passed; inserting it now would play
                 // audio out of order.
                 self.stats.frames_late += 1;
+                if self.stream_fell_behind(arrived_at) {
+                    self.delay_clock_behind(&frame, next, arrived_at);
+                }
                 return;
             }
         }
+        self.late_run = 0;
+        self.last_late_arrival = None;
         if self.pending.contains_key(&frame.timestamp) {
             self.stats.frames_duplicate += 1;
             return;
@@ -253,6 +274,75 @@ impl PlayoutBuffer {
             // the first sample is played 40 ms after the first arrival.
             let initial_wait = self.frame_duration().unwrap_or(Duration::from_millis(20));
             self.next_playout_at = Some(arrived_at + initial_wait);
+        }
+    }
+
+    /// Times the playout clock was delayed because the stream fell behind it.
+    #[must_use]
+    pub const fn clock_delays(&self) -> u64 {
+        self.clock_delays
+    }
+
+    /// Whether this late frame shows the stream itself now arrives behind the
+    /// playout clock, rather than one straggler or one burst.
+    ///
+    /// A straggler arrives while real audio is still playing. A stalled path
+    /// that drains delivers its late frames together, after which the stream
+    /// is on time again, and a reorder hold delays a few frames once. Only
+    /// late frames that keep arriving one frame apart, for
+    /// [`LATE_RUN_DELAYS_CLOCK`] frames, while every slot is being concealed
+    /// mean the stream moved: a delay step on the route, or a backlog
+    /// upstream that adds standing latency.
+    fn stream_fell_behind(&mut self, arrived_at: Instant) -> bool {
+        if self.consecutive_concealed == 0 {
+            self.late_run = 0;
+            self.last_late_arrival = None;
+            return false;
+        }
+        let half_frame = self.frame_duration().unwrap_or(Duration::from_millis(20)) / 2;
+        let paced = self
+            .last_late_arrival
+            .is_none_or(|previous| arrived_at.saturating_duration_since(previous) >= half_frame);
+        self.last_late_arrival = Some(arrived_at);
+        if paced {
+            self.late_run = self.late_run.saturating_add(1);
+        }
+        self.late_run >= LATE_RUN_DELAYS_CLOCK
+    }
+
+    /// Delay the playout clock behind a stream that fell behind it.
+    ///
+    /// Without this a stream that arrives later than the clock never plays
+    /// again: every frame is dropped as late, its slot is concealed, and the
+    /// concealment fades to silence for the rest of the call. The next
+    /// deadline moves to where the next expected frame arrives with the
+    /// target depth of slack, at most `max_depth_frames` per step.
+    /// Timestamps stay monotonic: nothing already concealed is replayed, so
+    /// latency grows by the step and nothing else changes. The frames still
+    /// in flight behind the next expected one are dropped as late, as before.
+    fn delay_clock_behind(&mut self, late: &AudioFrame, next: u32, arrived_at: Instant) {
+        self.late_run = 0;
+        self.last_late_arrival = None;
+        let Some(deadline) = self.next_playout_at else {
+            return;
+        };
+        // The media clock advances by samples per channel, so a stereo
+        // frame's interleaved length is not its timestamp span.
+        let frame_ticks = self
+            .samples_per_frame
+            .map(|samples| samples / u32::from(late.channels.max(1)))
+            .filter(|ticks| *ticks > 0)
+            .unwrap_or(160);
+        let behind = next.wrapping_sub(late.timestamp) / frame_ticks;
+        let target = u32::try_from(self.target_depth().max(1)).unwrap_or(u32::MAX);
+        let ceiling = u32::try_from(self.config.max_depth_frames.max(1)).unwrap_or(u32::MAX);
+        let frame = self.frame_duration().unwrap_or(Duration::from_millis(20));
+        let wanted =
+            arrived_at + frame * behind.saturating_add(target).min(ceiling.saturating_mul(2));
+        let delayed = wanted.min(deadline + frame * ceiling).max(deadline);
+        if delayed > deadline {
+            self.next_playout_at = Some(delayed);
+            self.clock_delays += 1;
         }
     }
 
@@ -663,6 +753,142 @@ mod tests {
         playout.push(frame(0, 9), now);
         assert_eq!(playout.stats().frames_late, 1);
         assert!(playout.pop().is_none() || playout.stats().frames_concealed > 0);
+    }
+
+    /// Drive a buffer the way a receive loop does on a 1 ms virtual clock:
+    /// arrivals first, then every due frame. Frame `index` carries level
+    /// `1_000 + index`, so real audio is told apart from concealment.
+    fn drive(
+        arrival_ms: impl Fn(u32) -> u64,
+        frames: u32,
+        end_ms: u64,
+    ) -> (PlayoutBuffer, Vec<AudioFrame>) {
+        let (playout, emitted) = drive_frames(
+            |index| frame(index * 160, 1_000 + index as i16),
+            arrival_ms,
+            frames,
+            end_ms,
+        );
+        (
+            playout,
+            emitted.into_iter().map(|(_, frame)| frame).collect(),
+        )
+    }
+
+    /// [`drive`] for any frame shape, keeping the millisecond each frame
+    /// was emitted at.
+    fn drive_frames(
+        make_frame: impl Fn(u32) -> AudioFrame,
+        arrival_ms: impl Fn(u32) -> u64,
+        frames: u32,
+        end_ms: u64,
+    ) -> (PlayoutBuffer, Vec<(u64, AudioFrame)>) {
+        let (mut playout, start) = buffer();
+        let mut order: Vec<u32> = (0..frames).collect();
+        order.sort_by_key(|index| (arrival_ms(*index), *index));
+        let mut next = 0;
+        let mut emitted = Vec::new();
+        for ms in 0..end_ms {
+            let now = start + Duration::from_millis(ms);
+            while next < order.len() && arrival_ms(order[next]) == ms {
+                playout.push(make_frame(order[next]), now);
+                next += 1;
+            }
+            while let Some(frame) = playout.pop_due(now) {
+                emitted.push((ms, frame));
+            }
+        }
+        (playout, emitted)
+    }
+
+    fn is_real(frame: &AudioFrame) -> bool {
+        frame.samples[0] == 1_000 + (frame.timestamp / 160) as i16
+    }
+
+    #[test]
+    fn a_stream_that_falls_behind_the_playout_clock_plays_again() {
+        // From frame 20 on, every frame arrives 100 ms later than before (a
+        // delay step on the route, or a standing backlog upstream). Every
+        // later frame used to be dropped as late and its slot concealed,
+        // fading to silence for the rest of the call. After half a second of
+        // that, the clock follows the stream and real audio resumes.
+        let step = |index: u32| u64::from(index) * 20 + if index >= 20 { 100 } else { 0 };
+        let (playout, emitted) = drive(step, 120, 3_000);
+        // Timestamps stay one frame apart: nothing concealed is replayed.
+        assert!(emitted
+            .windows(2)
+            .all(|pair| pair[1].timestamp == pair[0].timestamp.wrapping_add(160)));
+        let resumed: Vec<&AudioFrame> = emitted
+            .iter()
+            .filter(|frame| (50..115).contains(&(frame.timestamp / 160)))
+            .collect();
+        assert_eq!(resumed.len(), 65);
+        assert!(
+            resumed.iter().all(|frame| is_real(frame)),
+            "real audio must resume after the step"
+        );
+        assert!(playout.stats().frames_late <= 30, "{:?}", playout.stats());
+        assert_eq!(playout.clock_delays(), 1, "one step, one clock delay");
+    }
+
+    #[test]
+    fn a_stall_that_drains_in_one_burst_does_not_move_the_playout_clock() {
+        // Frames 20..=24 are held by a stall and all arrive at 540 ms; the
+        // stream is on time again from frame 25. Their slots are concealed
+        // and they are dropped as late: no latency is added and frame 25
+        // plays at its original moment.
+        let stalled = |index: u32| {
+            if (20..=24).contains(&index) {
+                540
+            } else {
+                u64::from(index) * 20
+            }
+        };
+        let (playout, emitted) = drive(stalled, 120, 3_000);
+        assert_eq!(playout.clock_delays(), 0);
+        assert_eq!(playout.stats().frames_late, 5);
+        assert!(emitted
+            .windows(2)
+            .all(|pair| pair[1].timestamp == pair[0].timestamp.wrapping_add(160)));
+        assert!(emitted
+            .iter()
+            .filter(|frame| (25..115).contains(&(frame.timestamp / 160)))
+            .all(is_real));
+    }
+
+    #[test]
+    fn a_stereo_stream_that_falls_behind_is_delayed_by_frames_not_samples() {
+        // The same delay step on a 48 kHz stereo stream. A frame advances the
+        // media clock by its samples per channel, not its interleaved length,
+        // so the clock must follow the stream exactly as it does in mono:
+        // the same frames play, at the same moments.
+        let step = |index: u32| u64::from(index) * 20 + if index >= 20 { 100 } else { 0 };
+        let (mono, mono_out) = drive_frames(
+            |index| frame(index * 160, 1_000 + index as i16),
+            step,
+            120,
+            3_000,
+        );
+        let (stereo, stereo_out) = drive_frames(
+            |index| AudioFrame {
+                samples: vec![1_000 + index as i16; 1_920],
+                sample_rate: 48_000,
+                channels: 2,
+                duration: Duration::from_millis(20),
+                timestamp: index * 960,
+            },
+            step,
+            120,
+            3_000,
+        );
+        let schedule = |out: &[(u64, AudioFrame)], ticks: u32| {
+            out.iter()
+                .map(|(ms, frame)| (*ms, frame.timestamp / ticks, frame.samples[0]))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(stereo.clock_delays(), 1);
+        assert_eq!(stereo.clock_delays(), mono.clock_delays());
+        assert_eq!(schedule(&stereo_out, 960), schedule(&mono_out, 160));
     }
 
     #[test]

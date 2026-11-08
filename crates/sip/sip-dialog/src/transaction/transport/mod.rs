@@ -93,6 +93,12 @@ pub struct TransportManagerConfig {
     /// for self-signed test certs; **must not** be enabled in
     /// production builds.
     pub tls_insecure_skip_verify: bool,
+    /// Receive backpressure, `TCP_NODELAY` and the optional ingress admission
+    /// hook for every TLS transport this manager creates. Defaults to
+    /// [`TlsFlowConfig::default`](rvoip_sip_transport::TlsFlowConfig): pause
+    /// reads while the transaction layer catches up, `TCP_NODELAY` on, no
+    /// hook.
+    pub tls_flow: rvoip_sip_transport::TlsFlowConfig,
 }
 
 impl Default for TransportManagerConfig {
@@ -130,6 +136,7 @@ impl Default for TransportManagerConfig {
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             tls_insecure_skip_verify: false,
+            tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
         }
     }
 }
@@ -649,6 +656,7 @@ impl TransportManager {
     ) -> Result<Arc<dyn Transport>> {
         let (transport_arc, key): (Arc<dyn Transport>, String) = if tls {
             use rvoip_sip_transport::transport::tls::{TlsClientConfig, TlsTransport};
+            use rvoip_sip_transport::transport::HandshakeAdmissionConfig;
             use std::path::{Path, PathBuf};
 
             let client_cfg = TlsClientConfig {
@@ -662,11 +670,13 @@ impl TransportManager {
             // (incoming SIP messages, errors) flow through the same
             // pipeline as UDP/TCP — no separate forwarder task needed.
             let (transport, _rx_unused) = match self.config.tls_role {
-                TlsRole::ClientOnly => TlsTransport::client_only_with_control_sender(
+                TlsRole::ClientOnly => TlsTransport::client_only_with_flow_config(
                     bind_addr,
                     Some(self.event_tx.clone()),
-                    self.control_event_tx.clone(),
+                    Some(self.control_event_tx.clone()),
                     client_cfg,
+                    HandshakeAdmissionConfig::default(),
+                    self.config.tls_flow.clone(),
                 )
                 .await
                 .map_err(|e| {
@@ -682,30 +692,19 @@ impl TransportManager {
                     let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
                         Error::Transport("TLS enabled but tls_key_path is missing".into())
                     })?;
-                    let result = if self.config.tls_role == TlsRole::ServerOnly {
-                        TlsTransport::bind_server_only_with_configs_handshake_and_control_sender(
-                            bind_addr,
-                            Path::new(cert_path),
-                            Path::new(key_path),
-                            Some(self.event_tx.clone()),
-                            self.control_event_tx.clone(),
-                            client_cfg,
-                            self.config.tls_server_client_auth.clone(),
-                            rvoip_sip_transport::transport::HandshakeAdmissionConfig::default(),
-                        )
-                        .await
-                    } else {
-                        TlsTransport::bind_with_configs_and_control_sender(
-                            bind_addr,
-                            Path::new(cert_path),
-                            Path::new(key_path),
-                            Some(self.event_tx.clone()),
-                            self.control_event_tx.clone(),
-                            client_cfg,
-                            self.config.tls_server_client_auth.clone(),
-                        )
-                        .await
-                    };
+                    let result = TlsTransport::bind_with_role_and_flow_config(
+                        bind_addr,
+                        Path::new(cert_path),
+                        Path::new(key_path),
+                        Some(self.event_tx.clone()),
+                        Some(self.control_event_tx.clone()),
+                        client_cfg,
+                        self.config.tls_server_client_auth.clone(),
+                        self.config.tls_role,
+                        HandshakeAdmissionConfig::default(),
+                        self.config.tls_flow.clone(),
+                    )
+                    .await;
                     result.map_err(|e| {
                         Error::Transport(format!(
                             "Failed to bind TLS transport to {}: {}",
@@ -1313,6 +1312,31 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn transport_manager_config_defaults_tls_flow_to_pause_with_nodelay() {
+        use rvoip_sip_transport::{TlsFlowConfig, TlsReceiveBackpressurePolicy};
+
+        let config = TransportManagerConfig::default();
+        assert_eq!(
+            config.tls_flow.receive_backpressure,
+            TlsReceiveBackpressurePolicy::Pause
+        );
+        assert!(config.tls_flow.tcp_nodelay);
+        assert!(config.tls_flow.ingress_admission.is_none());
+
+        let tuned = TransportManagerConfig {
+            tls_flow: TlsFlowConfig::default()
+                .with_receive_backpressure(TlsReceiveBackpressurePolicy::Close)
+                .with_tcp_nodelay(false),
+            ..Default::default()
+        };
+        assert_eq!(
+            tuned.tls_flow.receive_backpressure,
+            TlsReceiveBackpressurePolicy::Close
+        );
+        assert!(!tuned.tls_flow.tcp_nodelay);
     }
 
     #[tokio::test]
