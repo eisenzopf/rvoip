@@ -406,6 +406,11 @@ async fn run_poller_with(
     let ticking = tick.is_some();
     let mut loops: FuturesUnordered<Budgeted> = FuturesUnordered::new();
     let mut counters = LanePollerCounters::new();
+    // Counter and PCM pool cleanup: on a current-thread runtime (the poller
+    // never moves) the per-event counters the hosted futures add during a
+    // pass (PCM pool misses, owner RTCP) are held on this thread and
+    // published every 64 passes, on idle passes and when the poller stops.
+    let mut deferred = crate::executor::LaneDeferredBatch::for_this_poller();
     // The lane clock. Futures polled below file their deadlines in it
     // (through `media_clock::sleep_until`) instead of the runtime's timer
     // wheel when the lane timer is enabled; the poller arms one runtime timer
@@ -442,6 +447,9 @@ async fn run_poller_with(
             }
             LANE_DATAGRAMS.with(|count| count.set(0));
             LANE_POLL_BUDGET.with(|budget| budget.set(Some(LANE_SOCKET_POLLS_PER_WAKEUP)));
+            let _deferring = deferred
+                .as_ref()
+                .map(crate::executor::LaneDeferredBatch::enter_pass);
             let _current_clock = lane_timer.then(|| crate::lane_clock::enter(clock.clock()));
             // Pass clock: the pass's one clock reading (the tick's start when
             // ticking), served to everything this pass polls.
@@ -537,6 +545,10 @@ async fn run_poller_with(
             let exhausted = left == Some(0);
             let datagrams = LANE_DATAGRAMS.with(|count| count.replace(0));
             counters.wakeup(datagrams, exhausted);
+            if let Some(batch) = deferred.as_mut() {
+                // Idle: no hosted future was polled, or none is hosted.
+                batch.pass_end(loops.is_empty() || left == Some(LANE_SOCKET_POLLS_PER_WAKEUP));
+            }
             tick_counters.timers(clock.take_resets(), clock.clock().take_coalesced());
             if let Some(batch) = wheel_counters.as_mut() {
                 let reads = crate::lane_clock::take_pass_clock_stats();
@@ -1585,5 +1597,82 @@ mod tests {
             2,
             "outside a poller poll it always runs"
         );
+    }
+
+    /// Counter and PCM pool cleanup: on a current-thread runtime a poller
+    /// with the switch holds the per-event counts its hosted futures add in
+    /// a pass and publishes them in batches (every value once); without the
+    /// switch each is added at once.
+    #[tokio::test]
+    async fn a_poller_with_counter_pool_cleanup_batches_the_counts_of_its_passes() {
+        static ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static OFF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        const LOOPS: usize = 8;
+        const EVENTS_PER_LOOP: u64 = 10;
+        for (config, total) in [
+            (crate::executor::MediaExecutorConfig::v2(), &ON),
+            (
+                crate::executor::MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
+                &OFF,
+            ),
+        ] {
+            let cleanup = config.counter_pool_cleanup_active();
+            let _config = crate::executor::override_media_executor_config_on_this_thread(config);
+            let poller = LanePoller::start(&Handle::current());
+            let (release, gate) = tokio::sync::watch::channel(false);
+            let most_held = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+            for _ in 0..LOOPS {
+                let mut gate = gate.clone();
+                let held = most_held.clone();
+                handles.push(
+                    poller
+                        .host(async move {
+                            let _ = gate.wait_for(|open| *open).await;
+                            for _ in 0..EVENTS_PER_LOOP {
+                                crate::executor::add_lane_deferred(total, 1);
+                                let pending =
+                                    crate::executor::pending_lane_deferred_on_this_thread(total);
+                                held.fetch_max(pending as usize, Ordering::AcqRel);
+                                tokio::task::yield_now().await;
+                            }
+                        })
+                        .ok()
+                        .expect("poller is running"),
+                );
+            }
+            // Let every loop park on the gate, then release them together:
+            // one pass serves all of them.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+            release.send_replace(true);
+            for handle in handles {
+                tokio::time::timeout(Duration::from_secs(2), handle.join())
+                    .await
+                    .expect("every loop finishes");
+            }
+            drop(poller);
+            // The poller stops once its channel closed and it hosts nothing.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(
+                total.load(Ordering::Relaxed),
+                LOOPS as u64 * EVENTS_PER_LOOP,
+                "every event counted once (cleanup {cleanup})"
+            );
+            assert_eq!(
+                crate::executor::pending_lane_deferred_on_this_thread(total),
+                0
+            );
+            let most = most_held.load(Ordering::Acquire);
+            if cleanup {
+                assert!(
+                    most >= LOOPS,
+                    "the pass's counts were held for one publication ({most})"
+                );
+            } else {
+                assert_eq!(most, 0, "without the switch every count is added at once");
+            }
+        }
     }
 }
