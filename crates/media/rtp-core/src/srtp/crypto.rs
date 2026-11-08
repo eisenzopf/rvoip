@@ -9,14 +9,10 @@ use aes::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::{BufMut, Bytes, BytesMut};
 use ctr::Ctr64BE;
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
 
 // Define types for AES-CM
 type Aes128Ctr64BE = Ctr64BE<Aes128>;
 type Aes256Ctr64BE = Ctr64BE<Aes256>;
-// Define type for HMAC-SHA1
-type HmacSha1 = Hmac<Sha1>;
 
 /// Basic cryptographic key/salt for SRTP
 #[derive(Debug, Clone)]
@@ -947,29 +943,8 @@ fn aes_cm_decrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
 
 /// HMAC-SHA1 authentication for SRTP
 fn hmac_sha1(data: &[u8], key: &[u8], tag_length: usize) -> Result<Vec<u8>> {
-    // Create a new HMAC-SHA1 instance
-    let mut mac = HmacSha1::new_from_slice(key)
-        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
-
-    // Update with data
-    mac.update(data);
-
-    // Finalize and get the result
-    let result = mac.finalize().into_bytes();
-
-    // Truncate to the requested tag length. Guard against a misconfigured
-    // suite whose tag_length exceeds the 20-byte HMAC-SHA1 output (otherwise
-    // the slice below panics).
-    if tag_length > result.len() {
-        return Err(Error::SrtpError(format!(
-            "auth tag_length {} exceeds HMAC-SHA1 output {}",
-            tag_length,
-            result.len()
-        )));
-    }
-    let tag = result.as_slice()[..tag_length].to_vec();
-
-    Ok(tag)
+    let tag = super::auth::hmac_sha1_tag(key, data, &[], tag_length)?;
+    Ok(tag.as_slice().to_vec())
 }
 
 #[cfg(test)]
