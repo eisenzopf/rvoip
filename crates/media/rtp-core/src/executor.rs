@@ -98,6 +98,11 @@
 //!   encoded G.711 writer to its sole producer.
 //! - [`MediaExecutorConfig::session_owner_placement`]: a SIP stream's pumps
 //!   run on the lane that owns its RTP socket.
+//! - [`MediaExecutorConfig::callback_send`]: per-call TX sources that an
+//!   application installs with [`crate::lane_table::install_tx`] are fired
+//!   straight from their lane poller's table and timing wheel instead of
+//!   running as paced futures (see [`crate::lane_table`]). Needs the lane
+//!   timing wheel, lane-hosted TX and the cached TX path.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -297,6 +302,22 @@ pub struct MediaExecutorConfig {
     /// A SIP stream's pumps run on the lane that owns its RTP socket.
     pub session_owner_placement: bool,
     // ---- End SIP media path ----
+    // ---- Lane table callback send ----
+    /// Lane pollers keep a lane table: per-call TX sources an application
+    /// installs with [`crate::lane_table::install_tx`] (from a supervisor
+    /// future hosted on the call's lane) are fired straight from the table's
+    /// timing wheel when their deadline is due, with no waker, hosted-future
+    /// poll or `select!` per frame. Only pollers on [`MediaLanes::Dedicated`]
+    /// lanes keep a table; elsewhere, and with the switch off,
+    /// `install_tx` gives the source back and the application drives it as
+    /// a paced future. Needs [`Self::lane_timer_wheel`] (so the lane clock
+    /// and the lane poller too), [`Self::lane_tx`] and
+    /// [`Self::tx_handle_cache`] (the fenced synchronous TX path a paced
+    /// sender writes through); without them it reads as off.
+    ///
+    /// [`MediaLanes::Dedicated`]: crate::task_runtime::MediaLanes::Dedicated
+    pub callback_send: bool,
+    // ---- End lane table callback send ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -339,11 +360,13 @@ impl MediaExecutorConfig {
             ai_rx: false,
             direct_encoded_writer: false,
             session_owner_placement: false,
+            // Lane table callback send.
+            callback_send: false,
         }
     }
 
     /// The inline executor with every switch on, a 2 ms lane tick with grid
-    /// timers, the lane timing wheel and the pass clock.
+    /// timers, the lane timing wheel, the pass clock and the lane table.
     pub fn v2() -> Self {
         Self {
             mode: MediaExecutorMode::V2,
@@ -376,6 +399,8 @@ impl MediaExecutorConfig {
             ai_rx: true,
             direct_encoded_writer: true,
             session_owner_placement: true,
+            // Lane table callback send.
+            callback_send: true,
         }
     }
 
@@ -533,6 +558,15 @@ impl MediaExecutorConfig {
         self
     }
     // ---- End counter and PCM pool cleanup ----
+    // ---- Lane table callback send ----
+
+    /// Set [`Self::callback_send`].
+    pub fn with_callback_send(mut self, enabled: bool) -> Self {
+        self.callback_send = enabled;
+        self
+    }
+
+    // ---- End lane table callback send ----
 
     // ---- Hot call state ----
 
@@ -733,6 +767,19 @@ impl MediaExecutorConfig {
     }
 
     // ---- End SIP media path ----
+    // ---- Lane table callback send ----
+
+    /// Whether lane pollers keep a lane table that fires installed TX
+    /// sources (needs the lane timing wheel, lane-hosted TX and the cached
+    /// TX path).
+    pub fn callback_send_active(&self) -> bool {
+        self.lane_timer_wheel_active()
+            && self.lane_tx_active()
+            && self.tx_handle_cache_active()
+            && self.callback_send
+    }
+
+    // ---- End lane table callback send ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -1010,6 +1057,18 @@ pub fn counter_pool_cleanup_enabled() -> bool {
 }
 
 // ---- End counter and PCM pool cleanup ----
+// ---- Lane table callback send ----
+
+/// Whether lane pollers keep a lane table
+/// ([`MediaExecutorConfig::callback_send_active`]). Read when a lane poller
+/// starts; an application reads it once per call to decide whether to offer
+/// its TX source to [`crate::lane_table::install_tx`] (which still gives the
+/// source back on a lane without a table).
+pub fn callback_send_enabled() -> bool {
+    with_config(MediaExecutorConfig::callback_send_active)
+}
+
+// ---- End lane table callback send ----
 
 // ---- Hot call state ----
 
@@ -2682,6 +2741,73 @@ mod tests {
     }
 
     // ---- End lane timing wheel and pass clock ----
+
+    // ---- Lane table callback send ----
+
+    #[test]
+    fn callback_send_is_off_in_v1_on_in_v2_and_reads_as_off_without_its_prerequisites() {
+        let v1 = MediaExecutorConfig::v1();
+        assert!(!v1.callback_send && !v1.callback_send_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.callback_send && v2.callback_send_active());
+        assert!(v2.validate().is_ok());
+
+        assert!(
+            !v2.clone()
+                .with_mode(MediaExecutorMode::V1)
+                .callback_send_active(),
+            "never under v1"
+        );
+        // Every prerequisite missing reads as off and is not an error.
+        for missing in [
+            MediaExecutorConfig::v2().with_lane_poller(false),
+            MediaExecutorConfig::v2().with_lane_timer(false),
+            MediaExecutorConfig::v2().with_lane_timer_wheel(false),
+            MediaExecutorConfig::v2().with_lane_tx(false),
+            // `tx_batch` needs the cache too, so it goes with it.
+            MediaExecutorConfig::v2()
+                .with_tx_handle_cache(false)
+                .with_tx_batch(false),
+            MediaExecutorConfig::v2().with_callback_send(false),
+        ] {
+            assert!(missing.validate().is_ok(), "{missing:?}");
+            assert!(!missing.callback_send_active(), "{missing:?}");
+        }
+        // The cached TX path is a prerequisite on its own: the SIP switches
+        // that build on it are not.
+        assert!(!MediaExecutorConfig::v2()
+            .with_tx_handle_cache(false)
+            .with_tx_batch(false)
+            .with_ai_tx(false)
+            .callback_send_active());
+        assert!(MediaExecutorConfig::v2()
+            .with_ai_tx(false)
+            .with_tx_batch(false)
+            .callback_send_active());
+        // Neither the tick nor the pass clock is a prerequisite.
+        assert!(MediaExecutorConfig::v2()
+            .with_lane_tick(None)
+            .with_lane_pass_clock(false)
+            .callback_send_active());
+
+        let accessor = |config: MediaExecutorConfig| {
+            let _guard = override_media_executor_config_on_this_thread(config);
+            callback_send_enabled()
+        };
+        assert!(!accessor(MediaExecutorConfig::v1()));
+        assert!(accessor(MediaExecutorConfig::v2()));
+        assert!(!accessor(MediaExecutorConfig::v2().with_lane_tx(false)));
+        assert!(!accessor(
+            MediaExecutorConfig::v2()
+                .with_tx_handle_cache(false)
+                .with_tx_batch(false)
+        ));
+        assert!(!accessor(
+            MediaExecutorConfig::v1().with_callback_send(true)
+        ));
+    }
+
+    // ---- End lane table callback send ----
 
     #[test]
     fn sip_media_switches_are_off_under_v1_on_in_v2_and_follow_their_prerequisites() {

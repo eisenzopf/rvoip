@@ -274,6 +274,12 @@ impl WheelLinks {
         prev: NIL,
         next: NIL,
     };
+
+    /// Filed in a bucket or in the overflow heap.
+    #[inline]
+    pub(crate) fn is_filed(&self) -> bool {
+        self.bucket != UNFILED
+    }
 }
 
 /// One slot of a slab a [`Wheel`] is threaded through. The wheel
@@ -631,6 +637,17 @@ impl Wheel {
             }
         }
         self.overflow = overflow;
+    }
+
+    /// Wheel operations since the last call.
+    pub(crate) fn take_ops(&mut self) -> WheelOps {
+        std::mem::take(&mut self.ops)
+    }
+
+    /// Test view: (entries linked in buckets, overflow heap items).
+    #[cfg(test)]
+    pub(crate) fn lengths(&self) -> (usize, usize) {
+        (self.len, self.overflow.len())
     }
 }
 
