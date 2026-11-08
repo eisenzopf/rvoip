@@ -11775,8 +11775,13 @@ mod orphan_sweep_tests {
             1
         );
 
-        wait_for_sessions(&coordinator, 2).await;
+        // The reclaim drops the orphan from `list_sessions` as soon as it
+        // quiesces the lifetime, but removes the retained cell and returns
+        // the media port only when it finishes. Join the reclaim itself
+        // before checking what it left behind.
+        wait_for_reclaims(&adapter).await;
         assert!(!present(&coordinator, &orphan));
+        assert_eq!(coordinator.list_sessions().await.len(), 2);
         assert!(
             present(&coordinator, &active),
             "a call with a route is never reclaimed"
@@ -11786,7 +11791,6 @@ mod orphan_sweep_tests {
             "registration lifetimes are never swept"
         );
         assert!(coordinator.allocated_media_port_count().await < ports_with_calls);
-        wait_for_reclaims(&adapter).await;
         let after = crate::cleanup_diag::session_cleanup_counters();
         assert!(after.orphan_session_reclaims > before.orphan_session_reclaims);
         assert!(after.orphan_session_reclaims_forced > before.orphan_session_reclaims_forced);
