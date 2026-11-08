@@ -1,18 +1,19 @@
 #[cfg(test)]
 use crate::types::param::Param;
 use nom::{
-    character::complete::space1,
+    bytes::complete::take_till,
+    combinator::all_consuming,
     error::{Error as NomError, ErrorKind},
-    sequence::tuple,
+    sequence::terminated,
 };
 use std::str;
 // Keep Result for FromStr impls if needed elsewhere
 use crate::parser::common::sip_version;
+use crate::parser::message::ParseMode;
 use crate::parser::token::token;
-use crate::parser::uri::parse_uri;
+use crate::parser::uri::sip_or_absolute_uri;
 use crate::parser::whitespace::crlf;
 use crate::parser::ParseResult;
-use crate::types::uri::{Host, Scheme};
 use crate::types::{Method, Uri, Version};
 
 /// SIP Request Line Parser
@@ -33,78 +34,54 @@ use crate::types::{Method, Uri, Version};
 /// SIP-Version   =  "SIP" "/" 1*DIGIT "." 1*DIGIT
 /// ```
 ///
-/// Where SP is space and CRLF is carriage return followed by line feed.
-/// The parser handles these components separately for more precise error detection.
-/// Parser for a SIP request line
-/// Changed signature to accept &[u8]
+/// Where SP is a single space and CRLF is carriage return followed by line
+/// feed. This is the Strict form; see [`parse_request_line_with_mode`].
+#[cfg(test)]
 pub fn parse_request_line(input: &[u8]) -> ParseResult<'_, (Method, Uri, Version)> {
-    // First, parse the method and the first space
-    let (input, method_bytes) = token(input)?;
-    let (input, _) = space1(input)?;
+    parse_request_line_with_mode(input, &ParseMode::Strict)
+}
 
-    // Check if method is valid before proceeding
-    let method_str = str::from_utf8(method_bytes)
-        .map_err(|_| nom::Err::Failure(NomError::new(method_bytes, ErrorKind::Char)))?;
+/// Parse a Request-Line in the given mode.
+///
+/// Strict follows the grammar exactly. Lenient additionally accepts the
+/// deviations RFC 4475 allows a liberal element to accept, removing them
+/// from the parsed line so they are never forwarded: more than one SP
+/// between elements (§3.1.2.9), SP before the CRLF (§3.1.2.10), and a
+/// Request-URI enclosed in "<>" (§3.1.2.7). Everything else, including LWS
+/// inside the Request-URI (§3.1.2.8), is rejected in both modes.
+pub fn parse_request_line_with_mode<'a>(
+    input: &'a [u8],
+    mode: &ParseMode,
+) -> ParseResult<'a, (Method, Uri, Version)> {
+    let error = |at: &'a [u8], kind| nom::Err::Error(NomError::new(at, kind));
+    let (rest, line) = terminated(take_till(|b| b == b'\r' || b == b'\n'), crlf)(input)?;
+    let lenient = *mode == ParseMode::Lenient;
 
-    // Verify method is a valid SIP method
-    match method_str.parse::<Method>() {
-        Ok(method) => {
-            // Find the position of the next space which marks the end of the URI
-            if let Some(space_pos) = input.iter().position(|&c| c == b' ') {
-                // Extract the URI portion
-                let uri_part = &input[..space_pos];
+    let elements: Vec<&[u8]> = if lenient {
+        line.split(|&b| b == b' ')
+            .filter(|e| !e.is_empty())
+            .collect()
+    } else {
+        line.split(|&b| b == b' ').collect()
+    };
+    let [method_bytes, uri_bytes, version_bytes] = elements[..] else {
+        return Err(error(line, ErrorKind::Space));
+    };
 
-                // First try to parse as a SIP URI
-                let uri_result = parse_uri(uri_part);
+    let (_, method_bytes) = all_consuming(token)(method_bytes)?;
+    let method = str::from_utf8(method_bytes)
+        .ok()
+        .and_then(|m| m.parse::<Method>().ok())
+        .ok_or_else(|| error(method_bytes, ErrorKind::Tag))?;
 
-                let uri = match uri_result {
-                    Ok((_, uri)) => uri,
-                    Err(_) => {
-                        // If not a SIP URI, try to handle as a generic URI
-                        // This is needed for RFC 4475 compliance (exotic URI schemes)
-                        if let Ok(uri_str) = str::from_utf8(uri_part) {
-                            // Check for known schemes
-                            let scheme = if uri_str.starts_with("http:") {
-                                Scheme::Http
-                            } else if uri_str.starts_with("https:") {
-                                Scheme::Https
-                            } else if uri_str.starts_with("tel:") {
-                                Scheme::Tel
-                            } else {
-                                Scheme::Sip // Default for unknown schemes
-                            };
+    let uri_bytes = match uri_bytes {
+        [b'<', inner @ .., b'>'] if lenient => inner,
+        _ => uri_bytes,
+    };
+    let (_, uri) = sip_or_absolute_uri(uri_bytes)?;
 
-                            // Create a custom URI with the detected scheme
-                            let mut uri = Uri::new(scheme, Host::domain("example.com"));
-                            uri.raw_uri = Some(uri_str.to_string());
-                            uri
-                        } else {
-                            // If we can't even convert to UTF-8, it's a genuine error
-                            return Err(nom::Err::Error(NomError::new(uri_part, ErrorKind::Tag)));
-                        }
-                    }
-                };
-
-                // Parse the remaining part after the URI (space + SIP/2.0 + CRLF)
-                let version_part = &input[space_pos..];
-                if let Ok((remaining, version)) = tuple((space1, sip_version, crlf))(version_part) {
-                    Ok((remaining, (method, uri, version.1)))
-                } else {
-                    Err(nom::Err::Error(NomError::new(version_part, ErrorKind::Tag)))
-                }
-            } else {
-                // No space found after URI
-                Err(nom::Err::Error(NomError::new(input, ErrorKind::Space)))
-            }
-        }
-        Err(_) => {
-            // Invalid SIP method
-            Err(nom::Err::Failure(NomError::new(
-                method_bytes,
-                ErrorKind::Tag,
-            )))
-        }
-    }
+    let (_, version) = all_consuming(sip_version)(version_bytes)?;
+    Ok((rest, (method, uri, version)))
 }
 
 // Removed request_parser, request_parser_nom, parse_headers_and_body functions.
@@ -262,12 +239,17 @@ mod tests {
         assert_eq!(uri.headers.get("subject"), Some(&"meeting".to_string()));
     }
 
-    // Test multiple spaces between parts
+    // Request-Line elements are separated by exactly one SP (RFC 3261 §25.1);
+    // Lenient accepts extra SP and drops it (RFC 4475 §3.1.2.9, §3.1.2.10).
     #[test]
     fn test_request_line_multiple_spaces() {
-        let line = b"INVITE   sip:user@example.com   SIP/2.0\r\n";
-        let result = parse_request_line(line);
-        assert!(result.is_ok());
+        let line = b"INVITE   sip:user@example.com   SIP/2.0  \r\n";
+        assert!(parse_request_line(line).is_err());
+        let (rem, (method, uri, _)) =
+            parse_request_line_with_mode(line, &ParseMode::Lenient).unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(method, Method::Invite);
+        assert_eq!(uri.to_string(), "sip:user@example.com");
     }
 
     // Test escaped characters in URI

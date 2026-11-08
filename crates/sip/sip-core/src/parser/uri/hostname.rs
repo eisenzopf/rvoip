@@ -1,4 +1,3 @@
-use nom::{bytes::complete::take_while1, combinator::verify};
 use std::str;
 
 use crate::parser::ParseResult;
@@ -9,188 +8,34 @@ use crate::types::uri::Host;
 // domainlabel = alphanum / alphanum *( alphanum / "-" ) alphanum
 // toplabel = ALPHA / ALPHA *( alphanum / "-" ) alphanum
 
-// Valid character for a hostname label (alphanumeric or hyphen only)
-fn is_label_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'-'
-}
-
-// Parse a single valid domain label (without dots)
-// Cannot start or end with a hyphen per RFC 1034
-fn domain_label(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    // Verify the label doesn't start or end with hyphen
-    verify(
-        // Must have at least one character, all of which are valid label chars
-        take_while1(is_label_char),
-        |label: &[u8]| !label.is_empty() && label[0] != b'-' && label[label.len() - 1] != b'-',
-    )(input)
-}
-
 // Parse a hostname including handling of trailing dot for FQDN
 fn parse_hostname(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    // Find the position of a colon, semicolon, or question mark if it exists (for port, params, or headers)
-    let port_position = input.iter().position(|&c| c == b':');
-    let param_position = input.iter().position(|&c| c == b';');
-    let header_position = input.iter().position(|&c| c == b'?');
-
-    // Determine the end position - use the earliest of port, param, or header if multiple exist
-    let end_position = match (port_position, param_position, header_position) {
-        (Some(port_pos), Some(param_pos), Some(header_pos)) => {
-            Some(port_pos.min(param_pos).min(header_pos))
-        }
-        (Some(port_pos), Some(param_pos), None) => Some(port_pos.min(param_pos)),
-        (Some(port_pos), None, Some(header_pos)) => Some(port_pos.min(header_pos)),
-        (None, Some(param_pos), Some(header_pos)) => Some(param_pos.min(header_pos)),
-        (Some(pos), None, None) => Some(pos),
-        (None, Some(pos), None) => Some(pos),
-        (None, None, Some(pos)) => Some(pos),
-        (None, None, None) => None,
-    };
-
-    // If a terminator exists, only parse up to that point
-    let parse_input = match end_position {
-        Some(pos) => &input[..pos],
-        None => input,
-    };
-
-    // Reject consecutive dots (empty labels)
-    if parse_input.windows(2).any(|window| window == b"..") {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-
-    // Reject underscores in hostnames
-    if parse_input.iter().any(|&c| c == b'_') {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-
-    // Empty input is not a valid hostname
-    if parse_input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-
-    // Handle single labels (like "localhost") - valid hostname
-    if !parse_input.contains(&b'.') {
-        return match domain_label(parse_input) {
-            Ok(_) => {
-                // Return remaining input (which might include port or params)
-                if let Some(pos) = end_position {
-                    Ok((&input[pos..], parse_input))
-                } else {
-                    Ok((&[][..], parse_input))
-                }
-            }
-            Err(e) => Err(e),
-        };
-    }
-
-    // Handle trailing dot in FQDN format (e.g., "example.com.")
-    let has_trailing_dot = parse_input.len() > 1 && parse_input[parse_input.len() - 1] == b'.';
-
-    // Parse main part of the hostname (without the trailing dot)
-    let hostname_input = if has_trailing_dot {
-        &parse_input[..parse_input.len() - 1]
-    } else {
-        parse_input
-    };
-
-    // Leading dot is invalid (empty first label)
-    if hostname_input.starts_with(b".") {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-
-    // Split the hostname by dots and verify each label
-    let labels: Vec<&[u8]> = hostname_input.split(|&c| c == b'.').collect();
-
-    // Check each label for validity
-    for label in &labels {
-        if label.is_empty()
-            || label[0] == b'-'
-            || label[label.len() - 1] == b'-'
-            || !label.iter().all(|&c| is_label_char(c))
-        {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Tag,
-            )));
-        }
-    }
-
-    // Don't apply IPv4 detection to hostnames with no chance of being IPv4
-    let could_be_ipv4 = hostname_input
+    // hostname    = *( domainlabel "." ) toplabel [ "." ]
+    // domainlabel = alphanum / alphanum *( alphanum / "-" ) alphanum
+    // toplabel    = ALPHA / ALPHA *( alphanum / "-" ) alphanum
+    // (RFC 3261 §25.1). The hostname is the longest run of these characters;
+    // whatever follows (port, parameters, whitespace, ...) is for the caller.
+    let error = || nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag));
+    let length = input
         .iter()
-        .all(|&c| c == b'.' || c.is_ascii_digit());
-
-    // Only reject hostnames that are definitely meant to be IPv4 addresses
-    if could_be_ipv4 && is_likely_actual_ipv4(hostname_input) {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
+        .take_while(|&&c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
+        .count();
+    let candidate = &input[..length];
+    let labels = candidate.strip_suffix(b".").unwrap_or(candidate);
+    if labels.is_empty() {
+        return Err(error());
     }
-
-    // Calculate remaining input based on what we parsed and where the terminator is
-    if let Some(pos) = end_position {
-        // Return the port or param part as remaining input
-        Ok((&input[pos..], hostname_input))
-    } else if has_trailing_dot {
-        // Return the trailing dot as remaining
-        Ok((&parse_input[parse_input.len() - 1..], hostname_input))
-    } else {
-        // No port, params, or trailing dot
-        Ok((&[][..], hostname_input))
+    let labels_valid = labels
+        .split(|&c| c == b'.')
+        .all(|label| !label.is_empty() && label[0] != b'-' && label[label.len() - 1] != b'-');
+    let top_label_valid = labels
+        .rsplit(|&c| c == b'.')
+        .next()
+        .is_some_and(|top| top[0].is_ascii_alphabetic());
+    if !labels_valid || !top_label_valid {
+        return Err(error());
     }
-}
-
-// More precise IPv4 address detection to avoid false positives
-// Only marks definite IPv4 addresses, not just numeric domains that look like IPv4
-fn is_likely_actual_ipv4(input: &[u8]) -> bool {
-    // Must be a specific format: 4 numeric segments separated by dots
-    let segments: Vec<&[u8]> = input.split(|&c| c == b'.').collect();
-
-    if segments.len() != 4 {
-        return false;
-    }
-
-    // Check that each segment is a valid IPv4 octet
-    for segment in segments {
-        // Empty segment
-        if segment.is_empty() {
-            return false;
-        }
-
-        // Leading zeros (except single 0) not allowed in real IPv4
-        if segment.len() > 1 && segment[0] == b'0' {
-            return false;
-        }
-
-        // All characters must be digits
-        if !segment.iter().all(|&c| c.is_ascii_digit()) {
-            return false;
-        }
-
-        // Convert to a number and check range (0-255)
-        match std::str::from_utf8(segment) {
-            Ok(s) => match s.parse::<u8>() {
-                Ok(_) => {}             // Valid octet in 0-255 range
-                Err(_) => return false, // Outside 0-255 range
-            },
-            Err(_) => return false, // Not valid UTF-8 (shouldn't happen with ASCII digits)
-        }
-    }
-
-    // Only categorize as IPv4 if it strictly follows IPv4 format
-    true
+    Ok((&input[length..], candidate))
 }
 
 // Public hostname parser function
@@ -250,7 +95,7 @@ mod tests {
         // Trailing dot (RFC 1035, FQDN format)
         assert_eq!(
             hostname(b"example.com."),
-            Ok((&b"."[..], Host::Domain("example.com".to_string())))
+            Ok((&[][..], Host::Domain("example.com.".to_string())))
         );
     }
 
@@ -301,7 +146,7 @@ mod tests {
         // RFC 1034/1035 edge cases
 
         // Labels should only contain alphanumeric characters and hyphens
-        assert!(hostname(b"invalid_underscore.com").is_err());
+        assert!(nom::combinator::all_consuming(hostname)(b"invalid_underscore.com").is_err());
 
         // Modern DNS implementations sometimes allow underscores in certain contexts
         // SIP hostnames are more strict and don't allow this
@@ -346,31 +191,29 @@ mod tests {
 
     #[test]
     fn test_hostname_not_ipv4() {
-        // Test cases that look like IPv4 addresses but should be parsed as hostnames
+        // Dotted numbers that are not IPv4 addresses are not hostnames either:
+        // the top label must start with ALPHA (RFC 3261 §25.1).
 
-        // Numeric domains that don't follow IPv4 format should be valid hostnames
-        assert_eq!(
-            hostname(b"999.888.777.666"),
-            Ok((&[][..], Host::Domain("999.888.777.666".to_string())))
+        assert!(
+            hostname(b"999.888.777.666").is_err(),
+            "toplabel must start with ALPHA"
         );
-        assert_eq!(
-            hostname(b"192.168.1"),
-            Ok((&[][..], Host::Domain("192.168.1".to_string())))
+        assert!(
+            hostname(b"192.168.1").is_err(),
+            "toplabel must start with ALPHA"
         );
-        assert_eq!(
-            hostname(b"192.168.1."),
-            Ok((&b"."[..], Host::Domain("192.168.1".to_string())))
+        assert!(
+            hostname(b"192.168.1.").is_err(),
+            "toplabel must start with ALPHA"
         );
     }
 
     #[test]
-    fn test_hostname_rfc4475_torture_cases() {
-        // RFC 4475 SIP Torture test cases
-
-        // Valid hostnames with numeric labels from RFC 4475
-        assert_eq!(
-            hostname(b"987.13.55.44"),
-            Ok((&[][..], Host::Domain("987.13.55.44".to_string())))
+    fn test_hostname_numeric_labels() {
+        // Numeric labels are valid except in the top label.
+        assert!(
+            hostname(b"987.13.55.44").is_err(),
+            "toplabel must start with ALPHA"
         );
         assert_eq!(
             hostname(b"555.example.com"),
@@ -396,11 +239,11 @@ mod tests {
         // Test fully qualified domain names with trailing dots
         assert_eq!(
             hostname(b"example.com."),
-            Ok((&b"."[..], Host::Domain("example.com".to_string())))
+            Ok((&[][..], Host::Domain("example.com.".to_string())))
         );
         assert_eq!(
             hostname(b"a.b.c.d.e.f."),
-            Ok((&b"."[..], Host::Domain("a.b.c.d.e.f".to_string())))
+            Ok((&[][..], Host::Domain("a.b.c.d.e.f.".to_string())))
         );
     }
 

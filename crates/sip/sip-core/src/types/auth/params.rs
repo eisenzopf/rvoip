@@ -9,14 +9,24 @@ use std::fmt;
 
 /// Generic Authentication Parameter (name=value)
 ///
-/// Represents a generic name-value parameter used in SIP authentication headers.
-/// Parameters are typically presented as `name="value"` pairs in header fields.
+/// Represents a generic name-value parameter used in SIP authentication
+/// headers: `auth-param = auth-param-name EQUAL ( token / quoted-string )`
+/// (RFC 3261 §25.1).
 #[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AuthParam {
     /// Parameter name
     pub name: String,
-    /// Parameter value
+    /// Parameter value: the token, or the content of the quoted-string.
     pub value: String,
+    /// Whether the value is a quoted-string. Parsed parameters keep the form
+    /// they were received in, so credentials and challenges of a scheme rvoip
+    /// does not implement are forwarded unmodified (RFC 4475 §3.3.7).
+    #[serde(default = "quoted_by_default")]
+    pub quoted: bool,
+}
+
+fn quoted_by_default() -> bool {
+    true
 }
 
 impl fmt::Debug for AuthParam {
@@ -31,7 +41,11 @@ impl fmt::Debug for AuthParam {
 
 impl fmt::Display for AuthParam {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}=\"{}\"", self.name, self.value)
+        if self.quoted {
+            write!(f, "{}=\"{}\"", self.name, self.value)
+        } else {
+            write!(f, "{}={}", self.name, self.value)
+        }
     }
 }
 
@@ -127,9 +141,11 @@ impl fmt::Display for DigestParam {
             DigestParam::Algorithm(v) => write!(f, "algorithm={}", v),
             DigestParam::Domain(v) => write!(f, "domain=\"{}\"", v.join(", ")),
             DigestParam::Stale(v) => write!(f, "stale={}", v),
+            // qop-options = "qop" EQUAL LDQUOT qop-value *("," qop-value)
+            // RDQUOT (RFC 3261 §25.1)
             DigestParam::Qop(v) => write!(
                 f,
-                "qop={}",
+                "qop=\"{}\"",
                 v.iter()
                     .map(|q| q.to_string())
                     .collect::<Vec<_>>()
@@ -221,6 +237,7 @@ mod diagnostic_safety_tests {
             DigestParam::Param(AuthParam {
                 name: SECRET.into(),
                 value: SECRET.into(),
+                quoted: true,
             }),
         ];
         let info = vec![
@@ -240,6 +257,7 @@ mod diagnostic_safety_tests {
         let extension = AuthParam {
             name: SECRET.into(),
             value: SECRET.into(),
+            quoted: true,
         };
         assert!(!format!("{extension:?}").contains(SECRET));
         assert!(extension.to_string().contains(SECRET));

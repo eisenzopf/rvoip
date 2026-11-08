@@ -302,7 +302,11 @@ impl fmt::Display for ContentDisposition {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.disposition_type)?;
-        for (key, value) in &self.params {
+        // Parameter order carries no meaning; name order keeps the
+        // rendering deterministic.
+        let mut sorted: Vec<_> = self.params.iter().collect();
+        sorted.sort();
+        for (key, value) in sorted {
             // Remove internal quote escaping for now
             if value.chars().any(|c| {
                 !c.is_ascii_alphanumeric()
@@ -441,7 +445,11 @@ impl TypedHeaderTrait for ContentDisposition {
 
         // Convert the HashMap of parameters to a list of Param structs
         let mut params = Vec::new();
-        for (name, value) in &self.params {
+        // Parameter order carries no meaning; name order keeps the
+        // rendering deterministic.
+        let mut sorted: Vec<_> = self.params.iter().collect();
+        sorted.sort();
+        for (name, value) in sorted {
             if value.is_empty() {
                 params.push(Param::Other(name.clone(), None));
             } else {

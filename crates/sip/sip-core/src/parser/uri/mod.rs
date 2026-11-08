@@ -128,11 +128,49 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     }
 }
 
+/// Length of the hostport at the start of `input`: up to the first ';' or '?'
+/// that is not inside an IPv6 reference.
+fn hostport_extent(input: &[u8]) -> usize {
+    let mut in_reference = false;
+    for (index, &byte) in input.iter().enumerate() {
+        match byte {
+            b'[' => in_reference = true,
+            b']' => in_reference = false,
+            b';' | b'?' if !in_reference => return index,
+            _ => {}
+        }
+    }
+    input.len()
+}
+
 /// Public entry point for parsing a SIP or SIPS URI
 /// Can be re-exported by the main parser mod.rs
 pub fn parse_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Use alt to try each parser
     alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input)
+}
+
+/// `SIP-URI / SIPS-URI / absoluteURI` (RFC 3261 §25.1, the Request-URI and
+/// addr-spec grammar), consuming all of `input`.
+///
+/// `sip:`, `sips:` and `tel:` URIs must parse completely as such: an invalid
+/// SIP URI is an error, never an opaque URI. Any other scheme is an
+/// absoluteURI, kept verbatim with its scheme.
+pub fn sip_or_absolute_uri(input: &[u8]) -> ParseResult<'_, Uri> {
+    let scheme_end = input.iter().position(|&b| b == b':').ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
+    })?;
+    let scheme = &input[..scheme_end];
+    let modelled = [b"sip".as_slice(), b"sips", b"tel"]
+        .iter()
+        .any(|known| scheme.eq_ignore_ascii_case(known));
+    if modelled {
+        return nom::combinator::all_consuming(parse_uri)(input);
+    }
+    let (rest, absolute) = nom::combinator::all_consuming(parse_absolute_uri)(input)?;
+    let text = std::str::from_utf8(absolute)
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))?;
+    Ok((rest, Uri::custom(text)))
 }
 
 /// Special version of parse_uri that allows for non-standard schemes
@@ -230,8 +268,11 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     };
 
     // Special check for non-numeric port values
-    // If there's a colon not followed by digits, treat it as an error
-    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+    // If there's a colon not followed by digits, treat it as an error. Only
+    // the hostport is checked: it ends at the first ';' (uri-parameters) or
+    // '?' (headers) outside an IPv6 reference, and those may contain ':'.
+    let hostport_end = hostport_extent(input);
+    if let Some(colon_pos) = input[..hostport_end].iter().position(|&c| c == b':') {
         // First check if this is inside an IPv6 reference
         // Look for opening bracket before this position
         let has_ipv6_before = input[..colon_pos].iter().any(|&c| c == b'[');
@@ -401,8 +442,11 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     };
 
     // Special check for non-numeric port values
-    // If there's a colon not followed by digits, treat it as an error
-    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
+    // If there's a colon not followed by digits, treat it as an error. Only
+    // the hostport is checked: it ends at the first ';' (uri-parameters) or
+    // '?' (headers) outside an IPv6 reference, and those may contain ':'.
+    let hostport_end = hostport_extent(input);
+    if let Some(colon_pos) = input[..hostport_end].iter().position(|&c| c == b':') {
         // First check if this is inside an IPv6 reference
         // Look for opening bracket before this position
         let has_ipv6_before = input[..colon_pos].iter().any(|&c| c == b'[');
@@ -1286,7 +1330,7 @@ mod tests {
     #[test]
     fn test_strict_rfc_compliance_edge_cases_host_invalid_chars() {
         // 6. Invalid characters in host
-        let result = parse_uri(b"sip:alice@example_com");
+        let result = "sip:alice@example_com".parse::<Uri>();
         assert!(result.is_err(), "Parser should reject underscores in host");
     }
 

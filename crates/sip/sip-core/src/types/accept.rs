@@ -383,7 +383,11 @@ impl fmt::Display for AcceptValue {
         let mut s = format!("{}/{}", self.m_type, self.m_subtype);
 
         // First output params other than 'q'
-        for (k, v) in &self.params {
+        // Parameter order carries no meaning; name order keeps the
+        // rendering deterministic.
+        let mut sorted: Vec<_> = self.params.iter().collect();
+        sorted.sort();
+        for (k, v) in sorted {
             if k != "q" {
                 s.push_str(&format!(";{}={}", k, v));
             }

@@ -541,7 +541,14 @@ impl fmt::Display for TypedHeader {
             TypedHeader::ProxyRequire(proxy_require) => {
                 write!(f, "{}: {}", HeaderName::ProxyRequire, proxy_require)
             }
-            TypedHeader::Date(date) => write!(f, "{}: {}", HeaderName::Date, date),
+            // SIP-date = rfc1123-date in GMT (RFC 3261 §20.17).
+            TypedHeader::Date(date) => write!(
+                f,
+                "{}: {}",
+                HeaderName::Date,
+                date.with_timezone(&chrono::Utc)
+                    .format("%a, %d %b %Y %H:%M:%S GMT")
+            ),
             TypedHeader::Timestamp(timestamp) => {
                 // Format the tuple using Display implementation for the (NotNan<f32>, Option<NotNan<f32>>) type
                 let (value, delay) = timestamp;
@@ -958,7 +965,9 @@ impl TryFrom<&Header> for TypedHeader {
                     Ok((_, v)) => Ok(TypedHeader::Via(Via(v))),
                     Err(e) => {
                         // If that fails, try to parse as just the via-params part (without "Via:" prefix)
-                        match parser::headers::via::parse_via_params_public(value_bytes) {
+                        match all_consuming(parser::headers::via::parse_via_params_public)(
+                            value_bytes,
+                        ) {
                             Ok((_, v)) => Ok(TypedHeader::Via(Via(v))),
                             Err(_) => Err(Error::from(e.to_owned())), // Return the original error
                         }
@@ -1469,21 +1478,22 @@ impl TryFrom<&Header> for TypedHeader {
                 }
             }
             HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(value_bytes)
-                .map(|(_, alert_info_values)| {
-                    // Convert parser values to our AlertInfo types
+                .map_err(Error::from)
+                .and_then(|(_, alert_info_values)| {
+                    // Every value must convert; dropping one would forward a
+                    // truncated header field.
                     let mut alert_info_list = crate::types::alert_info::AlertInfoList::new();
                     for value in alert_info_values {
-                        if let Ok(alert_info) =
-                            crate::types::alert_info::AlertInfoHeader::from_alert_info_value(&value)
-                        {
-                            alert_info_list.add(alert_info);
-                        }
+                        alert_info_list.add(
+                            crate::types::alert_info::AlertInfoHeader::from_alert_info_value(
+                                &value,
+                            )?,
+                        );
                     }
-                    TypedHeader::AlertInfo(crate::types::alert_info::AlertInfoHeader {
-                        alert_info_list,
-                    })
-                })
-                .map_err(Error::from),
+                    Ok(TypedHeader::AlertInfo(
+                        crate::types::alert_info::AlertInfoHeader { alert_info_list },
+                    ))
+                }),
             HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)(value_bytes)
                 .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
                 .map_err(Error::from),
@@ -1760,6 +1770,7 @@ mod tests {
             params: vec![crate::types::auth::AuthParam {
                 name: "other-param-name-direct-debug-canary".into(),
                 value: "other-param-value-direct-debug-canary".into(),
+                quoted: true,
             }],
         };
         let info = AuthenticationInfo(vec![

@@ -178,6 +178,7 @@ impl ProxyAuthenticate {
             params: vec![crate::types::auth::params::AuthParam {
                 name: "realm".to_string(),
                 value: realm.into(),
+                quoted: true,
             }],
         }])
     }
@@ -658,6 +659,7 @@ mod tests {
             params: vec![AuthParam {
                 name: "realm".to_string(),
                 value: "proxy.example.com".to_string(),
+                quoted: true,
             }],
         });
 
@@ -763,6 +765,7 @@ mod tests {
             params: vec![AuthParam {
                 name: "realm".to_string(),
                 value: "proxy.example.com".to_string(),
+                quoted: true,
             }],
         });
 

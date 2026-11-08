@@ -242,18 +242,25 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // addr-spec = SIP-URI / SIPS-URI / absoluteURI (RFC 3261 §25.1), so any
+    // well-formed absolute URI is a valid Reply-To.
     #[test]
-    fn test_parse_reply_to_invalid_uri_should_fail() {
-        let input = b"<invalid:uri>";
-        let result = parse_reply_to_public(input);
-        assert!(result.is_err());
+    fn test_parse_reply_to_absolute_uri() {
+        let (rem, reply_to) = parse_reply_to_public(b"<invalid:uri>").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(reply_to.uri().to_string(), "invalid:uri");
     }
 
     #[test]
-    fn test_parse_reply_to_unsupported_scheme_should_fail() {
-        let input = b"<http://example.com>";
-        let result = parse_reply_to_public(input);
-        assert!(result.is_err());
+    fn test_parse_reply_to_http_uri() {
+        let (rem, reply_to) = parse_reply_to_public(b"<http://example.com>").unwrap();
+        assert!(rem.is_empty());
+        assert_eq!(reply_to.uri().to_string(), "http://example.com");
+    }
+
+    #[test]
+    fn test_parse_reply_to_malformed_sip_uri_should_fail() {
+        assert!(parse_reply_to_public(b"<sip:>").is_err());
     }
 
     #[test]

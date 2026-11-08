@@ -817,15 +817,24 @@ impl fmt::Display for Uri {
             }
         }
 
-        // Parameters (;key=value or ;key)
+        // uri-parameters: pname [ "=" pvalue ], each 1*paramchar (RFC 3261
+        // §25.1). Names and values are stored decoded, so anything outside
+        // paramchar (including '%') is escaped.
         for param in &self.parameters {
-            write!(f, ";{}", param)?;
+            write!(f, ";{}", escape_uri_text(param.key(), URI_PARAM_LITERAL))?;
+            if let Some(value) = param.value() {
+                write!(f, "={}", escape_uri_text(&value, URI_PARAM_LITERAL))?;
+            }
         }
 
-        // Headers (?key=value&key=value)
+        // Headers (?key=value&key=value), in name order so the same URI
+        // always renders the same bytes; their order carries no meaning
+        // (RFC 3261 §19.1.4).
         if !self.headers.is_empty() {
+            let mut headers: Vec<_> = self.headers.iter().collect();
+            headers.sort();
             let mut first = true;
-            for (key, value) in &self.headers {
+            for (key, value) in headers {
                 if first {
                     write!(f, "?")?;
                     first = false;
@@ -834,7 +843,12 @@ impl fmt::Display for Uri {
                 }
 
                 // URL-encode key and value
-                write!(f, "{}={}", escape_param(key), escape_param(value))?;
+                write!(
+                    f,
+                    "{}={}",
+                    escape_uri_text(key, URI_HEADER_LITERAL),
+                    escape_uri_text(value, URI_HEADER_LITERAL)
+                )?;
             }
         }
 
@@ -985,38 +999,27 @@ fn userinfo_wire_form<'a>(
     Cow::Owned(out)
 }
 
-/// Escape URI parameters and headers
-fn escape_param(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() * 3);
+/// `param-unreserved`: characters `paramchar` allows besides `unreserved`.
+const URI_PARAM_LITERAL: &[u8] = b"[]/:&+$";
 
-    for c in s.chars() {
-        match c {
-            'a'..='z'
-            | 'A'..='Z'
-            | '0'..='9'
-            | '-'
-            | '_'
-            | '.'
-            | '!'
-            | '~'
-            | '*'
-            | '\''
-            | '('
-            | ')'
-            | '+' => {
-                result.push(c);
-            }
-            _ => {
-                // Escape all other characters
-                for byte in c.to_string().bytes() {
-                    result.push('%');
-                    result.push_str(&format!("{:02X}", byte));
-                }
-            }
+/// `hnv-unreserved`: characters `hname` / `hvalue` allow besides
+/// `unreserved`.
+const URI_HEADER_LITERAL: &[u8] = b"[]/?:+$";
+
+/// Escape a decoded URI parameter or header name or value: `unreserved` and
+/// `literal_extra` stay literal, every other byte (including '%') becomes an
+/// uppercase `%HH` escape.
+fn escape_uri_text(text: &str, literal_extra: &[u8]) -> String {
+    let literal_ok = |b: u8| is_unreserved_byte(b) || literal_extra.contains(&b);
+    let mut out = String::with_capacity(text.len() * 3);
+    for b in text.bytes() {
+        if literal_ok(b) {
+            out.push(b as char);
+        } else {
+            push_escaped(&mut out, b);
         }
     }
-
-    result
+    out
 }
 
 #[cfg(test)]

@@ -97,6 +97,7 @@ fn parse_auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
         AuthParam {
             name: name_str.to_string(),
             value: std::str::from_utf8(value).unwrap_or("").to_string(),
+            quoted: true,
         },
     ))
 }

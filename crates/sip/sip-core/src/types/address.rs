@@ -148,6 +148,28 @@ pub fn needs_quoting(display_name: &str) -> bool {
     }) || display_name.contains('"') || display_name.contains('\\')
 }
 
+/// The content of a quoted-string holding `text` (RFC 3261 §25.1):
+/// `"`, `\` and control characters become quoted-pairs. CR and LF cannot be
+/// represented in a quoted-string and become a space (LWS).
+fn quoted_string_content(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for c in text.chars() {
+        match c {
+            '\r' | '\n' => out.push(' '),
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_ascii_control() && c != '\t' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl fmt::Display for Address {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut wrote_display_name = false;
@@ -155,7 +177,7 @@ impl fmt::Display for Address {
             let trimmed_name = name.trim();
             if !trimmed_name.is_empty() {
                 if needs_quoting(trimmed_name) {
-                    write!(f, "\"{}\"", name.replace("\"", "\\\""))?;
+                    write!(f, "\"{}\"", quoted_string_content(name))?;
                 } else {
                     write!(f, "{}", trimmed_name)?;
                 }

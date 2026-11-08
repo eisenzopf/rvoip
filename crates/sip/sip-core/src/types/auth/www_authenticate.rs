@@ -94,6 +94,7 @@ impl WwwAuthenticate {
             params: vec![crate::types::auth::params::AuthParam {
                 name: "realm".to_string(),
                 value: realm.into(),
+                quoted: true,
             }],
         }])
     }

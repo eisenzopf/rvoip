@@ -112,6 +112,28 @@ fn contains_forbidden_inline_control(value: &str) -> bool {
         .any(|character| character.is_control() && character != '\t')
 }
 
+/// Like [`contains_forbidden_inline_control`] for a rendered header field,
+/// except that a quoted-string may carry a control character as a
+/// quoted-pair: `quoted-pair = "\\" (%x00-09 / %x0B-0C / %x0E-7F)` (RFC 3261
+/// §25.1), so any but CR and LF (RFC 4475 §3.1.1.2).
+fn contains_forbidden_header_control(value: &str) -> bool {
+    let mut in_quoted_string = false;
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' if in_quoted_string => match chars.next() {
+                Some('\r' | '\n') | None => return true,
+                Some(escaped) if escaped.is_control() && !escaped.is_ascii() => return true,
+                Some(_) => {}
+            },
+            '"' => in_quoted_string = !in_quoted_string,
+            character if character.is_control() && character != '\t' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 fn is_sip_token(value: &str) -> bool {
     !value.is_empty()
         && value.bytes().all(|byte| {
@@ -223,7 +245,14 @@ fn validate_outbound_header_fields(headers: &[TypedHeader]) -> Result<()> {
                 Err(validation_error("SIP typed header could not be rendered"))
             };
         }
-        if contains_forbidden_inline_control(rendered.as_str()) {
+        // A Call-ID word may contain '"' and '\\' as ordinary characters
+        // (RFC 3261 §25.1), so it has no quoted-strings to track.
+        let forbidden_control = if matches!(header, TypedHeader::CallId(_)) {
+            contains_forbidden_inline_control(rendered.as_str())
+        } else {
+            contains_forbidden_header_control(rendered.as_str())
+        };
+        if forbidden_control {
             return Err(validation_error(
                 "SIP header line contains a forbidden control character",
             ));
@@ -712,6 +741,53 @@ mod tests {
         assert!(validate_wire_request(&valid_request()).is_ok());
     }
 
+    /// A quoted-string may carry any control character but CR and LF as a
+    /// quoted-pair (RFC 3261 §25.1); anywhere else a control character is
+    /// forbidden.
+    #[test]
+    fn header_controls_are_allowed_only_as_quoted_pairs() {
+        assert!(!contains_forbidden_header_control(
+            "To: \"BEL:\\\u{7} NUL:\\\u{0} DEL:\\\u{7f}\" <sip:a@example.com>"
+        ));
+        for forbidden in [
+            "To: \"BEL:\u{7}\" <sip:a@example.com>",
+            "To: BEL:\\\u{7} <sip:a@example.com>",
+            "To: \"a\\\r\nX-Injected: 1\" <sip:a@example.com>",
+            "To: \"a\\\n\" <sip:a@example.com>",
+            "To: \"a\\\u{85}\" <sip:a@example.com>",
+            "To: \"a\\",
+        ] {
+            assert!(
+                contains_forbidden_header_control(forbidden),
+                "{forbidden:?}"
+            );
+        }
+        // Call-ID has no quoted-strings: '"' and '\\' are word characters.
+        assert!(contains_forbidden_inline_control("Call-ID: a\"\\\u{7}"));
+    }
+
+    #[test]
+    fn accepts_display_name_with_control_characters_as_quoted_pairs() {
+        let mut request = valid_request();
+        request
+            .headers
+            .retain(|header| !matches!(header, TypedHeader::To(_)));
+        request
+            .headers
+            .push(TypedHeader::To(crate::types::to::To::new(
+                crate::types::address::Address::new_with_display_name(
+                    "BEL:\u{7} NUL:\u{0} DEL:\u{7f}",
+                    Uri::from_str("sip:alice@example.com").unwrap(),
+                ),
+            )));
+        assert!(validate_wire_request(&request).is_ok());
+        let wire = request.to_bytes();
+        assert!(matches!(
+            crate::parse_message_with_mode(&wire, crate::ParseMode::Strict),
+            Ok(crate::types::Message::Request(_))
+        ));
+    }
+
     #[test]
     fn structural_other_aliases_cannot_serialize_a_second_singleton() {
         for (alias, value, label) in [
@@ -1082,13 +1158,22 @@ mod tests {
                 Method::Options,
                 Uri::custom(format!("sip:bob@example.test\r\nX-Injected: {SECRET}")),
             ),
-            Request::new(Method::Options, nested_param_uri),
             Request::new(Method::Options, nested_domain_uri),
         ] {
             let error = validate_typed_outbound_message(&Message::Request(request)).unwrap_err();
             assert_validation_detail(&error, "request");
             assert!(!error.to_string().contains(SECRET));
         }
+
+        // URI parameter names and values are escaped when rendered (RFC 3261
+        // §25.1 paramchar), so CR/LF in one cannot break the start line.
+        let request = Request::new(Method::Options, nested_param_uri);
+        let start_line = request.uri.to_string();
+        assert!(!start_line.contains('\r') && !start_line.contains('\n'));
+        // ':' is param-unreserved and stays literal; CR, LF and SP are escaped.
+        assert!(start_line.contains("transport%0D%0AX-Injected:%20"));
+        validate_typed_outbound_message(&Message::Request(request))
+            .expect("an escaped parameter is a valid start line");
     }
 
     #[test]

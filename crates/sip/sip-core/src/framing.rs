@@ -519,7 +519,7 @@ mod tests {
         };
         assert_eq!(request.body(), b"body");
 
-        let missing = b"MESSAGE sip:service.example SIP/2.0\r\nVia : x\r\n\r\nbody";
+        let missing = b"MESSAGE sip:service.example SIP/2.0\r\nSubject : x\r\n\r\nbody";
         let parsed = crate::parse_message(missing).expect("missing length uses packet boundary");
         let crate::Message::Request(request) = parsed else {
             panic!("request expected");

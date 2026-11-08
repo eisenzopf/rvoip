@@ -226,7 +226,11 @@ impl fmt::Display for AlertInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<{}>", self.uri)?;
 
-        for (name, value) in &self.params {
+        // Parameter order carries no meaning; name order keeps the
+        // rendering deterministic.
+        let mut sorted: Vec<_> = self.params.iter().collect();
+        sorted.sort();
+        for (name, value) in sorted {
             // Check if we need to quote the value
             if value
                 .chars()
@@ -407,12 +411,10 @@ fn convert_from_parser_value(value: &AlertInfoValue) -> Result<AlertInfo> {
     // Convert the URI from AlertInfoUri to Uri
     let uri = match &value.uri {
         AlertInfoUri::Sip(uri) => uri.clone(),
-        AlertInfoUri::Other { uri, .. } => {
-            // For non-SIP URIs, create a new Uri
-            Uri::from_str(uri).map_err(|e| {
-                Error::ParseError(format!("Could not convert AlertInfoUri to Uri: {}", e))
-            })?
-        }
+        // alert-param = LAQUOT absoluteURI RAQUOT (RFC 3261 §25.1): any
+        // scheme. A scheme the URI parser does not know, such as the alert
+        // URNs of RFC 7462, is kept as received.
+        AlertInfoUri::Other { uri, .. } => Uri::from(uri.as_str()),
     };
 
     // Convert parameters

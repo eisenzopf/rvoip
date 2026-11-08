@@ -5,9 +5,14 @@
 
 #[cfg(any(test, feature = "generated-validation"))]
 pub mod generated;
+pub mod inbound;
 pub mod presence;
 pub mod wire;
 
+pub use inbound::{
+    is_answerable, recover_request_for_rejection, validate_request, validate_request_for_uas,
+    Rejection, UasCapabilities,
+};
 pub use presence::{validate_notify_request, validate_publish_request, validate_subscribe_request};
 
 #[cfg(any(test, feature = "generated-validation"))]
