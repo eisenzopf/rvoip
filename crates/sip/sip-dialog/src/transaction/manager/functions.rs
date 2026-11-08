@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,7 @@ pub(crate) struct ExplicitTerminationOperation {
     transaction_id: TransactionKey,
     target: ExplicitTerminationTarget,
     result: std::sync::Mutex<Option<Result<()>>>,
+    waiter_completed: std::sync::atomic::AtomicBool,
     completed: std::sync::atomic::AtomicBool,
     execution_claimed: std::sync::atomic::AtomicBool,
     notify: tokio::sync::Notify,
@@ -62,6 +64,7 @@ impl ExplicitTerminationOperation {
             transaction_id,
             target,
             result: std::sync::Mutex::new(None),
+            waiter_completed: std::sync::atomic::AtomicBool::new(false),
             completed: std::sync::atomic::AtomicBool::new(false),
             execution_claimed: std::sync::atomic::AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
@@ -122,16 +125,36 @@ impl ExplicitTerminationOperation {
             diagnostics::record_explicit_termination_in_flight(-1);
         }
         diagnostics::record_explicit_termination_completed(result.is_ok());
-        *self
-            .result
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
         // Release shutdown admission at manager completion, not when a slow
         // or abandoned public waiter eventually drops its Arc.
         self.manager_operation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
+        self.complete_waiter(result);
+    }
+
+    /// A TU handler must be able to resume draining its primary event queue
+    /// once the exact runner is quiesced and its maps/timers are retired.
+    /// The manager execution still owns the shutdown guard, transaction
+    /// generation and terminal publication until `complete` above.
+    fn complete_waiter(&self, result: Result<()>) {
+        if self
+            .waiter_completed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result);
         self.notify.notify_waiters();
     }
 
@@ -745,8 +768,12 @@ impl TransactionManager {
             let initial_send_in_flight = client_transaction
                 .as_ref()
                 .is_some_and(|transaction| transaction.data().initial_send_in_flight());
-            let handle = if let Some(transaction) = client_transaction.as_ref() {
-                transaction.data().event_loop_handle.lock().await.take()
+            // Hold the exact runner slot through its join. Concurrent
+            // termination jobs for the same generation must not mistake a
+            // handle temporarily owned by another supervisor for a runner
+            // that has already stopped.
+            let mut handle_slot = if let Some(transaction) = client_transaction.as_ref() {
+                transaction.data().event_loop_handle.lock().await
             } else {
                 server_transaction
                     .as_ref()
@@ -755,9 +782,8 @@ impl TransactionManager {
                     .event_loop_handle
                     .lock()
                     .await
-                    .take()
             };
-            if let Some(mut handle) = handle {
+            if let Some(mut handle) = handle_slot.take() {
                 if initial_send_in_flight {
                     // The runner set the conservative wire boundary before
                     // awaiting the transport. It cannot consume Terminate until
@@ -875,31 +901,6 @@ impl TransactionManager {
             publication.try_claim()
         };
 
-        let mut prefix_delivered = true;
-        if let (Some(claim), Some(prefix_previous_state)) =
-            (publication_claim.as_ref(), publication.pending_prefix())
-        {
-            let delivery = self.events_tx.send_terminal_prefix(
-                crate::transaction::TransactionEvent::StateChanged {
-                    transaction_id: tx_id.clone(),
-                    previous_state: prefix_previous_state,
-                    new_state: TransactionState::Terminated,
-                },
-                claim,
-            );
-            if !matches!(
-                tokio::time::timeout(Duration::from_secs(1), delivery).await,
-                Ok(Ok(()))
-            ) {
-                self.events_tx.fail_closed_terminal_batch();
-                publication_claim
-                    .take()
-                    .expect("terminal publication claim is live")
-                    .mark_failed_closed();
-                prefix_delivered = false;
-            }
-        }
-
         if client_transaction.is_some() {
             self.retire_and_remove_client_transaction(tx_id).await;
         } else if let Some(transaction) = server_transaction.as_ref() {
@@ -919,9 +920,37 @@ impl TransactionManager {
         self.pending_inbound_timing.remove(tx_id);
         self.timer_manager.unregister_transaction(tx_id).await;
 
-        if prefix_delivered {
+        // The runner is joined, state is terminal, and all live indexes and
+        // timers are retired before the public termination can succeed. Keep
+        // the exact owner in this manager-owned future while publishing the
+        // ordered terminal batch. Waiting for that publication before waking
+        // its TU consumer would create a bounded-queue dependency cycle.
+        let terminal_delivery = async {
+            if let (Some(claim), Some(prefix_previous_state)) =
+                (publication_claim.as_ref(), publication.pending_prefix())
+            {
+                let delivery = self.events_tx.send_terminal_prefix(
+                    crate::transaction::TransactionEvent::StateChanged {
+                        transaction_id: tx_id.clone(),
+                        previous_state: prefix_previous_state,
+                        new_state: TransactionState::Terminated,
+                    },
+                    claim,
+                );
+                if !matches!(
+                    tokio::time::timeout(Duration::from_secs(1), delivery).await,
+                    Ok(Ok(()))
+                ) {
+                    self.events_tx.fail_closed_terminal_batch();
+                    publication_claim
+                        .take()
+                        .expect("terminal publication claim is live")
+                        .mark_failed_closed();
+                    return;
+                }
+            }
             let Some(publication_claim) = publication_claim else {
-                return Ok(());
+                return;
             };
             let delivered = {
                 let mut delivery = std::pin::pin!(self.events_tx.send_terminal(
@@ -954,6 +983,21 @@ impl TransactionManager {
             } else {
                 publication_claim.mark_failed_closed();
             }
+        };
+        tokio::pin!(terminal_delivery);
+        // Register the real FIFO queue reservation before waking the TU, and
+        // observe an already-closed receiver before acknowledging completion.
+        // A single unconstrained poll avoids mistaking cooperative yielding
+        // for a registered, capacity-blocked publication.
+        let first_poll = std::future::poll_fn(|cx| {
+            let mut first_poll =
+                std::pin::pin!(tokio::task::unconstrained(terminal_delivery.as_mut()));
+            std::task::Poll::Ready(first_poll.as_mut().poll(cx))
+        })
+        .await;
+        if first_poll.is_pending() {
+            operation.complete_waiter(Ok(()));
+            terminal_delivery.await;
         }
         Ok(())
     }
