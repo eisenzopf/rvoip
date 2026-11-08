@@ -5751,6 +5751,37 @@ impl MediaAdapter {
         Ok(session.to_string())
     }
 
+    /// Media sessions the RTP range can still start for a call that answers
+    /// `remote_offer`, or makes the offer when it is `None`.
+    ///
+    /// Counts what that call's media creation would reserve: one free port,
+    /// or a free RTP/RTCP pair when it keeps a separate RTCP port
+    /// ([`Config::rtcp_non_mux`](crate::api::unified::Config::rtcp_non_mux)).
+    /// Point-in-time and advisory; media creation stays the authoritative
+    /// check. `None` when calls hold no range-backed ports (signalling-only
+    /// media, or an allocator without a tracked free count).
+    pub(crate) fn available_media_port_slots(&self, remote_offer: Option<&str>) -> Option<usize> {
+        if self.signaling_only_local_port().is_some() {
+            return None;
+        }
+        self.controller.available_session_port_slots(
+            self.local_ip,
+            self.wants_separate_rtcp_port(remote_offer),
+        )
+    }
+
+    /// Calls the configured RTP range holds when every port is free, sized
+    /// for the largest reservation a call can make here (an RTP/RTCP pair
+    /// when [`Config::rtcp_non_mux`](crate::api::unified::Config::rtcp_non_mux)
+    /// applies). `None` when calls hold no range-backed ports.
+    pub(crate) fn configured_media_port_slots(&self) -> Option<usize> {
+        if self.signaling_only_local_port().is_some() {
+            return None;
+        }
+        self.controller
+            .configured_session_port_slots(self.wants_separate_rtcp_port(None))
+    }
+
     fn signaling_only_local_port(&self) -> Option<u16> {
         match self.media_mode {
             MediaMode::Enabled => None,
@@ -7200,6 +7231,92 @@ mod sdp_format_tests {
         assert_eq!(source, SocketAddr::from(([127, 0, 0, 1], rtp_port)));
         assert!(!rtcp_arrives(&peer_rtp_plus_one, Duration::from_millis(800)).await);
         call.hang_up().await;
+    }
+
+    /// Port admission counts what each call's media creation reserves: one
+    /// port for a mux call, an RTP/RTCP pair for a non-mux call with
+    /// `rtcp_non_mux`, and the RTCP half comes back once mux is accepted.
+    #[tokio::test]
+    async fn media_port_slots_follow_each_calls_rtcp_reservation() {
+        use crate::state_table::types::Role;
+        let (peer_rtp, _peer_rtcp) = bind_peer_port_pair().await;
+        let peer_port = peer_rtp.local_addr().unwrap().port();
+        let plain_offer = build_answer("peer", "127.0.0.1", peer_port);
+        let mux_offer = format!("{plain_offer}a=rtcp-mux\r\n");
+
+        // Mux: answering a mux offer takes one of the 100 ports, and splits
+        // one of the 50 pairs.
+        let call = non_mux_call(
+            "slots-mux",
+            Role::UAS,
+            27_000,
+            Some(&mux_offer),
+            |adapter| adapter.set_rtcp_non_mux(true),
+        )
+        .await;
+        assert_eq!(call.controller.allocated_port_count().await, 1);
+        assert_eq!(call.adapter.configured_media_port_slots(), Some(50));
+        assert_eq!(
+            call.adapter.available_media_port_slots(Some(&mux_offer)),
+            Some(99)
+        );
+        assert_eq!(
+            call.adapter.available_media_port_slots(Some(&plain_offer)),
+            Some(49)
+        );
+        call.hang_up().await;
+
+        // Non-mux: an offerer with `rtcp_non_mux` reserves RTP and RTP + 1.
+        let mut call = non_mux_call("slots-non-mux", Role::UAC, 27_100, None, |adapter| {
+            adapter.set_rtcp_non_mux(true)
+        })
+        .await;
+        assert_eq!(call.controller.allocated_port_count().await, 2);
+        assert_eq!(call.adapter.available_media_port_slots(None), Some(49));
+        assert_eq!(
+            call.adapter.available_media_port_slots(Some(&mux_offer)),
+            Some(98)
+        );
+
+        // Mux accepted: the RTCP port is free again, but it is no pair while
+        // the call's RTP port holds its neighbour.
+        call.offer().await;
+        call.accept_answer(&mux_offer).await;
+        assert_eq!(call.info().await.rtcp_port, None);
+        assert_eq!(call.controller.allocated_port_count().await, 1);
+        assert_eq!(
+            call.adapter.available_media_port_slots(Some(&mux_offer)),
+            Some(99)
+        );
+        assert_eq!(call.adapter.available_media_port_slots(None), Some(49));
+        call.hang_up().await;
+
+        // `rtcp_non_mux` off: every call reserves one port.
+        let call = non_mux_call("slots-off", Role::UAC, 27_200, None, |_| {}).await;
+        assert_eq!(call.adapter.configured_media_port_slots(), Some(100));
+        assert_eq!(call.adapter.available_media_port_slots(None), Some(99));
+        assert_eq!(
+            call.adapter.available_media_port_slots(Some(&plain_offer)),
+            Some(99)
+        );
+        call.hang_up().await;
+
+        // Signalling-only media holds no range-backed ports to count.
+        let mut adapter = MediaAdapter::new(
+            Arc::new(
+                rvoip_media_core::relay::controller::MediaSessionController::with_port_range(
+                    27_300, 27_399,
+                ),
+            ),
+            Arc::new(SessionStore::new()),
+            "127.0.0.1".parse().unwrap(),
+            27_300,
+            27_399,
+        );
+        assert_eq!(adapter.available_media_port_slots(None), Some(100));
+        adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        assert_eq!(adapter.available_media_port_slots(None), None);
+        assert_eq!(adapter.configured_media_port_slots(), None);
     }
 
     #[tokio::test]

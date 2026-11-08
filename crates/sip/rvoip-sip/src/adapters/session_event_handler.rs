@@ -163,8 +163,10 @@ fn exact_final_response_retires_routes(outcome: ExactFinalResponseOutcome) -> bo
 
 /// Translate a state-machine response failure into the causal ingress ACK.
 /// Only transaction-core's terminal dispositions may be acknowledged as
-/// handled: `ZeroWireRetryable` and unclassified lifecycle/action failures
-/// must reach dialog-core so it can select its one safe local fallback.
+/// handled. `ZeroWireRetryable` and unclassified lifecycle/action failures
+/// are not: the IncomingCall handler releases upper resources and then
+/// authors the one 503 itself, because dialog-core never authors a fallback
+/// after a handler error.
 fn exact_response_failure_processing_ack(
     operation: &'static str,
     disposition: Option<rvoip_sip_dialog::FinalResponseCompletionDisposition>,
@@ -230,8 +232,8 @@ where
 
 /// Retain upper failed-inbound cleanup independently from the causal ACK
 /// waiter. The future deliberately excludes lower dialog-core cleanup so the
-/// original server INVITE remains available to the caller's classified 503
-/// fallback until this waiter resolves with a negative ACK.
+/// original server INVITE remains available to the handler's classified 503,
+/// which runs after this waiter resolves.
 fn spawn_retained_failed_inbound_cleanup<F>(
     retained_tasks: &Arc<RetainedTasks>,
     future: F,
@@ -266,8 +268,7 @@ fn remove_quiesced_failed_inbound_store_lifetime(
 
 /// Quiesce and retire only session-core-owned resources. Dialog-core's dialog
 /// and exact server transaction are intentionally absent from this function;
-/// the negative processing ACK hands them back to the lower classified 503
-/// fallback, which retires them only after Written/WireUnknown.
+/// the handler's classified 503 retires them only after Written/WireUnknown.
 async fn release_failed_inbound_upper_resources_once(
     store: Arc<crate::session_store::SessionStore>,
     helpers: Arc<StateMachineHelpers>,
@@ -4058,6 +4059,99 @@ impl SessionCrossCrateEventHandler {
         observed_sessions: usize,
         configured_admission_limit: Option<usize>,
     ) -> Result<()> {
+        let outcome = self
+            .author_incoming_call_503(transaction_id, incoming_dialog_id, dialog_id_str)
+            .await?;
+        exact_final_response_result("server overload 503 response", outcome)?;
+        warn!(
+            observed_sessions,
+            configured_admission_limit,
+            soft_limit = ?self.server_call_admission_soft_limit,
+            retry_after_secs = ?self.server_overload_retry_after_secs,
+            ?outcome,
+            "Rejected inbound INVITE with 503 because server admission capacity was reached"
+        );
+        Ok(())
+    }
+
+    /// Shed an initial INVITE with 503 because the RTP range has no free port
+    /// slot for its reservation. Runs before any session state exists, so a
+    /// full range costs one stateful final response, not a doomed setup.
+    async fn reject_incoming_call_for_media_ports(
+        &self,
+        transaction_id: &str,
+        incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
+        dialog_id_str: &str,
+        remote_offer: Option<&str>,
+    ) -> Result<()> {
+        let occurrences = cleanup_diag::record_media_port_admission_reject();
+        let outcome = self
+            .author_incoming_call_503(transaction_id, incoming_dialog_id, dialog_id_str)
+            .await?;
+        exact_final_response_result("media port 503 response", outcome)?;
+        if let Some(rejected) = occurrences {
+            warn!(
+                rejected,
+                configured_port_slots = ?self.media_adapter.configured_media_port_slots(),
+                available_port_slots = ?self.media_adapter.available_media_port_slots(remote_offer),
+                retry_after_secs = ?self.server_overload_retry_after_secs,
+                "Rejected inbound INVITEs with 503 because no RTP port slot was free"
+            );
+        }
+        Ok(())
+    }
+
+    /// Answer an initial INVITE whose setup failed before any final response
+    /// (session creation, the dialog commit, media allocation or another
+    /// setup action) with 503. Dialog-core deliberately authors no fallback
+    /// after a handler error, so without this the caller got no final
+    /// response and the server transaction and dialog stayed allocated.
+    /// Transaction-core supervises exactly one final response per server
+    /// transaction, so this can never duplicate one already written. `Ok`
+    /// means the 503 reached a terminal wire disposition.
+    async fn reject_incoming_call_after_setup_failure(
+        &self,
+        transaction_id: &str,
+        incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
+        dialog_id_str: &str,
+        failure: &str,
+    ) -> Result<()> {
+        let outcome = self
+            .author_incoming_call_503(transaction_id, incoming_dialog_id, dialog_id_str)
+            .await?;
+        if let Err(error) = exact_final_response_result("setup failure 503 response", outcome) {
+            if let Some(unanswered) = cleanup_diag::record_setup_failure_unanswered() {
+                warn!(
+                    unanswered,
+                    failure,
+                    "Inbound INVITE setup failed and its 503 stopped before any transport write"
+                );
+            }
+            return Err(error);
+        }
+        if let Some(rejected) = cleanup_diag::record_setup_failure_reject() {
+            warn!(
+                rejected,
+                last_failure = failure,
+                retry_after_secs = ?self.server_overload_retry_after_secs,
+                ?outcome,
+                "Answered inbound INVITEs with 503 after their setup failed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Author one 503, with the configured overload `Retry-After`, on the
+    /// exact inbound INVITE server transaction and, once it is terminal
+    /// (written or wire-unknown), retire the dialog and transaction routes.
+    /// A zero-wire outcome keeps both routes so the negative processing ACK
+    /// still owns the one safe retry.
+    async fn author_incoming_call_503(
+        &self,
+        transaction_id: &str,
+        incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
+        dialog_id_str: &str,
+    ) -> Result<ExactFinalResponseOutcome> {
         let transaction_id = transaction_id
             .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
             .map_err(|_| anyhow::anyhow!("server admission transaction id is invalid"))?;
@@ -4099,19 +4193,9 @@ impl SessionCrossCrateEventHandler {
                 }
                 outcome
             })?;
-        let outcome = completion.await.map_err(|_| {
-            anyhow::anyhow!("server overload response child ended without completion")
-        })?;
-        exact_final_response_result("server overload 503 response", outcome)?;
-        warn!(
-            observed_sessions,
-            configured_admission_limit,
-            soft_limit = ?self.server_call_admission_soft_limit,
-            retry_after_secs = ?self.server_overload_retry_after_secs,
-            ?outcome,
-            "Rejected inbound INVITE with 503 because server admission capacity was reached"
-        );
-        Ok(())
+        completion
+            .await
+            .map_err(|_| anyhow::anyhow!("server overload response child ended without completion"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4207,6 +4291,28 @@ impl SessionCrossCrateEventHandler {
                 return Ok(());
             }
         };
+        // The session limit alone does not bound media. Ports stay leased
+        // while ended calls finish cleanup and while bind collisions sit in
+        // quarantine, so shed here, before any state exists, when the range
+        // has no slot left for this call's reservation (one port, or an
+        // RTP/RTCP pair for a non-mux offer with `rtcp_non_mux`). Concurrent
+        // setups can still race for the last ports; a media failure below
+        // then gets the same 503.
+        let free_port_slots = self
+            .media_adapter
+            .available_media_port_slots(sdp.as_deref());
+        if free_port_slots == Some(0) {
+            drop(admission_guard);
+            self.reject_incoming_call_for_media_ports(
+                transaction_id,
+                incoming_dialog_id.as_ref(),
+                &dialog_id_str,
+                sdp.as_deref(),
+            )
+            .await?;
+            setup_guard.finish_success();
+            return Ok(());
+        }
 
         // The transport already parsed these exact bytes into the server
         // transaction's shared request; observers below take that request.
@@ -4259,10 +4365,24 @@ impl SessionCrossCrateEventHandler {
                     setup_guard.finish_success();
                     return Ok(());
                 }
-                return Err(SessionError::InternalError(format!(
-                    "Failed to create session: {error}"
-                ))
-                .into());
+                // No session exists, so there is nothing upper to release;
+                // the caller still needs exactly one final response.
+                let failure = format!("Failed to create session: {error}");
+                let reject_result = self
+                    .reject_incoming_call_after_setup_failure(
+                        transaction_id,
+                        incoming_dialog_id.as_ref(),
+                        &dialog_id_str,
+                        &failure,
+                    )
+                    .await;
+                setup_guard.finish_failure();
+                if let Err(reject_error) = reject_result {
+                    return Err(
+                        SessionError::InternalError(format!("{failure}; {reject_error}")).into(),
+                    );
+                }
+                return Ok(());
             }
         };
         let session_remote_sdp = created_session.remote_sdp.clone();
@@ -4283,7 +4403,11 @@ impl SessionCrossCrateEventHandler {
             dialog_id: our_dialog_id,
             p_asserted_identity: p_asserted_identity.clone(),
         };
-        self.commit_exact_inbound_dialog(&lifecycle, our_dialog_id, incoming_info.clone())?;
+        // A registry commit failure takes the same exact upper cleanup and 503
+        // as a failed setup action below, instead of leaving the session,
+        // dialog and server transaction without a final response.
+        let commit_result =
+            self.commit_exact_inbound_dialog(&lifecycle, our_dialog_id, incoming_info.clone());
 
         let event_type = if self.fast_auto_accept_incoming_calls {
             EventType::IncomingCallAutoAccept {
@@ -4297,13 +4421,18 @@ impl SessionCrossCrateEventHandler {
             }
         };
 
-        let process_result = process_inbound_response_event_exact_on_fresh_task(
-            Arc::clone(&self.state_machine),
-            lifecycle.clone(),
-            event_type,
-            inbound_response,
-        )
-        .await;
+        let process_result = match commit_result {
+            Ok(()) => {
+                process_inbound_response_event_exact_on_fresh_task(
+                    Arc::clone(&self.state_machine),
+                    lifecycle.clone(),
+                    event_type,
+                    inbound_response,
+                )
+                .await
+            }
+            Err(error) => Err(error.into()),
+        };
         if let Err(error) = process_result {
             let disposition = crate::state_machine::actions::exact_sip_response_failure_disposition(
                 error.as_ref(),
@@ -4334,15 +4463,33 @@ impl SessionCrossCrateEventHandler {
                 let cleanup_result = completion.await.map_err(|_| {
                     anyhow::anyhow!("failed inbound INVITE upper cleanup ended without completion")
                 });
+                // Upper resources, media ports included, are released: answer
+                // the caller on the exact server transaction. Dialog-core
+                // authors no fallback after a handler error, so this 503 is
+                // the only final response the INVITE can get. It is sent even
+                // when upper cleanup stayed incomplete: that is a local leak
+                // to report, never a reason to leave the caller hanging.
+                let reject_result = self
+                    .reject_incoming_call_after_setup_failure(
+                        transaction_id,
+                        incoming_dialog_id.as_ref(),
+                        &dialog_id_str,
+                        &detail,
+                    )
+                    .await;
                 setup_guard.finish_failure();
-                match cleanup_result {
-                    Ok(Ok(())) => return Err(processing_error),
-                    Ok(Err(cleanup_error)) => {
+                match (cleanup_result, reject_result) {
+                    (Ok(Ok(())), Ok(())) => return Ok(()),
+                    (Ok(Ok(())), Err(reject_error)) => {
+                        debug!(%reject_error, "setup failure 503 stayed zero-wire");
+                        return Err(processing_error);
+                    }
+                    (Ok(Err(cleanup_error)), _) => {
                         return Err(anyhow::anyhow!(
                             "{processing_error}; exact upper cleanup remained incomplete: {cleanup_error}"
                         ));
                     }
-                    Err(cleanup_error) => {
+                    (Err(cleanup_error), _) => {
                         return Err(anyhow::anyhow!("{processing_error}; {cleanup_error}"));
                     }
                 }
@@ -8231,6 +8378,74 @@ Content-Length: {}\r\n\r\n\
         assert!(!handler.contains("release_exact_local_resources("));
         assert!(handler.contains("return Err(processing_error)"));
         assert!(handler.contains("Fast auto-accepted inbound call"));
+    }
+
+    #[test]
+    fn failed_inbound_setup_always_ends_with_one_503() {
+        let source = include_str!("session_event_handler.rs");
+        let handler = source
+            .split("    async fn handle_incoming_call_parts(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("    async fn handle_call_established_parts(")
+                    .next()
+            })
+            .expect("incoming INVITE handler source");
+
+        // Port admission sheds before any session state exists, sized for the
+        // reservation this INVITE's offer makes.
+        let port_check = handler
+            .find("available_media_port_slots(sdp.as_deref());")
+            .expect("media port admission check");
+        assert!(handler.contains("if free_port_slots == Some(0) {"));
+        let create = handler
+            .find("create_session_initialized(")
+            .expect("session creation");
+        assert!(port_check < create);
+        assert!(handler.contains("reject_incoming_call_for_media_ports("));
+
+        // Session-creation, registry-commit and setup-action failures all
+        // reach the 503; the action-failure 503 follows upper cleanup.
+        assert_eq!(
+            handler
+                .matches("reject_incoming_call_after_setup_failure(")
+                .count(),
+            2
+        );
+        assert!(handler.contains("let process_result = match commit_result"));
+        let cleanup = handler
+            .find("spawn_retained_failed_inbound_cleanup(")
+            .expect("upper cleanup");
+        let reject = handler
+            .rfind("reject_incoming_call_after_setup_failure(")
+            .expect("setup failure 503");
+        assert!(cleanup < reject, "503 must follow upper resource release");
+        assert!(!handler.contains(
+            "self.commit_exact_inbound_dialog(&lifecycle, our_dialog_id, incoming_info.clone())?"
+        ));
+
+        // Every resource-shedding 503 carries the configured Retry-After and
+        // retires its routes only after a terminal wire outcome.
+        let author = source
+            .split("    async fn author_incoming_call_503(")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    }\n").next())
+            .expect("503 author source");
+        assert!(author.contains("server_overload_retry_after_secs"));
+        assert!(author.contains("TypedHeader::RetryAfter"));
+        assert!(author.contains("exact_final_response_retires_routes(outcome)"));
+        for shed in [
+            "    async fn reject_and_cleanup_incoming_call_for_overload(",
+            "    async fn reject_incoming_call_for_media_ports(",
+            "    async fn reject_incoming_call_after_setup_failure(",
+        ] {
+            let body = source
+                .split(shed)
+                .nth(1)
+                .and_then(|tail| tail.split("\n    }\n").next())
+                .expect("shedding source");
+            assert!(body.contains(".author_incoming_call_503("), "{shed}");
+        }
     }
 
     #[tokio::test]

@@ -11287,6 +11287,24 @@ impl UnifiedCoordinator {
             media_adapter_inner.set_stun_server(config.stun_server.clone());
         }
         let media_adapter = Arc::new(media_adapter_inner);
+        // Inbound admission also sheds with 503 when the RTP range has no free
+        // slot, so a session limit above the range's slot count is never
+        // reached. Make that visible at startup.
+        if let (Some(admission_limit), Some(port_slots)) = (
+            config.server_call_admission_limit,
+            media_adapter.configured_media_port_slots(),
+        ) {
+            if port_slots < admission_limit {
+                tracing::warn!(
+                    admission_limit,
+                    port_slots,
+                    media_port_start = config.media_port_start,
+                    media_port_end = config.media_port_end,
+                    "RTP range holds fewer calls than the server admission limit; \
+                     media port admission will shed new INVITEs with 503 first"
+                );
+            }
+        }
         // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
         // onto the API bus whenever media-core signals a DTMF event.
         media_adapter
