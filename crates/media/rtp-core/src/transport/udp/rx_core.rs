@@ -132,6 +132,13 @@ impl RxCore {
         check_active && !self.cfg.active_state.load(Ordering::Acquire)
     }
 
+    /// The loop owns everything a lane-table entry needs: the session's
+    /// inline ingress was adopted (at the first datagram it could be given).
+    #[inline]
+    pub(in crate::transport::udp) fn graduation_ready(&self) -> bool {
+        self.inline.is_some()
+    }
+
     /// A receive error: logged and published, as the loop always did (the
     /// loop then pauses 10 ms before it receives again).
     pub(in crate::transport::udp) fn on_error(&self, e: std::io::Error) {
@@ -584,4 +591,29 @@ impl RxCore {
             }
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: the drop counters of the last [`RxCore`] dropped on this
+    /// thread (SRTP failures, malformed RTP, non-RTP drops), so a dual run
+    /// can compare them after either driver ended the loop.
+    static LAST_DROPPED: std::cell::Cell<Option<[u64; 3]>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+impl Drop for RxCore {
+    fn drop(&mut self) {
+        let counts = [
+            self.srtp_unprotect_failures,
+            self.malformed_rtp_drop_count,
+            self.non_rtp_drop_count,
+        ];
+        let _ = LAST_DROPPED.try_with(|last| last.set(Some(counts)));
+    }
+}
+
+#[cfg(test)]
+pub(in crate::transport::udp) fn take_last_dropped_counts() -> Option<[u64; 3]> {
+    LAST_DROPPED.with(|last| last.take())
 }

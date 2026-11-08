@@ -347,9 +347,32 @@ use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;
 use crate::Result;
 
+/// A graduated receive loop as a lane-table entry.
+mod callback_rx;
 /// The receive loop's call state and per-datagram step.
 mod rx_core;
 use rx_core::{RxConfig, RxCore};
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: reads of a receive socket that found it empty (`WouldBlock`
+    /// from a read the receive loop made without awaiting readiness), on
+    /// this thread.
+    static EMPTY_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A receive loop's read found its socket empty (counted for tests only).
+#[inline(always)]
+fn note_empty_read() {
+    #[cfg(test)]
+    EMPTY_READS.with(|reads| reads.set(reads.get() + 1));
+}
+
+/// Tests: [`note_empty_read`]'s count on this thread.
+#[cfg(test)]
+fn empty_reads_on_this_thread() -> u64 {
+    EMPTY_READS.with(std::cell::Cell::get)
+}
 
 /// Executor v2 state owned by the socket's receive loop: the session's
 /// inline ingress, the one owner timer that serves every inline deadline
@@ -364,6 +387,10 @@ struct InlineRx {
     /// Receives taken back-to-back without parking on the socket.
     drained: usize,
     counters: InlineOwnerCounters,
+    /// The loop graduated into its lane's table, which files the owner
+    /// deadline itself; the owner timer keeps its bookkeeping (and its
+    /// counters) without a runtime timer.
+    callback: bool,
 }
 
 /// What woke the inline receive loop.
@@ -380,16 +407,51 @@ impl InlineRx {
             timer: OwnerTimer::new(),
             drained: 0,
             counters: InlineOwnerCounters::new(),
+            callback: false,
         }
     }
 
     /// Point the owner timer at the earliest inline deadline. The runtime
     /// timer is re-registered only when that deadline moved earlier or the
     /// timer fired (see `OwnerTimer`).
+    ///
+    /// On a lane-table entry: the same bookkeeping, without the runtime
+    /// timer (the table files [`OwnerTimer::deadline`] on its wheel).
     fn rearm(&mut self, now: Instant) {
         let deadline = self.ingress.next_deadline(now);
-        let outcome = self.timer.arm(deadline, now);
+        let outcome = if self.callback {
+            self.timer.note(deadline, now)
+        } else {
+            self.timer.arm(deadline, now)
+        };
         self.counters.armed(outcome);
+    }
+
+    /// The loop's state moves into its lane's table.
+    fn graduate(&mut self) {
+        self.callback = true;
+        self.timer.unback();
+    }
+
+    /// The loop's state is back in its async loop, which waits on the owner
+    /// timer again.
+    fn degrade(&mut self, now: Instant) {
+        self.callback = false;
+        let outcome = self.timer.reback(now);
+        self.counters.armed(outcome);
+    }
+
+    /// What [`Self::next_wake`] does after its budget yield, for an entry
+    /// served again after the drain budget stopped it: whether a due owner
+    /// deadline was served.
+    fn resume_after_yield(&mut self) -> bool {
+        self.drained = 0;
+        self.counters.budget_yield();
+        if self.timer.is_due(crate::media_clock::now_std()) {
+            self.on_timer();
+            return true;
+        }
+        false
     }
 
     fn on_timer(&mut self) {
@@ -429,7 +491,7 @@ impl InlineRx {
                 self.drained += 1;
                 return InlineWake::Received(Ok(received));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => note_empty_read(),
             Err(error) => {
                 self.drained = 0;
                 return InlineWake::Received(Err(error));
@@ -476,28 +538,71 @@ fn adopt_inline_ingress(
 struct ReceiveLoop {
     config: RxConfig,
     socket: Arc<UdpSocket>,
+    /// The loop may move into its lane's table
+    /// ([`MediaExecutorConfig::callback_rx_kernel`]).
+    ///
+    /// [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
+    callback_kernel: bool,
 }
 
 /// The RTP receive loop of a transport. Every received datagram goes
 /// through [`RxCore::on_datagram`] (the loop body, inlined here).
 ///
+/// With [`MediaExecutorConfig::callback_rx_kernel`], once the loop owns its
+/// call state (the inline ingress is adopted) and runs on a lane with a
+/// table, it *graduates*: its state moves into a lane-table entry that the
+/// lane serves from its socket's readiness and its owner deadline, and this
+/// future only waits for the entry to come back (it stopped, or needs this
+/// async path for a receive error). With the switch off nothing graduates
+/// and this is the loop as it was.
+///
 /// The future captures its inputs once (the call state is not stored twice,
-/// as the argument and as the core) and places the core on its first poll,
-/// on the thread that polls it.
+/// as the argument and as the core), places the core on its first poll, on
+/// the thread that polls it, and boxes the graduation future, so its state
+/// (a whole [`callback_rx::RxCall`]) is not part of this future's layout.
+///
+/// [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
 fn receive_loop(parts: ReceiveLoop) -> impl std::future::Future<Output = ()> + Send + 'static {
     let ReceiveLoop {
         config,
         socket: rtp_socket,
+        callback_kernel,
     } = parts;
     let mut core = RxCore::unplaced(config);
     async move {
         core.place();
         debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
+        // Whether this loop may still graduate (cleared for good when its
+        // lane has no table).
+        let mut graduate = callback_kernel;
         loop {
             // Check if we should continue running (hot call state: only when
             // the doorbell rang since the last check).
             if core.stopped() {
                 break;
+            }
+
+            // Graduate between two waits, where the loop holds no datagram.
+            if graduate && core.graduation_ready() {
+                let call = callback_rx::RxCall::new(core, Arc::clone(&rtp_socket));
+                match Box::pin(callback_rx::run_on_lane(call)).await {
+                    // The entry stopped (the transport's `active` check),
+                    // panicked or lost its lane: the loop ends.
+                    callback_rx::Graduated::Ended => return,
+                    callback_rx::Graduated::Back { call, refused } => {
+                        let (back, error) = (*call).into_loop();
+                        core = back;
+                        if refused {
+                            graduate = false;
+                        }
+                        if let Some(e) = error {
+                            core.on_error(e);
+                            // Short delay before retrying
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+                continue;
             }
 
             // Receive packet
@@ -1261,11 +1366,15 @@ impl UdpRtpTransport {
             // become wrong later.
             owner_srtp: crate::executor::owner_srtp_enabled() && self.rtcp_socket.load().is_none(),
         };
+        // A v2 loop hosted on its lane poller may move into its lane's table
+        // once it owns its call state (read once per loop).
+        let callback_kernel = callback_rx::switch_for_loop(on_lane);
         let rtp_receiver_future = memory_tracked(
             "rtp_core.udp_transport.rtp_receiver_task",
             receive_loop(ReceiveLoop {
                 config,
                 socket: rtp_socket,
+                callback_kernel,
             }),
         );
         let rtp_receiver = if on_lane {

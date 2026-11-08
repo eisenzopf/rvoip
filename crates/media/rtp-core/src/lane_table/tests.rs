@@ -373,6 +373,7 @@ fn pass_and_entry_budgets_carry_the_rest_to_the_next_pass() {
             returned: 0,
             // Hot call state prefetching has its own test.
             prefetched: fired.2.prefetched,
+            rx_calls: 0,
         },
         "over its budget: carried"
     );
@@ -696,4 +697,461 @@ fn table_counters_publish_on_flush_and_drop() {
     let late_after: u64 = after.late.iter().sum();
     let late_before: u64 = before.late.iter().sum();
     assert!(late_after >= late_before + 3, "every fire is bucketed");
+}
+
+// ---- receive entries ----
+
+/// What scripted receive sources saw, shared with the test.
+#[derive(Default)]
+struct RxLog {
+    /// (id, from the ready list)
+    serves: Vec<(u32, bool)>,
+    left: Vec<u32>,
+    dropped: Vec<u32>,
+}
+
+type SharedWaker = Arc<Mutex<Option<Waker>>>;
+
+/// A receive source whose calls return `plan` in turn (the last one
+/// repeats). It keeps a clone of its waker in `waker` for the test.
+struct ScriptedRx {
+    id: u32,
+    plan: Vec<RxNext>,
+    panic_on_serve: bool,
+    wake: Option<RxWake>,
+    waker: SharedWaker,
+    log: Arc<Mutex<RxLog>>,
+}
+
+impl ScriptedRx {
+    fn new(id: u32, plan: Vec<RxNext>, log: &Arc<Mutex<RxLog>>) -> Self {
+        Self {
+            id,
+            plan,
+            panic_on_serve: false,
+            wake: None,
+            waker: Arc::new(Mutex::new(None)),
+            log: Arc::clone(log),
+        }
+    }
+
+    fn next(&mut self) -> RxNext {
+        if self.plan.len() > 1 {
+            self.plan.remove(0)
+        } else {
+            self.plan[0]
+        }
+    }
+}
+
+impl LaneRxSource for ScriptedRx {
+    fn attach(&mut self, wake: RxWake) {
+        *self.waker.lock().unwrap() = Some(wake.waker.clone());
+        self.wake = Some(wake);
+    }
+
+    fn serve(&mut self, ready: bool) -> RxNext {
+        if ready {
+            if let Some(wake) = self.wake.as_ref() {
+                wake.begin_serve();
+            }
+        }
+        self.log.lock().unwrap().serves.push((self.id, ready));
+        if self.panic_on_serve {
+            panic!("scripted receive handler panic");
+        }
+        let next = self.next();
+        if matches!(next, RxNext::More(_)) {
+            if let Some(wake) = self.wake.as_ref() {
+                wake.waker.wake_by_ref();
+            }
+        }
+        next
+    }
+
+    fn on_leave(&mut self) {
+        self.log.lock().unwrap().left.push(self.id);
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send> {
+        self
+    }
+}
+
+impl Drop for ScriptedRx {
+    fn drop(&mut self) {
+        if let Ok(mut log) = self.log.lock() {
+            log.dropped.push(self.id);
+        }
+    }
+}
+
+fn install_rx_on(lane: &mut ManualLane, source: ScriptedRx) -> (LaneRxHandle, SharedWaker) {
+    let waker = Arc::clone(&source.waker);
+    let handle = lane.enter(|| {
+        install_rx(Box::new(source))
+            .ok()
+            .expect("a table is current")
+    });
+    (handle, waker)
+}
+
+fn rx_finished(handle: &mut LaneRxHandle) -> Option<Option<LaneRxReturn>> {
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    let mut finished = Box::pin(handle.finished());
+    match finished.as_mut().poll(&mut cx) {
+        Poll::Ready(value) => Some(value),
+        Poll::Pending => None,
+    }
+}
+
+fn wake(waker: &SharedWaker) {
+    waker
+        .lock()
+        .unwrap()
+        .as_ref()
+        .expect("attached")
+        .wake_by_ref();
+}
+
+/// No lost wakeup, receive side: an installed entry is served in its install
+/// pass; a wake between passes marks it once (and the table reports it
+/// pending until a pass serves it); a wake during a pass is served before
+/// the pass ends; a wake from another thread arrives through the mailbox.
+#[test]
+fn a_ready_receive_entry_is_served_once_per_mark_and_never_lost() {
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let (mut handle, waker) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(1, vec![RxNext::Wait(None)], &log),
+    );
+    assert!(lane.rx_pending(), "installed: marked ready");
+    assert_eq!(
+        lane.pass_with_rx(start, || {}),
+        (0, 1),
+        "served in the install pass"
+    );
+    assert!(!lane.rx_pending());
+    assert_eq!(lane.pass_with_rx(start, || {}), (0, 0), "nothing marked");
+    // Two wakes between passes: one mark, one service.
+    wake(&waker);
+    wake(&waker);
+    assert!(lane.rx_pending());
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 1);
+    assert!(!lane.rx_pending());
+    // A wake inside a pass (a readiness edge dispatched mid-pass) is served
+    // before the pass ends.
+    let (_, calls) = lane.pass_with_rx(start, || wake(&waker));
+    assert_eq!(calls, 1);
+    // A wake from another thread posts through the mailbox: due work.
+    let remote = Arc::clone(&waker);
+    std::thread::spawn(move || wake(&remote)).join().unwrap();
+    assert!(lane.rx_pending());
+    assert!(lane
+        .enter(|| with_current(|table| table.has_due(start)))
+        .unwrap());
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 1);
+    assert!(!lane.rx_pending());
+    let serves = log.lock().unwrap().serves.clone();
+    assert_eq!(serves, vec![(1, true); 4]);
+    assert!(rx_finished(&mut handle).is_none(), "still installed");
+}
+
+/// A wake between passes wakes the poller (a parked lane comes back for
+/// it); a wake during a pass does not (the pass serves it).
+#[test]
+fn a_receive_wake_between_passes_wakes_the_poller() {
+    use std::sync::atomic::AtomicUsize;
+    struct Count(AtomicUsize);
+    impl std::task::Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let count = Arc::new(Count(AtomicUsize::new(0)));
+    let poller = Waker::from(Arc::clone(&count));
+    let (_handle, waker) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(1, vec![RxNext::Wait(None)], &log),
+    );
+    lane.pass_with_waker(start, &poller, || {});
+    let woken = count.0.load(Ordering::SeqCst);
+    lane.pass_with_waker(start, &poller, || wake(&waker));
+    assert_eq!(count.0.load(Ordering::SeqCst), woken, "served in the pass");
+    wake(&waker);
+    assert_eq!(
+        count.0.load(Ordering::SeqCst),
+        woken + 1,
+        "between passes: the poller is woken"
+    );
+    assert_eq!(lane.pass_with_waker(start, &poller, || {}).1, 1);
+}
+
+/// Receive deadlines: a `Wait(deadline)` is filed on the wheel (on the tick
+/// grid when there is one) and served when due, never before; a moved
+/// deadline is moved, not duplicated.
+#[test]
+fn receive_deadlines_are_filed_and_served_never_early() {
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, Some(ms(2)));
+    let plan = vec![
+        RxNext::Wait(Some(start + ms(5))),
+        RxNext::Wait(Some(start + ms(9))),
+        RxNext::Wait(None),
+    ];
+    let (_handle, _waker) = install_rx_on(&mut lane, ScriptedRx::new(1, plan, &log));
+    lane.pass(start, || {});
+    assert_eq!(lane.next_deadline(), Some(start + ms(6)), "the 2 ms grid");
+    run(&mut lane, start + ms(1), start + ms(5), ms(1));
+    assert_eq!(
+        log.lock().unwrap().serves.len(),
+        1,
+        "not before the boundary"
+    );
+    lane.pass(start + ms(6), || {});
+    assert_eq!(log.lock().unwrap().serves, vec![(1, true), (1, false)]);
+    assert_eq!(lane.next_deadline(), Some(start + ms(10)));
+    run(&mut lane, start + ms(7), start + ms(30), ms(1));
+    assert_eq!(log.lock().unwrap().serves.len(), 3);
+    assert_eq!(lane.next_deadline(), None, "nothing left filed");
+    assert_eq!(
+        lane.table.as_ref().map(|table| table.wheel_lengths()),
+        Some((0, 0))
+    );
+}
+
+/// Receive budgets: a pass serves at most `CALLBACK_RX_SERVICES_PER_PASS`
+/// ready entries; the rest stay ready (first in the next pass) and the pass
+/// reports them; an entry that returns `More` is served again in a later
+/// pass, after the others.
+#[test]
+fn receive_services_are_budgeted_per_pass_and_carry_in_order() {
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let count = CALLBACK_RX_SERVICES_PER_PASS + 44;
+    let mut handles = Vec::new();
+    for id in 0..count {
+        handles.push(install_rx_on(
+            &mut lane,
+            ScriptedRx::new(id, vec![RxNext::Wait(None)], &log),
+        ));
+    }
+    let carried = lane
+        .enter(|| {
+            with_current(|table| {
+                let report = table.serve_ready();
+                assert_eq!(report.rx_calls, u64::from(CALLBACK_RX_SERVICES_PER_PASS));
+                assert_eq!(report.carried, 44);
+                assert!(table.rx_pending());
+                table.carried()
+            })
+        })
+        .unwrap();
+    assert_eq!(carried, 44);
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 44, "the rest, next pass");
+    let order: Vec<u32> = log
+        .lock()
+        .unwrap()
+        .serves
+        .iter()
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(
+        order,
+        (0..count).collect::<Vec<_>>(),
+        "FIFO across the carry"
+    );
+    // `More`: served once per pass until it parks.
+    log.lock().unwrap().serves.clear();
+    let plan = vec![RxNext::More(None), RxNext::More(None), RxNext::Wait(None)];
+    let (_greedy, _waker) = install_rx_on(&mut lane, ScriptedRx::new(999, plan, &log));
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 1);
+    assert!(lane.rx_pending(), "it asked for more");
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 1);
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 1);
+    assert!(!lane.rx_pending());
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 0);
+}
+
+/// A panicking receive handler poisons only its entry: its state is dropped
+/// (no `on_leave`), its supervisor is told, and a neighbour keeps its
+/// deadline and its service.
+#[test]
+fn a_panicking_receive_handler_poisons_only_its_entry() {
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let (mut good_handle, good_waker) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(2, vec![RxNext::Wait(Some(start + ms(50)))], &log),
+    );
+    let mut bad = ScriptedRx::new(3, vec![RxNext::Wait(None)], &log);
+    bad.panic_on_serve = true;
+    let (mut bad_handle, _bad_waker) = install_rx_on(&mut lane, bad);
+    let before = callback_lane_counters();
+    assert_eq!(
+        lane.pass_with_rx(start, || {}).1,
+        2,
+        "both served in their install pass"
+    );
+    assert!(matches!(
+        rx_finished(&mut bad_handle),
+        Some(Some(LaneRxReturn::Poisoned))
+    ));
+    assert!(callback_lane_counters().panics > before.panics);
+    {
+        let log = log.lock().unwrap();
+        assert!(log.dropped.contains(&3), "its state was dropped");
+        assert!(!log.left.contains(&3), "no on_leave after a panic");
+        assert!(!log.dropped.contains(&2));
+    }
+    assert_eq!(lane.len(), 1);
+    assert_eq!(
+        lane.next_deadline(),
+        Some(start + ms(50)),
+        "the neighbour's deadline stays"
+    );
+    wake(&good_waker);
+    assert_eq!(lane.pass_with_rx(start + ms(1), || {}).1, 1);
+    assert!(rx_finished(&mut good_handle).is_none());
+    lane.shut_down();
+    assert!(callback_lane_counters().rx_poisoned > before.rx_poisoned);
+}
+
+/// Receive teardown: dropping the supervisor's handle in a pass on its lane
+/// retires the entry at once (`on_leave`, state dropped, deadline unfiled);
+/// off the lane the retirement is posted and applied before the next pass
+/// serves anything; `Stopped` and `Escalate` hand the source back with
+/// `on_leave` run; lane shutdown drops the rest.
+#[test]
+fn receive_entries_leave_by_every_path_and_release_everything() {
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let before = callback_lane_counters();
+    let (on_lane, _) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(1, vec![RxNext::Wait(Some(start + ms(40)))], &log),
+    );
+    let (off_lane, off_waker) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(2, vec![RxNext::Wait(Some(start + ms(40)))], &log),
+    );
+    let (mut stops, _) = install_rx_on(&mut lane, ScriptedRx::new(3, vec![RxNext::Stopped], &log));
+    let (mut escalates, _) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(4, vec![RxNext::Escalate("socket_error")], &log),
+    );
+    let (mut lane_goes, _) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(5, vec![RxNext::Wait(Some(start + ms(40)))], &log),
+    );
+    lane.pass(start, || {});
+    match rx_finished(&mut stops) {
+        Some(Some(LaneRxReturn::Stopped(source))) => {
+            assert!(source.into_any().downcast::<ScriptedRx>().is_ok());
+        }
+        _ => panic!("stopped"),
+    }
+    assert!(matches!(
+        rx_finished(&mut escalates),
+        Some(Some(LaneRxReturn::Escalated(_, "socket_error")))
+    ));
+    assert_eq!(lane.len(), 3);
+    // On its lane, inside a pass: synchronous.
+    lane.pass(start + ms(1), || drop(on_lane));
+    assert_eq!(lane.len(), 2);
+    // Off the lane: posted; applied before anything is served, even a wake
+    // that raced it.
+    drop(off_lane);
+    wake(&off_waker);
+    lane.pass(start + ms(2), || {});
+    assert_eq!(lane.len(), 1);
+    // Lane shutdown: the source is dropped, its supervisor sees `None`.
+    lane.shut_down();
+    assert!(matches!(rx_finished(&mut lane_goes), Some(None)));
+    let log = log.lock().unwrap();
+    let served_2: usize = log.serves.iter().filter(|(id, _)| *id == 2).count();
+    assert_eq!(served_2, 1, "not served after its retirement was posted");
+    for id in 1..=4 {
+        assert!(log.left.contains(&id), "{id} left the table");
+    }
+    for id in 1..=5 {
+        assert!(log.dropped.contains(&id), "{id} was dropped");
+    }
+    let after = callback_lane_counters();
+    assert!(after.rx_installs >= before.rx_installs + 5);
+    assert!(after.rx_stopped > before.rx_stopped);
+    assert!(after.rx_escalated > before.rx_escalated);
+    assert!(after.rx_retired >= before.rx_retired + 2);
+}
+
+/// Marks and mailbox posts of a retired entry never reach a later occupant
+/// of its slot, and receive and TX entries never retire each other.
+#[test]
+fn stale_receive_marks_are_fenced_by_generation() {
+    let log = Arc::new(Mutex::new(RxLog::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let (first, first_waker) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(1, vec![RxNext::Wait(None)], &log),
+    );
+    lane.pass(start, || drop(first));
+    let (_second, _) = install_rx_on(
+        &mut lane,
+        ScriptedRx::new(2, vec![RxNext::Wait(None)], &log),
+    );
+    lane.pass(start, || {});
+    let slots: Vec<(u32, u32)> = lane
+        .enter(|| {
+            with_current(|table| {
+                table
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| entry.in_use)
+                    .map(|(slot, entry)| (slot as u32, entry.generation))
+                    .collect()
+            })
+        })
+        .unwrap();
+    assert_eq!(slots.len(), 1);
+    assert_eq!(slots[0].0, 0, "the slot was reused");
+    log.lock().unwrap().serves.clear();
+    // The first occupant's waker (still registered somewhere) fires, on the
+    // lane and from another thread: nothing is served.
+    wake(&first_waker);
+    let remote = Arc::clone(&first_waker);
+    std::thread::spawn(move || wake(&remote)).join().unwrap();
+    assert_eq!(lane.pass_with_rx(start, || {}).1, 0);
+    assert!(log.lock().unwrap().serves.is_empty());
+    // A TX retirement for the receive entry's slot is refused.
+    let refused = lane
+        .enter(|| with_current(|table| table.retire(slots[0].0, slots[0].1, RetireReason::Control)))
+        .unwrap();
+    assert!(refused.is_none());
+    assert_eq!(lane.len(), 1);
+}
+
+/// Receive entries cost a table nothing until one is installed: no receive
+/// work in a pass, nothing pending, and a TX fire is unchanged.
+#[test]
+fn without_receive_entries_a_pass_does_no_receive_work() {
+    let log = Arc::new(Mutex::new(Log::default()));
+    let start = Instant::now();
+    let mut lane = ManualLane::new(start, None);
+    let _handle = install(&mut lane, Scripted::new(1, start, ms(20), 3, &log), start);
+    assert_eq!(lane.pass_with_rx(start, || {}), (1, 0));
+    assert!(!lane.rx_pending());
+    let seen = lane.enter(|| with_current(|table| table.rx_seen)).unwrap();
+    assert!(!seen);
 }

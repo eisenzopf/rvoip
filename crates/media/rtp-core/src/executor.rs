@@ -318,6 +318,19 @@ pub struct MediaExecutorConfig {
     /// [`MediaLanes::Dedicated`]: crate::task_runtime::MediaLanes::Dedicated
     pub callback_send: bool,
     // ---- End lane table callback send ----
+    // ---- Lane table receive ----
+    /// A v2 receive loop hosted on its lane poller moves into its lane's
+    /// table once it owns its call state (the session's inline ingress was
+    /// adopted): the lane calls it when its socket is readable and when its
+    /// owner deadline is due, from the table's ready list and timing wheel,
+    /// with no hosted-future poll, waker re-registration or `select!` per
+    /// datagram. Every datagram goes through the async loop's own
+    /// per-packet step, in the same order. The loop's future stays as the
+    /// entry's supervisor (close, a receive error, teardown). Needs
+    /// [`Self::callback_send`] (the lane table); without it it reads as off,
+    /// and on a lane without a table the loop stays a hosted future.
+    pub callback_rx_kernel: bool,
+    // ---- End lane table receive ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -362,6 +375,8 @@ impl MediaExecutorConfig {
             session_owner_placement: false,
             // Lane table callback send.
             callback_send: false,
+            // Lane table receive.
+            callback_rx_kernel: false,
         }
     }
 
@@ -401,6 +416,8 @@ impl MediaExecutorConfig {
             session_owner_placement: true,
             // Lane table callback send.
             callback_send: true,
+            // Lane table receive.
+            callback_rx_kernel: true,
         }
     }
 
@@ -567,6 +584,15 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane table callback send ----
+    // ---- Lane table receive ----
+
+    /// Set [`Self::callback_rx_kernel`].
+    pub fn with_callback_rx_kernel(mut self, enabled: bool) -> Self {
+        self.callback_rx_kernel = enabled;
+        self
+    }
+
+    // ---- End lane table receive ----
 
     // ---- Hot call state ----
 
@@ -780,6 +806,15 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane table callback send ----
+    // ---- Lane table receive ----
+
+    /// Whether receive loops started now move into their lane's table once
+    /// they own their call state (needs the lane table).
+    pub fn callback_rx_kernel_active(&self) -> bool {
+        self.callback_send_active() && self.callback_rx_kernel
+    }
+
+    // ---- End lane table receive ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -1069,6 +1104,16 @@ pub fn callback_send_enabled() -> bool {
 }
 
 // ---- End lane table callback send ----
+// ---- Lane table receive ----
+
+/// Whether a receive loop started now may move into its lane's table
+/// ([`MediaExecutorConfig::callback_rx_kernel_active`]). Read once per
+/// receive loop, when the transport starts receiving.
+pub fn callback_rx_kernel_enabled() -> bool {
+    with_config(MediaExecutorConfig::callback_rx_kernel_active)
+}
+
+// ---- End lane table receive ----
 
 // ---- Hot call state ----
 
@@ -1747,6 +1792,46 @@ impl OwnerTimer {
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {
         self.armed.is_some_and(|deadline| deadline <= now)
+    }
+
+    /// [`Self::arm`]'s bookkeeping (and outcome, for the counters) for an
+    /// owner whose deadline a lane table files on its own wheel: no runtime
+    /// timer is created or moved.
+    pub(crate) fn note(&mut self, deadline: Option<Instant>, now: Instant) -> ArmOutcome {
+        if deadline == self.armed {
+            return ArmOutcome::Unchanged;
+        }
+        self.armed = deadline;
+        let Some(deadline) = deadline else {
+            return ArmOutcome::Cleared;
+        };
+        let extends = self.live.is_some_and(|live| live > now && deadline >= live);
+        self.live = Some(deadline);
+        if extends {
+            ArmOutcome::Extended
+        } else {
+            ArmOutcome::Registered
+        }
+    }
+
+    /// A lane table files this owner's deadline from now on: drop the
+    /// runtime timer (its lane-clock entry goes with it). The bookkeeping
+    /// stays, so [`Self::note`] continues where [`Self::arm`] stopped.
+    pub(crate) fn unback(&mut self) {
+        self.sleep = None;
+    }
+
+    /// The owner's async loop waits on this timer again: register whatever
+    /// is armed with a runtime timer.
+    pub(crate) fn reback(&mut self, now: Instant) -> ArmOutcome {
+        let armed = self.armed.take();
+        self.live = None;
+        self.arm(armed, now)
+    }
+
+    /// The armed deadline (the instant a lane table files).
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.armed
     }
 }
 
@@ -2805,6 +2890,92 @@ mod tests {
         assert!(!accessor(
             MediaExecutorConfig::v1().with_callback_send(true)
         ));
+    }
+
+    #[test]
+    fn callback_rx_kernel_is_off_in_v1_on_in_v2_and_reads_as_off_without_the_lane_table() {
+        let v1 = MediaExecutorConfig::v1();
+        assert!(!v1.callback_rx_kernel && !v1.callback_rx_kernel_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.callback_rx_kernel && v2.callback_rx_kernel_active());
+        assert!(v2.validate().is_ok());
+        assert!(
+            !v2.clone()
+                .with_mode(MediaExecutorMode::V1)
+                .callback_rx_kernel_active(),
+            "never under v1"
+        );
+        // Without the lane table (or any of its own prerequisites) it reads
+        // as off and is not an error.
+        for missing in [
+            MediaExecutorConfig::v2().with_callback_send(false),
+            MediaExecutorConfig::v2().with_lane_poller(false),
+            MediaExecutorConfig::v2().with_lane_timer_wheel(false),
+            MediaExecutorConfig::v2().with_lane_tx(false),
+            MediaExecutorConfig::v2()
+                .with_tx_handle_cache(false)
+                .with_tx_batch(false),
+            MediaExecutorConfig::v2().with_callback_rx_kernel(false),
+        ] {
+            assert!(missing.validate().is_ok(), "{missing:?}");
+            assert!(!missing.callback_rx_kernel_active(), "{missing:?}");
+        }
+        // The lane table stays on without it.
+        assert!(MediaExecutorConfig::v2()
+            .with_callback_rx_kernel(false)
+            .callback_send_active());
+        let accessor = |config: MediaExecutorConfig| {
+            let _guard = override_media_executor_config_on_this_thread(config);
+            callback_rx_kernel_enabled()
+        };
+        assert!(!accessor(MediaExecutorConfig::v1()));
+        assert!(accessor(MediaExecutorConfig::v2()));
+        assert!(!accessor(
+            MediaExecutorConfig::v2().with_callback_send(false)
+        ));
+        assert!(!accessor(
+            MediaExecutorConfig::v1().with_callback_rx_kernel(true)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_owner_timer_filed_by_a_table_keeps_its_bookkeeping_and_comes_back() {
+        let now = Instant::now();
+        let mut timer = OwnerTimer::new();
+        assert_eq!(
+            timer.arm(Some(now + Duration::from_millis(10)), now),
+            ArmOutcome::Registered
+        );
+        assert!(timer.armed_sleep().is_some());
+        // Graduated: no runtime timer; the table files `deadline()`.
+        timer.unback();
+        assert!(timer.armed_sleep().is_none());
+        assert_eq!(timer.deadline(), Some(now + Duration::from_millis(10)));
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(10)), now),
+            ArmOutcome::Unchanged
+        );
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(20)), now),
+            ArmOutcome::Extended,
+            "later while live: extended, as `arm` counts it"
+        );
+        assert!(timer.armed_sleep().is_none(), "still no runtime timer");
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(5)), now),
+            ArmOutcome::Registered
+        );
+        assert_eq!(timer.note(None, now), ArmOutcome::Cleared);
+        assert_eq!(timer.deadline(), None);
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(7)), now),
+            ArmOutcome::Extended,
+            "the cleared entry is still live"
+        );
+        // Back in the async loop: the armed deadline gets a runtime timer.
+        assert_eq!(timer.reback(now), ArmOutcome::Registered);
+        assert!(timer.armed_sleep().is_some());
+        assert_eq!(timer.deadline(), Some(now + Duration::from_millis(7)));
     }
 
     // ---- End lane table callback send ----
