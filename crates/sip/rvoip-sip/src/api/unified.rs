@@ -3163,6 +3163,37 @@ pub struct Config {
     /// `None` omits the header. Default is `Some(1)`.
     pub server_overload_retry_after_secs: Option<u32>,
 
+    /// Stateless admission for new inbound INVITEs in the SIP transaction
+    /// layer.
+    ///
+    /// While the mode is not
+    /// [`AdmissionMode::Off`](rvoip_sip_dialog::transaction::AdmissionMode::Off),
+    /// a new dialog-forming INVITE that the gate rejects is answered with a
+    /// stateless `503 Service Unavailable` before any transaction, dialog,
+    /// session or media state exists, and the ACK for that 503 is absorbed.
+    /// Over TLS the gate runs on the connection reader, unless
+    /// [`Config::sip_tls_flow`] carries an ingress hook of its own; over UDP
+    /// and TCP it runs on the transaction dispatch path. The level and rate
+    /// limit can be changed at run time through
+    /// [`UnifiedCoordinator::new_call_admission`].
+    ///
+    /// Default: `Off` with no rate limit, so applications that do not opt in
+    /// never see these 503s.
+    pub sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig,
+
+    /// Answer new inbound INVITEs at [`Config::server_call_admission_limit`]
+    /// with a stateless 503 in the transaction layer.
+    ///
+    /// When `true` and the admission limit is set, a new INVITE that arrives
+    /// while the session store is at the limit is refused before any
+    /// transaction, dialog or session state exists, with `Retry-After` from
+    /// [`Config::server_overload_retry_after_secs`] (1 s when that is
+    /// `None`). Rejecting there costs far less than admitting. The session
+    /// layer's own check, with its soft-limit pacing, stays authoritative
+    /// below the limit, and in-dialog requests are never affected.
+    /// Default: `false`.
+    pub server_call_admission_early_reject: bool,
+
     /// Enable SIP UDP transport and duplicate-recovery diagnostics.
     ///
     /// This is a Config-owned replacement for benchmark-only diagnostic env
@@ -3369,6 +3400,11 @@ impl std::fmt::Debug for Config {
                 &self.server_call_admission_limit,
             )
             .field("media_runtime", &self.media_runtime)
+            .field("sip_new_call_admission", &self.sip_new_call_admission)
+            .field(
+                "server_call_admission_early_reject",
+                &self.server_call_admission_early_reject,
+            )
             .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
             .field(
                 "sip_transaction_timing_diagnostics",
@@ -3563,6 +3599,9 @@ impl Config {
             server_call_admission_soft_limit: None,
             server_call_admission_pacing_delay_ms: None,
             server_overload_retry_after_secs: Some(1),
+            sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig::default(
+            ),
+            server_call_admission_early_reject: false,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -3699,6 +3738,9 @@ impl Config {
             server_call_admission_soft_limit: None,
             server_call_admission_pacing_delay_ms: None,
             server_overload_retry_after_secs: Some(1),
+            sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig::default(
+            ),
+            server_call_admission_early_reject: false,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -4473,6 +4515,24 @@ impl Config {
     /// Omit `Retry-After` from server overload rejections.
     pub fn without_server_overload_retry_after(mut self) -> Self {
         self.server_overload_retry_after_secs = None;
+        self
+    }
+
+    /// Configure stateless admission for new inbound INVITEs. See
+    /// [`Config::sip_new_call_admission`].
+    pub fn with_sip_new_call_admission(
+        mut self,
+        admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig,
+    ) -> Self {
+        self.sip_new_call_admission = admission;
+        self
+    }
+
+    /// Answer new inbound INVITEs at the admission limit with a stateless 503
+    /// in the transaction layer. See
+    /// [`Config::server_call_admission_early_reject`].
+    pub fn with_server_call_admission_early_reject(mut self, enabled: bool) -> Self {
+        self.server_call_admission_early_reject = enabled;
         self
     }
 
@@ -10281,6 +10341,29 @@ impl UnifiedCoordinator {
                 )));
         }
 
+        // At the session-slot cap, answer a new INVITE with a stateless 503 in
+        // the transaction layer, before any transaction, dialog or session
+        // state exists. The session layer's own check, with its soft-limit
+        // pacing, stays authoritative below the cap; in-dialog requests never
+        // consult the guard. Weak: the transaction manager must not keep the
+        // session store alive.
+        if config.server_call_admission_early_reject {
+            if let Some(hard_limit) = config.server_call_admission_limit {
+                let sessions = Arc::downgrade(&store);
+                dialog_api
+                    .dialog_manager()
+                    .core()
+                    .transaction_manager()
+                    .set_new_dialog_capacity_guard(
+                        rvoip_sip_dialog::transaction::NewDialogCapacityGuard::new(move || {
+                            sessions
+                                .upgrade()
+                                .is_some_and(|store| store.sessions.len() >= hard_limit)
+                        }),
+                    );
+            }
+        }
+
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),
@@ -13439,6 +13522,7 @@ impl UnifiedCoordinator {
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_server_client_auth: config.tls_server_client_auth.clone(),
             tls_flow: config.sip_tls_flow.clone(),
+            new_call_admission: config.sip_new_call_admission,
             tls_extra_ca_path: config
                 .tls_extra_ca_path
                 .as_ref()
@@ -13934,6 +14018,39 @@ impl UnifiedCoordinator {
         self.invite(Some(from.to_string()), to.to_string())
             .send()
             .await
+    }
+}
+
+/// SIP transaction-layer admission and slot cleanup
+impl UnifiedCoordinator {
+    /// The new-call admission gate of this coordinator's SIP transaction
+    /// layer, configured from [`Config::sip_new_call_admission`].
+    ///
+    /// An application overload controller changes the mode, level and rate
+    /// limit through it at run time, and reads its counters with
+    /// [`NewCallAdmission::stats`](rvoip_sip_dialog::transaction::NewCallAdmission::stats).
+    pub fn new_call_admission(&self) -> Arc<rvoip_sip_dialog::transaction::NewCallAdmission> {
+        Arc::clone(
+            self.dialog_adapter
+                .dialog_api
+                .dialog_manager()
+                .core()
+                .transaction_manager()
+                .new_call_admission(),
+        )
+    }
+
+    /// Slot-cleanup counters of this coordinator's SIP transaction layer:
+    /// terminal publications continued in the background instead of closing
+    /// admission, fail-closed latches, and new INVITEs answered with a
+    /// stateless 503 at the admission limit or while draining.
+    pub fn sip_slot_cleanup_stats(&self) -> rvoip_sip_dialog::transaction::SlotCleanupStats {
+        self.dialog_adapter
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .transaction_manager()
+            .slot_cleanup_stats()
     }
 }
 

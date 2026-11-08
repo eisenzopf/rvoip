@@ -309,7 +309,11 @@ impl ClientInviteLogic {
             .await
         {
             data.complete_initial_send(false);
-            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send initial request from Calling state");
+            static SEND_FAILURES: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            if let Some(occurrences) = crate::diagnostics::thin_log(&SEND_FAILURES) {
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), occurrences, "Failed to send initial request from Calling state");
+            }
             data.completion
                 .record_failure(crate::transaction::ClientTransactionFailure::Transport);
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
