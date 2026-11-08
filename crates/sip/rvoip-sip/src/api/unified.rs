@@ -1164,12 +1164,24 @@ impl Default for ExactResponseDeadlineQueue {
 
 /// Single-writer owners for generation-scoped INFO and standalone REGISTER
 /// final responses.
+///
+/// `by_lifetime` indexes the transactions of session-scoped `entries` by
+/// session lifetime. Exact call teardown reads its lifetime's pending
+/// obligations one to three times; the index makes each read one shard lookup
+/// instead of a walk over every pending obligation of every call. An
+/// obligation's lifetime is fixed before it can register, so the index is
+/// maintained by `register` and `remove_owner` alone. Lock order: a
+/// `by_lifetime` guard may be held while reading `entries`, never the reverse.
 pub(crate) struct PendingExactResponseRegistry {
     entries: dashmap::DashMap<
         rvoip_sip_dialog::transaction::TransactionKey,
         Arc<crate::api::incoming::ExactResponseObligation>,
     >,
     retry_attempts: dashmap::DashMap<rvoip_sip_dialog::transaction::TransactionKey, u8>,
+    by_lifetime: dashmap::DashMap<
+        SessionRegistryHandle,
+        HashSet<rvoip_sip_dialog::transaction::TransactionKey>,
+    >,
     deadlines: StdMutex<ExactResponseDeadlineQueue>,
     changed: tokio::sync::Notify,
     fire_in_flight: Arc<AtomicUsize>,
@@ -1215,6 +1227,7 @@ impl Default for PendingExactResponseRegistry {
         Self {
             entries: dashmap::DashMap::new(),
             retry_attempts: dashmap::DashMap::new(),
+            by_lifetime: dashmap::DashMap::new(),
             deadlines: StdMutex::new(ExactResponseDeadlineQueue::default()),
             changed: tokio::sync::Notify::new(),
             fire_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -1271,7 +1284,18 @@ impl PendingExactResponseRegistry {
                 ExactResponseRegistration::Collision
             };
         }
+        let lifetime = obligation.lifecycle_handle().cloned();
+        // Insert into `entries` before indexing: a concurrent `remove_owner`
+        // of an earlier obligation for the same transaction then finds this
+        // one registered and keeps the index entry. `deadlines` is held, so a
+        // lifetime close cannot observe the gap between the two inserts.
         self.entries.insert(transaction.clone(), obligation);
+        if let Some(lifetime) = lifetime {
+            self.by_lifetime
+                .entry(lifetime)
+                .or_default()
+                .insert(transaction.clone());
+        }
         let previous = deadlines.deadlines.peek().map(|entry| entry.deadline);
         let deadline = Instant::now() + EXACT_RESPONSE_OWNER_DEADLINE;
         let sequence = deadlines.next_sequence;
@@ -1298,6 +1322,32 @@ impl PendingExactResponseRegistry {
             .is_some()
         {
             self.retry_attempts.remove(transaction);
+            if let Some(lifetime) = obligation.lifecycle_handle() {
+                self.unindex_lifetime(lifetime, transaction);
+            }
+        }
+    }
+
+    /// Drop `transaction` from `lifetime`'s index entry unless an obligation
+    /// of that lifetime has registered the transaction again.
+    fn unindex_lifetime(
+        &self,
+        lifetime: &SessionRegistryHandle,
+        transaction: &rvoip_sip_dialog::transaction::TransactionKey,
+    ) {
+        if let dashmap::mapref::entry::Entry::Occupied(mut transactions) =
+            self.by_lifetime.entry(lifetime.clone())
+        {
+            let registered_again = self
+                .entries
+                .get(transaction)
+                .is_some_and(|current| current.lifecycle_handle() == Some(lifetime));
+            if !registered_again {
+                transactions.get_mut().remove(transaction);
+            }
+            if transactions.get().is_empty() {
+                transactions.remove();
+            }
         }
     }
 
@@ -1431,8 +1481,12 @@ impl PendingExactResponseRegistry {
         &self,
         handle: &SessionRegistryHandle,
     ) -> Vec<Arc<crate::api::incoming::ExactResponseObligation>> {
-        self.entries
+        let Some(transactions) = self.by_lifetime.get(handle) else {
+            return Vec::new();
+        };
+        transactions
             .iter()
+            .filter_map(|transaction| self.entries.get(transaction))
             .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
             .map(|entry| Arc::clone(entry.value()))
             .collect()
@@ -1526,6 +1580,7 @@ impl PendingExactResponseRegistry {
     fn clear(&self) {
         self.entries.clear();
         self.retry_attempts.clear();
+        self.by_lifetime.clear();
         let mut deadlines = self
             .deadlines
             .lock()
@@ -1542,6 +1597,7 @@ impl PendingExactResponseRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         serde_json::json!({
             "pending_obligations": self.entries.len(),
+            "indexed_lifetimes": self.by_lifetime.len(),
             "retry_attempts": self.retry_attempts.len(),
             "pending_deadlines": deadlines.deadlines.len(),
             "closing_lifetimes": deadlines.closing_lifetimes.len(),
@@ -6342,6 +6398,7 @@ mod config_tests {
         assert_eq!(drained_scheduler["accepting"], false);
         let drained_responses = coordinator.pending_exact_responses.perf_diagnostic_counts();
         assert_eq!(drained_responses["pending_obligations"], 0);
+        assert_eq!(drained_responses["indexed_lifetimes"], 0);
         assert_eq!(drained_responses["pending_deadlines"], 0);
         assert_eq!(drained_responses["fire_in_flight"], 0);
         assert_eq!(drained_responses["accepting"], false);
@@ -6568,6 +6625,273 @@ mod config_tests {
             registry.register(stale),
             ExactResponseRegistration::Closed
         ));
+    }
+
+    fn exact_response_transaction(label: &str) -> rvoip_sip_dialog::transaction::TransactionKey {
+        rvoip_sip_dialog::transaction::TransactionKey::new(
+            label.to_string(),
+            rvoip_sip_core::Method::Info,
+            true,
+        )
+    }
+
+    /// Reference answer: the full scan of `entries` the index replaces.
+    fn scanned_lifetime(
+        registry: &PendingExactResponseRegistry,
+        handle: &crate::session_registry::SessionRegistryHandle,
+    ) -> Vec<usize> {
+        let mut owners = registry
+            .entries
+            .iter()
+            .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
+            .map(|entry| Arc::as_ptr(entry.value()) as usize)
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners
+    }
+
+    fn indexed_lifetime(
+        registry: &PendingExactResponseRegistry,
+        handle: &crate::session_registry::SessionRegistryHandle,
+    ) -> Vec<usize> {
+        let mut owners = registry
+            .snapshot_lifetime(handle)
+            .iter()
+            .map(|owner| Arc::as_ptr(owner) as usize)
+            .collect::<Vec<_>>();
+        owners.sort_unstable();
+        owners
+    }
+
+    /// `snapshot_lifetime` equals the scan for every lifetime, and
+    /// `by_lifetime` holds exactly the session-scoped transactions of
+    /// `entries`, each under its own lifetime, with no empty sets.
+    fn assert_lifetime_index_matches_scan(
+        registry: &PendingExactResponseRegistry,
+        handles: &[crate::session_registry::SessionRegistryHandle],
+    ) {
+        for handle in handles {
+            assert_eq!(
+                indexed_lifetime(registry, handle),
+                scanned_lifetime(registry, handle)
+            );
+        }
+        let mut indexed = std::collections::HashSet::new();
+        for entry in registry.by_lifetime.iter() {
+            assert!(!entry.value().is_empty(), "empty lifetime sets are removed");
+            for transaction in entry.value() {
+                let owner = registry.entries.get(transaction).expect("indexed entry");
+                assert_eq!(owner.lifecycle_handle(), Some(entry.key()));
+                assert!(indexed.insert(transaction.clone()));
+            }
+        }
+        let session_scoped = registry
+            .entries
+            .iter()
+            .filter(|entry| entry.value().lifecycle_handle().is_some())
+            .map(|entry| entry.key().clone())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(indexed, session_scoped);
+    }
+
+    #[tokio::test]
+    async fn exact_response_by_lifetime_index_follows_register_remove_rekey_and_clear() {
+        let store = Arc::new(SessionStore::new());
+        let registry = PendingExactResponseRegistry::default();
+        registry.attach_session_store(&store);
+        let mut handles = Vec::new();
+        for name in ["by-lifetime-a", "by-lifetime-b"] {
+            let session_id = SessionId(name.to_string());
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact response owner");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("capture exact response owner"),
+            );
+        }
+        let register = |handle: &crate::session_registry::SessionRegistryHandle, label: &str| {
+            let owner = Arc::new(ExactResponseObligation::new(
+                handle.session_id().clone(),
+                exact_response_transaction(label),
+            ));
+            assert!(owner.bind_lifecycle_handle(handle));
+            assert!(matches!(
+                registry.register(Arc::clone(&owner)),
+                ExactResponseRegistration::Registered
+            ));
+            owner
+        };
+
+        let a1 = register(&handles[0], "z9hG4bK-by-lifetime-a1");
+        let a2 = register(&handles[0], "z9hG4bK-by-lifetime-a2");
+        let b1 = register(&handles[1], "z9hG4bK-by-lifetime-b1");
+        let standalone = Arc::new(ExactResponseObligation::new_standalone(
+            exact_response_transaction("z9hG4bK-by-lifetime-standalone"),
+            503,
+        ));
+        assert!(matches!(
+            registry.register(Arc::clone(&standalone)),
+            ExactResponseRegistration::Registered
+        ));
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
+        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 1);
+        assert_eq!(
+            registry.by_lifetime.len(),
+            2,
+            "standalone owners are not indexed"
+        );
+
+        // Re-registering the same owner is idempotent; a different owner for
+        // a registered transaction collides and leaves the index alone.
+        assert!(matches!(
+            registry.register(Arc::clone(&a1)),
+            ExactResponseRegistration::Registered
+        ));
+        let impostor = Arc::new(ExactResponseObligation::new(
+            handles[0].session_id().clone(),
+            a1.transaction().clone(),
+        ));
+        assert!(impostor.bind_lifecycle_handle(&handles[0]));
+        assert!(matches!(
+            registry.register(Arc::clone(&impostor)),
+            ExactResponseRegistration::Collision
+        ));
+        registry.remove_owner(impostor.as_ref());
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
+
+        // Removing one owner leaves its lifetime's others indexed.
+        registry.remove_owner(a1.as_ref());
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 1);
+
+        // Re-key: a new owner for a removed transaction is indexed again.
+        let a1_again = register(&handles[0], "z9hG4bK-by-lifetime-a1");
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
+
+        // The same transaction re-registered under another lifetime moves
+        // to that lifetime's index entry.
+        registry.remove_owner(a1_again.as_ref());
+        registry.remove_owner(a2.as_ref());
+        assert!(registry.by_lifetime.get(&handles[0]).is_none());
+        let moved = register(&handles[1], "z9hG4bK-by-lifetime-a1");
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert!(registry.snapshot_lifetime(&handles[0]).is_empty());
+        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 2);
+
+        registry.remove_owner(moved.as_ref());
+        registry.remove_owner(b1.as_ref());
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert!(
+            registry.by_lifetime.is_empty(),
+            "the index empties with its entries"
+        );
+        assert_eq!(registry.len(), 1, "only the standalone owner remains");
+
+        // Teardown clears the index with the entries.
+        let b2 = register(&handles[1], "z9hG4bK-by-lifetime-b2");
+        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 1);
+        registry.clear();
+        assert!(registry.by_lifetime.is_empty());
+        assert!(registry.snapshot_lifetime(&handles[1]).is_empty());
+        registry.remove_owner(b2.as_ref());
+        registry.remove_owner(standalone.as_ref());
+        assert!(registry.by_lifetime.is_empty());
+    }
+
+    #[tokio::test]
+    async fn exact_response_lifetime_snapshot_visits_only_that_lifetimes_obligations() {
+        let store = Arc::new(SessionStore::new());
+        let registry = PendingExactResponseRegistry::default();
+        registry.attach_session_store(&store);
+        let mut handles = Vec::new();
+        for index in 0..256 {
+            let session_id = SessionId(format!("by-lifetime-scale-{index}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact response owner");
+            let handle = store
+                .lifecycle_handle(&session_id)
+                .expect("capture exact response owner");
+            let owner = Arc::new(ExactResponseObligation::new(
+                session_id,
+                exact_response_transaction(&format!("z9hG4bK-by-lifetime-scale-{index}")),
+            ));
+            assert!(owner.bind_lifecycle_handle(&handle));
+            assert!(matches!(
+                registry.register(owner),
+                ExactResponseRegistration::Registered
+            ));
+            handles.push(handle);
+        }
+
+        // One lifetime's snapshot walks its own index entry (one transaction)
+        // regardless of the 256 pending obligations.
+        assert_eq!(registry.len(), 256);
+        for handle in [&handles[0], &handles[255]] {
+            assert_eq!(registry.by_lifetime.get(handle).expect("indexed").len(), 1);
+            assert_eq!(registry.snapshot_lifetime(handle).len(), 1);
+        }
+        assert_lifetime_index_matches_scan(&registry, &handles);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn exact_response_lifetime_index_survives_concurrent_register_and_remove() {
+        let store = Arc::new(SessionStore::new());
+        let registry = Arc::new(PendingExactResponseRegistry::default());
+        registry.attach_session_store(&store);
+        let mut handles = Vec::new();
+        for name in ["by-lifetime-race-a", "by-lifetime-race-b"] {
+            let session_id = SessionId(name.to_string());
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create exact response owner");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("capture exact response owner"),
+            );
+        }
+        // Workers share two transactions across both lifetimes, so a removal
+        // races re-registration of its transaction by the same and by the
+        // other lifetime.
+        let mut workers = Vec::new();
+        for worker in 0..8usize {
+            let registry = Arc::clone(&registry);
+            let handle = handles[(worker / 2) % 2].clone();
+            workers.push(tokio::spawn(async move {
+                let transaction =
+                    exact_response_transaction(&format!("z9hG4bK-by-lifetime-race-{}", worker % 2));
+                for _ in 0..500 {
+                    let owner = Arc::new(ExactResponseObligation::new(
+                        handle.session_id().clone(),
+                        transaction.clone(),
+                    ));
+                    assert!(owner.bind_lifecycle_handle(&handle));
+                    if matches!(
+                        registry.register(Arc::clone(&owner)),
+                        ExactResponseRegistration::Registered
+                    ) {
+                        tokio::task::yield_now().await;
+                        registry.remove_owner(owner.as_ref());
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for worker in workers {
+            worker.await.expect("worker");
+        }
+        assert_lifetime_index_matches_scan(&registry, &handles);
+        assert_eq!(registry.len(), 0);
+        assert!(registry.by_lifetime.is_empty());
     }
 
     #[test]
