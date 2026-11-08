@@ -557,6 +557,19 @@ pub(crate) fn record_session_event_dispatch_aborted_workers(count: usize) {
 // always on: each increment marks a bounded-failure decision that operators
 // must be able to reconcile against released sessions and connections.
 static CANCELLED_REJECT_TERMINALS: AtomicU64 = AtomicU64::new(0);
+static INLINE_HANGUP_DEADLINE_EXPIRED: AtomicU64 = AtomicU64::new(0);
+static INBOUND_END_BACKSTOP_EXPIRED: AtomicU64 = AtomicU64::new(0);
+static INBOUND_END_RECLAIMS: AtomicU64 = AtomicU64::new(0);
+static RECLAIM_RELEASED: AtomicU64 = AtomicU64::new(0);
+static RECLAIM_FINALIZED: AtomicU64 = AtomicU64::new(0);
+static RECLAIM_FORCED: AtomicU64 = AtomicU64::new(0);
+static RECLAIM_TIMED_OUT: AtomicU64 = AtomicU64::new(0);
+static FORCED_SESSION_RELEASES: AtomicU64 = AtomicU64::new(0);
+static FORCED_SESSION_RELEASE_FAILURES: AtomicU64 = AtomicU64::new(0);
+static INBOUND_END_BACKSTOP_LOG: RateLimitedLog = RateLimitedLog::new();
+static RECLAIM_TIMED_OUT_LOG: RateLimitedLog = RateLimitedLog::new();
+static FORCED_RELEASE_LOG: RateLimitedLog = RateLimitedLog::new();
+static FORCED_RELEASE_FAILURE_LOG: RateLimitedLog = RateLimitedLog::new();
 
 /// Always-on counters for the bounded session cleanup paths.
 ///
@@ -568,17 +581,138 @@ pub struct SessionCleanupCounters {
     /// its terminal delivered by a retained compensation task instead of
     /// leaving the orchestrator's connection lifecycle unresolved.
     pub cancelled_reject_terminals: u64,
+    /// Inbound ends whose hangup join passed
+    /// `SessionCleanupConfig::inline_hangup_deadline` before a BYE
+    /// transaction existed.
+    pub inline_hangup_deadline_expiries: u64,
+    /// Inbound ends whose hangup join passed
+    /// `SessionCleanupConfig::inbound_end_backstop`.
+    pub inbound_end_backstop_expiries: u64,
+    /// Inbound ends whose hangup failed (including both bounds above) and
+    /// that handed the ended call to the retained reclaim.
+    pub inbound_end_reclaims: u64,
+    /// Reclaims whose call left the session store on its own.
+    pub inbound_end_reclaims_released: u64,
+    /// Reclaims whose call left after its local BYE was finalized.
+    pub inbound_end_reclaims_finalized: u64,
+    /// Reclaims that ran the forced local reclaim to completion.
+    pub inbound_end_reclaims_forced: u64,
+    /// Reclaims whose forced local reclaim exceeded its bound, so the session
+    /// slot release was attempted directly. `released + finalized + forced +
+    /// timed_out` is the finished subset of `inbound_end_reclaims`.
+    pub inbound_end_reclaims_timed_out: u64,
+    /// Ended lifetimes whose session-store slot was released after their
+    /// bounded exact cleanup attempts failed.
+    pub forced_session_releases: u64,
+    /// Forced slot releases the lifecycle authority refused. Each one is a
+    /// slot still held, so a nonzero value at quiescence is a leak.
+    pub forced_session_release_failures: u64,
 }
 
 /// Read the session cleanup counters.
 pub fn session_cleanup_counters() -> SessionCleanupCounters {
     SessionCleanupCounters {
         cancelled_reject_terminals: CANCELLED_REJECT_TERMINALS.load(Ordering::Relaxed),
+        inline_hangup_deadline_expiries: INLINE_HANGUP_DEADLINE_EXPIRED.load(Ordering::Relaxed),
+        inbound_end_backstop_expiries: INBOUND_END_BACKSTOP_EXPIRED.load(Ordering::Relaxed),
+        inbound_end_reclaims: INBOUND_END_RECLAIMS.load(Ordering::Relaxed),
+        inbound_end_reclaims_released: RECLAIM_RELEASED.load(Ordering::Relaxed),
+        inbound_end_reclaims_finalized: RECLAIM_FINALIZED.load(Ordering::Relaxed),
+        inbound_end_reclaims_forced: RECLAIM_FORCED.load(Ordering::Relaxed),
+        inbound_end_reclaims_timed_out: RECLAIM_TIMED_OUT.load(Ordering::Relaxed),
+        forced_session_releases: FORCED_SESSION_RELEASES.load(Ordering::Relaxed),
+        forced_session_release_failures: FORCED_SESSION_RELEASE_FAILURES.load(Ordering::Relaxed),
     }
 }
 
 pub(crate) fn record_cancelled_reject_terminal() {
     CANCELLED_REJECT_TERMINALS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_inline_hangup_deadline_expired() {
+    INLINE_HANGUP_DEADLINE_EXPIRED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one inbound end cut off by its backstop; `Some(occurrences)` when it
+/// should log.
+pub(crate) fn record_inbound_end_backstop_expired() -> Option<u64> {
+    INBOUND_END_BACKSTOP_EXPIRED.fetch_add(1, Ordering::Relaxed);
+    INBOUND_END_BACKSTOP_LOG.admit()
+}
+
+pub(crate) fn record_inbound_end_reclaim() {
+    INBOUND_END_RECLAIMS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// How one inbound end reclaim finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboundEndReclaimOutcome {
+    /// The lifetime left the store on its own within the first wait.
+    Released,
+    /// It left after the local BYE was finalized.
+    Finalized,
+    /// The forced local reclaim ran to completion.
+    Forced,
+    /// The forced reclaim exceeded its bound; the slot release was attempted
+    /// directly (its own counters say whether it succeeded).
+    TimedOut,
+}
+
+/// Count one reclaim outcome; `Some(occurrences)` when a timeout should log.
+pub(crate) fn record_inbound_end_reclaim_outcome(outcome: InboundEndReclaimOutcome) -> Option<u64> {
+    match outcome {
+        InboundEndReclaimOutcome::Released => RECLAIM_RELEASED.fetch_add(1, Ordering::Relaxed),
+        InboundEndReclaimOutcome::Finalized => RECLAIM_FINALIZED.fetch_add(1, Ordering::Relaxed),
+        InboundEndReclaimOutcome::Forced => RECLAIM_FORCED.fetch_add(1, Ordering::Relaxed),
+        InboundEndReclaimOutcome::TimedOut => {
+            RECLAIM_TIMED_OUT.fetch_add(1, Ordering::Relaxed);
+            return RECLAIM_TIMED_OUT_LOG.admit();
+        }
+    };
+    None
+}
+
+/// Count one forced slot release; `Some(occurrences)` when it should log.
+pub(crate) fn record_forced_session_release() -> Option<u64> {
+    FORCED_SESSION_RELEASES.fetch_add(1, Ordering::Relaxed);
+    FORCED_RELEASE_LOG.admit()
+}
+
+/// Count one lifetime the authority would not retire even when forced.
+pub(crate) fn record_forced_session_release_failed() -> Option<u64> {
+    FORCED_SESSION_RELEASE_FAILURES.fetch_add(1, Ordering::Relaxed);
+    FORCED_RELEASE_FAILURE_LOG.admit()
+}
+
+/// At most one log line per second for an event that can fire thousands of
+/// times a second, carrying the occurrences since the previous line.
+struct RateLimitedLog {
+    occurrences: AtomicU64,
+    last_logged_ms: AtomicU64,
+}
+
+impl RateLimitedLog {
+    const INTERVAL_MS: u64 = 1_000;
+
+    const fn new() -> Self {
+        Self {
+            occurrences: AtomicU64::new(0),
+            last_logged_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn admit(&self) -> Option<u64> {
+        let now_ms = u64::try_from(unix_ms()).unwrap_or(u64::MAX).max(1);
+        self.occurrences.fetch_add(1, Ordering::AcqRel);
+        let last = self.last_logged_ms.load(Ordering::Acquire);
+        if last != 0 && now_ms.saturating_sub(last) < Self::INTERVAL_MS {
+            return None;
+        }
+        self.last_logged_ms
+            .compare_exchange(last, now_ms, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(self.occurrences.swap(0, Ordering::AcqRel))
+    }
 }
 
 fn metrics() -> &'static [StageMetrics] {

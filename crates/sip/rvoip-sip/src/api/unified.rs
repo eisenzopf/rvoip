@@ -451,6 +451,88 @@ impl SipNatConfig {
     }
 }
 
+/// Bounds on the SIP session cleanup the [`SipAdapter`](crate::adapter::SipAdapter)
+/// owns.
+///
+/// The defaults bound every wait an inbound `ConnectionAdapter::end` makes, so
+/// an ended call always hands its terminal to the orchestrator and leaves the
+/// session store even when its hangup cannot make progress. `None` restores
+/// the unbounded wait.
+///
+/// Only the adapter's waiter stops at a bound: the coordinator's retained
+/// hangup keeps running, and a call whose hangup failed is reclaimed by a
+/// bounded retained task that ends in a counted session-slot release (see
+/// [`crate::cleanup_diag::session_cleanup_counters`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionCleanupConfig {
+    /// Deadline on an inbound end's hangup join while no BYE transaction
+    /// exists yet. When it passes, the end delivers its terminal, returns an
+    /// error and hands the call to the retained reclaim. Once a BYE
+    /// transaction exists its own Timer F bounds the join, so this deadline
+    /// is waived. A deadline at or past [`Self::inbound_end_backstop`] never
+    /// applies. Default: `Some(5 s)`. Must be nonzero when set.
+    pub inline_hangup_deadline: Option<Duration>,
+
+    /// Absolute bound on an inbound end's hangup join, whether or not a BYE
+    /// transaction exists. When it passes, the end delivers its terminal,
+    /// returns an error and hands the call to the retained reclaim.
+    /// Default: `Some(10 s)`. Valid values are 1 s to 600 s.
+    pub inbound_end_backstop: Option<Duration>,
+}
+
+impl Default for SessionCleanupConfig {
+    fn default() -> Self {
+        Self {
+            inline_hangup_deadline: Some(Self::DEFAULT_INLINE_HANGUP_DEADLINE),
+            inbound_end_backstop: Some(Self::DEFAULT_INBOUND_END_BACKSTOP),
+        }
+    }
+}
+
+impl SessionCleanupConfig {
+    /// Default [`Self::inline_hangup_deadline`].
+    pub const DEFAULT_INLINE_HANGUP_DEADLINE: Duration = Duration::from_secs(5);
+    /// Default [`Self::inbound_end_backstop`].
+    pub const DEFAULT_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(10);
+    /// Smallest accepted [`Self::inbound_end_backstop`].
+    pub const MIN_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(1);
+    /// Largest accepted [`Self::inbound_end_backstop`].
+    pub const MAX_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(600);
+
+    /// Set or clear [`Self::inline_hangup_deadline`].
+    pub const fn with_inline_hangup_deadline(mut self, deadline: Option<Duration>) -> Self {
+        self.inline_hangup_deadline = deadline;
+        self
+    }
+
+    /// Set or clear [`Self::inbound_end_backstop`].
+    pub const fn with_inbound_end_backstop(mut self, backstop: Option<Duration>) -> Self {
+        self.inbound_end_backstop = backstop;
+        self
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.inline_hangup_deadline == Some(Duration::ZERO) {
+            return Err(SessionError::ConfigError(
+                "session_cleanup.inline_hangup_deadline must be nonzero when set".to_string(),
+            ));
+        }
+        if let Some(backstop) = self.inbound_end_backstop {
+            if !(Self::MIN_INBOUND_END_BACKSTOP..=Self::MAX_INBOUND_END_BACKSTOP)
+                .contains(&backstop)
+            {
+                return Err(SessionError::ConfigError(format!(
+                    "session_cleanup.inbound_end_backstop must be between {:?} and {:?} when set",
+                    Self::MIN_INBOUND_END_BACKSTOP,
+                    Self::MAX_INBOUND_END_BACKSTOP
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Construction-time options kept outside [`Config`].
 ///
 /// They were split out while `Config` could still be built with a struct
@@ -3128,6 +3210,10 @@ pub struct Config {
     /// [`Config::MAX_SIP_ADAPTER_CALL_CAPACITY`].
     pub sip_adapter_call_capacity: Option<usize>,
 
+    /// Bounds on the SIP session cleanup the `SipAdapter` owns. See
+    /// [`SessionCleanupConfig`]; every bound is on by default.
+    pub session_cleanup: SessionCleanupConfig,
+
     /// Maximum active, quarantined, and retired SIP lifecycle records retained
     /// by the session authority.
     ///
@@ -3439,6 +3525,7 @@ impl std::fmt::Debug for Config {
             )
             .field("server_call_capacity", &self.server_call_capacity)
             .field("sip_adapter_call_capacity", &self.sip_adapter_call_capacity)
+            .field("session_cleanup", &self.session_cleanup)
             .field(
                 "server_retained_lifecycle_capacity",
                 &self.server_retained_lifecycle_capacity,
@@ -3653,6 +3740,7 @@ impl Config {
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
             sip_adapter_call_capacity: None,
+            session_cleanup: SessionCleanupConfig::default(),
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -3796,6 +3884,7 @@ impl Config {
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
             sip_adapter_call_capacity: None,
+            session_cleanup: SessionCleanupConfig::default(),
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
@@ -4528,6 +4617,13 @@ impl Config {
     /// See [`Config::sip_adapter_call_capacity`].
     pub fn with_sip_adapter_call_capacity(mut self, calls: usize) -> Self {
         self.sip_adapter_call_capacity = Some(calls);
+        self
+    }
+
+    /// Replace the SIP session cleanup bounds. See
+    /// [`Config::session_cleanup`].
+    pub fn with_session_cleanup(mut self, cleanup: SessionCleanupConfig) -> Self {
+        self.session_cleanup = cleanup;
         self
     }
 
@@ -5689,6 +5785,7 @@ impl Config {
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
+        self.session_cleanup.validate()?;
         if let Some(calls) = self.sip_adapter_call_capacity {
             if calls == 0 || calls > Self::MAX_SIP_ADAPTER_CALL_CAPACITY {
                 return Err(SessionError::ConfigError(format!(
@@ -7169,6 +7266,93 @@ mod config_tests {
         assert_lifetime_index_matches_scan(&registry, &handles);
         assert_eq!(registry.len(), 0);
         assert!(registry.by_lifetime.is_empty());
+    }
+
+    #[test]
+    fn session_cleanup_bounds_default_on_and_are_validated() {
+        use super::SessionCleanupConfig;
+        let defaults = Config::local("session-cleanup-defaults", 0).session_cleanup;
+        assert_eq!(defaults, SessionCleanupConfig::default());
+        assert_eq!(
+            defaults.inline_hangup_deadline,
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(defaults.inbound_end_backstop, Some(Duration::from_secs(10)));
+        assert_eq!(Config::default().session_cleanup, defaults);
+
+        let validate = |cleanup: SessionCleanupConfig| {
+            Config::local("session-cleanup-validation", 0)
+                .with_session_cleanup(cleanup)
+                .validate()
+        };
+        assert!(validate(defaults).is_ok());
+        assert!(validate(
+            defaults
+                .with_inline_hangup_deadline(None)
+                .with_inbound_end_backstop(None)
+        )
+        .is_ok());
+        for backstop in [Duration::from_secs(1), Duration::from_secs(600)] {
+            assert!(validate(defaults.with_inbound_end_backstop(Some(backstop))).is_ok());
+        }
+        for backstop in [
+            Duration::ZERO,
+            Duration::from_millis(999),
+            Duration::from_millis(600_001),
+        ] {
+            assert!(
+                validate(defaults.with_inbound_end_backstop(Some(backstop))).is_err(),
+                "{backstop:?}"
+            );
+        }
+        assert!(validate(defaults.with_inline_hangup_deadline(Some(Duration::ZERO))).is_err());
+        assert!(
+            validate(defaults.with_inline_hangup_deadline(Some(Duration::from_millis(1)))).is_ok()
+        );
+    }
+
+    /// Ended lifetimes whose lower dialog/media cleanup never succeeded still
+    /// give their session-store slots back through the counted forced
+    /// release, and a repeat on an already-released lifetime is a no-op.
+    #[tokio::test]
+    async fn forced_slot_release_returns_store_to_zero_after_failed_cleanups() {
+        const BURST: usize = 32;
+        let store = Arc::new(SessionStore::new());
+        let mut handles = Vec::with_capacity(BURST);
+        for index in 0..BURST {
+            let session_id = SessionId(format!("forced-release-{index}"));
+            store
+                .create_session(session_id.clone(), Role::UAS, false)
+                .await
+                .expect("create ended lifetime");
+            handles.push(
+                store
+                    .lifecycle_handle(&session_id)
+                    .expect("capture exact lifetime"),
+            );
+        }
+        assert_eq!(store.sessions.len(), BURST);
+        let forced_before = crate::cleanup_diag::session_cleanup_counters().forced_session_releases;
+
+        for handle in &handles {
+            super::force_release_exact_session_slot(&store, None, None, handle, "test")
+                .await
+                .expect("an ended lifetime's slot must be released");
+        }
+        assert_eq!(
+            store.sessions.len(),
+            0,
+            "every slot returns after failed cleanups"
+        );
+        assert!(
+            crate::cleanup_diag::session_cleanup_counters().forced_session_releases
+                >= forced_before + BURST as u64
+        );
+
+        super::force_release_exact_session_slot(&store, None, None, &handles[0], "test")
+            .await
+            .expect("an already-released lifetime is idempotent success");
+        assert_eq!(store.sessions.len(), 0);
     }
 
     #[test]
@@ -9420,16 +9604,106 @@ pub(crate) async fn release_exact_local_resources_with_retry(
         "exact terminal release failed; retrying the same retained lifetime"
     );
     tokio::task::yield_now().await;
-    release_exact_local_resources(
-        session_store,
+    let second = release_exact_local_resources(
+        Arc::clone(&session_store),
         helpers,
         dialog_adapter,
         media_adapter,
-        pending_exact_responses,
-        setup_teardown_deadlines,
-        handle,
+        pending_exact_responses.as_ref().map(Arc::clone),
+        setup_teardown_deadlines.clone(),
+        handle.clone(),
+    )
+    .await;
+    let Err(error) = second else {
+        return Ok(());
+    };
+    // Both bounded attempts failed. Without a later owner the ended lifetime
+    // would keep its session-store slot for good, and enough of them fill
+    // the admission limit.
+    force_release_exact_session_slot(
+        &session_store,
+        pending_exact_responses.as_deref(),
+        setup_teardown_deadlines.as_ref(),
+        &handle,
+        "terminal-release-retries-exhausted",
     )
     .await
+    .map_err(|_| error)
+}
+
+/// Release one ended lifetime's session-store slot after its bounded exact
+/// release attempts failed.
+///
+/// Teardown is idempotent (it joins or reports the finished one), so this
+/// quiesces once more and removes the retired lifetime without requiring the
+/// lower dialog/media cleanup to have succeeded; that cleanup was already
+/// attempted and its own timers bound what is left. A lifetime the authority
+/// will not retire stays put and is counted as a failed forced release. Every
+/// outcome is counted; logging is limited to one line per second.
+pub(crate) async fn force_release_exact_session_slot(
+    session_store: &SessionStore,
+    pending_exact_responses: Option<&PendingExactResponseRegistry>,
+    setup_teardown_deadlines: Option<&SetupTeardownDeadlineCancellation>,
+    handle: &SessionRegistryHandle,
+    reason: &'static str,
+) -> Result<()> {
+    // `Ok(true)`: this call removed the slot; `Ok(false)`: a racing exact
+    // owner already had, so nothing is counted.
+    let released = if session_store
+        .get_session_retained_snapshot_exact(handle)
+        .is_err()
+    {
+        Ok(false)
+    } else {
+        let quiesce = session_store.quiesce_session_exact(handle).await;
+        match session_store.remove_quiesced_session_exact(handle) {
+            Ok(()) => Ok(true),
+            Err(_)
+                if session_store
+                    .get_session_retained_snapshot_exact(handle)
+                    .is_err() =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(SessionError::InternalError(format!(
+                "forced session slot release failed (class=lifecycle, quiesced={}): {error}",
+                quiesce.is_ok()
+            ))),
+        }
+    };
+    match released {
+        Ok(removed) => {
+            if let Some(pending) = pending_exact_responses {
+                pending.finish_lifetime_close(handle);
+            }
+            if let Some(deadlines) = setup_teardown_deadlines {
+                deadlines.finish_lifetime_close(handle);
+            }
+            if removed {
+                if let Some(occurrences) = crate::cleanup_diag::record_forced_session_release() {
+                    tracing::warn!(
+                        session = %handle.session_id(),
+                        reason,
+                        occurrences,
+                        "ended SIP session slot force-released after bounded cleanup retries"
+                    );
+                }
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(occurrences) = crate::cleanup_diag::record_forced_session_release_failed() {
+                tracing::error!(
+                    session = %handle.session_id(),
+                    reason,
+                    occurrences,
+                    %error,
+                    "ended SIP session slot could not be force-released"
+                );
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Best-effort lower-resource cleanup remaining after authoritative session
@@ -9446,12 +9720,14 @@ pub(crate) struct ForcedLocalSessionCleanup {
 
 impl ForcedLocalSessionCleanup {
     /// Finish helper, dialog, and media cleanup without relaying lower errors.
+    /// The retrying release ends in a counted session-slot release, so a
+    /// failing lower cleanup cannot keep the reclaimed lifetime's slot.
     pub(crate) async fn finish(self) {
         let Some(handle) = self.handle else {
             tracing::debug!("forced local reclaim had no exact session owner");
             return;
         };
-        if release_exact_local_resources(
+        if release_exact_local_resources_with_retry(
             self.session_store,
             self.helpers,
             self.dialog_adapter,
@@ -10837,6 +11113,10 @@ impl UnifiedCoordinator {
 
     pub(crate) fn sip_adapter_call_capacity(&self) -> Option<usize> {
         self.config.sip_adapter_call_capacity
+    }
+
+    pub(crate) fn session_cleanup_config(&self) -> SessionCleanupConfig {
+        self.config.session_cleanup
     }
 
     pub(crate) async fn claim_session_control_events(
@@ -12596,6 +12876,25 @@ impl UnifiedCoordinator {
     /// Retained adapter cleanup must use this entry point: resolving a raw
     /// identifier after a timeout could otherwise select a replacement
     /// lifetime admitted while the old cleanup was delayed.
+    /// Release one ended lifetime's session-store slot directly, for a
+    /// retained reclaim whose forced cleanup exceeded its bound. Counted and
+    /// rate-limited by [`force_release_exact_session_slot`].
+    pub(crate) async fn force_release_session_slot_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+        reason: &'static str,
+    ) -> Result<()> {
+        let deadlines = self.setup_teardown_deadline_cancellation();
+        force_release_exact_session_slot(
+            &self.helpers.state_machine.store,
+            Some(self.pending_exact_responses.as_ref()),
+            Some(&deadlines),
+            handle,
+            reason,
+        )
+        .await
+    }
+
     pub(crate) async fn begin_force_reclaim_local_session_exact(
         &self,
         handle: &SessionRegistryHandle,

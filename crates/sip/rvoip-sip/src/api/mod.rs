@@ -328,8 +328,8 @@ pub use unified::{
     Config, DtlsSetupRole, MediaExecutorConfig, MediaExecutorMode, MediaLanes, MediaMode,
     MediaRuntimeConfig, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
     RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
-    SipContactMode, SipNatConfig, SipRuntimeConfig, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy,
-    SymmetricRtpPolicy, UnifiedCoordinator,
+    SessionCleanupConfig, SipContactMode, SipNatConfig, SipRuntimeConfig, SipTlsMode,
+    SrtpKeyingMode, SrtpSuitePolicy, SymmetricRtpPolicy, UnifiedCoordinator,
 };
 
 // Re-export event types

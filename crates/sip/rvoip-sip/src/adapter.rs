@@ -69,6 +69,20 @@ const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
 const SIP_OUTBOUND_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 const SIP_CONFIRMED_HANGUP_TIMEOUT: Duration = Duration::from_secs(3);
 const SIP_ADAPTER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bound on the forced local reclaim after an inbound end failed. It covers
+/// two exact release attempts, each up to the session teardown quiesce plus
+/// the exact response drain, and the final slot release.
+const SIP_INBOUND_RECLAIM_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Bound on the direct slot release after a reclaim timed out.
+const SIP_INBOUND_RECLAIM_SLOT_RELEASE_TIMEOUT: Duration = Duration::from_secs(12);
+/// Failure text of an inbound end whose hangup join passed its inline
+/// deadline before a BYE transaction existed. The orchestrator treats it like
+/// any other end failure.
+const INLINE_HANGUP_DEADLINE_EXPIRED: &str =
+    "inline hangup deadline expired before a BYE transaction existed (class=inline-hangup-deadline)";
+/// Failure text of an inbound end whose hangup join passed its backstop.
+const INBOUND_END_BACKSTOP_EXPIRED: &str =
+    "inbound end hangup join exceeded its backstop (class=inbound-end-backstop)";
 const SIP_RFC4733_INTER_DIGIT_MS: u32 =
     rvoip_media_core::relay::controller::dtmf_transmitter::DEFAULT_DTMF_INTER_DIGIT_MS;
 
@@ -1065,6 +1079,49 @@ fn failed_inbound_termination(
         FailedInboundTermination::Reject
     } else {
         FailedInboundTermination::Hangup
+    }
+}
+
+/// How an inbound end's hangup join finished.
+#[derive(Debug, PartialEq, Eq)]
+enum InboundHangupJoin<T> {
+    Completed(T),
+    /// The inline deadline passed before a BYE transaction existed.
+    InlineDeadlineExpired,
+    /// The backstop passed, BYE or not.
+    BackstopExpired,
+}
+
+/// Join one inbound hangup under the inline deadline and the backstop of
+/// [`crate::api::unified::SessionCleanupConfig`]. Only the waiter stops: the
+/// coordinator's retained hangup keeps running. The inline deadline applies
+/// only if it falls before the backstop, and is waived once a BYE transaction
+/// exists (its Timer F bounds the join); the backstop applies in every case.
+async fn join_inbound_hangup<T>(
+    hangup: impl std::future::Future<Output = T>,
+    inline_deadline: Option<Duration>,
+    backstop: Option<Duration>,
+    bye_started: impl Fn() -> bool,
+) -> InboundHangupJoin<T> {
+    let started = tokio::time::Instant::now();
+    let backstop_at = backstop.map(|bound| started + bound);
+    tokio::pin!(hangup);
+    if let Some(inline_at) = inline_deadline
+        .map(|deadline| started + deadline)
+        .filter(|inline_at| backstop_at.is_none_or(|backstop_at| *inline_at < backstop_at))
+    {
+        match tokio::time::timeout_at(inline_at, &mut hangup).await {
+            Ok(result) => return InboundHangupJoin::Completed(result),
+            Err(_) if !bye_started() => return InboundHangupJoin::InlineDeadlineExpired,
+            Err(_) => {}
+        }
+    }
+    match backstop_at {
+        None => InboundHangupJoin::Completed(hangup.await),
+        Some(backstop_at) => match tokio::time::timeout_at(backstop_at, &mut hangup).await {
+            Ok(result) => InboundHangupJoin::Completed(result),
+            Err(_) => InboundHangupJoin::BackstopExpired,
+        },
     }
 }
 
@@ -2420,15 +2477,61 @@ impl SipAdapter {
         if let Some(stream) = removed.stream.as_ref() {
             stream.request_close();
         }
+        // Both bounds stop only this waiter; the coordinator's retained hangup
+        // keeps running. Before a BYE transaction exists nothing else bounds
+        // the join (a session whose HangupCall never runs, for example behind
+        // overflowing dispatch queues, would hold the orchestrator's end, and
+        // with it the connection, for good). Once a BYE exists its Timer F
+        // bounds the join, and the backstop still caps it.
+        let cleanup = self.coordinator.session_cleanup_config();
+        let inline_deadline = cleanup.inline_hangup_deadline;
+        let backstop = cleanup.inbound_end_backstop;
+        let bye_generation_before = self
+            .coordinator
+            .dialog_adapter()
+            .outgoing_bye_generation_exact(&lifecycle_handle)
+            .unwrap_or(0);
         // The stream close that `forget_epoch` would retain separately runs
         // inside this driver. Both operations progress independently and
         // neither holds the mapping lock.
         let (network_result, media_result) = tokio::join!(
             async {
-                self.coordinator
-                    .hangup_exact(&lifecycle_handle)
-                    .await
-                    .map_err(Self::map_session_err)
+                let joined = join_inbound_hangup(
+                    self.coordinator.hangup_exact(&lifecycle_handle),
+                    inline_deadline,
+                    backstop,
+                    || {
+                        self.coordinator
+                            .dialog_adapter()
+                            .has_outgoing_bye_after_exact(&lifecycle_handle, bye_generation_before)
+                    },
+                )
+                .await;
+                match joined {
+                    InboundHangupJoin::Completed(result) => result.map_err(Self::map_session_err),
+                    InboundHangupJoin::InlineDeadlineExpired => {
+                        crate::cleanup_diag::record_inline_hangup_deadline_expired();
+                        warn!(
+                            deadline_ms = inline_deadline.map_or(0, |deadline| deadline.as_millis()),
+                            "SipAdapter inbound hangup passed its inline deadline before a BYE transaction existed; delivering terminal and reclaiming the session"
+                        );
+                        Err(RvoipError::Adapter(
+                            INLINE_HANGUP_DEADLINE_EXPIRED.to_owned(),
+                        ))
+                    }
+                    InboundHangupJoin::BackstopExpired => {
+                        if let Some(occurrences) =
+                            crate::cleanup_diag::record_inbound_end_backstop_expired()
+                        {
+                            warn!(
+                                backstop_ms = backstop.map_or(0, |bound| bound.as_millis()),
+                                occurrences,
+                                "SipAdapter inbound hangup exceeded its backstop; delivering terminal and reclaiming the session"
+                            );
+                        }
+                        Err(RvoipError::Adapter(INBOUND_END_BACKSTOP_EXPIRED.to_owned()))
+                    }
+                }
             },
             async move {
                 let Some(stream) = removed.stream else {
@@ -2454,7 +2557,78 @@ impl SipAdapter {
             "end",
         )
         .await;
+        if network_result.is_err() {
+            // The route is already gone, so the orchestrator's retry of this
+            // end sees ConnectionNotFound and counts it done. Without a
+            // reclaim the ended lifetime would keep its session-store slot.
+            self.spawn_inbound_end_reclaim(lifecycle_handle);
+        }
         network_result.and(media_result)
+    }
+
+    /// Give an inbound lifetime whose hangup failed the same bounded sequence
+    /// outbound cleanup uses: wait for its natural release, finalize the local
+    /// BYE, then force-reclaim. Every step is bounded and the last one ends in
+    /// a counted session-slot release. Retained, so the orchestrator's end
+    /// still returns the hangup failure promptly.
+    fn spawn_inbound_end_reclaim(&self, handle: SessionRegistryHandle) {
+        use crate::cleanup_diag::{record_inbound_end_reclaim_outcome, InboundEndReclaimOutcome};
+        crate::cleanup_diag::record_inbound_end_reclaim();
+        let coordinator = Arc::clone(&self.coordinator);
+        let spawned = self.retained_tasks.spawn(async move {
+            if wait_for_outbound_session_release(&coordinator, &handle).await {
+                record_inbound_end_reclaim_outcome(InboundEndReclaimOutcome::Released);
+                return;
+            }
+            let finalized = matches!(
+                tokio::time::timeout(
+                    SIP_RETAINED_TASK_TIMEOUT,
+                    coordinator.finalize_local_bye_exact(&handle, "SIP inbound hangup failed"),
+                )
+                .await,
+                Ok(Ok(()))
+            );
+            if finalized && wait_for_outbound_session_release(&coordinator, &handle).await {
+                record_inbound_end_reclaim_outcome(InboundEndReclaimOutcome::Finalized);
+                return;
+            }
+            // The forced reclaim is bounded too, so it can never hold this
+            // retained task (or the adapter's drain). On timeout the slot
+            // release is attempted directly; its own counters say whether the
+            // lifecycle authority allowed it.
+            let reclaimed = tokio::time::timeout(SIP_INBOUND_RECLAIM_FINISH_TIMEOUT, async {
+                if let Ok(cleanup) = tokio::time::timeout(
+                    SIP_RETAINED_TASK_TIMEOUT,
+                    coordinator.begin_force_reclaim_local_session_exact(&handle),
+                )
+                .await
+                {
+                    cleanup.finish().await;
+                }
+            })
+            .await;
+            if reclaimed.is_ok() {
+                record_inbound_end_reclaim_outcome(InboundEndReclaimOutcome::Forced);
+                return;
+            }
+            if let Some(occurrences) =
+                record_inbound_end_reclaim_outcome(InboundEndReclaimOutcome::TimedOut)
+            {
+                warn!(
+                    timeout_ms = SIP_INBOUND_RECLAIM_FINISH_TIMEOUT.as_millis(),
+                    occurrences,
+                    "SipAdapter inbound end reclaim exceeded its bound; releasing the session slot directly"
+                );
+            }
+            let _ = tokio::time::timeout(
+                SIP_INBOUND_RECLAIM_SLOT_RELEASE_TIMEOUT,
+                coordinator.force_release_session_slot_exact(&handle, "inbound-end-reclaim-timed-out"),
+            )
+            .await;
+        });
+        if !spawned {
+            debug!("SipAdapter inbound end reclaim requested after retained-task admission closed");
+        }
     }
 
     fn retire_outbound_route(&self, route: &Arc<SipOutboundRoute>) {
@@ -9452,6 +9626,90 @@ Signal=5\r\nDuration=160\r\n";
             .await;
     }
 
+    /// A session whose HangupCall cannot run (here its lane is held, as an
+    /// overflowing dispatch queue would hold it) must not hold the
+    /// orchestrator's end forever: the end is bounded by its backstop, hands
+    /// over `Ended`, and the retained reclaim releases the ended session once
+    /// it can.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stalled_inbound_hangup_is_bounded_and_its_session_reclaimed() {
+        let coordinator = UnifiedCoordinator::new(
+            ApiConfig::local("stalled-inbound-end", 0).with_session_cleanup(
+                crate::api::unified::SessionCleanupConfig::default()
+                    .with_inbound_end_backstop(Some(Duration::from_secs(1))),
+            ),
+        )
+        .await
+        .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let session_id = SessionId::from("stalled-inbound-end-session".to_string());
+        let handle = admit_test_session(&coordinator, &session_id).await;
+        let store = Arc::clone(&coordinator.helpers.state_machine.store);
+        store
+            .update_session_exact_with(&handle, None, |session| {
+                session.call_state = CallState::Active;
+            })
+            .expect("place the inbound session in Active");
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id.clone())
+            .expect("exact inbound route");
+        let connection_id = epoch.connection_id.clone();
+        let lane = store
+            .state_machine_lane_exact(&handle)
+            .expect("exact state-machine lane");
+        let stall = Arc::clone(&lane).lock_owned().await;
+        let before = crate::cleanup_diag::session_cleanup_counters();
+
+        let ended = tokio::time::timeout(
+            Duration::from_secs(5),
+            ConnectionAdapter::end(adapter.as_ref(), connection_id.clone(), EndReason::Normal),
+        )
+        .await
+        .expect("an inbound end with a stalled hangup is bounded");
+        assert!(
+            ended.is_err(),
+            "a stalled hangup surfaces as an end failure"
+        );
+        let terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("terminal delivered")
+            .expect("terminal event");
+        assert!(
+            matches!(
+                &terminal,
+                OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                    connection_id: id,
+                    reason: EndReason::Normal,
+                }) if *id == connection_id
+            ),
+            "the bounded end reported {terminal:?}"
+        );
+        let after = crate::cleanup_diag::session_cleanup_counters();
+        assert!(after.inbound_end_backstop_expiries > before.inbound_end_backstop_expiries);
+        assert!(after.inbound_end_reclaims > before.inbound_end_reclaims);
+        assert!(!adapter.by_connection.contains_key(&connection_id));
+
+        // The stall clears; the retained reclaim releases the ended session.
+        drop(stall);
+        tokio::time::timeout(Duration::from_secs(45), async {
+            while store.get_session_retained_snapshot_exact(&handle).is_ok() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the reclaim released the ended session");
+        adapter.shutdown().await.expect("adapter shutdown");
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+    }
+
     #[test]
     fn failed_media_reports_the_terminal_signaling_reached_first() {
         use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
@@ -10920,6 +11178,90 @@ mod reject_terminal_owner_tests {
         assert!(
             out_rx.try_recv().is_err(),
             "a completed reject must not deliver twice"
+        );
+    }
+}
+
+#[cfg(test)]
+mod inbound_end_bound_tests {
+    use super::*;
+
+    fn never() -> futures::future::Pending<Result<(), ()>> {
+        futures::future::pending()
+    }
+
+    /// The paused clock lands on the timer wheel's millisecond granularity.
+    fn assert_near(elapsed: Duration, expected: Duration) {
+        assert!(
+            elapsed >= expected && elapsed < expected + Duration::from_millis(5),
+            "elapsed {elapsed:?}, expected {expected:?}"
+        );
+    }
+
+    /// A hangup whose session never takes its `HangupCall` transition: with
+    /// the inline deadline off the backstop alone ends the wait.
+    #[tokio::test(start_paused = true)]
+    async fn inbound_end_backstop_bounds_a_hangup_that_never_completes() {
+        let started = tokio::time::Instant::now();
+        let joined =
+            join_inbound_hangup(never(), None, Some(Duration::from_secs(10)), || false).await;
+        assert_eq!(joined, InboundHangupJoin::BackstopExpired);
+        assert_near(started.elapsed(), Duration::from_secs(10));
+    }
+
+    /// Before a BYE exists the inline deadline wins; once a BYE exists the
+    /// wait continues, but only to the backstop.
+    #[tokio::test(start_paused = true)]
+    async fn inbound_end_backstop_keeps_the_inline_deadline_and_bounds_a_started_bye() {
+        let five = Some(Duration::from_secs(5));
+        let ten = Some(Duration::from_secs(10));
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            join_inbound_hangup(never(), five, ten, || false).await,
+            InboundHangupJoin::InlineDeadlineExpired
+        );
+        assert_near(started.elapsed(), Duration::from_secs(5));
+
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            join_inbound_hangup(never(), five, ten, || true).await,
+            InboundHangupJoin::BackstopExpired
+        );
+        assert_near(started.elapsed(), Duration::from_secs(10));
+
+        // An inline deadline at or past the backstop never applies.
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            join_inbound_hangup(never(), ten, five, || false).await,
+            InboundHangupJoin::BackstopExpired
+        );
+        assert_near(started.elapsed(), Duration::from_secs(5));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inbound_end_completed_hangup_is_returned_unchanged() {
+        let hangup = async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            Ok::<(), ()>(())
+        };
+        assert_eq!(
+            join_inbound_hangup(
+                hangup,
+                Some(Duration::from_secs(5)),
+                Some(Duration::from_secs(10)),
+                || false
+            )
+            .await,
+            InboundHangupJoin::Completed(Ok(()))
+        );
+        // Both bounds off means the unbounded join.
+        let hangup = async {
+            tokio::time::sleep(Duration::from_secs(3_600)).await;
+            Err::<(), ()>(())
+        };
+        assert_eq!(
+            join_inbound_hangup(hangup, None, None, || false).await,
+            InboundHangupJoin::Completed(Err(()))
         );
     }
 }
