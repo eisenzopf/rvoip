@@ -987,9 +987,7 @@ impl TransactionManager {
         raw_bytes: Option<bytes::Bytes>,
         timing: Option<TransportReceiveTiming>,
     ) -> Result<()> {
-        let wire_key = crate::transaction::utils::transaction_key_from_message(&Message::Request(
-            request.clone(),
-        ));
+        let wire_key = crate::transaction::utils::transaction_key_from_request(&request);
         let match_key = super::ServerTransactionMatchKey::from_request(&request, ingress_context);
 
         // An independently completed CANCEL transaction owns its retransmits.
@@ -1355,9 +1353,7 @@ impl TransactionManager {
         );
 
         // Try to find a matching client transaction
-        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
-            &Message::Response(response.clone()),
-        ) {
+        if let Some(key) = crate::transaction::utils::transaction_key_from_response(&response) {
             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "🔍 RESPONSE HANDLER: Generated transaction key from response");
 
             // Debug the current client transactions (gated on debug level)
@@ -1591,9 +1587,7 @@ impl TransactionManager {
         // server INVITE in Completed/Confirmed owns such an ACK. Treating an
         // arbitrary same-branch ACK as transaction-owned can consume a 2xx
         // ACK before the retained dialog index gets a chance to classify it.
-        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
-            &Message::Request(request.clone()),
-        ) {
+        if let Some(key) = crate::transaction::utils::transaction_key_from_request(&request) {
             let invite_key = key.with_method(Method::Invite);
 
             let invite_tx = self

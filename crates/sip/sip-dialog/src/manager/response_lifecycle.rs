@@ -278,16 +278,25 @@ impl DialogManager {
             ));
         }
 
-        let original_request = self
+        // Share the active server transaction's request; only a transaction
+        // that already left the active map needs the copying lookup.
+        let original_request: std::sync::Arc<Request> = match self
             .transaction_manager()
-            .original_request(transaction_id)
-            .await
-            .map_err(|_| DialogError::TransactionError {
-                message: "failed to read response transaction request".to_string(),
-            })?
-            .ok_or_else(|| DialogError::TransactionError {
-                message: "response transaction request is unavailable".to_string(),
-            })?;
+            .server_transaction_request(transaction_id)
+        {
+            Some(request) => request,
+            None => std::sync::Arc::new(
+                self.transaction_manager()
+                    .original_request(transaction_id)
+                    .await
+                    .map_err(|_| DialogError::TransactionError {
+                        message: "failed to read response transaction request".to_string(),
+                    })?
+                    .ok_or_else(|| DialogError::TransactionError {
+                        message: "response transaction request is unavailable".to_string(),
+                    })?,
+            ),
+        };
 
         let is_initial_invite = original_request.method() == Method::Invite
             && original_request.to().and_then(|to| to.tag()).is_none();
