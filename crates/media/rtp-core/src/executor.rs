@@ -58,6 +58,9 @@
 //!   of crossing the transport broadcast to the session task, and periodic
 //!   reports leave with a synchronous send (from a future hosted on the
 //!   socket's lane poller when the lane poller is on).
+//! - [`MediaExecutorConfig::owner_receive_stats`]: the socket owner publishes
+//!   the per-packet receive statistics through a single-writer seqlock
+//!   instead of taking the session statistics mutex per packet.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -206,6 +209,10 @@ pub struct MediaExecutorConfig {
     /// task is hosted on the socket's lane poller. RTCP on a separate RTCP
     /// socket keeps its own receive task.
     pub owner_rtcp: bool,
+    /// The socket owner, the only writer of a v2 session's per-packet receive
+    /// statistics, publishes them without the session statistics mutex
+    /// (a single-writer seqlock that readers overlay).
+    pub owner_receive_stats: bool,
 }
 
 impl Default for MediaExecutorConfig {
@@ -234,6 +241,7 @@ impl MediaExecutorConfig {
             lane_pass_clock: false,
             owner_srtp: false,
             owner_rtcp: false,
+            owner_receive_stats: false,
         }
     }
 
@@ -257,6 +265,7 @@ impl MediaExecutorConfig {
             lane_pass_clock: true,
             owner_srtp: true,
             owner_rtcp: true,
+            owner_receive_stats: true,
         }
     }
 
@@ -347,6 +356,12 @@ impl MediaExecutorConfig {
     /// Set [`Self::owner_rtcp`].
     pub fn with_owner_rtcp(mut self, enabled: bool) -> Self {
         self.owner_rtcp = enabled;
+        self
+    }
+
+    /// Set [`Self::owner_receive_stats`].
+    pub fn with_owner_receive_stats(mut self, enabled: bool) -> Self {
+        self.owner_receive_stats = enabled;
         self
     }
 
@@ -460,6 +475,12 @@ impl MediaExecutorConfig {
     /// on its socket's lane poller.
     pub fn owner_rtcp_on_lane_active(&self) -> bool {
         self.owner_rtcp_active() && self.lane_poller_active()
+    }
+
+    /// Whether sessions created now publish receive statistics from the
+    /// socket owner without the statistics mutex.
+    pub fn owner_receive_stats_active(&self) -> bool {
+        self.is_v2() && self.owner_receive_stats
     }
 }
 
@@ -662,6 +683,12 @@ pub fn owner_rtcp_enabled() -> bool {
 /// socket's lane poller. Read when a session starts.
 pub fn owner_rtcp_on_lane_enabled() -> bool {
     with_config(MediaExecutorConfig::owner_rtcp_on_lane_active)
+}
+
+/// Whether a session created now publishes its receive statistics from the
+/// socket owner without the statistics mutex. Read when a session is created.
+pub fn owner_receive_stats_enabled() -> bool {
+    with_config(MediaExecutorConfig::owner_receive_stats_active)
 }
 
 /// Restores the previous per-thread override when dropped.
@@ -926,6 +953,7 @@ static OWNER_RTCP_INBOUND: AtomicU64 = AtomicU64::new(0);
 static RTCP_SYNC_SENDS: AtomicU64 = AtomicU64::new(0);
 static RTCP_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static RTCP_LANE_TASKS: AtomicU64 = AtomicU64::new(0);
+static OWNER_RECEIVE_STATS: AtomicU64 = AtomicU64::new(0);
 
 /// Media executor totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction.
@@ -1010,6 +1038,9 @@ pub struct InlineExecutorCounters {
     pub rtcp_sync_deferred: u64,
     /// Periodic report tasks hosted on a lane poller.
     pub rtcp_lane_tasks: u64,
+    /// Sessions whose socket owner publishes receive statistics without the
+    /// statistics mutex.
+    pub owner_receive_stats: u64,
 }
 
 /// The media executor totals since start.
@@ -1043,6 +1074,7 @@ pub fn inline_executor_counters() -> InlineExecutorCounters {
         rtcp_sync_sends: RTCP_SYNC_SENDS.load(Ordering::Relaxed),
         rtcp_sync_deferred: RTCP_SYNC_DEFERRED.load(Ordering::Relaxed),
         rtcp_lane_tasks: RTCP_LANE_TASKS.load(Ordering::Relaxed),
+        owner_receive_stats: OWNER_RECEIVE_STATS.load(Ordering::Relaxed),
     }
 }
 
@@ -1607,6 +1639,11 @@ pub(crate) fn record_rtcp_lane_task() {
     RTCP_LANE_TASKS.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Count one session whose socket owner publishes its receive statistics.
+pub(crate) fn record_owner_receive_stats() {
+    OWNER_RECEIVE_STATS.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Lock-free SRTP datagrams of one owning receive loop, published in
 /// batches.
 #[derive(Default)]
@@ -1657,6 +1694,7 @@ mod tests {
         assert!(!v1.owner_srtp_active());
         assert!(!v1.owner_rtcp_active());
         assert!(!v1.owner_rtcp_on_lane_active());
+        assert!(!v1.owner_receive_stats_active());
 
         let v2 = MediaExecutorConfig::v2();
         assert_eq!(v2.mode, MediaExecutorMode::V2);
@@ -1670,6 +1708,7 @@ mod tests {
         assert!(v2.owner_srtp_active());
         assert!(v2.owner_rtcp_active());
         assert!(v2.owner_rtcp_on_lane_active());
+        assert!(v2.owner_receive_stats_active());
         assert!(v2.validate().is_ok());
     }
 
@@ -1868,6 +1907,10 @@ mod tests {
         assert!(!v1_with_switches.pcm_pool_active(), "never under v1");
         assert!(!v1_with_switches.owner_srtp_active(), "never under v1");
         assert!(!v1_with_switches.owner_rtcp_active(), "never under v1");
+        assert!(
+            !v1_with_switches.owner_receive_stats_active(),
+            "never under v1"
+        );
 
         let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
         assert!(no_poller.validate().is_ok());
@@ -1912,7 +1955,8 @@ mod tests {
             .with_tx_batch(false)
             .with_fast_ssrc_hash(false)
             .with_owner_srtp(false)
-            .with_owner_rtcp(false);
+            .with_owner_rtcp(false)
+            .with_owner_receive_stats(false);
         assert!(one_off.lane_poller_active());
         assert!(!one_off.lane_timer_active());
         assert!(!one_off.lane_tx_active());
@@ -1921,6 +1965,7 @@ mod tests {
         assert!(!one_off.owner_srtp_active());
         assert!(!one_off.owner_rtcp_active());
         assert!(!one_off.owner_rtcp_on_lane_active());
+        assert!(!one_off.owner_receive_stats_active());
     }
 
     #[test]
@@ -1954,6 +1999,13 @@ mod tests {
         assert!(after.rtcp_sync_sends > before.rtcp_sync_sends);
         assert!(after.rtcp_sync_deferred > before.rtcp_sync_deferred);
         assert!(after.rtcp_lane_tasks > before.rtcp_lane_tasks);
+    }
+
+    #[test]
+    fn owner_receive_stats_sessions_are_counted() {
+        let before = inline_executor_counters();
+        record_owner_receive_stats();
+        assert!(inline_executor_counters().owner_receive_stats > before.owner_receive_stats);
     }
 
     #[test]

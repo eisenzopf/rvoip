@@ -4,6 +4,7 @@
 //! configuration, packet sending/receiving, and jitter buffer management.
 
 mod inline;
+mod receive_accounting;
 mod scheduling;
 mod stream;
 
@@ -1071,6 +1072,8 @@ struct RtcpReporter {
     rtcp_members: DashMap<RtpSsrc, ()>,
     xr_enabled: AtomicBool,
     xr_quality: RtcpXrQualityConfig,
+    /// Receive statistics the socket owner publishes outside `stats`.
+    receive_accounting: Arc<receive_accounting::ReceiveAccounting>,
     periodic_reports: AtomicU64,
     /// Wakes the report task to redraw a pending interval after the
     /// bandwidth or minimum-interval policy changed.
@@ -1156,7 +1159,8 @@ impl RtcpReporter {
             if self.xr_enabled.load(Ordering::Relaxed)
                 && index % u64::from(self.xr_quality.every_n_rtcp_reports.get()) == 0
             {
-                let stats_snapshot = self.stats.lock().clone();
+                let mut stats_snapshot = self.stats.lock().clone();
+                self.receive_accounting.overlay(&mut stats_snapshot);
                 if let Some(xr) = build_voip_metrics_xr(
                     self.ssrc,
                     &report_blocks,
@@ -1465,6 +1469,14 @@ pub struct RtpSession {
     /// RFC 3550 sender octet count (RTP payload bytes only).
     sender_octets: Arc<AtomicU64>,
 
+    /// Receive statistics the socket owner publishes without the `stats`
+    /// mutex ([`MediaExecutorConfig::owner_receive_stats`]). Overlaid by every
+    /// reader of `stats`; empty (a no-op overlay) unless the inline ingress
+    /// writes it.
+    ///
+    /// [`MediaExecutorConfig::owner_receive_stats`]: crate::executor::MediaExecutorConfig::owner_receive_stats
+    receive_accounting: Arc<receive_accounting::ReceiveAccounting>,
+
     /// Media synchronization context
     media_sync: Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>>,
 
@@ -1659,6 +1671,7 @@ impl RtpSession {
                 .unwrap_or(crate::stats::reports::DEFAULT_SESSION_BANDWIDTH_BPS),
         );
         let streams = Arc::new(new_ssrc_map());
+        let receive_accounting = Arc::new(receive_accounting::ReceiveAccounting::new());
         let rtcp_reporter = Arc::new(RtcpReporter {
             ssrc,
             generator: parking_lot::Mutex::new(rtcp_generator),
@@ -1670,6 +1683,7 @@ impl RtpSession {
             rtcp_members: DashMap::new(),
             xr_enabled: AtomicBool::new(xr_quality.is_some()),
             xr_quality: xr_quality.unwrap_or_default(),
+            receive_accounting: receive_accounting.clone(),
             periodic_reports: AtomicU64::new(0),
             reschedule: tokio::sync::Notify::new(),
         });
@@ -1694,6 +1708,7 @@ impl RtpSession {
             recv_task: None,
             stats,
             sender_octets,
+            receive_accounting,
             media_sync: None,
             active: false,
             rtcp_reporter,
@@ -1760,6 +1775,9 @@ impl RtpSession {
             // The receive task captures the same handling at `start`, right
             // after this; nothing it reads changes in between.
             crate::executor::owner_rtcp_enabled().then(|| self.rtcp_ingress()),
+            crate::executor::owner_receive_stats_enabled().then(|| {
+                receive_accounting::ReceiveAccountingWriter::new(self.receive_accounting.clone())
+            }),
         );
         if transport.attach_inline_ingress(Box::new(ingress)) {
             self.inline_sink_slot = Some(sink_slot);
@@ -2207,7 +2225,9 @@ impl RtpSession {
 
     /// Get the session statistics
     pub fn get_stats(&self) -> RtpSessionStats {
-        self.stats.lock().clone()
+        let mut stats = self.stats.lock().clone();
+        self.receive_accounting.overlay(&mut stats);
+        stats
     }
 
     /// Get current bounded-queue occupancy for leak/perf diagnostics.
@@ -2239,6 +2259,8 @@ impl RtpSession {
         {
             let mut stats = self.stats.lock();
             stats.remote_addr = Some(addr);
+            // The socket owner re-publishes its next packet's source.
+            self.receive_accounting.note_remote_write();
         }
 
         // Update the transport's remote address
@@ -2472,7 +2494,13 @@ impl RtpSession {
         self.config.clock_rate = clock_rate;
         self.clock_rate.store(clock_rate, Ordering::Release);
         self.streams.clear();
-        self.stats.lock().jitter_ms = 0.0;
+        {
+            let mut stats = self.stats.lock();
+            stats.jitter_ms = 0.0;
+            // Jitter the socket owner published before this reset is no
+            // longer shown.
+            self.receive_accounting.note_jitter_reset();
+        }
         if let Some(scheduler) = &mut self.scheduler {
             scheduler.set_clock_rate(clock_rate);
         }

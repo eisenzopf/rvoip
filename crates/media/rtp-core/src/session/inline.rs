@@ -27,6 +27,7 @@ use std::time::Instant;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{error, info, trace};
 
+use super::receive_accounting::ReceiveAccountingWriter;
 use super::{ReceivedSenderReport, RtcpIngress, RtpSessionEvent, RtpSessionStats, RtpStream};
 use crate::executor::{
     record_inline_fallback, record_inline_sink_active, record_owner_rtcp_inbound, HandoffSlot,
@@ -63,6 +64,9 @@ pub(super) struct InlineSessionIngress {
     counters: Option<InlinePacketCounters>,
     /// The session's RTCP handling, with `owner_rtcp`.
     rtcp: Option<RtcpIngress>,
+    /// With `owner_receive_stats`: the per-packet receive statistics are
+    /// published here, without the `stats` mutex.
+    receive: Option<ReceiveAccountingWriter>,
 }
 
 impl InlineSessionIngress {
@@ -76,6 +80,7 @@ impl InlineSessionIngress {
         receive_queue: Option<mpsc::Sender<RtpPacket>>,
         sink_slot: Arc<InlineSinkSlot>,
         rtcp: Option<RtcpIngress>,
+        receive: Option<ReceiveAccountingWriter>,
     ) -> Self {
         Self {
             streams,
@@ -89,6 +94,7 @@ impl InlineSessionIngress {
             broadcast_packets: 0,
             counters: None,
             rtcp,
+            receive,
         }
     }
 
@@ -146,6 +152,12 @@ impl InlineSessionIngress {
     /// this packet created the stream.
     fn account(&mut self, packet: &InlineRtpPacket<'_>, now: Instant) -> bool {
         let ssrc = packet.ssrc;
+        // The jitter-reset generation, read before the stream is touched
+        // (see `receive_accounting`).
+        let jitter_generation = self
+            .receive
+            .as_ref()
+            .map_or(0, ReceiveAccountingWriter::begin);
         let received_sender_reports = &self.received_sender_reports;
         let clock_rate = &self.clock_rate;
         let mut created = false;
@@ -170,6 +182,26 @@ impl InlineSessionIngress {
         let after = entry.get_stats();
         let jitter_ms = entry.get_jitter_ms();
         drop(entry);
+
+        if let Some(receive) = self.receive.as_mut() {
+            receive.account(
+                packet.payload.len() as u64 + 12 + u64::from(packet.padding_size),
+                [
+                    before.packets_lost,
+                    before.duplicates,
+                    before.packets_out_of_order,
+                ],
+                [
+                    after.packets_lost,
+                    after.duplicates,
+                    after.packets_out_of_order,
+                ],
+                jitter_ms,
+                jitter_generation,
+            );
+            receive.remote(packet.source, &self.stats);
+            return created;
+        }
 
         let mut session_stats = self.stats.lock();
         session_stats.packets_received += 1;
@@ -405,6 +437,79 @@ mod tests {
         assert_eq!(v2.published, sequence.to_vec());
         assert_eq!(v2.stream.2, 1, "exactly the missing sequence 15 is lost");
         assert_eq!(v2.stream.3, 1, "one duplicate");
+    }
+
+    /// With the socket owner publishing receive statistics outside the
+    /// mutex, every field a reader sees equals v1's: counters, the last
+    /// source address (also after `set_remote_addr`), and jitter zeroed by a
+    /// clock change until the next packet.
+    #[tokio::test]
+    async fn owner_published_receive_statistics_match_v1_across_a_clock_reset() {
+        type Key = (u64, u64, u64, u64, u64, bool);
+        fn key(stats: &RtpSessionStats, peer: SocketAddr) -> Key {
+            (
+                stats.packets_received,
+                stats.bytes_received,
+                stats.packets_lost,
+                stats.packets_duplicated,
+                stats.packets_out_of_order,
+                stats.remote_addr == Some(peer),
+            )
+        }
+        let mut results = Vec::new();
+        for mode in [MediaExecutorMode::V1, MediaExecutorMode::V2] {
+            let before = inline_executor_counters();
+            let mut session = session_in(mode).await;
+            let mut events = session.subscribe();
+            let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let peer_addr = peer.local_addr().unwrap();
+            let elsewhere: SocketAddr = "192.0.2.7:4000".parse().unwrap();
+            let destination = session.local_addr().unwrap();
+            // In order, a gap, a late arrival and a duplicate.
+            for seq in [20_u16, 21, 23, 22, 22] {
+                send_all(&peer, destination, &[seq]).await;
+                let _ = next_published(&mut events).await;
+            }
+            let first = session.get_stats();
+            let jitter_before_reset = first.jitter_ms;
+            session.set_clock_rate(8_000);
+            let reset = session.get_stats();
+            // The control plane moves the remote address; the next packet's
+            // source wins again, as in v1.
+            session.set_remote_addr(elsewhere).await;
+            let moved = session.get_stats();
+            for seq in [24_u16, 25] {
+                send_all(&peer, destination, &[seq]).await;
+                let _ = next_published(&mut events).await;
+            }
+            let last = session.get_stats();
+            let after = inline_executor_counters();
+            if mode == MediaExecutorMode::V2 {
+                assert!(after.owner_receive_stats > before.owner_receive_stats);
+            }
+            session.close().await.unwrap();
+            assert_eq!(
+                reset.jitter_ms, 0.0,
+                "{mode:?}: a clock change zeroes jitter"
+            );
+            assert!(jitter_before_reset >= 0.0);
+            assert_eq!(moved.remote_addr, Some(elsewhere), "{mode:?}");
+            results.push((
+                key(&first, peer_addr),
+                key(&reset, peer_addr),
+                key(&moved, peer_addr),
+                key(&last, peer_addr),
+            ));
+        }
+        assert_eq!(
+            results[1].3,
+            (7, 7 * 172, 0, 1, 1, true),
+            "v2: seven packets, one duplicate, one late, from the peer"
+        );
+        assert_eq!(
+            results[0], results[1],
+            "v1 and v2 readers see the same statistics"
+        );
     }
 
     /// One random SRTP master key and salt per test process: generated at
