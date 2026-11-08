@@ -51,6 +51,29 @@ behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
 needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
 bumps (they break the test fixtures and examples built on the older APIs).
 
+### SIP
+
+- The transaction layer no longer deadlocks against a dialog handler under
+  load. The dialog manager drains the bounded transaction event queue and
+  can await `send_response` or `terminate_transaction` while it handles one
+  of that queue's events. A server transaction completed `send_response`
+  only after it had published the resulting `StateChanged`, so with the
+  queue full the runner waited for the handler and the handler waited for
+  the runner, with no timeout. `send_response` now completes once the
+  response is written, the state hook (Timer G/H/J/K) has run and the event
+  holds its place in the queue; the event is still delivered losslessly and
+  in order.
+- `terminate_transaction` no longer waits for its own terminal events to be
+  consumed. It used to publish `StateChanged(Terminated)` and
+  `TransactionTerminated` before completing, so a handler that called it
+  with a full queue stalled for one second, after which the manager closed
+  admission for every new transaction. It now completes once the runner is
+  joined and the transaction is removed from the manager and its timers; the
+  manager keeps delivering the terminal events in order and keeps the
+  transaction key reserved until they are queued. A second, concurrent
+  termination of the same transaction now also waits for the runner join
+  instead of proceeding as if the runner had already stopped.
+
 ## 0.4.0 — 2026-10-11
 
 ### Highlights
