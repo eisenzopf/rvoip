@@ -74,6 +74,7 @@ mod error;
 pub mod executor;
 pub(crate) mod lane_clock;
 pub(crate) mod lane_poller;
+pub mod lane_tick;
 pub mod media_clock;
 pub mod packet;
 pub mod session;
