@@ -125,6 +125,75 @@ mod tests {
         }
     }
 
+    /// Sends with an explicit payload type go through the handle captured
+    /// with the wrapper and complete while the RTP session mutex is held.
+    /// Default-payload sends still resolve the session's current payload
+    /// type, and removing the session stops typed sends.
+    #[tokio::test]
+    async fn typed_rtp_sends_skip_the_session_mutex_and_default_sends_stay_fresh() {
+        async fn next_rtp(peer: &tokio::net::UdpSocket) -> RtpPacket {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let (size, _) = peer.recv_from(&mut buffer).await.unwrap();
+                    // Skip RTCP (packet types 192-223) sharing the RTP port.
+                    if size >= 2 && !(192..=223).contains(&buffer[1]) {
+                        return RtpPacket::parse(&buffer[..size]).unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("no RTP packet reached the peer")
+        }
+
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("typed-send");
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = loopback_config();
+        config.remote_addr = Some(peer.local_addr().unwrap());
+        config.preferred_codec = Some("PCMU".to_string());
+        controller
+            .start_media(dialog.clone(), config)
+            .await
+            .unwrap();
+        let session = controller.get_rtp_session(&dialog).await.unwrap();
+
+        {
+            let _held = session.lock().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                controller.send_rtp_packet_with_payload_type(&dialog, vec![0x11; 160], 160, 0),
+            )
+            .await
+            .expect("a typed send must not wait for the RTP session mutex")
+            .unwrap();
+        }
+        let typed = next_rtp(&peer).await;
+        assert_eq!(typed.header.payload_type, 0);
+        assert_eq!(typed.header.timestamp, 160);
+        assert_eq!(typed.payload.as_ref(), &[0x11; 160]);
+
+        // The captured handle's default payload type is a construction-time
+        // snapshot; the default path must follow a later change instead.
+        session.lock().await.set_payload_type(8);
+        controller
+            .send_rtp_packet(&dialog, vec![0x22; 4], 320)
+            .await
+            .unwrap();
+        let untyped = next_rtp(&peer).await;
+        assert_eq!(untyped.header.payload_type, 8);
+        assert_eq!(
+            untyped.header.sequence_number,
+            typed.header.sequence_number.wrapping_add(1)
+        );
+
+        controller.stop_media(&dialog).await.unwrap();
+        assert!(controller
+            .send_rtp_packet_with_payload_type(&dialog, vec![0x33; 160], 480, 0)
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn separate_rtcp_ports_are_paired_released_and_never_collide() {
         // An odd range start: pairs still begin on an even port.
