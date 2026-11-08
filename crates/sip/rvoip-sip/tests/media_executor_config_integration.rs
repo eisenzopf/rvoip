@@ -6,14 +6,14 @@
 //! against it. Two in-process endpoints place a call over loopback and stream
 //! PCMU both ways: both RTP transports must receive on their lane pollers,
 //! account RTP inline on the socket owner, and audio must flow in both
-//! directions.
+//! directions, paced at 20 ms although both lanes run on v2's 2 ms lane tick.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_rtp_core::executor::{inline_executor_counters, media_executor_config};
+use rvoip_rtp_core::lane_tick::lane_tick_counters;
 use rvoip_sip::api::unified::Config;
 use rvoip_sip::{
     MediaExecutorConfig, MediaExecutorMode, MediaLanes, MediaRuntimeConfig, SessionError,
@@ -93,16 +93,16 @@ fn tone(freq: f32, frame: usize) -> Vec<i16> {
         .collect()
 }
 
-/// Stream a tone for `FRAMES` 20 ms frames and count the frames received
-/// meanwhile.
-async fn stream_audio(handle: SessionHandle, freq: f32) -> usize {
+/// Stream a tone for `FRAMES` 20 ms frames and return the frames received
+/// meanwhile: (RTP timestamp, when it arrived).
+async fn stream_audio(handle: SessionHandle, freq: f32) -> Vec<(u32, Instant)> {
     let audio = handle.audio().await.expect("audio stream opens");
     let (sender, mut receiver) = audio.split();
-    let received = Arc::new(AtomicUsize::new(0));
-    let counter = received.clone();
+    let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = received.clone();
     let drain = tokio::spawn(async move {
-        while receiver.recv().await.is_some() {
-            counter.fetch_add(1, Ordering::Relaxed);
+        while let Some(frame) = receiver.recv().await {
+            log.lock().unwrap().push((frame.timestamp, Instant::now()));
         }
     });
     for i in 0..FRAMES {
@@ -115,13 +115,52 @@ async fn stream_audio(handle: SessionHandle, freq: f32) -> usize {
     // Let the last packets arrive.
     tokio::time::sleep(Duration::from_millis(200)).await;
     drain.abort();
-    received.load(Ordering::Relaxed)
+    let frames = std::mem::take(&mut *received.lock().unwrap());
+    frames
+}
+
+/// The received frames are consecutive 20 ms frames (RTP timestamps 160
+/// apart) delivered at a 20 ms cadence: the median gap between deliveries
+/// is within a lane tick quantum (plus scheduling noise) of 20 ms, and the
+/// stream spans its frame count in time.
+fn assert_paced_at_20ms(who: &str, frames: &[(u32, Instant)]) {
+    let steps: Vec<u32> = frames
+        .windows(2)
+        .map(|pair| pair[1].0.wrapping_sub(pair[0].0))
+        .collect();
+    let in_step = steps.iter().filter(|step| **step == 160).count();
+    assert!(
+        in_step * 10 >= steps.len() * 9,
+        "{who}: {in_step} of {} timestamp steps are one 20 ms frame",
+        steps.len()
+    );
+    let mut gaps: Vec<Duration> = frames
+        .windows(2)
+        .map(|pair| pair[1].1.saturating_duration_since(pair[0].1))
+        .collect();
+    gaps.sort();
+    let median = gaps[gaps.len() / 2];
+    assert!(
+        median >= Duration::from_millis(16) && median <= Duration::from_millis(24),
+        "{who}: median delivery gap {median:?}"
+    );
+    let span = frames.last().unwrap().1 - frames[0].1;
+    let expected = Duration::from_millis(20) * (frames.len() as u32 - 1);
+    assert!(
+        span >= expected * 8 / 10 && span <= expected * 12 / 10 + Duration::from_millis(100),
+        "{who}: {} frames spanned {span:?}",
+        frames.len()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn call_media_flows_both_ways_on_executor_v2() {
     let _ = tracing_subscriber::fmt::try_init();
+    let tick = MediaExecutorConfig::v2().lane_tick.expect("v2 ticks");
+    assert_eq!(tick.quantum, Duration::from_millis(2));
+    assert!(tick.grid_timers);
     let before = inline_executor_counters();
+    let tick_before = lane_tick_counters();
     let (alice_sip, bob_sip) = (37_710, 37_711);
     let mut bob = StreamPeer::with_config(config("bob", bob_sip, (37_750, 37_769)))
         .await
@@ -152,11 +191,14 @@ async fn call_media_flows_both_ways_on_executor_v2() {
 
     let alice_audio = tokio::spawn(stream_audio(alice_handle.clone(), 440.0));
     let bob_audio = tokio::spawn(stream_audio(bob_handle.clone(), 880.0));
-    let (alice_received, bob_received) = (alice_audio.await.unwrap(), bob_audio.await.unwrap());
+    let (alice_frames, bob_frames) = (alice_audio.await.unwrap(), bob_audio.await.unwrap());
+    let (alice_received, bob_received) = (alice_frames.len(), bob_frames.len());
     assert!(
         alice_received >= FRAMES / 2 && bob_received >= FRAMES / 2,
         "audio must flow both ways: alice received {alice_received}, bob {bob_received} of {FRAMES}"
     );
+    assert_paced_at_20ms("alice", &alice_frames);
+    assert_paced_at_20ms("bob", &bob_frames);
 
     // Both endpoints' receive loops ran on their lane pollers and received
     // the call's RTP there.
@@ -174,6 +216,19 @@ async fn call_media_flows_both_ways_on_executor_v2() {
         before.lane_datagrams,
         after.lane_datagrams
     );
+    // The lanes are dedicated current-thread lanes, so their pollers ran on
+    // the tick: they slept between ticks instead of waking per packet.
+    let tick_after = lane_tick_counters();
+    assert!(
+        tick_after.tick_lanes >= 1,
+        "lane pollers tick on dedicated lanes"
+    );
+    assert_eq!(
+        tick_after.unsupported_lanes, tick_before.unsupported_lanes,
+        "every lane could tick"
+    );
+    assert!(tick_after.tick_passes > tick_before.tick_passes);
+    assert!(tick_after.tick_sleeps > tick_before.tick_sleeps);
 
     alice_handle.hangup().await.ok();
     tokio::time::sleep(Duration::from_millis(200)).await;
