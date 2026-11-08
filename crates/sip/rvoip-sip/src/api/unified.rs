@@ -2769,8 +2769,9 @@ pub struct Config {
     /// Media-core controller pool and capacity tuning for SIP media calls.
     pub media_session_controller_config: MediaSessionControllerConfig,
 
-    /// Layout of the process-wide media executor (its lanes and worker
-    /// threads); `None` leaves it at the default single lane.
+    /// Layout of the process-wide media executor (shared lanes and their
+    /// worker threads, or dedicated single-threaded lanes, optionally pinned
+    /// to CPUs); `None` leaves it at the default single shared lane.
     ///
     /// The media executor is shared by every coordinator in the process and
     /// starts on first use, so the layout is installed when the coordinator
@@ -4665,7 +4666,8 @@ impl Config {
     }
 
     /// Lay out the process-wide media executor, for example to split its
-    /// worker threads into several independent lanes on a large host.
+    /// worker threads into several independent lanes on a large host, or to
+    /// run one single-threaded lane per core.
     ///
     /// ```
     /// use rvoip_sip::{Config, MediaLanes, MediaRuntimeConfig};
@@ -4677,7 +4679,15 @@ impl Config {
     ///     },
     /// ));
     /// config.validate().unwrap();
+    ///
+    /// // One dedicated lane on each of CPUs 1 to 7.
+    /// let config = Config::local("alice", 5060)
+    ///     .with_media_runtime(MediaRuntimeConfig::new(MediaLanes::pinned(1..8)));
+    /// config.validate().unwrap();
     /// ```
+    ///
+    /// `rvoip_rtp_core::host_plan::ExecutorPlan::media_runtime_config` derives
+    /// a dedicated layout from the cores of the host.
     pub fn with_media_runtime(mut self, config: MediaRuntimeConfig) -> Self {
         self.media_runtime = Some(config);
         self
