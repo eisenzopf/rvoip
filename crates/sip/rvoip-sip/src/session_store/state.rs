@@ -893,6 +893,29 @@ impl SessionHangupControl {
 /// for this exact session, then publish a complete immutable revision in one
 /// swap. Cross-session index changes are coordinated separately by
 /// `SessionStore`; ordinary state changes never take that global boundary.
+/// What a media driver waits for before binding: a media owner, a decided
+/// SDP negotiation, or the end of the call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MediaReadinessSignal {
+    pub owner_ready: bool,
+    pub negotiation_decided: bool,
+    pub terminal: bool,
+}
+
+impl MediaReadinessSignal {
+    fn from_state(state: &SessionState) -> Self {
+        Self {
+            owner_ready: state.media_session_id.is_some(),
+            // Mirrors when `negotiated_media_config` stops answering None:
+            // a negotiated config with its payload type, or an SDP exchange
+            // that ended without one (which fails the stream).
+            negotiation_decided: state.sdp_negotiated
+                || (state.negotiated_config.is_some() && state.negotiated_payload_type().is_some()),
+            terminal: state.call_state.is_final() || state.call_state == CallState::Terminating,
+        }
+    }
+}
+
 pub(crate) struct SessionStateCell {
     current: ArcSwap<SessionStateSnapshot>,
     update_lock: StdMutex<()>,
@@ -910,6 +933,9 @@ pub(crate) struct SessionStateCell {
     /// when something waits for one (an inbound accept awaiting its ACK).
     /// Revisions that leave the call state unchanged wake nobody.
     call_state_updates: OnceLock<tokio::sync::watch::Sender<Option<CallState>>>,
+    /// Committed media-readiness changes of this exact lifetime, allocated
+    /// only when a media driver waits for one.
+    media_readiness_updates: OnceLock<tokio::sync::watch::Sender<Option<MediaReadinessSignal>>>,
 }
 
 impl SessionStateCell {
@@ -920,6 +946,7 @@ impl SessionStateCell {
             state_machine_lane: OnceLock::new(),
             hangup_control: OnceLock::new(),
             call_state_updates: OnceLock::new(),
+            media_readiness_updates: OnceLock::new(),
         }
     }
 
@@ -949,25 +976,55 @@ impl SessionStateCell {
             .subscribe()
     }
 
-    /// Wake call-state subscribers after a lifecycle commit succeeded, with
-    /// `lock_update` still held. Never call this from `publish`: a published
-    /// revision can still roll back.
-    pub(crate) fn notify_call_state_committed(&self, state: CallState) {
+    /// Wake call-state and media-readiness subscribers after a lifecycle
+    /// commit succeeded, with `lock_update` still held. Never call this from
+    /// `publish`: a published revision can still roll back. Subscribers wake
+    /// only when their own value changes.
+    pub(crate) fn notify_state_committed(&self, state: &SessionState) {
         if let Some(updates) = self.call_state_updates.get() {
             updates.send_if_modified(|previous| {
-                if *previous == Some(state) {
+                if *previous == Some(state.call_state) {
                     false
                 } else {
-                    *previous = Some(state);
+                    *previous = Some(state.call_state);
+                    true
+                }
+            });
+        }
+        if let Some(updates) = self.media_readiness_updates.get() {
+            let signal = Some(MediaReadinessSignal::from_state(state));
+            updates.send_if_modified(|previous| {
+                if *previous == signal {
+                    false
+                } else {
+                    *previous = signal;
                     true
                 }
             });
         }
     }
 
-    /// Tell call-state subscribers this lifetime is gone.
+    /// Subscribe to committed media-readiness changes. Call with
+    /// `lock_update` held, like [`Self::subscribe_call_state`].
+    pub(crate) fn subscribe_media_readiness(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<MediaReadinessSignal>> {
+        self.media_readiness_updates
+            .get_or_init(|| {
+                tokio::sync::watch::channel(Some(MediaReadinessSignal::from_state(
+                    self.snapshot().state(),
+                )))
+                .0
+            })
+            .subscribe()
+    }
+
+    /// Tell call-state and media-readiness subscribers this lifetime is gone.
     pub(crate) fn close_call_state_updates(&self) {
         if let Some(updates) = self.call_state_updates.get() {
+            updates.send_replace(None);
+        }
+        if let Some(updates) = self.media_readiness_updates.get() {
             updates.send_replace(None);
         }
     }

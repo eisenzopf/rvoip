@@ -1030,14 +1030,6 @@ impl Drop for SipMediaStream {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MediaOwnerProbe {
-    Ready,
-    Pending,
-    Terminal,
-    Missing,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MediaOwnerWaitResult {
     Ready,
     Terminal,
@@ -1046,37 +1038,42 @@ enum MediaOwnerWaitResult {
     TimedOut,
 }
 
-async fn wait_for_media_owner<Probe, ProbeFuture>(
-    mut probe: Probe,
+type MediaReadinessReceiver =
+    watch::Receiver<Option<crate::session_store::state::MediaReadinessSignal>>;
+
+/// Wait until `ready` holds for the exact lifetime's committed readiness,
+/// the call ends, the route is cancelled, or the deadline passes.
+///
+/// Wakes only on committed readiness changes, cancellation and one retained
+/// deadline timer; nothing polls the session map while the wait is pending.
+async fn wait_for_media_readiness(
+    updates: &mut MediaReadinessReceiver,
+    ready: impl Fn(crate::session_store::state::MediaReadinessSignal) -> bool,
     cancel_tx: &watch::Sender<bool>,
     cancel_rx: &mut watch::Receiver<bool>,
     deadline: tokio::time::Instant,
-) -> MediaOwnerWaitResult
-where
-    Probe: FnMut() -> ProbeFuture,
-    ProbeFuture: std::future::Future<Output = MediaOwnerProbe>,
-{
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-
+) -> MediaOwnerWaitResult {
+    let deadline_wait = tokio::time::sleep_until(deadline);
+    tokio::pin!(deadline_wait);
     loop {
         if *cancel_tx.borrow() {
             return MediaOwnerWaitResult::Cancelled;
         }
-        match probe().await {
-            MediaOwnerProbe::Ready => return MediaOwnerWaitResult::Ready,
-            MediaOwnerProbe::Terminal => return MediaOwnerWaitResult::Terminal,
-            MediaOwnerProbe::Missing => return MediaOwnerWaitResult::Missing,
-            MediaOwnerProbe::Pending => {}
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return MediaOwnerWaitResult::TimedOut;
+        match *updates.borrow_and_update() {
+            None => return MediaOwnerWaitResult::Missing,
+            Some(signal) if signal.terminal => return MediaOwnerWaitResult::Terminal,
+            Some(signal) if ready(signal) => return MediaOwnerWaitResult::Ready,
+            Some(_) => {}
         }
         tokio::select! {
-            _ = wait_for_media_cancel(cancel_rx) => {
-                return MediaOwnerWaitResult::Cancelled;
+            biased;
+            _ = wait_for_media_cancel(cancel_rx) => return MediaOwnerWaitResult::Cancelled,
+            changed = updates.changed() => {
+                if changed.is_err() {
+                    return MediaOwnerWaitResult::Missing;
+                }
             }
-            _ = tokio::time::sleep_until((now + POLL_INTERVAL).min(deadline)) => {}
+            () = &mut deadline_wait => return MediaOwnerWaitResult::TimedOut,
         }
     }
 }
@@ -1176,26 +1173,15 @@ async fn run_media_driver(
     // missing/terminal session and bounding the wait by the shared setup
     // deadline. This preserves eager stream publication without retiring a
     // valid inbound route before the application can answer it.
-    let owner_coordinator = Arc::clone(&coordinator);
-    let owner_session_id = session_id.clone();
-    let owner = wait_for_media_owner(
-        move || {
-            let coordinator = Arc::clone(&owner_coordinator);
-            let session_id = owner_session_id.clone();
-            async move {
-                match coordinator.session_state(&session_id).await {
-                    Err(_) => MediaOwnerProbe::Missing,
-                    Ok(session)
-                        if session.call_state.is_final()
-                            || session.call_state == crate::types::CallState::Terminating =>
-                    {
-                        MediaOwnerProbe::Terminal
-                    }
-                    Ok(session) if session.media_session_id.is_some() => MediaOwnerProbe::Ready,
-                    Ok(_) => MediaOwnerProbe::Pending,
-                }
-            }
-        },
+    let Some((exact_handle, mut readiness)) = coordinator.subscribe_media_readiness(&session_id)
+    else {
+        tracing::warn!(target: "rvoip_sip", "SipMediaStream session disappeared before media ownership");
+        lifecycle.mark_failed();
+        return;
+    };
+    let owner = wait_for_media_readiness(
+        &mut readiness,
+        |signal| signal.owner_ready,
         &cancel_tx,
         &mut cancel_rx,
         setup_deadline,
@@ -1225,36 +1211,56 @@ async fn run_media_driver(
     // been negotiated. Waiting for that exact negotiated configuration first
     // keeps the retained driver dormant across the INVITE/answer gap instead
     // of treating a normal pre-answer subscription miss as terminal failure.
-    let negotiation_deadline = setup_deadline;
-    let (negotiated, payload_type) = loop {
-        if *cancel_tx.borrow() {
+    match wait_for_media_readiness(
+        &mut readiness,
+        |signal| signal.negotiation_decided,
+        &cancel_tx,
+        &mut cancel_rx,
+        setup_deadline,
+    )
+    .await
+    {
+        MediaOwnerWaitResult::Ready => {}
+        MediaOwnerWaitResult::Cancelled => return,
+        MediaOwnerWaitResult::TimedOut => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                "SipMediaStream SDP negotiation timed out"
+            );
+            lifecycle.mark_failed();
             return;
         }
-        match coordinator.negotiated_media_config(&session_id).await {
-            Ok(Some(config)) => break config,
-            Ok(None) => {
-                tokio::select! {
-                    _ = wait_for_media_cancel(&mut cancel_rx) => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                    _ = tokio::time::sleep_until(negotiation_deadline) => {
-                        tracing::warn!(
-                            target: "rvoip_sip",
-                            "SipMediaStream SDP negotiation timed out"
-                        );
-                        lifecycle.mark_failed();
-                        return;
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "rvoip_sip",
-                    error = %error,
-                    "SipMediaStream negotiated media lookup failed"
-                );
-                lifecycle.mark_failed();
-                return;
-            }
+        outcome => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                ?outcome,
+                "SipMediaStream session ended before SDP negotiation"
+            );
+            lifecycle.mark_failed();
+            return;
+        }
+    }
+    let (negotiated, payload_type) = match coordinator
+        .negotiated_media_config_exact(&exact_handle)
+        .await
+    {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                "SipMediaStream negotiated media was not retained"
+            );
+            lifecycle.mark_failed();
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                error = %error,
+                "SipMediaStream negotiated media lookup failed"
+            );
+            lifecycle.mark_failed();
+            return;
         }
     };
     let (resolved_descriptor, payload_type) = match codec_descriptor(&negotiated, payload_type) {
@@ -2539,78 +2545,123 @@ impl MediaStream for SipMediaStream {
 #[cfg(test)]
 mod media_owner_wait_tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::session_store::state::MediaReadinessSignal;
+
+    fn pending() -> MediaReadinessSignal {
+        MediaReadinessSignal {
+            owner_ready: false,
+            negotiation_decided: false,
+            terminal: false,
+        }
+    }
 
     #[tokio::test]
     async fn inbound_publication_waits_for_delayed_media_owner_commit() {
-        let owner_ready = Arc::new(AtomicBool::new(false));
-        let delayed_owner = Arc::clone(&owner_ready);
+        let (updates, mut readiness) = watch::channel(Some(pending()));
         let commit = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            delayed_owner.store(true, Ordering::Release);
+            updates.send_replace(Some(MediaReadinessSignal {
+                owner_ready: true,
+                ..pending()
+            }));
+            updates
         });
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
-
-        let result = wait_for_media_owner(
-            move || {
-                let ready = owner_ready.load(Ordering::Acquire);
-                std::future::ready(if ready {
-                    MediaOwnerProbe::Ready
-                } else {
-                    MediaOwnerProbe::Pending
-                })
-            },
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.owner_ready,
             &cancel_tx,
             &mut cancel_rx,
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
-
-        commit.await.expect("delayed media-owner commit task");
+        let _retained = commit.await.expect("delayed media-owner commit task");
         assert_eq!(result, MediaOwnerWaitResult::Ready);
     }
 
     #[tokio::test]
-    async fn terminal_and_missing_sessions_fail_without_waiting_for_setup_deadline() {
-        for (probe, expected) in [
-            (MediaOwnerProbe::Terminal, MediaOwnerWaitResult::Terminal),
-            (MediaOwnerProbe::Missing, MediaOwnerWaitResult::Missing),
+    async fn early_commit_is_retained_and_terminal_or_missing_fails_promptly() {
+        for (signal, expected) in [
+            (
+                Some(MediaReadinessSignal {
+                    owner_ready: true,
+                    ..pending()
+                }),
+                MediaOwnerWaitResult::Ready,
+            ),
+            (
+                Some(MediaReadinessSignal {
+                    terminal: true,
+                    ..pending()
+                }),
+                MediaOwnerWaitResult::Terminal,
+            ),
+            (None, MediaOwnerWaitResult::Missing),
         ] {
+            let (_updates, mut readiness) = watch::channel(signal);
             let (cancel_tx, mut cancel_rx) = watch::channel(false);
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                wait_for_media_owner(
-                    || std::future::ready(probe),
+                wait_for_media_readiness(
+                    &mut readiness,
+                    |signal| signal.owner_ready,
                     &cancel_tx,
                     &mut cancel_rx,
                     tokio::time::Instant::now() + std::time::Duration::from_secs(5),
                 ),
             )
             .await
-            .expect("terminal ownership probe returned promptly");
+            .expect("readiness wait returned promptly");
             assert_eq!(result, expected);
         }
     }
 
     #[tokio::test]
-    async fn pending_media_owner_wait_observes_route_cancellation() {
+    async fn pending_media_wait_observes_route_cancellation() {
+        let (_updates, mut readiness) = watch::channel(Some(pending()));
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let cancelling = cancel_tx.clone();
         let cancel = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             cancelling.send_replace(true);
         });
-
-        let result = wait_for_media_owner(
-            || std::future::ready(MediaOwnerProbe::Pending),
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.owner_ready,
             &cancel_tx,
             &mut cancel_rx,
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
-
         cancel.await.expect("media-owner cancellation task");
         assert_eq!(result, MediaOwnerWaitResult::Cancelled);
+    }
+
+    /// A pending wait ends at its one deadline, and a closed lifetime
+    /// (dropped sender) ends a later wait at once as Missing.
+    #[tokio::test(start_paused = true)]
+    async fn pending_media_wait_has_one_bounded_deadline_and_closed_lifetime_wakes() {
+        let (updates, mut readiness) = watch::channel(Some(pending()));
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.negotiation_decided,
+            &cancel_tx,
+            &mut cancel_rx,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result, MediaOwnerWaitResult::TimedOut);
+        drop(updates);
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.negotiation_decided,
+            &cancel_tx,
+            &mut cancel_rx,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(result, MediaOwnerWaitResult::Missing);
     }
 }
 
