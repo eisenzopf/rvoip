@@ -77,6 +77,34 @@ impl G711Codec {
         ))
     }
 
+    /// [`AudioCodec::encode`] without `&mut self`, into `output` (cleared
+    /// first), so a caller can reuse one buffer per stream. G.711 is
+    /// stateless: the same bytes, for every input including an empty one.
+    pub fn encode_into(&self, audio_frame: &AudioFrame, output: &mut Vec<u8>) -> Result<()> {
+        output.clear();
+        match self.variant {
+            G711Variant::MuLaw => output.extend(
+                audio_frame
+                    .samples
+                    .iter()
+                    .map(|sample| codec_core::codecs::g711::ulaw_compress(*sample)),
+            ),
+            G711Variant::ALaw => output.extend(
+                audio_frame
+                    .samples
+                    .iter()
+                    .map(|sample| codec_core::codecs::g711::alaw_compress(*sample)),
+            ),
+        }
+        Ok(())
+    }
+
+    /// The length [`AudioCodec::encode`] would return for `audio_frame`
+    /// (one byte per sample), and the same success, without encoding.
+    pub fn encoded_len(&self, audio_frame: &AudioFrame) -> Result<usize> {
+        Ok(audio_frame.samples.len())
+    }
+
     fn empty_decode_error(&self) -> Error {
         Error::Codec(crate::error::CodecError::DecodingFailed {
             reason: format!(
@@ -252,6 +280,24 @@ mod tests {
     /// The pooled decode gives exactly the samples, format and errors of
     /// `decode`, for every wire byte and both laws, with and without the PCM
     /// pool, including a pooled buffer that still held other samples.
+    #[test]
+    fn encode_into_and_encoded_len_match_encode_for_every_sample_and_both_laws() {
+        for variant in [G711Variant::MuLaw, G711Variant::ALaw] {
+            let mut codec = G711Codec::new(variant, 8000, 1).unwrap();
+            let samples: Vec<i16> = (i16::MIN..=i16::MAX).step_by(7).chain([i16::MAX]).collect();
+            for frame in [
+                AudioFrame::new(samples.clone(), 8000, 1, 0),
+                AudioFrame::new(Vec::new(), 8000, 1, 0),
+            ] {
+                let expected = codec.encode(&frame).unwrap();
+                let mut output = vec![0xAA; 5];
+                codec.encode_into(&frame, &mut output).unwrap();
+                assert_eq!(output, expected, "{variant:?}");
+                assert_eq!(codec.encoded_len(&frame).unwrap(), expected.len());
+            }
+        }
+    }
+
     #[test]
     fn pooled_decode_matches_decode_for_every_byte_and_both_laws() {
         use rvoip_rtp_core::executor::{

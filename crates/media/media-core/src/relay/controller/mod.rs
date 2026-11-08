@@ -1416,6 +1416,7 @@ pub use inline_rx::{
     inline_rx_counters, InlineAudioConsumer, InlineAudioConsumerGuard, InlineAudioDelivery,
     InlineRxCounters,
 };
+pub use rtp_management::{EncodedG711Format, G711SendNow, PreparedG711Sender};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
     MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
@@ -1423,7 +1424,7 @@ pub use types::{
     RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
 };
 
-use types::RtpSessionWrapper;
+use types::{DialogTxGate, RtpSessionWrapper};
 
 #[cfg(feature = "memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
@@ -2488,6 +2489,7 @@ impl MediaSessionController {
         let inline_lease = self.offer_inline_rx(&dialog_id, &rtp_session, &codec_runtime);
 
         // Wrap RTP session
+        let typed_send_handle = rtp_session.send_handle();
         let rtp_wrapper = RtpSessionWrapper {
             session: Arc::new(tokio::sync::Mutex::new(rtp_session)),
             update_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -2497,6 +2499,8 @@ impl MediaSessionController {
             audio_transmitter: None,
             transmission_enabled: true, // Enable transmission by default
             is_muted: false,
+            typed_send_handle,
+            tx_gate: Arc::new(DialogTxGate::default()),
             #[cfg(feature = "memory-diagnostics")]
             memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "media_core.rtp_session_wrapper",
@@ -2791,7 +2795,11 @@ impl MediaSessionController {
         self.audio_frame_callbacks.remove(dialog_id);
         self.dtmf_callbacks.remove(dialog_id);
         self.cn_gate_state.remove(dialog_id);
-        self.codec_runtimes.remove(dialog_id);
+        if let Some((_, runtime)) = self.codec_runtimes.remove(dialog_id) {
+            runtime
+                .encoded_generation_live
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         self.retire_inline_lease(dialog_id);
 
         let media_id = MediaSessionId::from_dialog(dialog_id);
@@ -2860,6 +2868,8 @@ impl MediaSessionController {
         // shard, drop the guard, then close the underlying session
         // outside the map's locking territory.
         if let Some((_, mut rtp_wrapper)) = self.rtp_sessions.remove(dialog_id) {
+            // No cached TX sender may use this dialog again.
+            rtp_wrapper.tx_gate.retire();
             if let Some(transmitter) = rtp_wrapper.audio_transmitter.take() {
                 transmitter.stop().await;
             }
@@ -3056,6 +3066,10 @@ impl MediaSessionController {
         if let Some(runtime) = replacement_runtime.as_ref() {
             self.codec_runtimes
                 .insert(dialog_id.clone(), Arc::clone(runtime));
+            // TX paths cached for the previous generation fall back now.
+            old_runtime
+                .encoded_generation_live
+                .store(false, std::sync::atomic::Ordering::Release);
             self.resync_inline_lease(&dialog_id);
         }
         if let Some(mut entry) = self.rtp_sessions.get_mut(&dialog_id) {
