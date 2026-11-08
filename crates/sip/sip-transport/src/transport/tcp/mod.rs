@@ -281,6 +281,24 @@ impl TcpTransport {
                                 Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
                         }
+                        Ok(Some(ReceivedFrame::MalformedRequest(request))) => {
+                            let local_addr = connection.local_addr().unwrap_or(peer_addr);
+                            let event = TransportEvent::MalformedRequest {
+                                request: *request,
+                                source: peer_addr,
+                                destination: local_addr,
+                                transport_type: TransportType::Tcp,
+                                flow_id: Some(flow_id),
+                            };
+                            let Some(inner) = weak_inner.upgrade() else {
+                                break;
+                            };
+                            let events_tx = inner.events_tx.clone();
+                            drop(inner);
+                            if events_tx.try_send(event).is_err() {
+                                debug!(source = %peer_addr, "Dropping 400 for a malformed TCP request");
+                            }
+                        }
                         Ok(Some(ReceivedFrame::KeepAlivePong)) => {
                             let local_addr = connection.local_addr().unwrap_or(peer_addr);
                             let Some(inner) = weak_inner.upgrade() else {

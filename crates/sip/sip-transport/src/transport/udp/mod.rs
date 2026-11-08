@@ -576,6 +576,14 @@ async fn process_udp_datagram(
                     .map(|message| (message, raw_bytes))
                     .map_err(|error| Error::ParseError(error.to_string()))
             }
+            // No empty line ends the header section. A datagram is a whole
+            // message (RFC 3261 §18.3), so it is the parser's to accept
+            // leniently or reject.
+            Ok(SipFrameStatus::Incomplete {
+                required_total: None,
+            }) => rvoip_sip_core::parse_message(&datagram.packet)
+                .map(|message| (message, datagram.packet.clone()))
+                .map_err(|error| Error::ParseError(error.to_string())),
             Ok(SipFrameStatus::Incomplete { .. }) => {
                 Err(Error::ParseError("incomplete SIP UDP datagram".to_string()))
             }
@@ -604,13 +612,30 @@ async fn process_udp_datagram(
         }
         Err(e) => {
             diagnostics::record_udp_parse_failed();
-            debug!(
-                error_class = "malformed-sip-datagram",
-                error_bytes = e.to_string().len(),
-                "Discarding malformed SIP UDP datagram"
-            );
-            TransportEvent::Error {
-                error: format!("Error parsing SIP message: {}", e),
+            match rvoip_sip_core::validation::recover_request_for_rejection(&datagram.packet) {
+                Some(request) => {
+                    debug!(
+                        error_class = "malformed-sip-request",
+                        "Answering malformed SIP UDP request with 400"
+                    );
+                    TransportEvent::MalformedRequest {
+                        request,
+                        source: datagram.source,
+                        destination: datagram.local_addr,
+                        transport_type: TransportType::Udp,
+                        flow_id: None,
+                    }
+                }
+                None => {
+                    debug!(
+                        error_class = "malformed-sip-datagram",
+                        error_bytes = e.to_string().len(),
+                        "Discarding malformed SIP UDP datagram"
+                    );
+                    TransportEvent::Error {
+                        error: format!("Error parsing SIP message: {}", e),
+                    }
+                }
             }
         }
     };

@@ -8228,6 +8228,40 @@ impl TransactionManager {
         .await
     }
 
+    /// The server transaction that `request` from `remote_addr` created when
+    /// it arrived, found by its RFC 3261 §17.2.3 identity (branch, sent-by
+    /// and method) rather than the branch alone: two requests may share a
+    /// branch and differ in sent-by (RFC 4475 reuses one branch in several
+    /// messages). `None` when no such transaction, or more than one, exists.
+    fn arrived_server_transaction(
+        &self,
+        request: &Request,
+        remote_addr: SocketAddr,
+    ) -> Option<Arc<dyn ServerTransaction>> {
+        let identity = ServerTransactionWireIdentity {
+            branch: TransactionKey::from_request(request)?.branch,
+            method: request.method().clone(),
+            sent_by: NormalizedViaSentBy::from_request(request)?,
+        };
+        let match_keys = self
+            .server_transaction_matches
+            .by_wire_identity
+            .get(&identity)?
+            .clone();
+        let mut transaction_ids = match_keys
+            .iter()
+            .filter(|match_key| match_key.peer.source == remote_addr)
+            .filter_map(|match_key| self.server_transaction_matches.registration(match_key))
+            .map(|registration| registration.transaction_id.clone());
+        let transaction_id = transaction_ids.next()?;
+        if transaction_ids.next().is_some() {
+            return None;
+        }
+        self.server_transactions
+            .get(&transaction_id)
+            .map(|entry| Arc::clone(entry.value()))
+    }
+
     async fn create_server_transaction_inner(
         &self,
         request: Request,
@@ -8236,18 +8270,19 @@ impl TransactionManager {
         publish_cancel_event: bool,
         transaction_id: Option<TransactionKey>,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        // Extract branch parameter from the top Via header
-        let branch = match request.first_via() {
-            Some(via) => match via.branch() {
-                Some(b) => b.to_string(),
-                None => {
-                    return Err(Error::Other(
-                        "Missing branch parameter in Via header".to_string(),
-                    ));
-                }
-            },
-            None => return Err(Error::Other("Missing Via header in request".to_string())),
-        };
+        // The RFC 3261 branch, or the RFC 2543 transaction identifier
+        // (RFC 3261 §17.2.3).
+        let branch = crate::transaction::key::server_transaction_branch(&request)
+            .ok_or_else(|| Error::Other("Missing Via header in request".to_string()))?;
+
+        // A handler re-creating the transaction of a request it was handed
+        // gets the transaction that request created.
+        if transaction_id.is_none() {
+            if let Some(transaction) = self.arrived_server_transaction(&request, remote_addr) {
+                transaction.process_request(request.clone()).await?;
+                return Ok(transaction);
+            }
+        }
 
         // Create the transaction key directly with is_server: true
         let wire_key = TransactionKey::new(branch, request.method().clone(), true);

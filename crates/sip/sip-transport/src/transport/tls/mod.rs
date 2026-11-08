@@ -1029,8 +1029,25 @@ impl TlsTransport {
                             }
                             None => {}
                         }
-                        match try_parse_one(&mut buffer) {
-                            Ok(Some((message, raw_bytes))) => {
+                        match try_parse_tls_frame(&mut buffer) {
+                            Ok(Some(TlsFrame::MalformedRequest(request))) => {
+                                if event_tx
+                                    .try_send(TransportEvent::MalformedRequest {
+                                        request,
+                                        source: remote_addr,
+                                        destination: local_addr,
+                                        transport_type: TransportType::Tls,
+                                        flow_id: Some(flow_id),
+                                    })
+                                    .is_err()
+                                {
+                                    debug!(
+                                        source = %remote_addr,
+                                        "Dropping 400 for a malformed TLS request"
+                                    );
+                                }
+                            }
+                            Ok(Some(TlsFrame::Message(message, raw_bytes))) => {
                                 if event_tx
                                     .try_send(TransportEvent::MessageReceived {
                                         message,
@@ -2662,7 +2679,27 @@ pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 /// over-limit framing. Mirrors
 /// `transport::tcp::connection::TcpConnection::try_parse_message` so TLS
 /// framing matches TCP's behaviour exactly.
+/// One framed unit read from a TLS stream.
+enum TlsFrame {
+    Message(rvoip_sip_core::Message, bytes::Bytes),
+    /// A framed request that does not parse, reduced to what a 400 (Bad
+    /// Request) needs; the stream stays framed (RFC 4475 §3.1.2).
+    MalformedRequest(rvoip_sip_core::Request),
+}
+
+/// [`try_parse_tls_frame`] for tests that expect a parsed message.
+#[cfg(test)]
 fn try_parse_one(buffer: &mut BytesMut) -> Result<Option<(rvoip_sip_core::Message, bytes::Bytes)>> {
+    match try_parse_tls_frame(buffer)? {
+        Some(TlsFrame::Message(message, raw_bytes)) => Ok(Some((message, raw_bytes))),
+        Some(TlsFrame::MalformedRequest(_)) => Err(Error::ParseError(
+            "SIP parser rejected framed TLS message".to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn try_parse_tls_frame(buffer: &mut BytesMut) -> Result<Option<TlsFrame>> {
     if buffer.is_empty() {
         return Ok(None);
     }
@@ -2686,17 +2723,27 @@ fn try_parse_one(buffer: &mut BytesMut) -> Result<Option<(rvoip_sip_core::Messag
     match rvoip_sip_core::parse_message(&raw_bytes) {
         Ok(message) => {
             buffer.advance(frame.total_bytes);
-            Ok(Some((message, raw_bytes)))
+            Ok(Some(TlsFrame::Message(message, raw_bytes)))
         }
-        Err(_) => {
-            warn!(
-                error_class = "sip-syntax",
-                "Rejecting malformed SIP TLS message"
-            );
-            Err(Error::ParseError(
-                "SIP parser rejected framed TLS message".to_string(),
-            ))
-        }
+        Err(_) => match rvoip_sip_core::validation::recover_request_for_rejection(&raw_bytes) {
+            Some(request) => {
+                debug!(
+                    error_class = "sip-syntax",
+                    "Answering malformed SIP TLS request with 400"
+                );
+                buffer.advance(frame.total_bytes);
+                Ok(Some(TlsFrame::MalformedRequest(request)))
+            }
+            None => {
+                warn!(
+                    error_class = "sip-syntax",
+                    "Rejecting malformed SIP TLS message"
+                );
+                Err(Error::ParseError(
+                    "SIP parser rejected framed TLS message".to_string(),
+                ))
+            }
+        },
     }
 }
 
