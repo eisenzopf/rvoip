@@ -2109,6 +2109,259 @@ impl UdpRtpTransport {
     }
 }
 
+/// One RTP payload a caller wants on the wire now (synchronous TX path).
+/// The header is the minimal one `RtpPacketSender` builds (`RtpHeader::new`
+/// plus the marker), with consecutive sequence numbers assigned by the
+/// sender.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TxPayload<'a> {
+    pub(crate) payload_type: u8,
+    pub(crate) marker: bool,
+    pub(crate) timestamp: u32,
+    pub(crate) payload: &'a [u8],
+}
+
+/// What [`UdpRtpTransport::try_send_rtp_now`] did.
+#[derive(Debug, Default)]
+pub(crate) struct TxNowOutcome {
+    /// Leading packets that left: accepted by the kernel, or refused by the
+    /// local stack and lost as on the wire (see [`datagram_refused`]). Their
+    /// sequence numbers and SRTP indexes are consumed.
+    pub(crate) sent: usize,
+    /// Of `sent`, the datagrams the local stack refused.
+    pub(crate) refused: u32,
+    /// The packet at index `sent` failed after consuming its sequence
+    /// number (`send_payload` returned this error for it). Packets after it
+    /// were not consumed.
+    pub(crate) error: Option<Error>,
+    /// Packets after `sent` (and after a failed one) were not consumed: the
+    /// socket would block. The caller sends them through the async path,
+    /// which assigns them the same sequence numbers and SRTP indexes.
+    pub(crate) would_block: bool,
+    /// `sendmmsg` calls that carried more than one packet, and those packets.
+    pub(crate) sendmmsg_calls: u32,
+    pub(crate) sendmmsg_packets: u32,
+    /// Some packets went one `sendto` at a time after a short (or
+    /// unavailable) `sendmmsg`.
+    pub(crate) fallback: bool,
+}
+
+impl TxNowOutcome {
+    /// Sequence numbers consumed: every sent packet, plus a failed one.
+    pub(crate) fn consumed(&self) -> usize {
+        self.sent + usize::from(self.error.is_some())
+    }
+}
+
+/// Where the synchronous TX loop writes. The socket in production; a
+/// scripted fake in tests, so the `sendmmsg` fallback rules are
+/// deterministic.
+pub(crate) trait DatagramWriter {
+    /// One non-blocking `sendto`.
+    fn send_one(&self, datagram: &[u8], dest: SocketAddr) -> std::io::Result<usize>;
+    /// One non-blocking `sendmmsg` of all `datagrams`; `None` where the
+    /// platform has none.
+    fn send_many(&self, datagrams: &[&[u8]], dest: SocketAddr) -> Option<std::io::Result<usize>>;
+}
+
+impl DatagramWriter for UdpSocket {
+    fn send_one(&self, datagram: &[u8], dest: SocketAddr) -> std::io::Result<usize> {
+        self.try_send_to(datagram, dest)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn send_many(&self, datagrams: &[&[u8]], dest: SocketAddr) -> Option<std::io::Result<usize>> {
+        use std::os::fd::AsRawFd;
+        let fd = self.as_raw_fd();
+        // `try_io` only runs the closure while Tokio believes the socket is
+        // writable, and clears that readiness if it returns `WouldBlock`,
+        // exactly as `try_send_to` does.
+        Some(self.try_io(tokio::io::Interest::WRITABLE, || {
+            crate::sys_mmsg::send_to_many(fd, datagrams, dest)
+        }))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn send_many(&self, _datagrams: &[&[u8]], _dest: SocketAddr) -> Option<std::io::Result<usize>> {
+        None
+    }
+}
+
+/// Send `datagrams` (one call's packets, in wire order) to `dest` without
+/// blocking. With `batch` and more than one datagram, one `sendmmsg` first;
+/// whatever it did not take goes one `sendto` at a time. Stops at the first
+/// `WouldBlock` (the rest are reported unsent) or the first error other than
+/// a per-datagram refusal (reported for that datagram). A refused datagram
+/// is lost and the rest go on, as on the async path. Order is never changed.
+pub(crate) fn write_datagrams_now<W: DatagramWriter + ?Sized>(
+    writer: &W,
+    datagrams: &[&[u8]],
+    dest: SocketAddr,
+    batch: bool,
+) -> (TxNowOutcome, Option<std::io::Error>) {
+    let mut outcome = TxNowOutcome::default();
+    let mut next = 0usize;
+    if batch && datagrams.len() > 1 {
+        let limit = datagrams.len().min(MAX_TX_BATCH);
+        match writer.send_many(&datagrams[..limit], dest) {
+            Some(Ok(accepted)) => {
+                let accepted = accepted.min(limit);
+                if accepted > 1 {
+                    outcome.sendmmsg_calls = 1;
+                    outcome.sendmmsg_packets = accepted as u32;
+                }
+                next = accepted;
+                if next < datagrams.len() {
+                    outcome.fallback = true;
+                }
+            }
+            Some(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                outcome.would_block = true;
+                return (outcome, None);
+            }
+            // A hard error from `sendmmsg` belongs to its first datagram;
+            // let the per-packet path report it precisely.
+            Some(Err(_)) | None => outcome.fallback = true,
+        }
+    }
+    while next < datagrams.len() {
+        match writer.send_one(datagrams[next], dest) {
+            Ok(_) => next += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                outcome.would_block = true;
+                break;
+            }
+            Err(error) if datagram_refused(&error) => {
+                // Consumed and lost, like a network drop; the rest go on.
+                debug!(%error, %dest, "RTP datagram refused by the local network stack; counted as lost");
+                outcome.refused += 1;
+                next += 1;
+            }
+            Err(error) => {
+                outcome.sent = next;
+                return (outcome, Some(error));
+            }
+        }
+    }
+    outcome.sent = next;
+    (outcome, None)
+}
+
+/// Most packets one synchronous call protects and sends.
+pub(crate) const MAX_TX_BATCH: usize = 16;
+
+impl UdpRtpTransport {
+    /// Protect and send `packets` (one stream, consecutive sequence numbers
+    /// from `first_sequence`, in order) from the caller's thread, without
+    /// awaiting: one `try_send_to` per packet, or one `sendmmsg` for a batch
+    /// on Linux.
+    ///
+    /// The caller holds the stream's packet-writer lock, so sequence numbers
+    /// and wire order are exactly those of `send_payload`. SRTP state is
+    /// committed only for packets that consumed their sequence number (sent,
+    /// refused, or failed after protection as the async path fails): a
+    /// packet that would block is left unconsumed for the async path. The
+    /// `srtp_send` lock is held across the non-blocking system call so no
+    /// other protect can take an index in between.
+    ///
+    /// `None`: this transport cannot send synchronously; nothing was
+    /// consumed.
+    pub(crate) fn try_send_rtp_now(
+        &self,
+        packets: &[TxPayload<'_>],
+        ssrc: u32,
+        first_sequence: u16,
+        dest: SocketAddr,
+        arena: &mut Vec<u8>,
+        batch: bool,
+    ) -> Option<TxNowOutcome> {
+        let packets = &packets[..packets.len().min(MAX_TX_BATCH)];
+        if packets.is_empty() {
+            return Some(TxNowOutcome::default());
+        }
+        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
+            // As `send_rtp_wire_bytes_unchecked`: seed the pre-latch target.
+            seed_prelatch_destination(&self.remote_rtp_addr, dest);
+        }
+        let mut srtp_guard = self.srtp_send.lock();
+        arena.clear();
+        let mut ranges: [(usize, usize); MAX_TX_BATCH] = [(0, 0); MAX_TX_BATCH];
+        let mut commits = [crate::srtp::OutboundRtpCommit::default(); MAX_TX_BATCH];
+        let mut protected = 0usize;
+        let mut protect_error = None;
+        for (index, packet) in packets.iter().enumerate() {
+            let sequence = first_sequence.wrapping_add(index as u16);
+            let start = arena.len();
+            if let Some(context) = srtp_guard.as_mut() {
+                match context.protect_rtp_into(
+                    packet.payload_type,
+                    packet.marker,
+                    sequence,
+                    packet.timestamp,
+                    ssrc,
+                    packet.payload,
+                    &commits[..protected],
+                    arena,
+                ) {
+                    Ok(commit) => commits[protected] = commit,
+                    Err(error) => {
+                        protect_error = Some(error);
+                        break;
+                    }
+                }
+            } else if self.secure_media_required.load(Ordering::Acquire) {
+                protect_error = Some(Error::InvalidState(
+                    "SRTP is required but no send context is installed".to_string(),
+                ));
+                break;
+            } else {
+                crate::srtp::write_minimal_rtp_header(
+                    arena,
+                    packet.payload_type,
+                    packet.marker,
+                    sequence,
+                    packet.timestamp,
+                    ssrc,
+                );
+                arena.extend_from_slice(packet.payload);
+            }
+            ranges[index] = (start, arena.len());
+            protected += 1;
+        }
+        let mut views: [&[u8]; MAX_TX_BATCH] = [&[]; MAX_TX_BATCH];
+        for (view, (start, end)) in views.iter_mut().zip(ranges.iter()).take(protected) {
+            *view = &arena[*start..*end];
+        }
+        let (mut outcome, io_error) =
+            write_datagrams_now(&*self.rtp_socket, &views[..protected], dest, batch);
+        if outcome.refused > 0 {
+            self.refused_rtp_datagrams
+                .fetch_add(u64::from(outcome.refused), Ordering::Relaxed);
+        }
+        if let Some(error) = io_error {
+            outcome.error = Some(Error::Transport(format!(
+                "Failed to send RTP packet: {}",
+                error
+            )));
+        } else if !outcome.would_block {
+            // Everything protected left; a protect failure (the async path:
+            // the frame's `send_rtp_with_buffer` error, after its sequence
+            // number was taken) is reported for the next packet.
+            if let Some(error) = protect_error {
+                outcome.error = Some(error);
+            }
+        }
+        // SRTP state: every packet that consumed its sequence number and was
+        // protected. A protect failure never committed (the async path
+        // neither).
+        if let Some(context) = srtp_guard.as_mut() {
+            let committed = outcome.consumed().min(protected);
+            context.commit_outbound(&commits[..committed]);
+        }
+        Some(outcome)
+    }
+}
+
 #[async_trait]
 impl RtpTransport for UdpRtpTransport {
     fn media_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
@@ -4555,5 +4808,196 @@ mod inline_rx_tests {
             assert!(matches!(tasks[0], ReceiverTask::Task(_)));
         }
         transport.close().await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sync_tx_writer_tests {
+    //! The `sendmmsg` fallback and refusal rules of the synchronous TX loop,
+    //! against a scripted writer.
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::io;
+
+    enum Many {
+        Unsupported,
+        Accept(usize),
+        Fail(io::ErrorKind),
+    }
+
+    struct Scripted {
+        many: Many,
+        one: RefCell<VecDeque<io::Result<usize>>>,
+        wire: RefCell<Vec<Vec<u8>>>,
+    }
+
+    impl Scripted {
+        fn new(many: Many, one: Vec<io::Result<usize>>) -> Self {
+            Self {
+                many,
+                one: RefCell::new(one.into()),
+                wire: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DatagramWriter for Scripted {
+        fn send_one(&self, datagram: &[u8], _dest: SocketAddr) -> io::Result<usize> {
+            let result = self
+                .one
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(Ok(datagram.len()));
+            if result.is_ok() {
+                self.wire.borrow_mut().push(datagram.to_vec());
+            }
+            result
+        }
+
+        fn send_many(&self, datagrams: &[&[u8]], _dest: SocketAddr) -> Option<io::Result<usize>> {
+            match self.many {
+                Many::Unsupported => None,
+                Many::Fail(kind) => Some(Err(io::Error::from(kind))),
+                Many::Accept(count) => {
+                    let count = count.min(datagrams.len());
+                    self.wire
+                        .borrow_mut()
+                        .extend(datagrams[..count].iter().map(|datagram| datagram.to_vec()));
+                    Some(Ok(count))
+                }
+            }
+        }
+    }
+
+    fn datagrams() -> Vec<Vec<u8>> {
+        (0..5u8).map(|i| vec![i; 3]).collect()
+    }
+
+    fn run(writer: &Scripted, batch: bool) -> (TxNowOutcome, Option<io::Error>) {
+        let owned = datagrams();
+        let views: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+        write_datagrams_now(writer, &views, "127.0.0.1:9".parse().unwrap(), batch)
+    }
+
+    #[test]
+    fn a_full_sendmmsg_sends_everything_in_one_call() {
+        let writer = Scripted::new(Many::Accept(5), vec![]);
+        let (outcome, error) = run(&writer, true);
+        assert!(error.is_none());
+        assert_eq!(
+            (
+                outcome.sent,
+                outcome.sendmmsg_calls,
+                outcome.sendmmsg_packets
+            ),
+            (5, 1, 4 + 1)
+        );
+        assert!(!outcome.fallback && !outcome.would_block);
+        assert_eq!(*writer.wire.borrow(), datagrams());
+    }
+
+    #[test]
+    fn a_short_sendmmsg_falls_back_per_packet_in_order() {
+        let writer = Scripted::new(Many::Accept(2), vec![]);
+        let (outcome, error) = run(&writer, true);
+        assert!(error.is_none());
+        assert_eq!(outcome.sent, 5);
+        assert!(outcome.fallback);
+        assert_eq!((outcome.sendmmsg_calls, outcome.sendmmsg_packets), (1, 2));
+        assert_eq!(
+            *writer.wire.borrow(),
+            datagrams(),
+            "order kept across the fallback"
+        );
+    }
+
+    #[test]
+    fn would_block_stops_and_leaves_the_rest_unsent() {
+        let writer = Scripted::new(
+            Many::Accept(1),
+            vec![Ok(3), Err(io::Error::from(io::ErrorKind::WouldBlock))],
+        );
+        let (outcome, error) = run(&writer, true);
+        assert!(error.is_none());
+        assert_eq!(outcome.sent, 2);
+        assert!(outcome.would_block);
+        assert_eq!(outcome.consumed(), 2);
+        assert_eq!(
+            outcome.sendmmsg_calls, 0,
+            "a one-packet sendmmsg is not a batch"
+        );
+    }
+
+    #[test]
+    fn a_blocked_sendmmsg_sends_nothing() {
+        let writer = Scripted::new(Many::Fail(io::ErrorKind::WouldBlock), vec![]);
+        let (outcome, error) = run(&writer, true);
+        assert!(error.is_none());
+        assert_eq!((outcome.sent, outcome.would_block), (0, true));
+        assert!(writer.wire.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_hard_error_is_reported_for_its_packet() {
+        let writer = Scripted::new(
+            Many::Fail(io::ErrorKind::PermissionDenied),
+            vec![Ok(3), Err(io::Error::from(io::ErrorKind::InvalidInput))],
+        );
+        let (outcome, error) = run(&writer, true);
+        assert_eq!(outcome.sent, 1);
+        assert_eq!(
+            outcome.consumed(),
+            1,
+            "a hard error ends the send before the failed packet consumes its number"
+        );
+        assert!(outcome.fallback);
+        assert_eq!(
+            error.map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn a_refused_datagram_is_lost_and_the_rest_still_leave() {
+        // A host firewall's egress drop rule (`iptables -j DROP` in
+        // OUTPUT) makes `sendto` return EPERM for one datagram. Before the
+        // fix that was the call's last packet: the send failed and every
+        // consumer ended its outbound audio.
+        for refusal in [
+            io::Error::from_raw_os_error(libc::EPERM),
+            io::Error::from_raw_os_error(libc::ENOBUFS),
+            io::Error::from(io::ErrorKind::ConnectionRefused),
+            io::Error::from(io::ErrorKind::HostUnreachable),
+        ] {
+            let kind = refusal.kind();
+            let writer = Scripted::new(Many::Unsupported, vec![Ok(3), Err(refusal), Ok(3)]);
+            let (outcome, error) = run(&writer, true);
+            assert!(error.is_none(), "{kind:?}");
+            assert_eq!(outcome.sent, 5, "{kind:?}");
+            assert_eq!(
+                outcome.consumed(),
+                5,
+                "every packet consumed its number once"
+            );
+            let mut expected = datagrams();
+            expected.remove(1);
+            assert_eq!(
+                *writer.wire.borrow(),
+                expected,
+                "only the refused one is missing"
+            );
+        }
+    }
+
+    #[test]
+    fn without_batching_or_sendmmsg_every_packet_is_a_sendto() {
+        for (many, batch) in [(Many::Accept(5), false), (Many::Unsupported, true)] {
+            let writer = Scripted::new(many, vec![]);
+            let (outcome, error) = run(&writer, batch);
+            assert!(error.is_none());
+            assert_eq!((outcome.sent, outcome.sendmmsg_calls), (5, 0));
+            assert_eq!(*writer.wire.borrow(), datagrams());
+        }
     }
 }

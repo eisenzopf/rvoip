@@ -75,13 +75,13 @@ pub mod executor;
 pub(crate) mod lane_clock;
 pub(crate) mod lane_poller;
 pub mod media_clock;
-pub(crate) mod ssrc_hash;
-#[cfg(target_os = "linux")]
-mod sys_mmsg;
 pub mod packet;
 pub mod session;
 pub mod srtp;
+pub(crate) mod ssrc_hash;
 pub mod stats;
+#[cfg(target_os = "linux")]
+mod sys_mmsg;
 pub mod time;
 pub mod traits;
 pub mod transport;
@@ -140,8 +140,9 @@ pub use packet::rtp::RtpPacket;
 
 // Re-export session types
 pub use session::{
-    PeerReceptionReport, PeerRtcpBye, RtpSendHandle, RtpSession, RtpSessionBufferConfig,
-    RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream, RtpStreamStats,
+    PeerReceptionReport, PeerRtcpBye, RtpFrameNow, RtpSendHandle, RtpSendNowReport, RtpSession,
+    RtpSessionBufferConfig, RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream,
+    RtpStreamStats,
 };
 
 // Re-export transport types
