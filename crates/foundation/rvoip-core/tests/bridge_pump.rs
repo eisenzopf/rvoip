@@ -28,8 +28,9 @@ use rvoip_core::orchestrator::DEFAULT_BRIDGED_DATA_MESSAGE_QUEUE_CAPACITY;
 #[cfg(feature = "test-hooks")]
 use rvoip_core::orchestrator::{ReplacementPreparationBoundary, ReplacementPreparationTestGate};
 use rvoip_core::stream::{
-    BridgedDataMessageDecision, DataMessageBridgePolicy, MediaFrame, MediaReceiverReservation,
-    MediaStream, QualitySnapshot, StreamKind,
+    BridgedDataMessageDecision, DataMessageBridgePolicy, GatedFrameAdmission, GatedFrameInput,
+    MediaFrame, MediaLanePlacement, MediaReceiverReservation, MediaStream, QualitySnapshot,
+    StreamKind,
 };
 use rvoip_core::{
     Config, DataMessage, DataReliability, DirectionalMediaBridgePlan, Orchestrator, RvoipError,
@@ -64,6 +65,11 @@ struct MockMediaStream {
     out_tx: mpsc::Sender<MediaFrame>,
     external_out_rx: StdMutex<Option<mpsc::Receiver<MediaFrame>>>,
     writable: AtomicBool,
+    /// The media lane the stream publishes, if any.
+    media_lane: StdMutex<Option<MediaLanePlacement>>,
+    /// A gated input over `out_tx` that records where each frame was
+    /// written from, if offered.
+    landing_probe: StdMutex<Option<Arc<LandingProbe>>>,
 }
 
 impl MockMediaStream {
@@ -103,7 +109,25 @@ impl MockMediaStream {
             out_tx,
             external_out_rx: StdMutex::new(Some(external_out_rx)),
             writable: AtomicBool::new(true),
+            media_lane: StdMutex::new(None),
+            landing_probe: StdMutex::new(None),
         })
+    }
+
+    fn set_media_lane(&self, placement: Option<MediaLanePlacement>) {
+        *self.media_lane.lock().unwrap() = placement;
+    }
+
+    /// Offer a gated input over the stream's outbound channel that records
+    /// where each frame was written from. Frames still reach
+    /// `take_external_out`.
+    fn offer_landing_probe(&self) -> Arc<LandingProbe> {
+        let probe = Arc::new(LandingProbe {
+            channel: self.out_tx.clone(),
+            landings: StdMutex::new(Vec::new()),
+        });
+        *self.landing_probe.lock().unwrap() = Some(Arc::clone(&probe));
+        probe
     }
 
     /// Push a frame from "outside" — the bridge sees it via `frames_in()`.
@@ -197,11 +221,142 @@ impl MediaStream for MockMediaStream {
             ))
         }
     }
+    fn try_gated_frames_out(&self) -> Option<Arc<dyn GatedFrameInput>> {
+        self.landing_probe
+            .lock()
+            .unwrap()
+            .clone()
+            .map(|probe| probe as Arc<dyn GatedFrameInput>)
+    }
+    fn media_lane(&self) -> Option<MediaLanePlacement> {
+        self.media_lane.lock().unwrap().clone()
+    }
     fn quality_snapshot(&self) -> QualitySnapshot {
         QualitySnapshot::default()
     }
     async fn close(self: Arc<Self>) -> rvoip_core::error::Result<()> {
         Ok(())
+    }
+}
+
+// =====================================================================
+// Media lane test support
+// =====================================================================
+
+const TEST_LANE_THREAD: &str = "rvoip-test-media-lane";
+
+/// A current-thread runtime on its own named thread, standing in for a SIP
+/// leg's media lane.
+struct TestLane {
+    handle: tokio::runtime::Handle,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl TestLane {
+    fn start() -> Self {
+        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name(TEST_LANE_THREAD.to_string())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("lane runtime");
+                handle_tx
+                    .send(runtime.handle().clone())
+                    .expect("lane handle");
+                runtime.block_on(async move {
+                    let _ = stop_rx.await;
+                });
+            })
+            .expect("lane thread");
+        let handle = handle_rx.recv().expect("lane started");
+        Self {
+            handle,
+            stop: Some(stop_tx),
+            thread: Some(thread),
+        }
+    }
+
+    /// A placement on this lane hosting the given graphs.
+    fn placement(&self, reader_graphs: bool, writer_graphs: bool) -> MediaLanePlacement {
+        MediaLanePlacement::new(self.handle.clone())
+            .with_reader_graphs(reader_graphs)
+            .with_writer_graphs(writer_graphs)
+    }
+}
+
+impl Drop for TestLane {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Where a frame was written into a stream from.
+#[derive(Clone, Debug)]
+struct Landing {
+    runtime: tokio::runtime::Id,
+    thread: Option<String>,
+}
+
+/// An always-open gated input that records where each frame was committed
+/// from (see [`MockMediaStream::offer_landing_probe`]).
+struct LandingProbe {
+    channel: mpsc::Sender<MediaFrame>,
+    landings: StdMutex<Vec<Landing>>,
+}
+
+impl LandingProbe {
+    fn landings(&self) -> Vec<Landing> {
+        self.landings.lock().unwrap().clone()
+    }
+
+    /// Whether every recorded frame was written from `lane`, or from no lane
+    /// at all.
+    fn all_on(&self, lane: Option<&TestLane>) -> bool {
+        let landings = self.landings();
+        !landings.is_empty()
+            && landings.iter().all(|landing| match lane {
+                Some(lane) => {
+                    landing.runtime == lane.handle.id()
+                        && landing.thread.as_deref() == Some(TEST_LANE_THREAD)
+                }
+                None => landing.thread.as_deref() != Some(TEST_LANE_THREAD),
+            })
+    }
+}
+
+impl GatedFrameInput for LandingProbe {
+    fn channel(&self) -> &mpsc::Sender<MediaFrame> {
+        &self.channel
+    }
+
+    fn admission(&self) -> GatedFrameAdmission {
+        if self.channel.is_closed() {
+            GatedFrameAdmission::Closed
+        } else {
+            GatedFrameAdmission::Open
+        }
+    }
+
+    fn left_open(&self) -> std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool {
+        self.landings.lock().unwrap().push(Landing {
+            runtime: tokio::runtime::Handle::current().id(),
+            thread: std::thread::current().name().map(str::to_owned),
+        });
+        permit.send(frame);
+        true
     }
 }
 
@@ -1104,14 +1259,30 @@ fn caller_pcmu(stream_id: StreamId, value: u8) -> MediaFrame {
 /// through a hold and a resume, end the AI, and return what the caller heard
 /// back (payload and RTP timestamp, in order).
 async fn run_caller_to_echo_ai_bridge(gated_input: bool) -> Vec<(Vec<u8>, u32)> {
+    run_caller_to_echo_ai_bridge_on(gated_input, None, Config::default()).await
+}
+
+/// [`run_caller_to_echo_ai_bridge`] with the caller leg publishing `lane`
+/// (hosting reader and writer graphs) and the orchestrator built from
+/// `config`. With a lane, the caller's audio reaches the AI from the lane and
+/// the AI's audio reaches the caller from the lane.
+async fn run_caller_to_echo_ai_bridge_on(
+    gated_input: bool,
+    lane: Option<&TestLane>,
+    config: Config,
+) -> Vec<(Vec<u8>, u32)> {
     let sip_adapter = MockAdapter::new(Transport::Sip);
     let ingress = ConnectionId::new();
     let caller = MockMediaStream::new(DEFAULT_TEST_CODEC);
+    caller.set_media_lane(lane.map(|lane| lane.placement(true, true)));
+    // Only a laned caller offers the probe, so the unplaced bridge keeps the
+    // caller's plain outbound channel.
+    let caller_probe = lane.map(|_| caller.offer_landing_probe());
     sip_adapter.register_connection(ingress.clone(), Arc::clone(&caller));
     let ai_adapter =
         InProcessAiAdapter::echo(InProcessAiConfig::default().with_gated_input(gated_input))
             .expect("echo AI adapter");
-    let orchestrator = Orchestrator::new(Config::default());
+    let orchestrator = Orchestrator::new(config);
     orchestrator
         .register(sip_adapter.clone() as Arc<dyn ConnectionAdapter>)
         .expect("register SIP adapter");
@@ -1212,6 +1383,16 @@ async fn run_caller_to_echo_ai_bridge(gated_input: bool) -> Vec<(Vec<u8>, u32)> 
         caller.inject(caller_pcmu(caller.id(), value)).await;
         echoed.push(echo_of(&mut heard).await);
     }
+    // The AI's audio graph (no lane of its own) wrote into the caller from
+    // the caller's lane.
+    if let Some(probe) = &caller_probe {
+        assert_eq!(probe.landings().len(), echoed.len());
+        assert!(
+            probe.all_on(lane),
+            "AI audio was written into the caller from {:?}",
+            probe.landings()
+        );
+    }
 
     orchestrator
         .end_connection(ai, AdapterEndReason::Normal)
@@ -1237,6 +1418,85 @@ async fn in_process_ai_gated_input_matches_its_input_pump_through_a_bridge() {
     let gated = run_caller_to_echo_ai_bridge(true).await;
     assert_eq!(pumped.len(), 12);
     assert_eq!(gated, pumped);
+}
+
+/// An AI bridge whose caller leg publishes a media lane runs both of its
+/// graphs there (caller audio to the AI, and AI audio to the caller), and the
+/// caller hears exactly what it hears with no lane, through the same hold,
+/// resume and end, with or without the AI's gated input.
+#[tokio::test]
+async fn in_process_ai_bridge_on_the_callers_media_lane_matches_the_unplaced_bridge() {
+    let lane = TestLane::start();
+    let reference = run_caller_to_echo_ai_bridge(false).await;
+    assert_eq!(reference.len(), 12);
+    for gated_input in [false, true] {
+        let placed =
+            run_caller_to_echo_ai_bridge_on(gated_input, Some(&lane), Config::default()).await;
+        assert_eq!(placed, reference, "gated_input={gated_input}");
+    }
+}
+
+/// Each graph of a bridge runs where its streams' published lanes put it:
+/// on the source's lane when the source hosts reader graphs, on the
+/// target's lane when only the target has one and hosts writer graphs, and
+/// on the caller's runtime otherwise. What crosses is the same everywhere.
+#[tokio::test]
+async fn bridge_graphs_run_on_the_media_lane_their_streams_publish() {
+    let lane = TestLane::start();
+    let mut reference = None;
+    // (published by A, a_to_b on the lane, b_to_a on the lane)
+    for (published, a_to_b_on_lane, b_to_a_on_lane) in [
+        (None, false, false),
+        (Some((true, true)), true, true),
+        (Some((true, false)), true, false),
+        (Some((false, true)), false, true),
+        (Some((false, false)), false, false),
+    ] {
+        let (orch, stream_a, stream_b, conn_a, conn_b) =
+            setup_two_connection_orchestrator(DEFAULT_TEST_CODEC, DEFAULT_TEST_CODEC).await;
+        stream_a.set_media_lane(published.map(|(reader, writer)| lane.placement(reader, writer)));
+        let into_a = stream_a.offer_landing_probe();
+        let into_b = stream_b.offer_landing_probe();
+        let mut a_out = stream_a.take_external_out();
+        let mut b_out = stream_b.take_external_out();
+        let bridge = orch
+            .bridge_connections(conn_a.clone(), conn_b.clone())
+            .await
+            .expect("bridge");
+        let mut crossed = Vec::new();
+        for value in 0..6u8 {
+            stream_a.inject(caller_pcmu(stream_a.id(), value)).await;
+            let frame = tokio::time::timeout(Duration::from_secs(2), b_out.recv())
+                .await
+                .expect("A to B")
+                .expect("B open");
+            crossed.push((frame.payload.to_vec(), frame.timestamp_rtp));
+        }
+        for value in 10..16u8 {
+            stream_b.inject(caller_pcmu(stream_b.id(), value)).await;
+            let frame = tokio::time::timeout(Duration::from_secs(2), a_out.recv())
+                .await
+                .expect("B to A")
+                .expect("A open");
+            crossed.push((frame.payload.to_vec(), frame.timestamp_rtp));
+        }
+        assert!(
+            into_b.all_on(a_to_b_on_lane.then_some(&lane)),
+            "published={published:?}: A-to-B frames written from {:?}",
+            into_b.landings()
+        );
+        assert!(
+            into_a.all_on(b_to_a_on_lane.then_some(&lane)),
+            "published={published:?}: B-to-A frames written from {:?}",
+            into_a.landings()
+        );
+        match &reference {
+            None => reference = Some(crossed),
+            Some(reference) => assert_eq!(&crossed, reference, "published={published:?}"),
+        }
+        orch.unbridge_connections(bridge).await.expect("unbridge");
+        wait_for_active_bridge_count(&orch, 0).await;
+    }
 }
 
 #[tokio::test]

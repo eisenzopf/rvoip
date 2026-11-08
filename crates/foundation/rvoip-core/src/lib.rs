@@ -197,8 +197,8 @@ pub use inbound_admission::{
     MAX_STAGED_INBOUND_DATA_CAPACITY, MAX_STAGED_INBOUND_DATA_LABELS,
 };
 pub use media_graph::{
-    start_media_graph, MediaGraphActivityObservation, MediaGraphHandle, MediaGraphPolicy,
-    DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
+    start_media_graph, start_media_graph_on, MediaGraphActivityObservation, MediaGraphHandle,
+    MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use operational_events::{
