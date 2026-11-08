@@ -294,6 +294,7 @@ impl AuthChallengeBuilder {
                     params: vec![AuthParam {
                         name: "realm".to_string(),
                         value: realm,
+                        quoted: true,
                     }],
                 };
                 if self.proxy {
