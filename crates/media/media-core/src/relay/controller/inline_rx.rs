@@ -2730,6 +2730,182 @@ mod tests {
         controller.stop_media(&dialog).await.unwrap();
     }
 
+    // ---- Lane tick: service on lane ticks ----
+
+    /// Frames a consumer saw: (timestamp, samples, when it saw them).
+    type TimedFrames = Vec<(u32, Vec<i16>, Instant)>;
+
+    /// Records every frame with the instant it reached the consumer.
+    struct TimingConsumer {
+        frames: Arc<parking_lot::Mutex<TimedFrames>>,
+    }
+
+    impl InlineAudioConsumer for TimingConsumer {
+        fn on_installed(&mut self, _now: Instant) {}
+
+        fn on_frame(&mut self, frame: AudioFrame, now: Instant) -> InlineAudioDelivery {
+            self.frames
+                .lock()
+                .push((frame.timestamp, frame.samples, now));
+            InlineAudioDelivery::Accepted
+        }
+
+        fn next_deadline(&self) -> Option<Instant> {
+            None
+        }
+
+        fn on_deadline(&mut self, _now: Instant) -> InlineAudioDelivery {
+            InlineAudioDelivery::Accepted
+        }
+
+        fn on_detach(&mut self, _now: Instant) {}
+    }
+
+    /// The lane thread's wake-up latency after a tick sleep, in the model.
+    const TICK_WAKE: Duration = Duration::from_micros(60);
+
+    /// Feed `arrivals` (sequence, exact arrival instant) to a sink with a
+    /// fused consumer and serve its deadlines, as the socket owner does:
+    /// exactly (`tick: None`), or on the ticks of a fake-clock grid (every
+    /// arrival and deadline at the first boundary at or after it plus
+    /// [`TICK_WAKE`]; packets served in one tick 1 µs apart, receives before
+    /// deadlines). Returns what the consumer saw and when.
+    fn run_on_ticks(
+        arrivals: &[(u16, Instant)],
+        tick: Option<rvoip_rtp_core::lane_tick::TickGrid>,
+        anchored: bool,
+    ) -> TimedFrames {
+        let dialog = DialogId::new("lane-tick");
+        let (audio_tx, _audio_rx) = mpsc::channel(256);
+        let lease = lease_with(&dialog, None, audio_tx.clone());
+        let mut sink = InlineAudioSink::new(dialog, Arc::clone(&lease), false, false);
+        sink.decoded_playout.anchored = anchored;
+        let frames = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let consumer = Box::new(TimingConsumer {
+            frames: Arc::clone(&frames),
+        });
+        let guard = install_consumer(&lease, &audio_tx, consumer, &mut no_backlog)
+            .unwrap_or_else(|_| panic!("an inline dialog accepts a consumer"));
+        let serve = |at: Instant| match tick {
+            Some(grid) => grid.ceil(at) + TICK_WAKE,
+            None => at,
+        };
+        let mut payload = [0u8; 160];
+        let mut now = arrivals[0].1;
+        let mut next = 0;
+        for _ in 0..100_000 {
+            let arrival = arrivals.get(next).map(|(_, at)| serve(*at));
+            let deadline = sink.next_deadline(now).map(serve);
+            match (arrival, deadline) {
+                (None, None) => break,
+                (Some(arrival), deadline)
+                    if deadline.is_none_or(|deadline| arrival <= deadline) =>
+                {
+                    let mut offset = 0;
+                    while let Some((seq, at)) = arrivals.get(next) {
+                        if serve(*at) != arrival {
+                            break;
+                        }
+                        now = now.max(arrival + Duration::from_micros(offset));
+                        payload.fill(payload_byte(*seq));
+                        let verdict = sink.on_packet(&inline_packet(*seq, &payload), now);
+                        assert!(matches!(verdict, InlineSinkVerdict::Continue));
+                        offset += 1;
+                        next += 1;
+                    }
+                }
+                (_, Some(deadline)) => {
+                    now = now.max(deadline);
+                    assert!(matches!(sink.on_deadline(now), InlineSinkVerdict::Continue));
+                }
+                (Some(_), None) => unreachable!("handled by the arrival arm"),
+            }
+        }
+        assert_eq!(next, arrivals.len(), "every packet was fed");
+        drop(sink);
+        drop(guard);
+        let seen = std::mem::take(&mut *frames.lock());
+        seen
+    }
+
+    /// The inline receive path served on lane ticks hands the consumer
+    /// exactly the frames (timestamps, samples, order) it hands it when every
+    /// packet and deadline is served on time, for every quantum and two grid
+    /// phases. Frames delivered on arrival (an in-order stream with jitter)
+    /// are at most one quantum (plus the wake-up latency) late. Frames
+    /// released by a loss or reorder hold and then paced are later by at most
+    /// three quanta: the hold, and the pacing step after it, are relative
+    /// deadlines re-quantized once each; nothing accumulates.
+    #[test]
+    fn tick_service_hands_the_consumer_the_same_frames_within_the_quantum() {
+        let start = Instant::now();
+        let at = |slot: u64, extra_us: u64| start + Duration::from_micros(20_000 * slot + extra_us);
+        let in_order: Vec<(u16, Instant)> = (1..=60u16)
+            .map(|seq| {
+                let jitter = u64::from(seq % 4) * 900 + u64::from(seq % 3) * 130;
+                (seq, at(u64::from(seq), jitter))
+            })
+            .collect();
+        let lossy: Vec<(u16, Instant)> = (1..=60u16)
+            .filter(|seq| *seq != 20 && *seq != 41)
+            .map(|seq| (seq, at(u64::from(seq), 0)))
+            .collect();
+        let reordered: Vec<(u16, Instant)> = (1..=60u16)
+            .map(|seq| match seq {
+                30 => (31, at(30, 0)),
+                31 => (30, at(30, 3_000)),
+                _ => (seq, at(u64::from(seq), 0)),
+            })
+            .collect();
+        let scripts = [
+            ("in-order", &in_order, 1u32),
+            ("lossy", &lossy, 3),
+            ("reordered", &reordered, 3),
+        ];
+        let strip = |frames: &[(u32, Vec<i16>, Instant)]| {
+            frames
+                .iter()
+                .map(|(timestamp, samples, _)| (*timestamp, samples.clone()))
+                .collect::<Vec<_>>()
+        };
+        for (name, arrivals, quanta) in scripts {
+            let exact = run_on_ticks(arrivals, None, false);
+            assert!(exact.len() >= 58, "{name}: frames flowed ({})", exact.len());
+            assert_eq!(
+                exact,
+                run_on_ticks(arrivals, None, true),
+                "{name}: anchoring is a no-op on time"
+            );
+            for quantum_ms in rvoip_rtp_core::lane_tick::LANE_TICK_QUANTA_MS {
+                let quantum = Duration::from_millis(quantum_ms);
+                for phase_us in [700u64, 3_100] {
+                    let grid = rvoip_rtp_core::lane_tick::TickGrid::new(
+                        start - Duration::from_micros(phase_us),
+                        quantum,
+                    );
+                    let ticked = run_on_ticks(arrivals, Some(grid), true);
+                    assert_eq!(
+                        strip(&ticked),
+                        strip(&exact),
+                        "{name} Q={quantum:?}: same frames"
+                    );
+                    let bound = quantum * quanta + TICK_WAKE * 2 + Duration::from_micros(100);
+                    for ((timestamp, _, on_time), (_, _, served)) in exact.iter().zip(&ticked) {
+                        assert!(
+                            served >= on_time,
+                            "{name} Q={quantum:?}: frame {timestamp} early"
+                        );
+                        let late = served.saturating_duration_since(*on_time);
+                        assert!(
+                            late <= bound,
+                            "{name} Q={quantum:?}: frame {timestamp} {late:?} late"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // ---- PCM pool and the allocation-free steady state ----
 
     /// A fused consumer that only counts frames and hands their PCM back to

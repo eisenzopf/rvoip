@@ -384,6 +384,12 @@ struct DecodedPlayoutQueue {
     /// Frames dropped on overflow. The first drop is logged; the rest are
     /// counted so a burst does not flood the log.
     dropped_frames: u64,
+    /// Pace the next frame from the deadline just served rather than from
+    /// the time it was served. On when the lane tick is active
+    /// (`rvoip_rtp_core::lane_tick`), where deadlines are served up to one
+    /// quantum late; identical to the other rule when a deadline is served
+    /// on time.
+    anchored: bool,
 }
 
 impl DecodedPlayoutQueue {
@@ -394,6 +400,7 @@ impl DecodedPlayoutQueue {
             last_push_at: None,
             catch_up: 0,
             dropped_frames: 0,
+            anchored: rvoip_rtp_core::lane_tick::lane_tick_pacing_enabled(),
         }
     }
 
@@ -433,10 +440,17 @@ impl DecodedPlayoutQueue {
             return None;
         }
         let frame = self.pending.pop_front()?;
-        self.next_delivery_at = self
-            .pending
-            .front()
-            .map(|_| now + frame.duration.max(Duration::from_millis(1)));
+        let step = frame.duration.max(Duration::from_millis(1));
+        // A lane tick serves a deadline up to one quantum late; pacing from
+        // the served deadline keeps that from accumulating frame after
+        // frame. A wake later than a whole frame (a stall) still restarts the
+        // schedule from now, so a stall never becomes a burst.
+        let base = if self.anchored && now.saturating_duration_since(deadline) < step {
+            deadline
+        } else {
+            now
+        };
+        self.next_delivery_at = self.pending.front().map(|_| base + step);
         if self.pending.is_empty() {
             self.catch_up = 0;
         }
@@ -1023,6 +1037,128 @@ mod rtp_playout_tests {
                 .timestamp,
             40_000
         );
+    }
+
+    /// Lane tick: a paced batch whose deadlines are served on lane ticks
+    /// (each at the first boundary of a fake-clock grid at or after it, plus
+    /// the lane thread's wake-up latency) delivers the same frames in the
+    /// same order. Anchored pacing keeps every delivery within one quantum
+    /// plus that latency of the exact schedule; pacing from the wake time
+    /// drifts by up to a quantum per frame.
+    #[test]
+    fn tick_served_pacing_stays_within_one_quantum_only_when_anchored() {
+        let start = Instant::now();
+        let wake = Duration::from_micros(60);
+        let frames = 12u32;
+        let deliver = |anchored: bool, quantum: Option<Duration>| -> Vec<(u32, Instant)> {
+            let mut playout = DecodedPlayoutQueue::new();
+            playout.anchored = anchored;
+            for index in 0..frames {
+                let samples = vec![index as i16; 160];
+                assert!(playout.push(AudioFrame::new(samples, 8_000, 1, index * 160), start));
+            }
+            // A grid whose boundaries are 0.7 ms out of phase with the batch.
+            let grid = quantum.map(|quantum| {
+                rvoip_rtp_core::lane_tick::TickGrid::new(
+                    start - Duration::from_micros(700),
+                    quantum,
+                )
+            });
+            let mut delivered = Vec::new();
+            let mut now = start;
+            for _ in 0..1_000 {
+                while let Some(frame) = playout.pop_due(now) {
+                    assert!(frame
+                        .samples
+                        .iter()
+                        .all(|sample| *sample == (frame.timestamp / 160) as i16));
+                    delivered.push((frame.timestamp, now));
+                }
+                let Some(deadline) = playout.next_deadline() else {
+                    break;
+                };
+                now = match grid {
+                    Some(grid) => grid.ceil(deadline) + wake,
+                    None => deadline,
+                };
+            }
+            delivered
+        };
+        let exact = deliver(false, None);
+        assert_eq!(
+            exact,
+            deliver(true, None),
+            "anchoring changes nothing on time"
+        );
+        let timestamps: Vec<u32> = (0..frames).map(|index| index * 160).collect();
+        assert_eq!(
+            exact
+                .iter()
+                .map(|(timestamp, _)| *timestamp)
+                .collect::<Vec<_>>(),
+            timestamps
+        );
+        for quantum_ms in rvoip_rtp_core::lane_tick::LANE_TICK_QUANTA_MS {
+            let quantum = Duration::from_millis(quantum_ms);
+            let ticked = deliver(true, Some(quantum));
+            assert_eq!(
+                ticked
+                    .iter()
+                    .map(|(timestamp, _)| *timestamp)
+                    .collect::<Vec<_>>(),
+                timestamps,
+                "same frames, same order"
+            );
+            for ((_, on_time), (_, served)) in exact.iter().zip(&ticked) {
+                assert!(served >= on_time, "never early");
+                let late = served.saturating_duration_since(*on_time);
+                assert!(late <= quantum + wake, "Q={quantum:?}: {late:?} late");
+            }
+            let drifting = deliver(false, Some(quantum));
+            let worst = exact
+                .iter()
+                .zip(&drifting)
+                .map(|((_, on_time), (_, served))| served.saturating_duration_since(*on_time))
+                .max()
+                .unwrap();
+            assert!(
+                worst > quantum + wake,
+                "Q={quantum:?}: wake-time pacing drifts ({worst:?})"
+            );
+        }
+        // A stall longer than a frame restarts the schedule from now: no burst.
+        let mut playout = DecodedPlayoutQueue::new();
+        playout.anchored = true;
+        for timestamp in [0, 160, 320] {
+            assert!(playout.push(AudioFrame::new(vec![0; 160], 8_000, 1, timestamp), start));
+        }
+        assert!(playout.pop_due(start).is_some());
+        let stalled = start + Duration::from_millis(70);
+        assert!(playout.pop_due(stalled).is_some());
+        assert!(
+            playout.pop_due(stalled).is_none(),
+            "one frame per deadline after a stall"
+        );
+        assert_eq!(
+            playout.next_deadline(),
+            Some(stalled + Duration::from_millis(20))
+        );
+    }
+
+    #[test]
+    fn decoded_pacing_is_anchored_only_while_the_lane_tick_is_active() {
+        use rvoip_rtp_core::executor::{
+            override_media_executor_config_on_this_thread, MediaExecutorConfig,
+        };
+        for (config, anchored) in [
+            (MediaExecutorConfig::v1(), false),
+            (MediaExecutorConfig::v2(), true),
+            (MediaExecutorConfig::v2().with_lane_tick(None), false),
+            (MediaExecutorConfig::v2().with_lane_poller(false), false),
+        ] {
+            let _guard = override_media_executor_config_on_this_thread(config.clone());
+            assert_eq!(DecodedPlayoutQueue::new().anchored, anchored, "{config:?}");
+        }
     }
 
     #[tokio::test]
