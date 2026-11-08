@@ -73,6 +73,32 @@
 //!   one doorbell line, and lane clocks prefetch the state of the futures
 //!   they are about to wake (see [`crate::hot_state`]).
 //!
+//! The SIP media path adds its own switches (read by `rvoip-sip`):
+//!
+//! - [`MediaExecutorConfig::fused_inbound_pump`]: a SIP stream's inbound
+//!   pump (playout, re-encode, `frames_in`) runs as the dialog's inline audio
+//!   consumer on the socket owner instead of as its own task. Needs inline
+//!   decode.
+//! - [`MediaExecutorConfig::direct_inbound_sink`]: a fused pump hands each
+//!   frame to a synchronous inbound frame sink the consumer offered, instead
+//!   of through `frames_in`. Needs the fused pump.
+//! - [`MediaExecutorConfig::count_only_sink`]: a sink that does not read
+//!   payloads gets each frame without the G.711 re-encode. Needs the direct
+//!   sink.
+//! - [`MediaExecutorConfig::tx_handle_cache`]: an encoded G.711 TX path is
+//!   resolved once per media lifetime, re-checked per frame by generation
+//!   fences (atomic loads), and sends synchronously.
+//! - [`MediaExecutorConfig::ai_tx`]: a SIP stream's outbound pump sends
+//!   encoded G.711 through that cached path, and its pumps run on the lane
+//!   that owns the RTP socket; the stream offers its lane to media graphs
+//!   that write into it. Needs the TX handle cache.
+//! - [`MediaExecutorConfig::ai_rx`]: the stream offers its lane to media
+//!   graphs that read from it.
+//! - [`MediaExecutorConfig::direct_encoded_writer`]: a SIP stream offers an
+//!   encoded G.711 writer to its sole producer.
+//! - [`MediaExecutorConfig::session_owner_placement`]: a SIP stream's pumps
+//!   run on the lane that owns its RTP socket.
+//!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
 
@@ -247,6 +273,30 @@ pub struct MediaExecutorConfig {
     /// [`crate::hot_state`].
     pub hot_state: bool,
     // ---- End hot call state ----
+    // ---- SIP media path (fused pump, sinks, cached TX) ----
+    /// A SIP stream's inbound pump runs as the dialog's inline audio
+    /// consumer on the socket owner. Needs [`Self::inline_decode`].
+    pub fused_inbound_pump: bool,
+    /// A fused pump hands frames to the stream's offered inbound frame sink
+    /// instead of `frames_in`. Needs [`Self::fused_inbound_pump`].
+    pub direct_inbound_sink: bool,
+    /// A direct sink that does not read payloads gets G.711 frames without
+    /// the re-encode. Needs [`Self::direct_inbound_sink`].
+    pub count_only_sink: bool,
+    /// Encoded G.711 TX paths are resolved once per media lifetime and
+    /// fenced, then send synchronously.
+    pub tx_handle_cache: bool,
+    /// A SIP stream's outbound pump sends encoded G.711 through the cached
+    /// TX path, its pumps run on the RTP socket's lane, and the stream hosts
+    /// graphs that write into it. Needs [`Self::tx_handle_cache`].
+    pub ai_tx: bool,
+    /// A SIP stream hosts graphs that read from it on its RTP socket's lane.
+    pub ai_rx: bool,
+    /// A SIP stream offers an encoded G.711 writer to its sole producer.
+    pub direct_encoded_writer: bool,
+    /// A SIP stream's pumps run on the lane that owns its RTP socket.
+    pub session_owner_placement: bool,
+    // ---- End SIP media path ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -280,6 +330,15 @@ impl MediaExecutorConfig {
             counter_pool_cleanup: false,
             // Hot call state.
             hot_state: false,
+            // SIP media path.
+            fused_inbound_pump: false,
+            direct_inbound_sink: false,
+            count_only_sink: false,
+            tx_handle_cache: false,
+            ai_tx: false,
+            ai_rx: false,
+            direct_encoded_writer: false,
+            session_owner_placement: false,
         }
     }
 
@@ -308,6 +367,15 @@ impl MediaExecutorConfig {
             counter_pool_cleanup: true,
             // Hot call state.
             hot_state: true,
+            // SIP media path.
+            fused_inbound_pump: true,
+            direct_inbound_sink: true,
+            count_only_sink: true,
+            tx_handle_cache: true,
+            ai_tx: true,
+            ai_rx: true,
+            direct_encoded_writer: true,
+            session_owner_placement: true,
         }
     }
 
@@ -388,6 +456,57 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
+    // ---- SIP media path ----
+
+    /// Set [`Self::fused_inbound_pump`].
+    pub fn with_fused_inbound_pump(mut self, enabled: bool) -> Self {
+        self.fused_inbound_pump = enabled;
+        self
+    }
+
+    /// Set [`Self::direct_inbound_sink`].
+    pub fn with_direct_inbound_sink(mut self, enabled: bool) -> Self {
+        self.direct_inbound_sink = enabled;
+        self
+    }
+
+    /// Set [`Self::count_only_sink`].
+    pub fn with_count_only_sink(mut self, enabled: bool) -> Self {
+        self.count_only_sink = enabled;
+        self
+    }
+
+    /// Set [`Self::tx_handle_cache`].
+    pub fn with_tx_handle_cache(mut self, enabled: bool) -> Self {
+        self.tx_handle_cache = enabled;
+        self
+    }
+
+    /// Set [`Self::ai_tx`].
+    pub fn with_ai_tx(mut self, enabled: bool) -> Self {
+        self.ai_tx = enabled;
+        self
+    }
+
+    /// Set [`Self::ai_rx`].
+    pub fn with_ai_rx(mut self, enabled: bool) -> Self {
+        self.ai_rx = enabled;
+        self
+    }
+
+    /// Set [`Self::direct_encoded_writer`].
+    pub fn with_direct_encoded_writer(mut self, enabled: bool) -> Self {
+        self.direct_encoded_writer = enabled;
+        self
+    }
+
+    /// Set [`Self::session_owner_placement`].
+    pub fn with_session_owner_placement(mut self, enabled: bool) -> Self {
+        self.session_owner_placement = enabled;
+        self
+    }
+
+    // ---- End SIP media path ----
 
     /// Set [`Self::owner_srtp`].
     pub fn with_owner_srtp(mut self, enabled: bool) -> Self {
@@ -431,6 +550,9 @@ impl MediaExecutorConfig {
     /// (switching the lane poller off is the documented way to keep receive
     /// loops on their own tasks). Rules for switches that need a specific
     /// media runtime layout are checked here.
+    ///
+    /// Under v2, [`Self::tx_batch`] requires [`Self::tx_handle_cache`]: the
+    /// only callers that batch are the cached TX paths.
     pub fn validate(&self) -> Result<(), MediaExecutorConfigError> {
         // ---- Lane tick ----
         if let Some(tick) = self.lane_tick {
@@ -441,6 +563,14 @@ impl MediaExecutorConfig {
             }
         }
         // ---- End lane tick ----
+        // ---- SIP media path ----
+        if self.is_v2() && self.tx_batch && !self.tx_handle_cache {
+            return Err(MediaExecutorConfigError::Requires {
+                switch: "tx_batch",
+                requires: "tx_handle_cache",
+            });
+        }
+        // ---- End SIP media path ----
         Ok(())
     }
 
@@ -559,6 +689,50 @@ impl MediaExecutorConfig {
     }
 
     // ---- End hot call state ----
+    // ---- SIP media path ----
+
+    /// Whether a SIP stream fuses its inbound pump onto the socket owner.
+    pub fn fused_inbound_pump_active(&self) -> bool {
+        self.inline_decode_active() && self.fused_inbound_pump
+    }
+
+    /// Whether a fused pump adopts an offered inbound frame sink.
+    pub fn direct_inbound_sink_active(&self) -> bool {
+        self.fused_inbound_pump_active() && self.direct_inbound_sink
+    }
+
+    /// Whether a direct sink that reads no payloads skips the re-encode.
+    pub fn count_only_sink_active(&self) -> bool {
+        self.direct_inbound_sink_active() && self.count_only_sink
+    }
+
+    /// Whether encoded G.711 TX paths are cached and fenced.
+    pub fn tx_handle_cache_active(&self) -> bool {
+        self.is_v2() && self.tx_handle_cache
+    }
+
+    /// Whether a SIP outbound pump sends through the cached TX path on its
+    /// socket's lane.
+    pub fn ai_tx_active(&self) -> bool {
+        self.tx_handle_cache_active() && self.ai_tx
+    }
+
+    /// Whether a SIP stream hosts graphs that read from it on its lane.
+    pub fn ai_rx_active(&self) -> bool {
+        self.is_v2() && self.ai_rx
+    }
+
+    /// Whether a SIP stream offers an encoded G.711 writer.
+    pub fn direct_encoded_writer_active(&self) -> bool {
+        self.is_v2() && self.direct_encoded_writer
+    }
+
+    /// Whether a SIP stream's pumps run on its RTP socket's lane.
+    pub fn session_owner_placement_active(&self) -> bool {
+        self.is_v2() && self.session_owner_placement
+    }
+
+    // ---- End SIP media path ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -592,6 +766,16 @@ pub enum MediaExecutorConfigError {
         quantum: Duration,
     },
     // ---- End lane tick ----
+    // ---- SIP media path ----
+    /// A switch is on without a switch it requires.
+    #[error("media executor switch {switch} requires {requires}")]
+    Requires {
+        /// The switch that is on.
+        switch: &'static str,
+        /// The switch it needs.
+        requires: &'static str,
+    },
+    // ---- End SIP media path ----
 }
 
 static PROCESS_CONFIG: OnceLock<MediaExecutorConfig> = OnceLock::new();
@@ -742,6 +926,53 @@ pub fn lane_pass_clock_enabled() -> bool {
 }
 
 // ---- End lane timing wheel and pass clock ----
+// ---- SIP media path ----
+
+/// Whether a SIP stream bound now fuses its inbound pump onto the socket
+/// owner.
+pub fn fused_inbound_pump_enabled() -> bool {
+    with_config(MediaExecutorConfig::fused_inbound_pump_active)
+}
+
+/// Whether a fused pump adopts an offered inbound frame sink. Read when the
+/// sink is offered.
+pub fn direct_inbound_sink_enabled() -> bool {
+    with_config(MediaExecutorConfig::direct_inbound_sink_active)
+}
+
+/// Whether a direct sink that reads no payloads skips the re-encode. Read
+/// when the pump is built.
+pub fn count_only_sink_enabled() -> bool {
+    with_config(MediaExecutorConfig::count_only_sink_active)
+}
+
+/// Whether an encoded G.711 writer built now caches its TX path.
+pub fn tx_handle_cache_enabled() -> bool {
+    with_config(MediaExecutorConfig::tx_handle_cache_active)
+}
+
+/// Whether a SIP stream bound now sends its outbound G.711 through the
+/// cached TX path on its socket's lane.
+pub fn ai_tx_enabled() -> bool {
+    with_config(MediaExecutorConfig::ai_tx_active)
+}
+
+/// Whether a SIP stream bound now hosts reader graphs on its lane.
+pub fn ai_rx_enabled() -> bool {
+    with_config(MediaExecutorConfig::ai_rx_active)
+}
+
+/// Whether a SIP stream offers an encoded G.711 writer.
+pub fn direct_encoded_writer_enabled() -> bool {
+    with_config(MediaExecutorConfig::direct_encoded_writer_active)
+}
+
+/// Whether a SIP stream bound now runs its pumps on its socket's lane.
+pub fn session_owner_placement_enabled() -> bool {
+    with_config(MediaExecutorConfig::session_owner_placement_active)
+}
+
+// ---- End SIP media path ----
 
 /// Whether a receive loop started now owns its transport's inbound SRTP
 /// context. Read when a transport starts.
@@ -1062,6 +1293,18 @@ static RTCP_SYNC_SENDS: AtomicU64 = AtomicU64::new(0);
 static RTCP_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static RTCP_LANE_TASKS: AtomicU64 = AtomicU64::new(0);
 static OWNER_RECEIVE_STATS: AtomicU64 = AtomicU64::new(0);
+// SIP media path.
+static FUSED_BACKLOG_DROPS: AtomicU64 = AtomicU64::new(0);
+static DIRECT_SINKS: AtomicU64 = AtomicU64::new(0);
+static DIRECT_SINK_FRAMES: AtomicU64 = AtomicU64::new(0);
+static COUNT_ONLY_SINKS: AtomicU64 = AtomicU64::new(0);
+static COUNT_ONLY_FRAMES: AtomicU64 = AtomicU64::new(0);
+static TX_HANDLE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+static TX_HANDLE_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+static AI_TX_PUMPS_ON_LANE: AtomicU64 = AtomicU64::new(0);
+static AI_TX_RESOLVES: AtomicU64 = AtomicU64::new(0);
+static AI_TX_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static DIRECT_ENCODED_WRITERS: AtomicU64 = AtomicU64::new(0);
 
 /// Media executor totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction.
@@ -1149,6 +1392,31 @@ pub struct InlineExecutorCounters {
     /// Sessions whose socket owner publishes receive statistics without the
     /// statistics mutex.
     pub owner_receive_stats: u64,
+    // ---- SIP media path ----
+    /// Decoded frames a fused SIP inbound pump dropped because its consumer
+    /// was backed up and its backlog full (where the audio channel would
+    /// have been full).
+    pub fused_backlog_drops: u64,
+    /// Inbound frame sinks adopted by a fused pump.
+    pub direct_sinks: u64,
+    /// Frames handed to a direct sink with a payload.
+    pub direct_sink_frames: u64,
+    /// Direct sinks adopted without payloads (no re-encode).
+    pub count_only_sinks: u64,
+    /// Frames handed to a count-only sink.
+    pub count_only_frames: u64,
+    /// Frames whose cached TX path passed its fences.
+    pub tx_handle_cache_hits: u64,
+    /// TX path resolutions (first frame, or after a fence closed).
+    pub tx_handle_cache_misses: u64,
+    /// SIP stream pumps placed on their RTP socket's lane by `ai_tx`.
+    pub ai_tx_pumps_on_lane: u64,
+    /// Outbound pump TX path resolutions.
+    pub ai_tx_resolves: u64,
+    /// Outbound pump frames that took the regular async path.
+    pub ai_tx_fallbacks: u64,
+    /// Encoded G.711 writers handed out by SIP streams.
+    pub direct_encoded_writers: u64,
 }
 
 /// The media executor totals since start.
@@ -1183,6 +1451,18 @@ pub fn inline_executor_counters() -> InlineExecutorCounters {
         rtcp_sync_deferred: RTCP_SYNC_DEFERRED.load(Ordering::Relaxed),
         rtcp_lane_tasks: RTCP_LANE_TASKS.load(Ordering::Relaxed),
         owner_receive_stats: OWNER_RECEIVE_STATS.load(Ordering::Relaxed),
+        // SIP media path.
+        fused_backlog_drops: FUSED_BACKLOG_DROPS.load(Ordering::Relaxed),
+        direct_sinks: DIRECT_SINKS.load(Ordering::Relaxed),
+        direct_sink_frames: DIRECT_SINK_FRAMES.load(Ordering::Relaxed),
+        count_only_sinks: COUNT_ONLY_SINKS.load(Ordering::Relaxed),
+        count_only_frames: COUNT_ONLY_FRAMES.load(Ordering::Relaxed),
+        tx_handle_cache_hits: TX_HANDLE_CACHE_HITS.load(Ordering::Relaxed),
+        tx_handle_cache_misses: TX_HANDLE_CACHE_MISSES.load(Ordering::Relaxed),
+        ai_tx_pumps_on_lane: AI_TX_PUMPS_ON_LANE.load(Ordering::Relaxed),
+        ai_tx_resolves: AI_TX_RESOLVES.load(Ordering::Relaxed),
+        ai_tx_fallbacks: AI_TX_FALLBACKS.load(Ordering::Relaxed),
+        direct_encoded_writers: DIRECT_ENCODED_WRITERS.load(Ordering::Relaxed),
     }
 }
 
@@ -1681,6 +1961,8 @@ pub struct TxPathCounters {
     pending_batches: u64,
     pending_batched: u64,
     pending_fallbacks: u64,
+    pending_cache_hits: u64,
+    pending_cache_misses: u64,
 }
 
 impl TxPathCounters {
@@ -1690,7 +1972,12 @@ impl TxPathCounters {
     }
 
     fn maybe_flush(&mut self) {
-        if self.pending_sync + self.pending_deferred + self.pending_batches + self.pending_fallbacks
+        if self.pending_sync
+            + self.pending_deferred
+            + self.pending_batches
+            + self.pending_fallbacks
+            + self.pending_cache_hits
+            + self.pending_cache_misses
             >= FLUSH_EVERY
         {
             self.flush();
@@ -1722,6 +2009,18 @@ impl TxPathCounters {
         self.maybe_flush();
     }
 
+    /// A cached TX path passed its fences for one call.
+    pub fn cache_hit(&mut self) {
+        self.pending_cache_hits += 1;
+        self.maybe_flush();
+    }
+
+    /// The TX path was resolved (again).
+    pub fn cache_miss(&mut self) {
+        self.pending_cache_misses += 1;
+        self.maybe_flush();
+    }
+
     /// Publish everything pending to the process totals.
     pub fn flush(&mut self) {
         publish(&TX_SYNC_SENDS, &mut self.pending_sync);
@@ -1729,6 +2028,8 @@ impl TxPathCounters {
         publish(&TX_BATCHES, &mut self.pending_batches);
         publish(&TX_BATCHED_PACKETS, &mut self.pending_batched);
         publish(&TX_BATCH_FALLBACKS, &mut self.pending_fallbacks);
+        publish(&TX_HANDLE_CACHE_HITS, &mut self.pending_cache_hits);
+        publish(&TX_HANDLE_CACHE_MISSES, &mut self.pending_cache_misses);
     }
 }
 
@@ -2037,6 +2338,130 @@ impl Drop for SrtpOwnerCounters {
     }
 }
 
+// ---- SIP media path ----
+
+/// One fused SIP inbound pump dropped a decoded frame (backlog full).
+/// Backpressure rate only.
+pub fn record_fused_backlog_drop() {
+    FUSED_BACKLOG_DROPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A fused pump adopted an inbound frame sink; `count_only` when it reads
+/// no payloads. Once per stream.
+pub fn record_direct_sink_active(count_only: bool) {
+    DIRECT_SINKS.fetch_add(1, Ordering::Relaxed);
+    if count_only {
+        COUNT_ONLY_SINKS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A SIP stream's pumps were placed on its socket's lane by `ai_tx`.
+pub fn record_ai_tx_pump_on_lane() {
+    AI_TX_PUMPS_ON_LANE.fetch_add(1, Ordering::Relaxed);
+}
+
+/// A SIP stream handed out its encoded G.711 writer.
+pub fn record_direct_encoded_writer() {
+    DIRECT_ENCODED_WRITERS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Direct inbound sink frame counters owned by one fused pump, published in
+/// batches.
+#[derive(Debug, Default)]
+pub struct DirectSinkCounters {
+    pending_frames: u64,
+    pending_count_only: u64,
+}
+
+impl DirectSinkCounters {
+    /// Counters with nothing pending.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One frame (with its payload) went to the sink.
+    #[inline]
+    pub fn frame(&mut self) {
+        self.pending_frames += 1;
+        if self.pending_frames >= FLUSH_EVERY {
+            publish(&DIRECT_SINK_FRAMES, &mut self.pending_frames);
+        }
+    }
+
+    /// One frame went to a count-only sink.
+    #[inline]
+    pub fn count_only_frame(&mut self) {
+        self.pending_count_only += 1;
+        if self.pending_count_only >= FLUSH_EVERY {
+            publish(&COUNT_ONLY_FRAMES, &mut self.pending_count_only);
+        }
+    }
+
+    /// Publish everything pending.
+    pub fn flush(&mut self) {
+        publish(&DIRECT_SINK_FRAMES, &mut self.pending_frames);
+        publish(&COUNT_ONLY_FRAMES, &mut self.pending_count_only);
+    }
+}
+
+impl Drop for DirectSinkCounters {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+/// Outbound pump (AI TX) counters owned by one pump, published in batches.
+/// Frames that left synchronously are counted by [`TxPathCounters`].
+#[derive(Debug, Default)]
+pub struct AiTxCounters {
+    pending_resolves: u64,
+    pending_fallbacks: u64,
+    tx: TxPathCounters,
+}
+
+impl AiTxCounters {
+    /// Counters with nothing pending.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The TX path was resolved (again).
+    pub fn resolve(&mut self) {
+        self.pending_resolves += 1;
+        if self.pending_resolves >= FLUSH_EVERY {
+            publish(&AI_TX_RESOLVES, &mut self.pending_resolves);
+        }
+    }
+
+    /// One frame took the regular async path.
+    pub fn fallback(&mut self) {
+        self.pending_fallbacks += 1;
+        if self.pending_fallbacks >= FLUSH_EVERY {
+            publish(&AI_TX_FALLBACKS, &mut self.pending_fallbacks);
+        }
+    }
+
+    /// The synchronous TX counters of this pump.
+    pub fn tx(&mut self) -> &mut TxPathCounters {
+        &mut self.tx
+    }
+
+    /// Publish everything pending.
+    pub fn flush(&mut self) {
+        publish(&AI_TX_RESOLVES, &mut self.pending_resolves);
+        publish(&AI_TX_FALLBACKS, &mut self.pending_fallbacks);
+        self.tx.flush();
+    }
+}
+
+impl Drop for AiTxCounters {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+// ---- End SIP media path ----
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2257,6 +2682,121 @@ mod tests {
     }
 
     // ---- End lane timing wheel and pass clock ----
+
+    #[test]
+    fn sip_media_switches_are_off_under_v1_on_in_v2_and_follow_their_prerequisites() {
+        let v1 = MediaExecutorConfig::v1();
+        let v1_with_switches = MediaExecutorConfig::v2().with_mode(MediaExecutorMode::V1);
+        for config in [&v1, &v1_with_switches] {
+            assert!(!config.fused_inbound_pump_active());
+            assert!(!config.direct_inbound_sink_active());
+            assert!(!config.count_only_sink_active());
+            assert!(!config.tx_handle_cache_active());
+            assert!(!config.ai_tx_active());
+            assert!(!config.ai_rx_active());
+            assert!(!config.direct_encoded_writer_active());
+            assert!(!config.session_owner_placement_active());
+        }
+        assert!(
+            v1_with_switches.validate().is_ok(),
+            "v1 ignores every switch"
+        );
+
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.fused_inbound_pump_active());
+        assert!(v2.direct_inbound_sink_active());
+        assert!(v2.count_only_sink_active());
+        assert!(v2.tx_handle_cache_active());
+        assert!(v2.ai_tx_active());
+        assert!(v2.ai_rx_active());
+        assert!(v2.direct_encoded_writer_active());
+        assert!(v2.session_owner_placement_active());
+
+        let no_inline = MediaExecutorConfig::v2().with_inline_decode(false);
+        assert!(
+            !no_inline.fused_inbound_pump_active(),
+            "the pump fuses onto the inline sink"
+        );
+        assert!(!no_inline.direct_inbound_sink_active() && !no_inline.count_only_sink_active());
+        let no_fuse = MediaExecutorConfig::v2().with_fused_inbound_pump(false);
+        assert!(
+            !no_fuse.direct_inbound_sink_active(),
+            "only a fused pump adopts a sink"
+        );
+        let no_sink = MediaExecutorConfig::v2().with_direct_inbound_sink(false);
+        assert!(no_sink.fused_inbound_pump_active() && !no_sink.count_only_sink_active());
+
+        let no_cache = MediaExecutorConfig::v2()
+            .with_tx_handle_cache(false)
+            .with_tx_batch(false);
+        assert!(no_cache.validate().is_ok());
+        assert!(
+            !no_cache.ai_tx_active(),
+            "AI TX sends through the cached path"
+        );
+        assert!(no_cache.ai_rx_active() && no_cache.direct_encoded_writer_active());
+    }
+
+    #[test]
+    fn tx_batch_requires_the_tx_handle_cache_under_v2() {
+        let error = MediaExecutorConfig::v2()
+            .with_tx_handle_cache(false)
+            .validate()
+            .unwrap_err();
+        assert_eq!(
+            error,
+            MediaExecutorConfigError::Requires {
+                switch: "tx_batch",
+                requires: "tx_handle_cache"
+            }
+        );
+        assert!(install_into(
+            &OnceLock::new(),
+            MediaExecutorConfig::v2().with_tx_handle_cache(false)
+        )
+        .is_err());
+        assert!(MediaExecutorConfig::v2()
+            .with_tx_handle_cache(false)
+            .with_mode(MediaExecutorMode::V1)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn sip_media_counters_flush_in_batches_and_on_drop() {
+        let before = inline_executor_counters();
+        {
+            let mut sink = DirectSinkCounters::new();
+            for _ in 0..FLUSH_EVERY {
+                sink.frame();
+            }
+            sink.count_only_frame();
+            let mut ai = AiTxCounters::new();
+            ai.resolve();
+            ai.fallback();
+            ai.tx().cache_hit();
+            ai.tx().cache_miss();
+            ai.tx().sync_sent(2);
+            record_direct_sink_active(true);
+            record_ai_tx_pump_on_lane();
+            record_direct_encoded_writer();
+            record_fused_backlog_drop();
+        }
+        let after = inline_executor_counters();
+        // Process-wide totals: other tests may add to them concurrently.
+        assert!(after.direct_sink_frames >= before.direct_sink_frames + FLUSH_EVERY);
+        assert!(after.count_only_frames > before.count_only_frames);
+        assert!(after.ai_tx_resolves > before.ai_tx_resolves);
+        assert!(after.ai_tx_fallbacks > before.ai_tx_fallbacks);
+        assert!(after.tx_handle_cache_hits > before.tx_handle_cache_hits);
+        assert!(after.tx_handle_cache_misses > before.tx_handle_cache_misses);
+        assert!(after.tx_sync_sends >= before.tx_sync_sends + 2);
+        assert!(after.direct_sinks > before.direct_sinks);
+        assert!(after.count_only_sinks > before.count_only_sinks);
+        assert!(after.ai_tx_pumps_on_lane > before.ai_tx_pumps_on_lane);
+        assert!(after.direct_encoded_writers > before.direct_encoded_writers);
+        assert!(after.fused_backlog_drops > before.fused_backlog_drops);
+    }
 
     #[test]
     fn switches_never_apply_under_v1_and_dependents_follow_the_lane_poller() {
