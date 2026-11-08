@@ -335,6 +335,177 @@ pub trait GatedFrameInput: Send + Sync + 'static {
     fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool;
 }
 
+/// Where a stream's media lane is: the runtime that owns the stream's
+/// socket, for per-frame work that reads from or writes to the stream.
+///
+/// Published by a stream through [`MediaStream::media_lane`]. Placement only:
+/// work spawned on [`Self::handle`] behaves exactly as anywhere else; it just
+/// runs next to the stream's own producer and writer instead of on the
+/// caller's runtime. The two flags say which media graphs the stream wants
+/// there.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct MediaLanePlacement {
+    /// The runtime of the lane that owns the stream's socket.
+    pub handle: tokio::runtime::Handle,
+    /// A graph that reads from this stream (this stream is its source) may
+    /// run on the lane.
+    pub host_reader_graphs: bool,
+    /// A graph that writes into this stream (this stream is its target) and
+    /// whose source has no lane of its own may run on the lane.
+    pub host_writer_graphs: bool,
+}
+
+impl MediaLanePlacement {
+    /// A placement on `handle` that hosts no graph.
+    pub fn new(handle: tokio::runtime::Handle) -> Self {
+        Self {
+            handle,
+            host_reader_graphs: false,
+            host_writer_graphs: false,
+        }
+    }
+
+    /// Set [`Self::host_reader_graphs`].
+    pub fn with_reader_graphs(mut self, enabled: bool) -> Self {
+        self.host_reader_graphs = enabled;
+        self
+    }
+
+    /// Set [`Self::host_writer_graphs`].
+    pub fn with_writer_graphs(mut self, enabled: bool) -> Self {
+        self.host_writer_graphs = enabled;
+        self
+    }
+}
+
+/// A move-only writer for the sole producer of a stream's encoded G.711
+/// output (for example a recording or prompt player that already holds
+/// G.711 payloads).
+///
+/// Taken with [`MediaStream::try_take_encoded_g711_writer`]. While a writer
+/// exists the stream accepts no other producer. Implementations keep the
+/// stream's transport generation, encryption, timestamp normalisation and
+/// pacing/backpressure semantics: a frame sent here leaves exactly as the
+/// same payload written through [`MediaStream::try_frames_out`] would.
+#[async_trait::async_trait]
+pub trait EncodedG711Writer: Send {
+    /// Send one encoded G.711 payload with its source RTP timestamp.
+    async fn send_encoded(
+        &mut self,
+        payload: &Bytes,
+        timestamp: u32,
+        payload_type: u8,
+    ) -> Result<()>;
+
+    /// Handle `frames` (`(payload, timestamp)`, in order) now, without
+    /// awaiting, exactly as the same sequence of [`Self::send_encoded`] calls
+    /// would handle them, as far as that is possible synchronously. The
+    /// report says how far it got; the caller sends every frame after that
+    /// with `send_encoded`, in order.
+    ///
+    /// `batch` lets frames that leave together use one system call. The
+    /// default handles nothing.
+    fn try_send_encoded_now(
+        &mut self,
+        _frames: &[(&Bytes, u32)],
+        _payload_type: u8,
+        _batch: bool,
+    ) -> EncodedSendNow {
+        EncodedSendNow::default()
+    }
+}
+
+/// What [`EncodedG711Writer::try_send_encoded_now`] did.
+#[derive(Debug, Default)]
+#[non_exhaustive]
+pub struct EncodedSendNow {
+    /// Leading frames for which `send_encoded` would have returned `Ok`
+    /// (sent, or dropped where it drops them).
+    pub sent: usize,
+    /// `send_encoded`'s error for frame `sent`, which it consumed. Frames
+    /// after it were not handled.
+    pub failure: Option<crate::error::RvoipError>,
+}
+
+impl EncodedSendNow {
+    /// Frames handled (sent, or failed).
+    pub fn handled(&self) -> usize {
+        self.sent + usize::from(self.failure.is_some())
+    }
+}
+
+/// One inbound frame lent to an [`InboundFrameSink`]. Fields mean what the
+/// same-named [`MediaFrame`] fields mean; the stream id and capture time are
+/// not materialised, since a sink is bound to one stream when it is offered.
+#[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
+pub struct InboundFrameView<'a> {
+    /// The frame's kind.
+    pub kind: StreamKind,
+    /// Encoded codec payload only, as in [`MediaFrame::payload`]. Empty when
+    /// the sink declared it does not read payloads
+    /// ([`InboundFrameSink::wants_payload`]) and the stream skipped encoding.
+    pub payload: &'a [u8],
+    /// The RTP timestamp, as in [`MediaFrame::timestamp_rtp`].
+    pub timestamp_rtp: u32,
+    /// The payload type, as in [`MediaFrame::payload_type`].
+    pub payload_type: Option<u8>,
+}
+
+impl<'a> InboundFrameView<'a> {
+    /// A view of one frame.
+    pub fn new(
+        kind: StreamKind,
+        payload: &'a [u8],
+        timestamp_rtp: u32,
+        payload_type: Option<u8>,
+    ) -> Self {
+        Self {
+            kind,
+            payload,
+            timestamp_rtp,
+            payload_type,
+        }
+    }
+}
+
+/// What an [`InboundFrameSink`] did with a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InboundFrameDelivery {
+    /// Taken (as `frames_in` accepting the frame).
+    Accepted,
+    /// The consumer is gone (as `frames_in` being closed). The producer
+    /// stops as it does when `frames_in` closes.
+    Closed,
+}
+
+/// A synchronous consumer of one stream's inbound frames that runs on the
+/// stream's media owner instead of reading `frames_in` from its own task.
+///
+/// Offered with [`MediaStream::offer_inbound_frame_sink`]. A stream that
+/// adopts the sink hands it, in media order, every inbound frame it would
+/// otherwise send on `frames_in` from the point of adoption; frames already
+/// sent on `frames_in` stay there, so the consumer keeps its receiver and
+/// keeps reading it. A stream that cannot adopt the sink (or stops using it,
+/// for example when its media leaves the owner) keeps or resumes using
+/// `frames_in`. Calls run on the media owner, so implementations must be
+/// cheap and must not block, await or take contended locks.
+pub trait InboundFrameSink: Send + 'static {
+    /// One inbound frame, borrowed for the duration of the call.
+    fn on_frame(&mut self, frame: InboundFrameView<'_>) -> InboundFrameDelivery;
+
+    /// Whether this sink reads [`InboundFrameView::payload`]. A sink that
+    /// only counts or validates frame metadata returns `false`; a stream may
+    /// then skip producing the payload (the SIP stream skips its G.711
+    /// re-encode) and lend an empty one. Every other field, and which frames
+    /// are lent in which order, stay exactly as with a payload. Asked once,
+    /// when the sink is adopted. The default (`true`) keeps payloads.
+    fn wants_payload(&self) -> bool {
+        true
+    }
+}
+
 /// Transport-agnostic media flow. Channel-based per INTERFACE_DESIGN §3.6 to
 /// avoid per-frame async overhead at high frame rates.
 #[async_trait::async_trait]
@@ -430,6 +601,32 @@ pub trait MediaStream: Send + Sync {
         None
     }
 
+    /// The stream's media lane (see [`MediaLanePlacement`]), once the stream
+    /// is bound, if it wants per-frame graph work to run there. The default,
+    /// and every stream without a lane, is `None`.
+    fn media_lane(&self) -> Option<MediaLanePlacement> {
+        None
+    }
+
+    /// Offer a synchronous consumer for this stream's inbound frames (see
+    /// [`InboundFrameSink`]). `Err` hands the sink back: the stream cannot
+    /// host one (the default), or one was already offered. `Ok` means the
+    /// stream may adopt it at any later frame; until then, and whenever it
+    /// does not use it, frames keep arriving on `frames_in`.
+    fn offer_inbound_frame_sink(
+        &self,
+        sink: Box<dyn InboundFrameSink>,
+    ) -> std::result::Result<(), Box<dyn InboundFrameSink>> {
+        Err(sink)
+    }
+
+    /// Take the stream's encoded G.711 writer (see [`EncodedG711Writer`]),
+    /// if the stream offers one and has no other producer. `Ok(None)` (the
+    /// default) means the caller writes through [`Self::try_frames_out`].
+    fn try_take_encoded_g711_writer(&self) -> Result<Option<Box<dyn EncodedG711Writer>>> {
+        Ok(None)
+    }
+
     fn quality_snapshot(&self) -> QualitySnapshot;
 
     /// Whether [`Self::quality_snapshot`] reflects an actual measurement.
@@ -485,6 +682,69 @@ impl fmt::Debug for MediaStreamHandle {
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn media_executor_seams_default_to_the_channels() {
+        struct Plain;
+        #[async_trait::async_trait]
+        impl MediaStream for Plain {
+            fn id(&self) -> StreamId {
+                StreamId::new()
+            }
+            fn kind(&self) -> StreamKind {
+                StreamKind::Audio
+            }
+            fn codec(&self) -> CodecInfo {
+                CodecInfo::from_name_with_defaults("PCMU")
+            }
+            fn direction(&self) -> Direction {
+                Direction::Inbound
+            }
+            fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
+                mpsc::channel(1).1
+            }
+            fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
+                mpsc::channel(1).0
+            }
+            fn quality_snapshot(&self) -> QualitySnapshot {
+                QualitySnapshot::default()
+            }
+            async fn close(self: Arc<Self>) -> Result<()> {
+                Ok(())
+            }
+        }
+        struct Counting(usize);
+        impl InboundFrameSink for Counting {
+            fn on_frame(&mut self, frame: InboundFrameView<'_>) -> InboundFrameDelivery {
+                assert_eq!(frame.kind, StreamKind::Audio);
+                self.0 += 1;
+                InboundFrameDelivery::Accepted
+            }
+        }
+        let stream = Plain;
+        assert!(stream.media_lane().is_none());
+        assert!(stream.try_take_encoded_g711_writer().unwrap().is_none());
+        let mut refused = stream
+            .offer_inbound_frame_sink(Box::new(Counting(0)))
+            .expect_err("the default refuses and hands the sink back");
+        assert!(refused.wants_payload(), "sinks read payloads by default");
+        let view = InboundFrameView::new(StreamKind::Audio, &[1, 2], 160, Some(0));
+        assert_eq!(refused.on_frame(view), InboundFrameDelivery::Accepted);
+
+        let mut report = EncodedSendNow::default();
+        assert_eq!(report.handled(), 0);
+        report.sent = 2;
+        report.failure = Some(crate::error::RvoipError::InvalidState("closed"));
+        assert_eq!(report.handled(), 3, "the failed frame was handled too");
+    }
+
+    #[tokio::test]
+    async fn a_media_lane_placement_hosts_nothing_until_asked() {
+        let placement = MediaLanePlacement::new(tokio::runtime::Handle::current());
+        assert!(!placement.host_reader_graphs && !placement.host_writer_graphs);
+        let placement = placement.with_reader_graphs(true).with_writer_graphs(true);
+        assert!(placement.host_reader_graphs && placement.host_writer_graphs);
+    }
 
     #[test]
     fn media_frame_debug_reports_shape_without_packet_bytes() {

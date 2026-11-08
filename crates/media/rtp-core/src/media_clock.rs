@@ -52,6 +52,14 @@ impl MediaSleep {
     pub fn is_lane(&self) -> bool {
         matches!(self, Self::Lane { .. })
     }
+
+    /// Hot call state: an address the lane clock prefetches when this sleep
+    /// falls due (a runtime timer ignores it).
+    pub(crate) fn set_prefetch_hint(self: Pin<&mut Self>, address: usize) {
+        if let MediaSleepProj::Lane { sleep } = self.project() {
+            sleep.set_prefetch_hint(address);
+        }
+    }
 }
 
 impl Future for MediaSleep {

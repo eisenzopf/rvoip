@@ -157,6 +157,8 @@ mod allocator;
 pub mod dtls_bridge;
 pub mod security_transport;
 mod srtp_rx;
+// Hot call state: the receive loop's lane-slab control entry.
+mod rx_hot;
 mod symmetric;
 mod tcp;
 mod udp;
@@ -165,13 +167,14 @@ mod validation;
 // Re-export transport implementations
 pub use allocator::{
     AllocationStrategy, GlobalPortAllocator, PairingStrategy, PortAllocator, PortAllocatorConfig,
-    PortAllocatorDiagnostics, DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
+    PortAllocatorDiagnostics, SessionPortReservation, DEFAULT_RTP_PORT_RANGE_END,
+    DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
 pub use security_transport::SecurityRtpTransport;
 pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, SrtpContextRollback, UdpRtpTransport};
-pub(crate) use udp::{RemotePeerAddrs, TxPayload, MAX_TX_BATCH};
+pub(crate) use udp::{RemotePeerAddrs, TxDestCache, TxPayload, MAX_TX_BATCH};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
 
 #[cfg(test)]

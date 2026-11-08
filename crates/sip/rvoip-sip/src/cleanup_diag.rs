@@ -567,6 +567,18 @@ static RECLAIM_TIMED_OUT: AtomicU64 = AtomicU64::new(0);
 static FORCED_SESSION_RELEASES: AtomicU64 = AtomicU64::new(0);
 static FORCED_SESSION_RELEASE_FAILURES: AtomicU64 = AtomicU64::new(0);
 static PENDING_HANGUP_WATCHDOGS_ARMED: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_RECLAIMS_STARTED: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_RECLAIM_ALREADY_RELEASED: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_RECLAIM_GRACEFUL: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_RECLAIM_FORCED: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_RECLAIM_TIMED_OUT: AtomicU64 = AtomicU64::new(0);
+static ORPHAN_RECLAIM_LOG: RateLimitedLog = RateLimitedLog::new();
+static MEDIA_PORT_ADMISSION_REJECTS: AtomicU64 = AtomicU64::new(0);
+static MEDIA_PORT_ADMISSION_LOG: RateLimitedLog = RateLimitedLog::new();
+static SETUP_FAILURE_REJECTS: AtomicU64 = AtomicU64::new(0);
+static SETUP_FAILURE_REJECT_LOG: RateLimitedLog = RateLimitedLog::new();
+static SETUP_FAILURE_UNANSWERED: AtomicU64 = AtomicU64::new(0);
+static SETUP_FAILURE_UNANSWERED_LOG: RateLimitedLog = RateLimitedLog::new();
 static INBOUND_END_BACKSTOP_LOG: RateLimitedLog = RateLimitedLog::new();
 static RECLAIM_TIMED_OUT_LOG: RateLimitedLog = RateLimitedLog::new();
 static FORCED_RELEASE_LOG: RateLimitedLog = RateLimitedLog::new();
@@ -612,6 +624,33 @@ pub struct SessionCleanupCounters {
     /// armed the accepted-call watchdog
     /// (`SessionCleanupConfig::pending_hangup_watchdog`).
     pub pending_hangup_watchdogs_armed: u64,
+    /// Ownerless call sessions handed to an orphan reclaim
+    /// (`SessionCleanupConfig::orphan_session_ttl`).
+    pub orphan_session_reclaims: u64,
+    /// Orphan reclaims that found the session already released by another
+    /// owner.
+    pub orphan_session_reclaims_already_released: u64,
+    /// Orphan reclaims of established calls that left the session store
+    /// after their bounded BYE.
+    pub orphan_session_reclaims_graceful: u64,
+    /// Orphan reclaims whose forced local reclaim (dialog, media port,
+    /// session slot) ran to completion.
+    pub orphan_session_reclaims_forced: u64,
+    /// Orphan reclaims whose forced reclaim exceeded its bound, or was cut
+    /// off by an adapter drain, so the slot release was attempted directly.
+    /// `already_released + graceful + forced + timed_out` is the finished
+    /// subset of `orphan_session_reclaims`.
+    pub orphan_session_reclaims_timed_out: u64,
+    /// Initial INVITEs shed with 503 because the RTP range had no free port
+    /// slot for the call's reservation, before any session state existed.
+    pub media_port_admission_rejects: u64,
+    /// Initial INVITEs answered 503 after their setup failed before a final
+    /// response (session creation, the dialog commit, media allocation or
+    /// another setup action). Such INVITEs used to get no final response.
+    pub setup_failure_rejects: u64,
+    /// Failed setups whose 503 also stopped before any transport write.
+    /// Each one is a caller that saw a timeout instead of a 503.
+    pub setup_failure_unanswered: u64,
 }
 
 /// Read the session cleanup counters.
@@ -628,6 +667,15 @@ pub fn session_cleanup_counters() -> SessionCleanupCounters {
         forced_session_releases: FORCED_SESSION_RELEASES.load(Ordering::Relaxed),
         forced_session_release_failures: FORCED_SESSION_RELEASE_FAILURES.load(Ordering::Relaxed),
         pending_hangup_watchdogs_armed: PENDING_HANGUP_WATCHDOGS_ARMED.load(Ordering::Relaxed),
+        orphan_session_reclaims: ORPHAN_RECLAIMS_STARTED.load(Ordering::Relaxed),
+        orphan_session_reclaims_already_released: ORPHAN_RECLAIM_ALREADY_RELEASED
+            .load(Ordering::Relaxed),
+        orphan_session_reclaims_graceful: ORPHAN_RECLAIM_GRACEFUL.load(Ordering::Relaxed),
+        orphan_session_reclaims_forced: ORPHAN_RECLAIM_FORCED.load(Ordering::Relaxed),
+        orphan_session_reclaims_timed_out: ORPHAN_RECLAIM_TIMED_OUT.load(Ordering::Relaxed),
+        media_port_admission_rejects: MEDIA_PORT_ADMISSION_REJECTS.load(Ordering::Relaxed),
+        setup_failure_rejects: SETUP_FAILURE_REJECTS.load(Ordering::Relaxed),
+        setup_failure_unanswered: SETUP_FAILURE_UNANSWERED.load(Ordering::Relaxed),
     }
 }
 
@@ -648,6 +696,58 @@ pub(crate) fn record_inbound_end_backstop_expired() -> Option<u64> {
 
 pub(crate) fn record_pending_hangup_watchdog_armed() {
     PENDING_HANGUP_WATCHDOGS_ARMED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Count one INVITE shed with 503 because no RTP port slot was free;
+/// `Some(occurrences)` when it should log.
+pub(crate) fn record_media_port_admission_reject() -> Option<u64> {
+    MEDIA_PORT_ADMISSION_REJECTS.fetch_add(1, Ordering::Relaxed);
+    MEDIA_PORT_ADMISSION_LOG.admit()
+}
+
+/// Count one INVITE answered 503 after its setup failed; `Some(occurrences)`
+/// when it should log.
+pub(crate) fn record_setup_failure_reject() -> Option<u64> {
+    SETUP_FAILURE_REJECTS.fetch_add(1, Ordering::Relaxed);
+    SETUP_FAILURE_REJECT_LOG.admit()
+}
+
+/// Count one failed setup whose 503 stopped before its first transport
+/// write; `Some(occurrences)` when it should log.
+pub(crate) fn record_setup_failure_unanswered() -> Option<u64> {
+    SETUP_FAILURE_UNANSWERED.fetch_add(1, Ordering::Relaxed);
+    SETUP_FAILURE_UNANSWERED_LOG.admit()
+}
+
+/// How one orphan session reclaim finished.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OrphanSessionReclaimOutcome {
+    /// Another owner released the lifetime before the reclaim acted.
+    AlreadyReleased,
+    /// An established call left the store after its bounded BYE.
+    Graceful,
+    /// The forced local reclaim (dialog, media, slot) ran to completion.
+    Forced,
+    /// The forced reclaim exceeded its bound, or a drain stopped its waiter;
+    /// the slot release was attempted directly.
+    TimedOut,
+}
+
+/// Count one ownerless session handed to a reclaim; `Some(occurrences)` when
+/// it should log.
+pub(crate) fn record_orphan_session_reclaim_started() -> Option<u64> {
+    ORPHAN_RECLAIMS_STARTED.fetch_add(1, Ordering::Relaxed);
+    ORPHAN_RECLAIM_LOG.admit()
+}
+
+pub(crate) fn record_orphan_session_reclaim_outcome(outcome: OrphanSessionReclaimOutcome) {
+    let counter = match outcome {
+        OrphanSessionReclaimOutcome::AlreadyReleased => &ORPHAN_RECLAIM_ALREADY_RELEASED,
+        OrphanSessionReclaimOutcome::Graceful => &ORPHAN_RECLAIM_GRACEFUL,
+        OrphanSessionReclaimOutcome::Forced => &ORPHAN_RECLAIM_FORCED,
+        OrphanSessionReclaimOutcome::TimedOut => &ORPHAN_RECLAIM_TIMED_OUT,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn record_inbound_end_reclaim() {

@@ -84,7 +84,7 @@ struct SrtpSessionKeys {
     rtp_enc_key: Vec<u8>,
 
     /// Key for RTP authentication
-    rtp_auth_key: Vec<u8>,
+    rtp_authenticator: super::auth::SrtpAuthenticator,
 
     /// Salt for RTP encryption
     rtp_salt: Vec<u8>,
@@ -132,6 +132,28 @@ impl SrtpCrypto {
 
     pub(crate) fn suite(&self) -> &SrtpCryptoSuite {
         &self.suite
+    }
+
+    /// Hot call state: the RTP session key material the packed SRTP block
+    /// copies, as (encryption key, salt, keyed HMAC-SHA1 state, tag length).
+    /// `None` unless the suite is AES-CM with HMAC-SHA1 and the keys are
+    /// derived (every suite `SrtpCryptoSuite::validate` admits), so the block
+    /// is only built where its path is the session-key path, byte for byte.
+    pub(crate) fn rtp_hot_material(
+        &self,
+    ) -> Option<(&[u8], &[u8], &super::auth::HmacSha1Core, usize)> {
+        if self.suite.encryption != SrtpEncryptionAlgorithm::AesCm
+            || self.suite.authentication == SrtpAuthenticationAlgorithm::Null
+        {
+            return None;
+        }
+        let keys = self.session_keys.as_ref()?;
+        Some((
+            keys.rtp_enc_key.as_slice(),
+            keys.rtp_salt.as_slice(),
+            keys.rtp_authenticator.keyed_mac()?,
+            self.suite.tag_length,
+        ))
     }
 
     /// Derive session keys from master key
@@ -191,7 +213,11 @@ impl SrtpCrypto {
         // Store the derived keys
         let session_keys = SrtpSessionKeys {
             rtp_enc_key,
-            rtp_auth_key,
+            rtp_authenticator: super::auth::SrtpAuthenticator::new(
+                self.suite.authentication,
+                rtp_auth_key,
+                self.suite.tag_length,
+            ),
             rtp_salt,
             rtcp_enc_key,
             rtcp_auth_key,
@@ -324,14 +350,9 @@ impl SrtpCrypto {
                 .session_keys
                 .as_ref()
                 .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
-            return super::auth::SrtpAuthenticator::append_auth_tag(
-                self.suite.authentication,
-                &session_keys.rtp_auth_key,
-                self.suite.tag_length,
-                buffer,
-                start,
-                roc,
-            );
+            return session_keys
+                .rtp_authenticator
+                .append_auth_tag(buffer, start, roc);
         }
         let session_keys = self
             .session_keys
@@ -356,14 +377,9 @@ impl SrtpCrypto {
             &iv,
         )?;
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            super::auth::SrtpAuthenticator::append_auth_tag(
-                self.suite.authentication,
-                &session_keys.rtp_auth_key,
-                self.suite.tag_length,
-                buffer,
-                start,
-                roc,
-            )?;
+            session_keys
+                .rtp_authenticator
+                .append_auth_tag(buffer, start, roc)?;
         }
         Ok(())
     }
@@ -382,15 +398,10 @@ impl SrtpCrypto {
             .as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
-        // Create an authenticator
-        let authenticator = super::auth::SrtpAuthenticator::new(
-            self.suite.authentication,
-            session_keys.rtp_auth_key.clone(),
-            self.suite.tag_length,
-        );
-
         // Calculate the authentication tag
-        authenticator.calculate_auth_tag(packet_data, roc)
+        session_keys
+            .rtp_authenticator
+            .calculate_auth_tag(packet_data, roc)
     }
 
     /// Decrypt an SRTP packet in the initial rollover cycle.
@@ -441,15 +452,11 @@ impl SrtpCrypto {
 
         // Verify authentication if enabled
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            // Create an authenticator
-            let authenticator = super::auth::SrtpAuthenticator::new(
-                self.suite.authentication,
-                session_keys.rtp_auth_key.clone(),
-                self.suite.tag_length,
-            );
-
             // Verify the authentication tag
-            let is_valid = authenticator.verify_auth_tag(packet_data, auth_tag, roc)?;
+            let is_valid =
+                session_keys
+                    .rtp_authenticator
+                    .verify_auth_tag(packet_data, auth_tag, roc)?;
             if !is_valid {
                 return Err(Error::AuthenticationFailed(
                     "SRTP authentication tag mismatch".to_string(),
@@ -562,10 +569,7 @@ impl SrtpCrypto {
         let (packet_data, auth_tag) = data.split_at_mut(tag_start);
 
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            let is_valid = super::auth::SrtpAuthenticator::verify_auth_tag_in_place(
-                self.suite.authentication,
-                &session_keys.rtp_auth_key,
-                self.suite.tag_length,
+            let is_valid = session_keys.rtp_authenticator.verify_auth_tag_in_place(
                 packet_data,
                 auth_tag,
                 roc,
@@ -610,29 +614,7 @@ impl SrtpCrypto {
             }
         }
 
-        let decrypted: &[u8] = encrypted;
-        let padding_size = if header.padding {
-            let Some(&padding_size) = decrypted.last() else {
-                return Err(Error::InvalidPacket(
-                    "decrypted RTP padding flag is set but no padding is present".to_string(),
-                ));
-            };
-            if padding_size == 0 || usize::from(padding_size) > decrypted.len() {
-                return Err(Error::InvalidPacket(format!(
-                    "invalid decrypted RTP padding length {padding_size} for {} payload octets",
-                    decrypted.len()
-                )));
-            }
-            padding_size
-        } else {
-            0
-        };
-        let payload_end = header_size + decrypted.len() - usize::from(padding_size);
-        Ok(crate::packet::rtp::RtpPacketBounds {
-            header,
-            payload: header_size..payload_end,
-            padding_size,
-        })
+        rtp_bounds_after_decrypt(header, header_size, encrypted)
     }
 
     /// Legacy stateless SRTCP encryption entry point.
@@ -903,8 +885,41 @@ impl SrtpCrypto {
     }
 }
 
-/// AES Counter Mode encryption for SRTP
-fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
+/// The bounds of an in-place decrypted RTP packet whose header (of
+/// `header_size` bytes) was parsed as `header` and whose decrypted payload
+/// and padding are `decrypted`: the padding is checked and excluded.
+pub(super) fn rtp_bounds_after_decrypt(
+    header: crate::packet::RtpHeader,
+    header_size: usize,
+    decrypted: &[u8],
+) -> Result<crate::packet::rtp::RtpPacketBounds> {
+    let padding_size = if header.padding {
+        let Some(&padding_size) = decrypted.last() else {
+            return Err(Error::InvalidPacket(
+                "decrypted RTP padding flag is set but no padding is present".to_string(),
+            ));
+        };
+        if padding_size == 0 || usize::from(padding_size) > decrypted.len() {
+            return Err(Error::InvalidPacket(format!(
+                "invalid decrypted RTP padding length {padding_size} for {} payload octets",
+                decrypted.len()
+            )));
+        }
+        padding_size
+    } else {
+        0
+    };
+    let payload_end = header_size + decrypted.len() - usize::from(padding_size);
+    Ok(crate::packet::rtp::RtpPacketBounds {
+        header,
+        payload: header_size..payload_end,
+        padding_size,
+    })
+}
+
+/// AES Counter Mode encryption for SRTP (also the packed hot-state block's
+/// keystream, with its inline key copy)
+pub(super) fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
     if iv.len() < 16 {
         return Err(Error::SrtpError(format!(
             "AES-CM IV too short: expected 16 bytes, got {}",

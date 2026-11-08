@@ -296,7 +296,7 @@ pub const LATENESS_BUCKETS_US: [u64; 10] =
 
 const LATENESS_SLOTS: usize = LATENESS_BUCKETS_US.len() + 1;
 
-fn lateness_bucket(late: Duration) -> usize {
+pub(crate) fn lateness_bucket(late: Duration) -> usize {
     let micros = u64::try_from(late.as_micros()).unwrap_or(u64::MAX);
     LATENESS_BUCKETS_US
         .iter()

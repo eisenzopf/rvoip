@@ -501,6 +501,7 @@ pub mod auth;
 pub mod call_setup_diag;
 #[doc(hidden)]
 pub mod cleanup_diag;
+mod orphan_sweep;
 mod retained_tasks;
 #[doc(hidden)]
 pub mod session_lifecycle;
