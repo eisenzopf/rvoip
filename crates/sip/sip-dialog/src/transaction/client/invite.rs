@@ -309,7 +309,11 @@ impl ClientInviteLogic {
             .await
         {
             data.complete_initial_send(false);
-            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Failed to send initial request from Calling state");
+            static SEND_FAILURES: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            if let Some(occurrences) = crate::diagnostics::thin_log(&SEND_FAILURES) {
+                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), occurrences, "Failed to send initial request from Calling state");
+            }
             data.completion
                 .record_failure(crate::transaction::ClientTransactionFailure::Transport);
             common_logic::send_transport_error_event(tx_id, &data.events_tx).await;
@@ -932,7 +936,7 @@ impl ClientInviteTransaction {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Initial)),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
-            request: Arc::new(request.clone()),
+            request: Arc::new(request),
             last_response: Arc::new(Mutex::new(None)),
             response_notify: Arc::new(tokio::sync::Notify::new()),
             completion: Arc::new(
@@ -2092,5 +2096,37 @@ mod tests {
             "the INVITE transaction must not generate an ACK for a 2xx"
         );
         assert_eq!(setup.transaction.state(), TransactionState::Completed);
+    }
+
+    #[tokio::test]
+    async fn new_keeps_the_owned_request_instead_of_copying_it() {
+        let mock_transport = Arc::new(UnitTestMockTransport::new("127.0.0.1:5090"));
+        let (tu_events_tx, _tu_events_rx) = mpsc::channel(8);
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@target.com")
+            .expect("Failed to create SimpleRequestBuilder")
+            .from("Alice", "sip:alice@atlanta.com", Some("fromtag"))
+            .to("Bob", "sip:bob@target.com", None)
+            .call_id("callid-owned-request")
+            .cseq(1)
+            .via("127.0.0.1:5070", "UDP", Some("z9hG4bK.owned-request"))
+            .build();
+        let expected = request.clone();
+        let header_buffer = request.headers.as_ptr();
+        let tx_key = TransactionKey::from_request(&request).expect("transaction key");
+
+        let transaction = ClientInviteTransaction::new(
+            tx_key,
+            request,
+            SocketAddr::from_str("127.0.0.1:5070").unwrap(),
+            mock_transport as Arc<dyn Transport>,
+            tu_events_tx,
+            None,
+        )
+        .expect("transaction");
+
+        // A copy would own a newly allocated header list; the transaction
+        // keeps the moved request and therefore the caller's buffer.
+        assert_eq!(transaction.data().request.headers.as_ptr(), header_buffer);
+        assert_eq!(*transaction.data().request, expected);
     }
 }

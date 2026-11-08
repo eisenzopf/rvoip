@@ -68,6 +68,9 @@ pub mod audio;
 // Event system and cross-crate communication
 pub mod events;
 
+// Per-thread PCM buffer reuse on the media path (media executor v2)
+pub mod pcm_pool;
+
 // Re-export core types
 pub use error::{Error, Result};
 pub use types::*;

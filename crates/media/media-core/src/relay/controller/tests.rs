@@ -193,6 +193,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_port_slots_track_exhaustion_and_recover_after_stop() {
+        let controller = MediaSessionController::with_port_range(24_400, 24_401);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert_eq!(controller.configured_session_port_slots(false), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+
+        for dialog in ["slot-a", "slot-b"] {
+            controller
+                .start_media(DialogId::new(dialog), loopback_config())
+                .await
+                .expect("media start within the range");
+        }
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(0));
+        let exhausted = controller
+            .start_media(DialogId::new("slot-c"), loopback_config())
+            .await
+            .expect_err("a full range must fail media start");
+        assert!(
+            exhausted.to_string().contains("port_pool_exhausted"),
+            "{exhausted}"
+        );
+
+        controller
+            .stop_media(&DialogId::new("slot-a"))
+            .await
+            .expect("stop releases its port");
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(1));
+        controller
+            .start_media(DialogId::new("slot-c"), loopback_config())
+            .await
+            .expect("a released port serves the next call");
+        for dialog in ["slot-b", "slot-c"] {
+            controller
+                .stop_media(&DialogId::new(dialog))
+                .await
+                .expect("stop media");
+        }
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+        // A controller without a range-backed allocator counts nothing.
+        assert_eq!(
+            MediaSessionController::new().available_session_port_slots(ip, false),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_rtcp_session_port_slots_count_pairs_and_follow_rtcp_release() {
+        // Four ports: four multiplexed sessions or two RTP/RTCP pairs.
+        let controller = MediaSessionController::with_port_range(24_410, 24_413);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert_eq!(controller.configured_session_port_slots(false), Some(4));
+        assert_eq!(controller.configured_session_port_slots(true), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(2));
+
+        // Non-mux: the session reserves RTP and RTP + 1.
+        let paired = DialogId::new("slots-paired");
+        controller
+            .start_media(
+                paired.clone(),
+                loopback_config().with_rtcp_separate_port(true),
+            )
+            .await
+            .expect("pair start");
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(1));
+
+        // Mux accepted: the RTCP port is a free port again, but no pair.
+        assert!(controller.release_rtcp_port(&paired).await.unwrap());
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(3));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(1));
+
+        // A multiplexed session splits the last pair: one free port per side
+        // of it, so free ports / 2 would still admit a doomed pair start.
+        let single = DialogId::new("slots-single");
+        controller
+            .start_media(single.clone(), loopback_config())
+            .await
+            .expect("single start");
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(0));
+        controller
+            .start_media(
+                DialogId::new("slots-no-pair"),
+                loopback_config().with_rtcp_separate_port(true),
+            )
+            .await
+            .expect_err("no free pair is left");
+
+        for dialog in [&paired, &single] {
+            controller.stop_media(dialog).await.unwrap();
+        }
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(4));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(2));
+    }
+
+    #[tokio::test]
     async fn separate_rtcp_bind_failure_moves_to_the_next_pair_and_leaks_nothing() {
         let controller = MediaSessionController::with_port_range(24_200, 24_203);
         // Someone else holds the first pair's RTCP port.

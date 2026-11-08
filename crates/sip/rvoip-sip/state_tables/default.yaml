@@ -84,6 +84,34 @@ transitions:
       - "SessionCreated"
     description: "Start outgoing call"
 
+  # RFC 3261 section 9.1: once any provisional response has arrived, CANCEL
+  # is legal. A 100 is enough, but it does not mean the peer is ringing, so it
+  # only records progress (the executor sets the flag that selects
+  # CancelAfterTrying for a later hangup or cancel).
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "Dialog100Trying"
+    description: "Record initial INVITE progress without publishing ringing"
+
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "CancelAfterTrying"
+    next_state: "Cancelling"
+    actions:
+      - type: "SendCANCELWithOptions"
+    description: "Cancel after 100; wait for the final INVITE response and exact release"
+
+  - role: "UAC"
+    state: "CancelPending"
+    event:
+      type: "Dialog100Trying"
+    next_state: "Cancelling"
+    actions:
+      - type: "SendCANCELWithOptions"
+    description: "100 makes an already requested cancellation legal"
+
   # UAC receives 180 Ringing
   - role: "UAC"
     state: "Initiating"
@@ -821,6 +849,20 @@ transitions:
     publish:
       - "CallTerminated"
     description: "Local hangup wire completion committed; retained exact release owns all cleanup"
+
+  # The peer can send its own BYE while ours is in flight. Dialog-core has
+  # already answered the inbound BYE. Commit termination here, but as with
+  # DialogTerminated above run no cleanup actions: SendBYE may still own an
+  # exact operation, and the retained exact release quiesces it before it
+  # cleans the dialog and media once.
+  - role: "Both"
+    state: "Terminating"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    publish:
+      - "CallTerminated"
+    description: "Crossed BYE commits termination; retained exact release owns all cleanup"
 
   # RFC 3261 §14.1 — Hold is a re-INVITE. Session parameters MUST NOT
   # change until a 2xx response arrives. We enter an intermediate

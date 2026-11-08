@@ -32,11 +32,11 @@ use rvoip_media_core::codec::audio::{G729Annexes, G729Codec, G729Config};
 use rvoip_media_core::codec::audio::{OpusApplication, OpusCodec, OpusConfig};
 use rvoip_media_core::codec::factory::CodecFactory;
 use rvoip_media_core::error::CodecError;
-use rvoip_media_core::processing::format::{ConversionParams, FormatConverter};
+use rvoip_media_core::processing::format::{ConversionParams, FormatConverter, Resampler};
 use rvoip_media_core::types::SampleRate;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -44,7 +44,7 @@ use crate::bridge::{codec_to_pt, frame_pump::DEFAULT_TELEPHONE_EVENT_PT};
 use crate::capability::CodecInfo;
 use crate::error::{Result, RvoipError};
 use crate::ids::MediaRouteId;
-use crate::stream::MediaFrame;
+use crate::stream::{GatedFrameAdmission, GatedFrameInput, MediaFrame};
 
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -248,12 +248,26 @@ impl RouteDelivery {
         let delivered = self.delivered.fetch_add(1, Ordering::AcqRel) + 1;
         self.changed.send_replace(delivered);
     }
+
+    /// Wait until this route's delivery task has ended, without polling: its
+    /// [`DeliveryPumpGuard`] bumps `changed` after setting `pump_finished`.
+    async fn wait_pump_finished(&self) {
+        let mut changed = self.changed.subscribe();
+        while !self.pump_finished.load(Ordering::SeqCst) {
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
 }
 
 struct DeliveryPumpGuard(Arc<RouteDelivery>);
 impl Drop for DeliveryPumpGuard {
     fn drop(&mut self) {
         self.0.pump_finished.store(true, Ordering::SeqCst);
+        // Wake `wait_pump_finished`. Delivery observers re-check their own
+        // counter, so the unchanged value is only a wake-up.
+        self.0.changed.send_modify(|_| {});
     }
 }
 
@@ -544,6 +558,10 @@ pub struct MediaGraphSnapshot {
 pub(crate) enum MediaSinkTarget {
     Legacy(mpsc::Sender<MediaFrame>),
     Peer(mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>),
+    /// A stream input whose consumer gate the route applies itself (see
+    /// [`GatedFrameInput`]), so a frame goes straight into the consumer's
+    /// channel instead of through the stream's own input pump.
+    Gated(Arc<dyn GatedFrameInput>),
 }
 
 impl MediaSinkTarget {
@@ -553,7 +571,10 @@ impl MediaSinkTarget {
     pub(crate) fn for_stream(stream: &dyn crate::stream::MediaStream) -> Result<Self> {
         match stream.try_peer_frames_out() {
             Ok(sender) => Ok(Self::Peer(sender)),
-            Err(RvoipError::NotImplemented(_)) => stream.try_frames_out().map(Self::Legacy),
+            Err(RvoipError::NotImplemented(_)) => match stream.try_gated_frames_out() {
+                Some(input) => Ok(Self::Gated(input)),
+                None => stream.try_frames_out().map(Self::Legacy),
+            },
             Err(error) => Err(error),
         }
     }
@@ -562,6 +583,9 @@ impl MediaSinkTarget {
         match self {
             Self::Legacy(tx) => tx.is_closed(),
             Self::Peer(tx) => tx.is_closed(),
+            Self::Gated(input) => {
+                input.channel().is_closed() || input.admission() == GatedFrameAdmission::Closed
+            }
         }
     }
 
@@ -580,6 +604,33 @@ impl MediaSinkTarget {
                 ticket.forward(tx, frame).await.map_err(|_| ())
             }
             (Self::Peer(_), None) => Err(()),
+            (Self::Gated(input), Some(ticket)) => {
+                if !ticket.is_active() {
+                    return Ok(false);
+                }
+                match input.admission() {
+                    GatedFrameAdmission::Closed => return Err(()),
+                    // Taken and discarded, as the stream's own input pump
+                    // takes a frame from its channel and drops it.
+                    GatedFrameAdmission::Discard => return Ok(true),
+                    GatedFrameAdmission::Open => {}
+                }
+                let forwarded = ticket
+                    .forward_with(input.channel(), input.left_open(), |permit| {
+                        input.commit(permit, frame)
+                    })
+                    .await
+                    .map_err(|_| ())?;
+                match forwarded {
+                    // Committed or discarded under the gate, or discarded
+                    // because the gate left `Open` while waiting for room:
+                    // the stream accepted the frame either way.
+                    crate::bridge::peer_switch::PeerForwarded::Committed(_)
+                    | crate::bridge::peer_switch::PeerForwarded::Abandoned => Ok(true),
+                    crate::bridge::peer_switch::PeerForwarded::Inactive => Ok(false),
+                }
+            }
+            (Self::Gated(input), None) => forwarding.publish_gated(input.as_ref(), frame).await,
         }
     }
 }
@@ -634,7 +685,8 @@ enum Command {
 }
 
 type RetainedSnapshot = Arc<StdRwLock<Arc<MediaGraphSnapshot>>>;
-type SinkTaskRegistry = Arc<Mutex<Vec<AbortHandle>>>;
+/// Sink delivery tasks by join handle, so graph teardown can await their exit.
+type SinkTaskRegistry = Arc<Mutex<Vec<JoinHandle<()>>>>;
 type RouteStatusRegistry = Arc<Mutex<HashMap<MediaRouteId, watch::Sender<MediaGraphRouteState>>>>;
 
 #[derive(Default)]
@@ -756,6 +808,53 @@ impl RouteForwardingGate {
         permit.send(frame);
         Ok(true)
     }
+
+    /// [`Self::publish_fenced`] into a gated stream input.
+    ///
+    /// The input's gate is checked first and rechecked at commit. A frame
+    /// whose gate leaves `Open` while it waits for room is discarded and
+    /// counts as accepted, as the stream's input pump would discard it.
+    async fn publish_gated(
+        &self,
+        input: &dyn GatedFrameInput,
+        frame: MediaFrame,
+    ) -> std::result::Result<bool, ()> {
+        match input.admission() {
+            GatedFrameAdmission::Closed => return Err(()),
+            GatedFrameAdmission::Discard => return Ok(true),
+            GatedFrameAdmission::Open => {}
+        }
+        if self.buffer_while_disabled {
+            let permit = tokio::select! {
+                biased;
+                () = input.left_open() => return Ok(true),
+                capacity = input.channel().reserve() => match capacity {
+                    Ok(permit) => permit,
+                    Err(_) => return Err(()),
+                },
+            };
+            input.commit(permit, frame);
+            return Ok(true);
+        }
+        let permit = tokio::select! {
+            biased;
+            () = self.wait_until_disabled() => return Ok(false),
+            () = input.left_open() => return Ok(true),
+            capacity = input.channel().reserve() => match capacity {
+                Ok(permit) => permit,
+                Err(_) => return Err(()),
+            },
+        };
+        let _cutover = self
+            .cutover
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !self.enabled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        input.commit(permit, frame);
+        Ok(true)
+    }
 }
 
 struct SinkAdmissionState {
@@ -810,6 +909,10 @@ pub struct MediaGraphHandle {
     graph_id: MediaGraphId,
     commands: mpsc::Sender<Command>,
     abort: AbortHandle,
+    /// The actor's join handle, shared by every clone of this handle. A
+    /// waiter awaits it under the lock and clears the slot once it has
+    /// completed, because a `JoinHandle` must not be polled after that.
+    actor_join: Arc<tokio::sync::Mutex<Option<JoinHandle<()>>>>,
     latest_snapshot: RetainedSnapshot,
     snapshot_in_flight: Arc<AtomicBool>,
     completion: watch::Receiver<Option<MediaGraphSourceState>>,
@@ -1244,7 +1347,6 @@ impl MediaGraphHandle {
 
     async fn wait_closed_unbounded(&self) -> Result<MediaGraphSourceState> {
         let mut completion = self.completion.clone();
-        let actor = self.abort.clone();
         let state = loop {
             if let Some(state) = *completion.borrow() {
                 break state;
@@ -1254,8 +1356,14 @@ impl MediaGraphHandle {
                 .await
                 .map_err(|_| RvoipError::InvalidState("media graph completion was dropped"))?;
         };
-        while !actor.is_finished() {
-            tokio::task::yield_now().await;
+        // Await the actor's exit rather than spinning on `is_finished`: the
+        // actor may run on another runtime, and the spin kept this worker busy
+        // for as long as that runtime took to finish it. Cancel-safe: the
+        // handle stays in its slot until it has completed.
+        let mut actor = self.actor_join.lock().await;
+        if let Some(join) = actor.as_mut() {
+            let _ = join.await;
+            *actor = None;
         }
         Ok(state)
     }
@@ -1719,6 +1827,9 @@ struct ConfiguredTranscodingSession {
     expected_source_timestamp: Option<u32>,
     source_clock_rate: u32,
     target_clock_rate: u32,
+    /// Resampler for a rate change without a channel change, keyed by
+    /// (input rate, output rate). See [`Self::resample`].
+    resampler: Option<((u32, u32), Resampler)>,
 }
 
 impl ConfiguredTranscodingSession {
@@ -1746,7 +1857,36 @@ impl ConfiguredTranscodingSession {
             expected_source_timestamp: None,
             source_clock_rate: source.clock_rate_hz.max(1),
             target_clock_rate: target.clock_rate_hz.max(1),
+            resampler: None,
         })
+    }
+
+    /// Change only the sample rate of `frame`.
+    ///
+    /// This is what [`FormatConverter::convert_frame`] does when the channel
+    /// count already matches: one resampler per (input, output) rate pair at
+    /// the same quality, kept across frames. It skips the converter's two
+    /// whole-frame copies, and the output is bit-identical.
+    fn resample(
+        &mut self,
+        frame: rvoip_media_core::types::AudioFrame,
+        params: &ConversionParams,
+    ) -> rvoip_media_core::Result<rvoip_media_core::types::AudioFrame> {
+        let rates = (frame.sample_rate, params.target_sample_rate.as_hz());
+        if self.resampler.as_ref().map(|(current, _)| *current) != Some(rates) {
+            self.resampler = Some((rates, Resampler::new(rates.0, rates.1, params.quality)?));
+        }
+        let (_, resampler) = self
+            .resampler
+            .as_mut()
+            .expect("resampler for these rates was just created");
+        let samples = resampler.resample(&frame.samples)?;
+        Ok(rvoip_media_core::types::AudioFrame::new(
+            samples,
+            rates.1,
+            frame.channels,
+            frame.timestamp,
+        ))
     }
 
     /// Source-domain RTP ticks spanned by one target frame.
@@ -1811,12 +1951,14 @@ impl ConfiguredTranscodingSession {
                     details: format!("unsupported target clock rate {}", target_info.sample_rate),
                 }
             })?;
-            self.format_converter
-                .convert_frame(
-                    &source_frame,
-                    &ConversionParams::new(target_rate, target_info.channels),
-                )?
-                .frame
+            let params = ConversionParams::new(target_rate, target_info.channels);
+            if source_frame.channels == target_info.channels {
+                self.resample(source_frame, &params)?
+            } else {
+                self.format_converter
+                    .convert_frame(&source_frame, &params)?
+                    .frame
+            }
         } else {
             source_frame
         };
@@ -2069,6 +2211,9 @@ struct CodecGroup {
     sinks: HashSet<MediaRouteId>,
     source_frames_routed: u64,
     transcode_operations: u64,
+    /// `rvoip_media_graph_transcodes_total` for this target payload type,
+    /// resolved once rather than formatting its label for every frame.
+    transcodes_counter: metrics::Counter,
 }
 
 impl CodecGroup {
@@ -2080,6 +2225,10 @@ impl CodecGroup {
     ) -> Self {
         Self {
             transcoder: make_transcoder(source_codec, source_pt, &target_codec, target_pt),
+            transcodes_counter: metrics::counter!(
+                "rvoip_media_graph_transcodes_total",
+                "target_payload_type" => target_pt.to_string()
+            ),
             target_codec,
             target_pt,
             sinks: HashSet::new(),
@@ -2234,7 +2383,7 @@ impl Drop for SnapshotTerminalGuard {
         };
         terminate_all_routes(&self.route_statuses, reason);
 
-        let mut sink_tasks = self
+        let sink_tasks = self
             .sink_tasks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2244,14 +2393,15 @@ impl Drop for SnapshotTerminalGuard {
             task.abort();
         }
         let completion = self.completion.clone();
-        if sink_tasks.iter().all(AbortHandle::is_finished) {
+        if sink_tasks.iter().all(JoinHandle::is_finished) {
             let _ = completion.send(Some(terminal_state));
         } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                while sink_tasks.iter().any(|task| !task.is_finished()) {
-                    tokio::task::yield_now().await;
+                // Await each aborted task's exit instead of spinning on
+                // `is_finished` with `yield_now`.
+                for task in sink_tasks {
+                    let _ = task.await;
                 }
-                sink_tasks.clear();
                 let _ = completion.send(Some(terminal_state));
             });
         } else {
@@ -2383,6 +2533,7 @@ fn start_media_graph_with_activity_interval(
         let mut sinks: HashMap<MediaRouteId, SinkRuntime> = HashMap::new();
         let mut groups: HashMap<CodecGroupKey, CodecGroup> = HashMap::new();
         let mut stats = GraphStats::default();
+        let counters = GraphCounters::new();
         let mut pre_sink_buffer = VecDeque::with_capacity(policy.pre_sink_buffer_frames);
         // Once a first sink has existed, later zero-sink periods deliberately
         // discard media rather than replaying stale RTP to a future attachment.
@@ -2470,11 +2621,12 @@ fn start_media_graph_with_activity_interval(
                                     }
                                 }
                             });
+                            let task_abort = task.abort_handle();
                             prune_sink_tasks(&sink_tasks_for_actor);
                             sink_tasks_for_actor
                                 .lock()
                                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                                .push(task.abort_handle());
+                                .push(task);
                             let mut group_key = CodecGroupKey::new(&codec, target_pt);
                             if queue.peer_ticket.is_some() {
                                 group_key.peer_route = Some(route_id.clone());
@@ -2499,7 +2651,7 @@ fn start_media_graph_with_activity_interval(
                                     target_clock_rate_hz,
                                 ),
                                 queue,
-                                task: task.abort_handle(),
+                                task: task_abort,
                                 warmup_since: None,
                                 history: VecDeque::new(),
                                 rolling_drops: 0,
@@ -2535,6 +2687,7 @@ fn start_media_graph_with_activity_interval(
                                         &mut sinks,
                                         &mut groups,
                                         &mut stats,
+                                        &counters,
                                     ));
                                 }
                                 snapshot_dirty = true;
@@ -2822,7 +2975,7 @@ fn start_media_graph_with_activity_interval(
                         Utc::now(),
                     );
                     snapshot_dirty = true;
-                    metrics::counter!("rvoip_media_graph_source_frames_total").increment(1);
+                    counters.source_frames.increment(1);
                     if !source_routing_started {
                         if policy.pre_sink_buffer_frames > 0 {
                             if pre_sink_buffer.len() == policy.pre_sink_buffer_frames {
@@ -2852,6 +3005,7 @@ fn start_media_graph_with_activity_interval(
                             &mut sinks,
                             &mut groups,
                             &mut stats,
+                            &counters,
                         );
                         aggregate_metrics.set_sink_count(sinks.len());
                         aggregate_metrics.set_codec_group_count(groups.len());
@@ -2937,9 +3091,11 @@ fn start_media_graph_with_activity_interval(
         for sink in sinks.values() {
             sink.queue.seal();
         }
+        // Wait for the draining delivery tasks to end (their guards signal
+        // it) instead of polling them every millisecond.
         let _ = tokio::time::timeout(Duration::from_secs(2), async {
-            while sinks.values().any(|sink| !sink.task.is_finished()) {
-                tokio::time::sleep(Duration::from_millis(1)).await;
+            for sink in sinks.values() {
+                sink.delivery.wait_pump_finished().await;
             }
         })
         .await;
@@ -2966,6 +3122,7 @@ fn start_media_graph_with_activity_interval(
         graph_id,
         commands: command_tx,
         abort: task.abort_handle(),
+        actor_join: Arc::new(tokio::sync::Mutex::new(Some(task))),
         latest_snapshot,
         snapshot_in_flight,
         completion: completion_rx,
@@ -3025,6 +3182,24 @@ fn publish_actor_snapshot(
     );
 }
 
+/// Per-frame counters of one graph, resolved once when the graph starts
+/// instead of looking each one up in the recorder for every frame.
+struct GraphCounters {
+    /// `rvoip_media_graph_source_frames_total`.
+    source_frames: metrics::Counter,
+    /// `rvoip_media_graph_frames_total`: frames offered to a sink.
+    sink_offers: metrics::Counter,
+}
+
+impl GraphCounters {
+    fn new() -> Self {
+        Self {
+            source_frames: metrics::counter!("rvoip_media_graph_source_frames_total"),
+            sink_offers: metrics::counter!("rvoip_media_graph_frames_total"),
+        }
+    }
+}
+
 /// Route one already-accounted source frame. Payload transcoding remains once
 /// per codec group, while each sink advances its own RTP clock so a group
 /// re-key cannot reset that route's timestamp epoch.
@@ -3036,6 +3211,7 @@ fn route_source_frame(
     sinks: &mut HashMap<MediaRouteId, SinkRuntime>,
     groups: &mut HashMap<CodecGroupKey, CodecGroup>,
     stats: &mut GraphStats,
+    counters: &GraphCounters,
 ) -> Vec<(MediaRouteId, MediaGraphRouteTerminalReason)> {
     if groups.is_empty() {
         // Every route is gone but the source is still producing. Discarding is
@@ -3088,11 +3264,7 @@ fn route_source_frame(
             if let Some(transcoder) = group.transcoder.as_mut() {
                 group.transcode_operations = group.transcode_operations.saturating_add(1);
                 stats.transcode_operations = stats.transcode_operations.saturating_add(1);
-                metrics::counter!(
-                    "rvoip_media_graph_transcodes_total",
-                    "target_payload_type" => group.target_pt.to_string()
-                )
-                .increment(1);
+                group.transcodes_counter.increment(1);
                 match transcoder.transcode(&frame.payload, frame.timestamp_rtp) {
                     Ok(transcoded) => {
                         for produced in transcoded {
@@ -3153,7 +3325,7 @@ fn route_source_frame(
                 }
                 let dropped = offer == OfferResult::DroppedOldest;
                 stats.sink_offers = stats.sink_offers.saturating_add(1);
-                metrics::counter!("rvoip_media_graph_frames_total").increment(1);
+                counters.sink_offers.increment(1);
                 if dropped {
                     stats.dropped_frames = stats.dropped_frames.saturating_add(1);
                     metrics::counter!(
@@ -3261,13 +3433,9 @@ fn rebuild_transcoders(
 }
 
 async fn wait_for_recording_delivery(sink: &SinkRuntime) -> bool {
-    if tokio::time::timeout(Duration::from_secs(2), async {
-        while !sink.task.is_finished() {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .is_err()
+    if tokio::time::timeout(Duration::from_secs(2), sink.delivery.wait_pump_finished())
+        .await
+        .is_err()
     {
         return false;
     }
@@ -6290,5 +6458,697 @@ mod tests {
         }
         assert_eq!(graph.snapshot().await.source_frames, 20);
         graph.shutdown();
+    }
+
+    /// Counts how often the wrapped future is polled.
+    struct Polls<F> {
+        inner: std::pin::Pin<Box<F>>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl<F: std::future::Future> std::future::Future for Polls<F> {
+        type Output = F::Output;
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<F::Output> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// Teardown awaited from another runtime awaits the graph actor and its
+    /// delivery tasks: with the graph's runtime blocked for 60 ms, the waiter
+    /// is polled a handful of times, never in a `yield_now` loop.
+    #[tokio::test]
+    async fn teardown_from_another_runtime_awaits_without_spinning() {
+        let graph_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("graph runtime");
+        let (source_tx, source_rx) = mpsc::channel(4);
+        let graph = {
+            let _graph_runtime = graph_runtime.enter();
+            start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap()
+        };
+        let (target_tx, _target_rx) = mpsc::channel(1);
+        let route = graph
+            .add_managed_sink(codec("pcmu", 8_000), target_tx)
+            .unwrap();
+        route.wait_active().await.unwrap();
+        // Fill the target so the delivery task is parked in a send.
+        for value in 1..=3u8 {
+            source_tx.send(frame(value)).await.unwrap();
+        }
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        graph_runtime.spawn(async move {
+            blocked_tx.send(()).expect("signal");
+            std::thread::sleep(Duration::from_millis(60));
+        });
+        blocked_rx.recv().expect("graph runtime is blocked");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let waiting = Polls {
+            inner: Box::pin(graph.shutdown_and_wait()),
+            polls: Arc::clone(&polls),
+        };
+        assert_eq!(waiting.await.unwrap(), MediaGraphSourceState::Shutdown);
+        let polls = polls.load(Ordering::Relaxed);
+        assert!(polls <= 16, "teardown was polled {polls} times");
+        assert!(graph.abort_handle().is_finished());
+        assert_eq!(
+            graph.wait_closed().await.unwrap(),
+            MediaGraphSourceState::Shutdown,
+            "a later waiter finds the actor already joined"
+        );
+        drop(route);
+        drop(source_tx);
+        graph_runtime.shutdown_background();
+    }
+
+    /// A recording drain waits for its delivery task's exit signal instead
+    /// of polling the task every millisecond: while a slow consumer drains
+    /// the queue, the graph's runtime wakes for the room the consumer frees,
+    /// not once per millisecond. Covers an explicit drain and source EOF.
+    #[tokio::test]
+    async fn recording_drains_wait_for_the_delivery_task_without_polling() {
+        const FRAMES: u8 = 5;
+        for explicit_drain in [true, false] {
+            let wakeups = Arc::new(AtomicUsize::new(0));
+            let counter = Arc::clone(&wakeups);
+            let graph_runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .on_thread_unpark(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                })
+                .build()
+                .expect("graph runtime");
+            let (source_tx, source_rx) = mpsc::channel(8);
+            let graph = {
+                let _graph_runtime = graph_runtime.enter();
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap()
+            };
+            let (target, mut output) = mpsc::channel(1);
+            let route = graph
+                .add_recording_sink(codec("pcmu", 8_000), target)
+                .unwrap();
+            route.wait_active().await.unwrap();
+            for value in 1..=FRAMES {
+                source_tx.send(frame(value)).await.unwrap();
+            }
+            while graph.snapshot().await.source_frames < u64::from(FRAMES) {
+                tokio::task::yield_now().await;
+            }
+            // About 120 ms of draining: one frame per 20 ms, then the close.
+            let consume = async {
+                let mut received = 0u8;
+                loop {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    match output.recv().await {
+                        Some(_) => received += 1,
+                        None => break received,
+                    }
+                }
+            };
+            wakeups.store(0, Ordering::Relaxed);
+            if explicit_drain {
+                let (drained, received) = tokio::join!(route.drain(), consume);
+                assert!(drained.unwrap(), "every queued frame was delivered");
+                assert_eq!(received, FRAMES);
+            } else {
+                drop(source_tx);
+                let (closed, received) = tokio::join!(graph.wait_closed(), consume);
+                assert_eq!(closed.unwrap(), MediaGraphSourceState::Closed);
+                assert_eq!(received, FRAMES);
+            }
+            let wakeups = wakeups.load(Ordering::Relaxed);
+            assert!(
+                wakeups <= 20,
+                "the graph runtime woke {wakeups} times during the drain \
+                 (explicit_drain={explicit_drain})"
+            );
+            graph.shutdown_and_wait().await.unwrap();
+            graph_runtime.shutdown_background();
+        }
+    }
+
+    /// 20 ms of G.711 µ-law, distinct per frame.
+    fn pcmu_audio(value: u8, timestamp_rtp: u32) -> MediaFrame {
+        let mut frame = frame_at(value, timestamp_rtp);
+        frame.payload = Bytes::from(
+            (0..160u32)
+                .map(|index| (u32::from(value) * 13 + index * 7) as u8 | 0x10)
+                .collect::<Vec<u8>>(),
+        );
+        frame
+    }
+
+    /// 20 ms of 16 kHz PCM (the in-process AI codec), distinct per frame.
+    fn pcm16_audio(value: u8, timestamp_rtp: u32) -> MediaFrame {
+        let mut payload = Vec::with_capacity(640);
+        for sample in 0..320i32 {
+            let level = (i32::from(value) * 97 + sample * 31) % 4000 - 2000;
+            payload.extend_from_slice(&(level as i16).to_le_bytes());
+        }
+        let mut frame = frame_at_pt(value, timestamp_rtp, PCM_S16LE);
+        frame.payload = Bytes::from(payload);
+        frame
+    }
+
+    type Delivered = Vec<(Vec<u8>, u32, Option<u8>)>;
+
+    /// Everything that arrives until the target stays quiet for 300 ms.
+    async fn collect_quiet(target: &mut mpsc::Receiver<MediaFrame>) -> Delivered {
+        let mut delivered = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(Duration::from_millis(300), target.recv()).await
+        {
+            delivered.push((
+                frame.payload.to_vec(),
+                frame.timestamp_rtp,
+                frame.payload_type,
+            ));
+        }
+        delivered
+    }
+
+    /// A gated stream input modelled on the in-process AI stream's: open,
+    /// paused (discard) or stopped (closed), with a transition fence.
+    struct TestGate {
+        channel: mpsc::Sender<MediaFrame>,
+        state: std::sync::atomic::AtomicU8,
+        transition: tokio::sync::RwLock<()>,
+        updates: watch::Sender<u8>,
+    }
+
+    impl TestGate {
+        const OPEN: u8 = 0;
+        const PAUSED: u8 = 1;
+        const STOPPED: u8 = 2;
+
+        fn new(channel: mpsc::Sender<MediaFrame>) -> Arc<Self> {
+            Arc::new(Self {
+                channel,
+                state: std::sync::atomic::AtomicU8::new(Self::OPEN),
+                transition: tokio::sync::RwLock::new(()),
+                updates: watch::channel(Self::OPEN).0,
+            })
+        }
+
+        async fn set(&self, state: u8) {
+            let _transition = self.transition.write().await;
+            self.state.store(state, Ordering::Release);
+            self.updates.send_replace(state);
+        }
+    }
+
+    impl GatedFrameInput for TestGate {
+        fn channel(&self) -> &mpsc::Sender<MediaFrame> {
+            &self.channel
+        }
+
+        fn admission(&self) -> GatedFrameAdmission {
+            match self.state.load(Ordering::Acquire) {
+                Self::OPEN => GatedFrameAdmission::Open,
+                Self::PAUSED => GatedFrameAdmission::Discard,
+                _ => GatedFrameAdmission::Closed,
+            }
+        }
+
+        fn left_open(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let mut updates = self.updates.subscribe();
+            Box::pin(async move {
+                while self.state.load(Ordering::Acquire) == Self::OPEN {
+                    if updates.changed().await.is_err() {
+                        return;
+                    }
+                }
+            })
+        }
+
+        fn commit(&self, permit: mpsc::Permit<'_, MediaFrame>, frame: MediaFrame) -> bool {
+            let Ok(_transition) = self.transition.try_read() else {
+                return false;
+            };
+            if self.state.load(Ordering::Acquire) != Self::OPEN {
+                return false;
+            }
+            permit.send(frame);
+            true
+        }
+    }
+
+    /// Add a route of the bridge's kind (behind a peer switch) or a plain
+    /// managed route, to `target`.
+    fn add_route(
+        graph: &MediaGraphHandle,
+        codec: CodecInfo,
+        target: MediaSinkTarget,
+        peer: bool,
+    ) -> ManagedMediaRoute {
+        if peer {
+            graph
+                .add_peer_sink_target(
+                    codec,
+                    target,
+                    crate::bridge::peer_switch::PeerRouteTicket::initial(),
+                )
+                .unwrap()
+        } else {
+            graph
+                .add_sink_internal(codec, target, false, None, true, false)
+                .unwrap()
+        }
+    }
+
+    /// A stream offering a plain sender and, optionally, a gated input and a
+    /// peer queue.
+    struct TargetChoiceStream {
+        frames: mpsc::Sender<MediaFrame>,
+        gated: Option<Arc<TestGate>>,
+        peer: Option<mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::stream::MediaStream for TargetChoiceStream {
+        fn id(&self) -> StreamId {
+            StreamId::from_string("strm_media_graph_target_choice")
+        }
+
+        fn kind(&self) -> StreamKind {
+            StreamKind::Audio
+        }
+
+        fn codec(&self) -> CodecInfo {
+            codec("pcmu", 8_000)
+        }
+
+        fn direction(&self) -> crate::connection::Direction {
+            crate::connection::Direction::Outbound
+        }
+
+        fn frames_in(&self) -> mpsc::Receiver<MediaFrame> {
+            mpsc::channel(1).1
+        }
+
+        fn frames_out(&self) -> mpsc::Sender<MediaFrame> {
+            self.frames.clone()
+        }
+
+        fn try_peer_frames_out(
+            &self,
+        ) -> Result<mpsc::Sender<rvoip_core_traits::peer_media::PeerMediaFrame>> {
+            self.peer.clone().ok_or(RvoipError::NotImplemented(
+                "MediaStream::try_peer_frames_out",
+            ))
+        }
+
+        fn try_gated_frames_out(&self) -> Option<Arc<dyn GatedFrameInput>> {
+            self.gated
+                .clone()
+                .map(|gate| gate as Arc<dyn GatedFrameInput>)
+        }
+
+        fn quality_snapshot(&self) -> crate::stream::QualitySnapshot {
+            crate::stream::QualitySnapshot::default()
+        }
+
+        async fn close(self: Arc<Self>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A route into a stream uses the stream's peer queue when it has one,
+    /// else its gated input, else its plain sender.
+    #[test]
+    fn a_stream_target_prefers_its_peer_queue_then_its_gated_input() {
+        let (frames, _frames_rx) = mpsc::channel(1);
+        let (gate_tx, _gate_rx) = mpsc::channel(1);
+        let gate = TestGate::new(gate_tx);
+        let (peer, _peer_rx) = mpsc::channel(1);
+        let plain = TargetChoiceStream {
+            frames: frames.clone(),
+            gated: None,
+            peer: None,
+        };
+        assert!(matches!(
+            MediaSinkTarget::for_stream(&plain),
+            Ok(MediaSinkTarget::Legacy(_))
+        ));
+        let gated = TargetChoiceStream {
+            frames: frames.clone(),
+            gated: Some(Arc::clone(&gate)),
+            peer: None,
+        };
+        assert!(matches!(
+            MediaSinkTarget::for_stream(&gated),
+            Ok(MediaSinkTarget::Gated(_))
+        ));
+        let both = TargetChoiceStream {
+            frames,
+            gated: Some(gate),
+            peer: Some(peer),
+        };
+        assert!(matches!(
+            MediaSinkTarget::for_stream(&both),
+            Ok(MediaSinkTarget::Peer(_))
+        ));
+    }
+
+    /// A stream's gated input receives exactly what a plain channel target
+    /// receives (here transcoded caller audio, as for the in-process AI), and
+    /// the route honours the gate: paused frames are accepted and discarded,
+    /// audio flows again once it reopens, and a stopped gate ends the route
+    /// as a closed channel does.
+    #[tokio::test]
+    async fn gated_target_receives_what_a_channel_target_receives_and_honours_its_gate() {
+        let frames: Vec<MediaFrame> = (0..10u8)
+            .map(|value| pcmu_audio(value, u32::from(value) * 160))
+            .collect();
+        for peer in [true, false] {
+            let (source_tx, source_rx) = mpsc::channel(64);
+            let graph =
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (channel_tx, mut channel_rx) = mpsc::channel(64);
+            let route = add_route(
+                &graph,
+                codec("pcm_s16le", 16_000),
+                MediaSinkTarget::Legacy(channel_tx),
+                peer,
+            );
+            route.wait_active().await.unwrap();
+            for frame in frames.clone() {
+                source_tx.send(frame).await.unwrap();
+            }
+            let reference = collect_quiet(&mut channel_rx).await;
+            assert_eq!(reference.len(), 10);
+            assert_eq!(route.delivered_frames(), 10);
+            graph.shutdown_and_wait().await.unwrap();
+
+            let (source_tx, source_rx) = mpsc::channel(64);
+            let graph =
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (gate_tx, mut gate_rx) = mpsc::channel(64);
+            let gate = TestGate::new(gate_tx);
+            let route = add_route(
+                &graph,
+                codec("pcm_s16le", 16_000),
+                MediaSinkTarget::Gated(gate.clone()),
+                peer,
+            );
+            route.wait_active().await.unwrap();
+            for frame in frames.clone() {
+                source_tx.send(frame).await.unwrap();
+            }
+            assert_eq!(collect_quiet(&mut gate_rx).await, reference, "peer={peer}");
+            assert_eq!(route.delivered_frames(), 10);
+
+            gate.set(TestGate::PAUSED).await;
+            for value in 20..23u8 {
+                source_tx
+                    .send(pcmu_audio(value, u32::from(value) * 160))
+                    .await
+                    .unwrap();
+            }
+            wait_until(|| route.delivered_frames() == 13).await;
+            assert!(
+                collect_quiet(&mut gate_rx).await.is_empty(),
+                "paused frames crossed"
+            );
+
+            gate.set(TestGate::OPEN).await;
+            source_tx.send(pcmu_audio(30, 30 * 160)).await.unwrap();
+            assert_eq!(collect_quiet(&mut gate_rx).await.len(), 1);
+            assert_eq!(route.delivered_frames(), 14);
+
+            gate.set(TestGate::STOPPED).await;
+            assert!(MediaSinkTarget::Gated(gate.clone()).is_closed());
+            source_tx.send(pcmu_audio(31, 31 * 160)).await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), route.status().wait_terminal())
+                    .await
+                    .expect("route terminal"),
+                MediaGraphRouteTerminalReason::TargetClosed
+            );
+            assert_eq!(route.delivered_frames(), 14);
+            graph.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    /// A frame waiting for room in a gated input is discarded (and counted as
+    /// accepted) once the gate pauses, exactly as the stream's input pump
+    /// would discard it. It never crosses later.
+    #[tokio::test]
+    async fn gated_target_discards_a_frame_whose_gate_pauses_while_it_waits() {
+        for peer in [true, false] {
+            let (source_tx, source_rx) = mpsc::channel(8);
+            let graph =
+                start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+            let (gate_tx, mut gate_rx) = mpsc::channel(1);
+            gate_tx.try_send(frame(0xEE)).unwrap();
+            let gate = TestGate::new(gate_tx);
+            let route = add_route(
+                &graph,
+                codec("pcmu", 8_000),
+                MediaSinkTarget::Gated(gate.clone()),
+                peer,
+            );
+            route.wait_active().await.unwrap();
+            source_tx.send(frame(1)).await.unwrap();
+            wait_until(|| graph.latest_snapshot().sink_offers >= 1).await;
+            gate.set(TestGate::PAUSED).await;
+            wait_until(|| route.delivered_frames() == 1).await;
+            assert_eq!(gate_rx.recv().await.unwrap().payload[0], 0xEE);
+            assert!(
+                collect_quiet(&mut gate_rx).await.is_empty(),
+                "a frame crossed after its gate paused (peer={peer})"
+            );
+            graph.shutdown_and_wait().await.unwrap();
+        }
+    }
+
+    /// Barge-in: a flush discards exactly the same queued frames whether the
+    /// route ends in a plain channel or a gated input, and audio after the
+    /// flush flows the same way.
+    #[tokio::test]
+    async fn flush_discards_the_same_frames_for_a_gated_target() {
+        let policy = MediaGraphPolicy {
+            sink_queue_frames: 50,
+            ..MediaGraphPolicy::default()
+        };
+        let mut outcomes = Vec::new();
+        for gated in [false, true] {
+            let (source_tx, source_rx) = mpsc::channel(64);
+            let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy.clone()).unwrap();
+            // A consumer that is not reading yet, so frames back up.
+            let (target_tx, mut target_rx) = mpsc::channel(1);
+            let target = if gated {
+                MediaSinkTarget::Gated(TestGate::new(target_tx))
+            } else {
+                MediaSinkTarget::Legacy(target_tx)
+            };
+            let route = add_route(&graph, codec("pcm_s16le", 16_000), target, true);
+            route.wait_active().await.unwrap();
+            for value in 0..20u8 {
+                source_tx
+                    .send(pcmu_audio(value, u32::from(value) * 160))
+                    .await
+                    .unwrap();
+            }
+            // One frame sits in the target, the delivery task holds the next
+            // one while it waits for room, and the rest are queued.
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while graph.snapshot().await.sinks[0].queue_depth != 18 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("queue settled");
+            let flushed = graph.flush_sinks_and_wait().await.expect("flush");
+            source_tx.send(pcmu_audio(99, 99 * 160)).await.unwrap();
+            let delivered = collect_quiet(&mut target_rx).await;
+            outcomes.push((flushed, delivered, route.delivered_frames()));
+            graph.shutdown_and_wait().await.unwrap();
+        }
+        assert_eq!(outcomes[0].0, 18);
+        assert_eq!(
+            outcomes[0].1.len(),
+            3,
+            "the target, in-flight and fresh frames"
+        );
+        assert_eq!(outcomes[1], outcomes[0]);
+    }
+
+    /// The direct resample used for a rate-only change produces exactly what
+    /// the format converter produces, frame after frame (the resampler keeps
+    /// state across frames).
+    #[test]
+    fn rate_conversion_is_bit_identical_to_the_format_converter() {
+        let pcm = codec("pcm_s16le", 16_000);
+        let pcmu = codec("pcmu", 8_000);
+        let pcma = codec("pcma", 8_000);
+        let caller = |value: u8| pcmu_audio(value, u32::from(value) * 160);
+        let agent = |value: u8| pcm16_audio(value, u32::from(value) * 320);
+        for (source, source_pt, target, target_pt, make) in [
+            (
+                &pcmu,
+                0u8,
+                &pcm,
+                PCM_S16LE,
+                &caller as &dyn Fn(u8) -> MediaFrame,
+            ),
+            (&pcma, 8u8, &pcm, PCM_S16LE, &caller),
+            (&pcm, PCM_S16LE, &pcmu, 0u8, &agent),
+            (&pcm, PCM_S16LE, &pcma, 8u8, &agent),
+        ] {
+            let mut session =
+                ConfiguredTranscodingSession::new(source, source_pt, target, target_pt).unwrap();
+            let mut decoder = create_configured_codec(source, source_pt).unwrap();
+            let mut encoder = create_configured_codec(target, target_pt).unwrap();
+            let mut converter = FormatConverter::new();
+            let params =
+                ConversionParams::new(SampleRate::from_hz(target.clock_rate_hz).unwrap(), 1);
+            for value in 0..25u8 {
+                let frame = make(value);
+                let decoded = decoder.decode(&frame.payload).unwrap();
+                let converted = converter.convert_frame(&decoded, &params).unwrap();
+                assert!(converted.was_converted);
+                let expected = encoder.encode(&converted.frame).unwrap();
+                let got = session
+                    .transcode(&frame.payload, frame.timestamp_rtp)
+                    .unwrap();
+                assert_eq!(got.len(), 1);
+                assert_eq!(
+                    got[0].payload, expected,
+                    "{}->{} frame {value} differs from the converter",
+                    source.name, target.name
+                );
+                assert_eq!(got[0].timestamp_rtp, frame.timestamp_rtp);
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingRecorder {
+        counters: Arc<Mutex<HashMap<String, Arc<AtomicU64>>>>,
+    }
+
+    struct RecordedCounter(Arc<AtomicU64>);
+
+    impl metrics::CounterFn for RecordedCounter {
+        fn increment(&self, value: u64) {
+            self.0.fetch_add(value, Ordering::Relaxed);
+        }
+
+        fn absolute(&self, value: u64) {
+            self.0.store(value, Ordering::Relaxed);
+        }
+    }
+
+    impl CountingRecorder {
+        fn value(&self, key: &str) -> u64 {
+            self.counters
+                .lock()
+                .unwrap()
+                .get(key)
+                .map_or(0, |counter| counter.load(Ordering::Relaxed))
+        }
+    }
+
+    impl metrics::Recorder for CountingRecorder {
+        fn describe_counter(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_gauge(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+        fn describe_histogram(
+            &self,
+            _: metrics::KeyName,
+            _: Option<metrics::Unit>,
+            _: metrics::SharedString,
+        ) {
+        }
+
+        fn register_counter(
+            &self,
+            key: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Counter {
+            let mut name = key.name().to_string();
+            for label in key.labels() {
+                name.push_str(&format!("{{{}={}}}", label.key(), label.value()));
+            }
+            let counter = Arc::clone(self.counters.lock().unwrap().entry(name).or_default());
+            metrics::Counter::from_arc(Arc::new(RecordedCounter(counter)))
+        }
+
+        fn register_gauge(&self, _: &metrics::Key, _: &metrics::Metadata<'_>) -> metrics::Gauge {
+            metrics::Gauge::noop()
+        }
+
+        fn register_histogram(
+            &self,
+            _: &metrics::Key,
+            _: &metrics::Metadata<'_>,
+        ) -> metrics::Histogram {
+            metrics::Histogram::noop()
+        }
+    }
+
+    /// The per-frame counters, resolved once per graph and per codec group,
+    /// still count every source frame, sink offer and transcode under the
+    /// same names and labels.
+    #[test]
+    fn per_frame_counters_count_every_frame_under_the_same_names() {
+        let recorder = CountingRecorder::default();
+        let target_pt = metrics::with_local_recorder(&recorder, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let (source_tx, source_rx) = mpsc::channel(16);
+                let graph =
+                    start_media_graph(source_rx, codec("pcmu", 8_000), Default::default()).unwrap();
+                let (target_tx, mut target_rx) = mpsc::channel(16);
+                let route = graph
+                    .add_managed_sink(codec("pcm_s16le", 16_000), target_tx)
+                    .unwrap();
+                route.wait_active().await.unwrap();
+                for value in 0..5u8 {
+                    source_tx
+                        .send(pcmu_audio(value, u32::from(value) * 160))
+                        .await
+                        .unwrap();
+                }
+                for _ in 0..5 {
+                    target_rx.recv().await.unwrap();
+                }
+                let target_pt = graph.snapshot().await.codec_groups[0].target_payload_type;
+                graph.shutdown_and_wait().await.unwrap();
+                target_pt
+            })
+        });
+        assert_eq!(recorder.value("rvoip_media_graph_source_frames_total"), 5);
+        assert_eq!(recorder.value("rvoip_media_graph_frames_total"), 5);
+        assert_eq!(
+            recorder.value(&format!(
+                "rvoip_media_graph_transcodes_total{{target_payload_type={target_pt}}}"
+            )),
+            5
+        );
     }
 }

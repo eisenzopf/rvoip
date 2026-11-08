@@ -67,10 +67,12 @@ impl From<AdapterEvent> for OrchestratorAdapterEvent {
 /// Direct fallback for terminal adapter events when the adapter's bounded
 /// event queue is saturated or closed.
 ///
-/// The Orchestrator implementation invalidates/removes the connection before
-/// awaiting the remaining media cleanup. Adapters invoke this only after
-/// removing their own route and stream state; the peer task retains its
-/// bounded admission permit until cleanup converges.
+/// The Orchestrator implementation retires the connection synchronously and
+/// then takes bounded, supervised ownership of its media cleanup and terminal
+/// publication; when its lifecycle supervisor is saturated or draining it
+/// completes that work inline instead. Adapters invoke this only after
+/// removing their own route and stream state. Returning acknowledges that the
+/// Orchestrator owns the outcome, not that media cleanup has finished.
 #[async_trait::async_trait]
 pub trait AdapterLifecycleSink: Send + Sync {
     async fn deliver_terminal(&self, event: AdapterEvent);

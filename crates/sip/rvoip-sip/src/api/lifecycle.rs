@@ -1062,7 +1062,7 @@ impl LifecycleIndex {
                 });
             }
 
-            if let Ok(outcome) = TransferOutcome::try_from(event.clone()) {
+            if let Some(outcome) = TransferOutcome::from_event(event) {
                 active.latest_transfer_outcome = Some(Box::new(outcome));
             }
 
@@ -1143,7 +1143,7 @@ impl LifecycleIndex {
                 });
             }
 
-            if let Ok(outcome) = TransferOutcome::try_from(event.clone()) {
+            if let Some(outcome) = TransferOutcome::from_event(event) {
                 active.latest_transfer_outcome = Some(Box::new(outcome));
             }
 
@@ -2210,8 +2210,8 @@ impl SessionEventPublisher {
 
     pub(crate) fn publish(&self, event: Event) {
         self.lifecycle.record_event(&event);
-        let _ = self.offer_to_control_owner(&event, None);
         let wrapped = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.offer_to_control_owner(event, None);
         let _ = self.dispatcher.publish_best_effort(wrapped);
     }
 
@@ -2257,15 +2257,15 @@ impl SessionEventPublisher {
     pub(crate) fn publish_exact(&self, lifecycle_handle: &SessionRegistryHandle, event: Event) {
         debug_assert_eq!(event.call_id(), Some(lifecycle_handle.session_id()));
         self.lifecycle.record_event_exact(lifecycle_handle, &event);
-        let _ = self.offer_to_control_owner(&event, Some(lifecycle_handle));
         let public = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.offer_to_control_owner(event, Some(lifecycle_handle));
         let _ = self.dispatcher.publish_best_effort(public);
     }
 
     pub(crate) async fn publish_now(&self, event: Event) -> Result<()> {
         self.lifecycle.record_event(&event);
-        let _ = self.offer_to_control_owner(&event, None);
         let wrapped = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.offer_to_control_owner(event, None);
         match self.dispatcher.publish_confirmed(wrapped).await {
             Ok(()) => Ok(()),
             Err(SessionEventDispatchError::Closed) => Err(SessionError::Other(
@@ -2307,7 +2307,7 @@ impl SessionEventPublisher {
     ) -> Result<()> {
         self.lifecycle.record_event(&event);
         let observation = sanitize_session_api_observation(&event);
-        let control_result = self.offer_to_control_owner(&event, lifecycle_handle);
+        let control_result = self.offer_to_control_owner(event, lifecycle_handle);
         if control_result == SessionControlAdmission::NoOwner {
             let _ = self
                 .dispatcher
@@ -2328,9 +2328,11 @@ impl SessionEventPublisher {
         }
     }
 
+    /// Offer `event` itself, not a copy, to the claimed control owner.
+    /// Callers take the sanitized public observation first.
     fn offer_to_control_owner(
         &self,
-        event: &Event,
+        event: Event,
         lifecycle_handle: Option<&SessionRegistryHandle>,
     ) -> SessionControlAdmission {
         let Some(sink) = &self.control_sink else {
@@ -2339,7 +2341,7 @@ impl SessionEventPublisher {
         if !sink.claimed.load(Ordering::Acquire) {
             return SessionControlAdmission::NoOwner;
         }
-        let control = SessionControlEvent::new(event.clone(), lifecycle_handle.cloned());
+        let control = SessionControlEvent::new(event, lifecycle_handle.cloned());
         match sink.sender.send(control) {
             Ok(()) => SessionControlAdmission::Accepted,
             Err(_) => SessionControlAdmission::Rejected,
@@ -2356,12 +2358,9 @@ impl SessionEventPublisher {
     #[cfg(test)]
     pub(crate) fn publish_terminal_best_effort(&self, event: Event) -> Result<()> {
         self.lifecycle.record_event(&event);
-        let _ = self.offer_to_control_owner(&event, None);
-        match self
-            .dispatcher
-            .publish_best_effort(SessionApiCrossCrateEvent::new(
-                sanitize_session_api_observation(&event),
-            )) {
+        let public = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.offer_to_control_owner(event, None);
+        match self.dispatcher.publish_best_effort(public) {
             Ok(()) => Ok(()),
             Err(SessionEventDispatchError::Closed) => Err(SessionError::Other(
                 "Failed to publish app-level event (class=dispatcher-closed)".to_string(),
@@ -2382,8 +2381,8 @@ impl SessionEventPublisher {
     ) -> Result<()> {
         debug_assert_eq!(event.call_id(), Some(lifecycle_handle.session_id()));
         self.lifecycle.record_event_exact(lifecycle_handle, &event);
-        let _ = self.offer_to_control_owner(&event, Some(lifecycle_handle));
         let public = SessionApiCrossCrateEvent::new(sanitize_session_api_observation(&event));
+        let _ = self.offer_to_control_owner(event, Some(lifecycle_handle));
         match self.dispatcher.publish_best_effort(public) {
             Ok(()) => Ok(()),
             Err(SessionEventDispatchError::Closed) => Err(SessionError::Other(

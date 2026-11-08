@@ -23,7 +23,7 @@ use bytes::Bytes;
 use chrono::Utc;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
@@ -380,6 +380,10 @@ pub(crate) fn codec_descriptor(
 /// `crates/webrtc/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
 const FRAME_CHANNEL_CAP: usize = 64;
 
+/// Inbound pump outcome when the SIP audio source closes: the ordinary end
+/// of a call's media after a remote hangup, so it is logged at debug.
+const AUDIO_SOURCE_CLOSED: &str = "sip-audio-source-closed";
+
 /// Epoch-normalized clock for PCM handed to the negotiated SIP media runtime.
 ///
 /// The media graph has already translated `MediaFrame::timestamp_rtp` into the
@@ -426,7 +430,10 @@ struct SipMediaStreamInner {
     peer_out_tx: mpsc::Sender<PeerMediaFrame>,
     peer_out_rx: Mutex<Option<mpsc::Receiver<PeerMediaFrame>>>,
     bind_target: Mutex<Option<SipMediaBindTarget>>,
-    driver_abort: Mutex<Option<AbortHandle>>,
+    /// The media driver task. `close` awaits it and `Drop` aborts it. The
+    /// slot is cleared only once the driver has completed, because a
+    /// `JoinHandle` must not be polled after that.
+    driver: Mutex<Option<JoinHandle<()>>>,
     lifecycle_gate: AsyncMutex<()>,
     lifecycle: Arc<SipMediaLifecycleState>,
     outbound_writes_activated: AtomicBool,
@@ -631,7 +638,7 @@ impl SipMediaStream {
                 peer_out_tx,
                 peer_out_rx: Mutex::new(Some(peer_out_rx)),
                 bind_target: Mutex::new(None),
-                driver_abort: Mutex::new(None),
+                driver: Mutex::new(None),
                 lifecycle_gate: AsyncMutex::new(()),
                 lifecycle: Arc::new(SipMediaLifecycleState::new()),
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
@@ -781,11 +788,9 @@ impl SipMediaStream {
                     ));
                     *self
                         .inner
-                        .driver_abort
+                        .driver
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(driver.abort_handle());
-                    drop(driver);
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
                 }
                 SipMediaLifecycle::Binding | SipMediaLifecycle::Bound => {}
                 SipMediaLifecycle::Failed => {
@@ -896,38 +901,60 @@ impl SipMediaStream {
         }
         self.request_close();
 
-        let driver_abort = self
-            .inner
-            .driver_abort
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        if let Some(abort) = driver_abort {
-            if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while !abort.is_finished() {
-                    tokio::task::yield_now().await;
-                }
-            })
+        if !self
+            .wait_for_driver(std::time::Duration::from_secs(1))
             .await
-            .is_err()
+        {
+            if let Some(driver) = self
+                .inner
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
             {
-                abort.abort();
-                if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    while !abort.is_finished() {
-                        tokio::task::yield_now().await;
-                    }
-                })
+                driver.abort();
+            }
+            if !self
+                .wait_for_driver(std::time::Duration::from_secs(1))
                 .await
-                .is_err()
-                {
-                    return Err(RvoipError::Adapter(
-                        "SIP media driver did not terminate after abort".to_string(),
-                    ));
-                }
+            {
+                return Err(RvoipError::Adapter(
+                    "SIP media driver did not terminate after abort".to_string(),
+                ));
             }
         }
         self.inner.lifecycle.mark_closed();
         Ok(())
+    }
+
+    /// Wait up to `limit` for the media driver to end; `true` once it has
+    /// (or none was started).
+    ///
+    /// The driver usually runs on another runtime, so this awaits its
+    /// `JoinHandle` rather than polling `is_finished`, which kept a signaling
+    /// worker spinning for as long as that runtime took to run the driver's
+    /// cancellation. The handle is polled in place: a wait that times out or
+    /// is cancelled leaves it in its slot, where `Drop` can still abort it.
+    /// Callers hold `lifecycle_gate`, so the handle has a single waiter.
+    async fn wait_for_driver(&self, limit: std::time::Duration) -> bool {
+        let driver_ended = std::future::poll_fn(|cx| {
+            let mut slot = self
+                .inner
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(driver) = slot.as_mut() else {
+                return std::task::Poll::Ready(());
+            };
+            match std::future::Future::poll(std::pin::Pin::new(driver), cx) {
+                std::task::Poll::Ready(_) => {
+                    *slot = None;
+                    std::task::Poll::Ready(())
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        });
+        tokio::time::timeout(limit, driver_ended).await.is_ok()
     }
 }
 
@@ -957,7 +984,7 @@ impl Drop for SipMediaStream {
             .take();
         if let Some(driver) = self
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
@@ -1026,13 +1053,6 @@ enum InboundPumpEvent {
     CodecChanged,
     Audio(Option<AudioFrame>),
     PlayoutTick,
-}
-
-async fn wait_for_playout(deadline: Option<std::time::Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-        None => std::future::pending::<()>().await,
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1203,7 +1223,14 @@ async fn run_media_driver(
         failure = &mut outbound => Some(failure),
     };
     if let Some(failure) = failed_pump {
-        tracing::warn!(target: "rvoip_sip", failure, "SipMediaStream pump stopped unexpectedly");
+        if failure == AUDIO_SOURCE_CLOSED {
+            // The inbound audio source closing is how a call's media ends
+            // after a remote hangup; only the other pump failures are
+            // unexpected.
+            tracing::debug!(target: "rvoip_sip", failure, "SipMediaStream pump stopped: audio source closed");
+        } else {
+            tracing::warn!(target: "rvoip_sip", failure, "SipMediaStream pump stopped unexpectedly");
+        }
         if lifecycle.mark_failed() {
             cancel_tx.send_replace(true);
         }
@@ -1310,26 +1337,43 @@ async fn run_inbound_pump(
             Err(_) => return "sip-codec-reconfigure-failed",
         };
     let mut reported = std::time::Instant::now();
+    // Packet waiters live as long as what they wait for, not one packet. The
+    // codec-change waiter spans a codec epoch and the playout timer is
+    // re-armed only when its deadline moves, so a packet or timer wakeup
+    // never cancels and re-registers either of them.
+    let mut codec_changed = Box::pin(codec_updates.changed());
+    let playout_timer = tokio::time::sleep_until(tokio::time::Instant::now());
+    tokio::pin!(playout_timer);
+    let mut armed_deadline = None;
 
     loop {
+        let deadline = playout.as_ref().and_then(PlayoutBuffer::next_deadline);
+        if deadline != armed_deadline {
+            if let Some(deadline) = deadline {
+                playout_timer.as_mut().reset(deadline.into());
+            }
+            armed_deadline = deadline;
+        }
         let event = tokio::select! {
             biased;
-            changed = codec_updates.changed() => {
+            changed = &mut codec_changed => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
                 InboundPumpEvent::CodecChanged
             }
             frame = subscriber.receiver.recv() => InboundPumpEvent::Audio(frame),
-            () = wait_for_playout(playout.as_ref().and_then(PlayoutBuffer::next_deadline)) => {
-                InboundPumpEvent::PlayoutTick
-            }
+            () = &mut playout_timer, if deadline.is_some() => InboundPumpEvent::PlayoutTick,
         };
 
         let mut ready = Vec::new();
         match event {
             InboundPumpEvent::CodecChanged => {
-                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                // The completed waiter is replaced for the next codec epoch.
+                drop(codec_changed);
+                let updated = codec_updates.borrow_and_update().clone();
+                codec_changed = Box::pin(codec_updates.changed());
+                let Some(updated) = updated else {
                     continue;
                 };
                 encoder = match SipPayloadCodec::from_negotiated(
@@ -1348,7 +1392,7 @@ async fn run_inbound_pump(
                 Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
                 None => ready.push(audio_frame),
             },
-            InboundPumpEvent::Audio(None) => return "sip-audio-source-closed",
+            InboundPumpEvent::Audio(None) => return AUDIO_SOURCE_CLOSED,
             InboundPumpEvent::PlayoutTick => {}
         }
 
@@ -1427,13 +1471,19 @@ async fn run_outbound_pump(
     let mut channels = runtime.negotiated.channels.max(1);
     let mut outbound_clock = OutboundRtpClock::default();
     let mut telephone_events = TelephoneEventTracker::default();
+    // One codec-change waiter per codec epoch, not one per outbound frame.
+    let mut codec_changed = Box::pin(codec_updates.changed());
     loop {
         let (media_frame, mut delivery_guard) = tokio::select! {
-            changed = codec_updates.changed() => {
+            changed = &mut codec_changed => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
-                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                // The completed waiter is replaced for the next codec epoch.
+                drop(codec_changed);
+                let updated = codec_updates.borrow_and_update().clone();
+                codec_changed = Box::pin(codec_updates.changed());
+                let Some(updated) = updated else {
                     continue;
                 };
                 decoder = match SipPayloadCodec::from_negotiated(
@@ -1898,6 +1948,76 @@ mod negotiated_codec_tests {
 
         drop(audio_tx);
         assert_eq!(pump.await.expect("pump task"), "sip-audio-source-closed");
+    }
+
+    #[tokio::test]
+    async fn inbound_pump_rearms_its_codec_waiter_for_every_codec_epoch() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let runtime = |codec: &str, payload_type| SipMediaCodecRuntime {
+            negotiated: negotiated(codec, 8_000, 1),
+            payload_type,
+        };
+        let (codec_tx, codec_rx) = watch::channel(Some(runtime("PCMU", 0)));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            runtime("PCMU", 0),
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            None,
+        ));
+        let mut timestamp = 0;
+        async fn next_payload_type(
+            audio_tx: &mpsc::Sender<AudioFrame>,
+            frames_rx: &mut mpsc::Receiver<MediaFrame>,
+            timestamp: &mut u32,
+        ) -> Option<u8> {
+            audio_tx
+                .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, *timestamp))
+                .await
+                .expect("source frame");
+            *timestamp += 160;
+            frames_rx.recv().await.expect("graph frame").payload_type
+        }
+
+        // Many frames within one epoch, then each change applies to the very
+        // next frame: the waiter outlives frames and is renewed per epoch.
+        for _ in 0..32 {
+            assert_eq!(
+                next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+                Some(0)
+            );
+        }
+        codec_tx.send_replace(Some(runtime("PCMA", 8)));
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        // An update without a codec keeps the current one...
+        codec_tx.send_replace(None);
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        // ...and the waiter is still armed for the next real change.
+        codec_tx.send_replace(Some(runtime("PCMU", 0)));
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(0)
+        );
+
+        drop(codec_tx);
+        assert_eq!(
+            pump.await.expect("pump task"),
+            "sip-codec-update-channel-closed"
+        );
     }
 
     #[tokio::test]
@@ -2497,7 +2617,7 @@ mod receiver_ownership_tests {
         assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Dormant);
         assert!(stream
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none());
@@ -2530,7 +2650,7 @@ mod receiver_ownership_tests {
         );
         assert!(stream
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none());
@@ -2578,10 +2698,9 @@ mod receiver_ownership_tests {
             let abort = driver.abort_handle();
             *stream
                 .inner
-                .driver_abort
+                .driver
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
-            drop(driver);
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
 
             drop(stream);
             tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -2675,6 +2794,83 @@ mod receiver_ownership_tests {
         }
     }
 
+    /// `close` awaits the driver's end instead of polling `is_finished` in a
+    /// yield loop. The driver here, a stand-in for one on another runtime,
+    /// ends 50 ms after cancellation; the close future is polled a handful of
+    /// times in that window, not thousands.
+    #[tokio::test]
+    async fn close_awaits_the_driver_without_spinning() {
+        use std::future::Future as _;
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.inner.lifecycle.begin_binding());
+        let mut cancelled = stream.inner.cancel.subscribe();
+        let driver = tokio::spawn(async move {
+            wait_for_media_cancel(&mut cancelled).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        *stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        let started = tokio::time::Instant::now();
+        let mut close = Box::pin(Arc::clone(&stream).close());
+        let mut polls = 0u32;
+        std::future::poll_fn(|cx| {
+            polls += 1;
+            close.as_mut().poll(cx)
+        })
+        .await
+        .expect("stream close");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(50),
+            "close waited for the driver"
+        );
+        assert!(
+            polls <= 8,
+            "close was polled {polls} times: it must await, not spin"
+        );
+        assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+        assert!(stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none());
+    }
+
+    /// A cancelled `close` leaves the driver in the stream's slot, where
+    /// `Drop` can still abort it and a later `close` still awaits it.
+    #[tokio::test]
+    async fn cancelled_close_keeps_the_driver_owned() {
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.inner.lifecycle.begin_binding());
+        let driver = tokio::spawn(std::future::pending::<()>());
+        let abort = driver.abort_handle();
+        *stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            Arc::clone(&stream).close()
+        )
+        .await
+        .is_err());
+        assert!(!abort.is_finished());
+        assert!(stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some());
+        abort.abort();
+        Arc::clone(&stream).close().await.expect("stream close");
+        assert!(abort.is_finished());
+        assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+    }
+
     #[tokio::test]
     async fn closed_is_published_only_after_driver_termination() {
         let stream = SipMediaStream::dormant(Direction::Outbound);
@@ -2683,10 +2879,9 @@ mod receiver_ownership_tests {
         let abort = driver.abort_handle();
         *stream
             .inner
-            .driver_abort
+            .driver
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
-        drop(driver);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
 
         let closing_stream = Arc::clone(&stream);
         let close = tokio::spawn(async move { closing_stream.close().await });

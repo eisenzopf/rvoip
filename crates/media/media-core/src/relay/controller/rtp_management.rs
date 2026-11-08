@@ -113,6 +113,7 @@ impl MediaSessionController {
         }
 
         self.media_directions.insert(dialog_id.clone(), direction);
+        self.resync_inline_lease(dialog_id);
         info!(
             "🎚️ Applied media direction for dialog {}: {}",
             dialog_id, direction

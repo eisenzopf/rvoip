@@ -693,9 +693,7 @@ fn extract_notify_fields(
     // SIP_API_DESIGN_2 §7.5: prefer the transport-cached wire bytes so
     // STIR/SHAKEN consumers verify against the upstream form. Mock /
     // synthetic paths fall back to re-serialising the parsed Request.
-    let transaction_key = crate::transaction::utils::transaction_key_from_message(
-        &rvoip_sip_core::Message::Request(request.clone()),
-    );
+    let transaction_key = crate::transaction::utils::transaction_key_from_request(request);
     let raw_request = transaction_key
         .as_ref()
         .and_then(|key| transaction_manager.peek_inbound_bytes(key))

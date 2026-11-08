@@ -41,6 +41,7 @@ mod tests {
         AuthenticatedPrincipal, AuthenticationMethod, CredentialKind, IdentityAssurance,
     };
     use rvoip_sip_core::builder::SimpleRequestBuilder;
+    use rvoip_sip_core::builder::SimpleResponseBuilder;
     use rvoip_sip_core::prelude::*;
     use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_core::types::Address;
@@ -7550,6 +7551,101 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compact_timer_j_expiry_cannot_overtake_backpressured_response_state() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut events) = TransactionManager::new_with_config(
+            transport.clone(),
+            transport_rx,
+            Some(1),
+            Some(crate::transaction::timer::TimerSettings {
+                wait_time_j: Duration::ZERO,
+                ..Default::default()
+            }),
+        )
+        .await?;
+        let request = SimpleRequestBuilder::new(Method::Bye, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("fromtag"))
+            .to("Bob", "sip:bob@example.com", Some("totag"))
+            .call_id("backpressured-compact-j-expiry")
+            .cseq(2)
+            .via(
+                "127.0.0.1:5070",
+                "UDP",
+                Some("z9hG4bK.backpressured-compact-j-expiry"),
+            )
+            .build();
+        let transaction = manager
+            .create_server_transaction(request.clone(), "127.0.0.1:5070".parse().unwrap())
+            .await?;
+        while events.try_recv().is_ok() {}
+        manager
+            .events_tx
+            .send(TransactionEvent::Error {
+                transaction_id: None,
+                error: "capacity-sentinel".into(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.send_response(
+                transaction.id(),
+                create_test_response(&request, StatusCode::Ok, Some("OK")),
+            ),
+        )
+        .await
+        .expect("response must not depend on draining the TU queue")?;
+
+        // Expire the compact retention while Completed is still waiting for
+        // primary capacity. The scheduler runs on another runtime thread.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            matches!(events.recv().await, Some(TransactionEvent::Error { error, .. })
+            if error == "capacity-sentinel")
+        );
+        let mut states = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match events.recv().await.expect("retained protocol event") {
+                    TransactionEvent::StateChanged {
+                        transaction_id,
+                        new_state,
+                        ..
+                    } => {
+                        assert_eq!(&transaction_id, transaction.id());
+                        states.push(new_state);
+                    }
+                    TransactionEvent::TransactionTerminated { transaction_id } => {
+                        assert_eq!(&transaction_id, transaction.id());
+                        break;
+                    }
+                    TransactionEvent::TimerTriggered { .. } => {}
+                    other => panic!("unexpected event: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("compact terminal publication");
+        assert_eq!(
+            states,
+            vec![TransactionState::Completed, TransactionState::Terminated]
+        );
+        assert_eq!(transport.get_sent_messages().await.len(), 1);
+        manager.shutdown().await;
+        assert!(matches!(
+            events.try_recv(),
+            Ok(TransactionEvent::ShutdownComplete)
+        ));
+        assert!(
+            events.try_recv().is_err(),
+            "terminal publication must not duplicate"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn compact_timer_j_is_visible_to_existence_kind_and_state_apis() -> Result<()> {
         let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
@@ -8000,6 +8096,178 @@ mod tests {
             ))
         ));
 
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_termination_commits_before_full_primary_queue_is_drained() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(1)).await?;
+        let request = create_dispatch_request(Method::Options, "z9hG4bK-terminal-cycle", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let route = TransportRoute::new("192.0.2.118:5060".parse().unwrap())
+            .with_transport_type(TransportType::Tcp);
+        let key = manager
+            .create_client_transaction_on_route(request.clone(), route.clone())
+            .await?;
+        let live = manager.client_transactions.get(&key).unwrap().clone();
+        manager
+            .events_tx
+            .try_send(TransactionEvent::Error {
+                transaction_id: None,
+                error: "terminal-cycle-capacity-blocker".into(),
+            })
+            .unwrap();
+
+        // The TU cannot drain its own queue until this operation returns.
+        // Permit the existing one-second supervised runner join, but not the
+        // additional terminal-publication timeout that closes all admission.
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            manager.terminate_transaction(&key),
+        )
+        .await
+        .expect("quiesced termination must complete before the TU drains its queue")?;
+        assert_eq!(live.state(), TransactionState::Terminated);
+        assert!(!manager.client_transactions.contains_key(&key));
+        assert!(live.data().event_loop_handle.lock().await.is_none());
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+        assert!(!live.data().terminal_event_publication.is_delivered());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                manager.admission_lifecycle.wait_idle(),
+            )
+            .await
+            .is_err(),
+            "publication must retain manager shutdown admission after the public waiter completes"
+        );
+        let publication = Arc::clone(&live.data().terminal_event_publication);
+        drop(live);
+        assert!(
+            matches!(
+                manager
+                    .create_client_transaction_on_route(request, route)
+                    .await,
+                Err(Error::TransactionExists { .. })
+            ),
+            "pending terminal delivery must retain its exact admission owner"
+        );
+
+        assert!(
+            matches!(events.recv().await, Some(TransactionEvent::Error { error, .. })
+            if error == "terminal-cycle-capacity-blocker")
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, new_state: TransactionState::Terminated, .. }))
+                if transaction_id == key
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::TransactionTerminated { transaction_id })) if transaction_id == key
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !publication.is_delivered() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retained terminal publication completes after the consumer resumes");
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concurrent_termination_waiters_both_observe_the_exact_runner_join() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(1)).await?;
+        let request = create_dispatch_request(Method::Options, "z9hG4bK-terminal-concurrent", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let key = manager
+            .create_client_transaction_on_route(
+                request,
+                TransportRoute::new("192.0.2.119:5060".parse().unwrap())
+                    .with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        let live = manager.client_transactions.get(&key).unwrap().clone();
+        let runner = live
+            .data()
+            .event_loop_handle
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .abort_handle();
+        manager
+            .events_tx
+            .try_send(TransactionEvent::Error {
+                transaction_id: None,
+                error: "concurrent-terminal-capacity-blocker".into(),
+            })
+            .unwrap();
+
+        // Both requests enter the manager queue during one parent poll, so
+        // the same cleanup batch supervises them concurrently. Neither may
+        // complete while the other still owns a running protocol producer.
+        let terminate = || async {
+            manager.terminate_transaction(&key).await?;
+            assert!(
+                runner.is_finished(),
+                "public completion preceded the exact runner join"
+            );
+            Ok::<(), Error>(())
+        };
+        let (first, second) = tokio::time::timeout(Duration::from_millis(1500), async {
+            tokio::join!(terminate(), terminate())
+        })
+        .await
+        .expect("concurrent quiesced waiters must not require their own queue to drain");
+        first?;
+        second?;
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+        assert!(
+            matches!(events.recv().await, Some(TransactionEvent::Error { error, .. })
+            if error == "concurrent-terminal-capacity-blocker")
+        );
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::StateChanged { transaction_id, new_state: TransactionState::Terminated, .. })) if transaction_id == key
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv()).await,
+            Ok(Some(TransactionEvent::TransactionTerminated { transaction_id })) if transaction_id == key
+        ));
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            manager.admission_lifecycle.wait_idle(),
+        )
+        .await
+        .expect("both manager-owned jobs must finish after terminal delivery");
+        assert!(matches!(
+            events.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
         manager.shutdown().await;
         Ok(())
     }
@@ -8960,6 +9228,683 @@ mod tests {
         assert_eq!(transport.raw_send_count(), 0);
         assert!(transport.get_sent_messages().await.is_empty());
         assert!(!transaction.data().final_response_may_have_reached_wire());
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_transaction_request_shares_the_transactions_request() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+        let request = create_test_invite_with_identity(
+            "shared-server-request",
+            "z9hG4bK-shared-server-request",
+            "UDP",
+        )
+        .map_err(|e| Error::Other(e.to_string()))?;
+        let tx = manager
+            .create_server_transaction(
+                request.clone(),
+                SocketAddr::from_str("192.168.1.100:5060").unwrap(),
+            )
+            .await?;
+        let tx_id = tx.id().clone();
+
+        let shared = manager
+            .server_transaction_request(&tx_id)
+            .expect("active server transaction request");
+        assert!(Arc::ptr_eq(&shared, &tx.data().request));
+        assert!(Arc::ptr_eq(
+            &shared,
+            &manager
+                .server_transaction_request(&tx_id)
+                .expect("second lookup"),
+        ));
+        assert_eq!(*shared, request);
+        assert_eq!(
+            manager.original_request(&tx_id).await?,
+            Some((*shared).clone())
+        );
+
+        let client_key = TransactionKey::new(
+            "z9hG4bK-shared-server-request".to_string(),
+            Method::Invite,
+            false,
+        );
+        assert!(manager.server_transaction_request(&client_key).is_none());
+        Ok(())
+    }
+
+    /// Drain every queued TU event within `deadline`, returning them in order.
+    async fn drain_events_for(
+        events: &mut mpsc::Receiver<TransactionEvent>,
+        deadline: Duration,
+    ) -> Vec<TransactionEvent> {
+        let end = tokio::time::Instant::now() + deadline;
+        let mut drained = Vec::new();
+        while let Ok(Some(event)) = tokio::time::timeout_at(end, events.recv()).await {
+            drained.push(event);
+        }
+        drained
+    }
+
+    /// Fill the TU queue with placeholder events until it reports full.
+    fn saturate_tu_queue(manager: &TransactionManager, label: &str) -> usize {
+        let mut blockers = 0;
+        while manager
+            .events_tx
+            .try_send(TransactionEvent::Error {
+                transaction_id: None,
+                error: format!("{label}-{blockers}"),
+            })
+            .is_ok()
+        {
+            blockers += 1;
+        }
+        blockers
+    }
+
+    /// A terminal publication that waits on a saturated TU queue must not
+    /// close new-transaction admission. The cleanup worker used to fail
+    /// closed after one second and latch the manager into draining, so every
+    /// later request and local BYE was refused for the rest of its life and
+    /// ended sessions could never release their slots.
+    #[tokio::test]
+    async fn slow_terminal_publication_is_handed_off_without_closing_admission() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, mut events) =
+            TransactionManager::new(transport, transport_rx, Some(1)).await?;
+        let route = TransportRoute::new("192.0.2.120:5060".parse().unwrap())
+            .with_transport_type(TransportType::Tcp);
+        let request = create_dispatch_request(Method::Options, "z9hG4bK-terminal-handoff", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let key = manager
+            .create_client_transaction_on_route(request, route.clone())
+            .await?;
+        let publication = Arc::clone(
+            &manager
+                .client_transactions
+                .get(&key)
+                .unwrap()
+                .data()
+                .terminal_event_publication,
+        );
+        assert_eq!(saturate_tu_queue(&manager, "terminal-handoff-blocker"), 1);
+
+        tokio::time::timeout(
+            Duration::from_millis(1500),
+            manager.terminate_transaction(&key),
+        )
+        .await
+        .expect("termination completes before the TU drains its queue")?;
+        // Keep the TU stalled well past the inline publication wait.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING,
+            "a full TU queue must not close new-transaction admission"
+        );
+        let stats = manager.slot_cleanup_stats();
+        assert_eq!(stats.terminal_publication_handoffs, 1);
+        assert_eq!(stats.terminal_publications_detached, 1);
+        assert_eq!(stats.admission_fail_closed, 0);
+        assert!(!publication.is_delivered());
+
+        // New work is still admitted while the publication waits.
+        let bye = create_dispatch_request(Method::Bye, "z9hG4bK-terminal-handoff-bye", 2)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .create_client_transaction_on_route(bye, route)
+            .await
+            .expect("a local BYE is admitted while a terminal publication is handed off");
+
+        // Once the TU resumes, the handed-off batch arrives complete and in
+        // order behind what was already queued.
+        let drained = drain_events_for(&mut events, Duration::from_millis(500)).await;
+        assert!(
+            matches!(
+                drained.as_slice(),
+                [
+                    TransactionEvent::Error { error, .. },
+                    TransactionEvent::StateChanged {
+                        transaction_id: changed,
+                        new_state: TransactionState::Terminated,
+                        ..
+                    },
+                    TransactionEvent::TransactionTerminated {
+                        transaction_id: terminated,
+                    },
+                ] if error == "terminal-handoff-blocker-0" && changed == &key && terminated == &key
+            ),
+            "unexpected TU events: {drained:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.slot_cleanup_stats().terminal_publications_detached != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the detached publication finishes once the TU drains");
+        assert!(publication.is_delivered());
+        assert_eq!(manager.slot_cleanup_stats().admission_fail_closed, 0);
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// Shutdown stops a handed-off publication instead of waiting for a TU
+    /// that never drains.
+    #[tokio::test]
+    async fn shutdown_stops_a_handed_off_terminal_publication() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, _events) = TransactionManager::new(transport, transport_rx, Some(1)).await?;
+        let request = create_dispatch_request(Method::Options, "z9hG4bK-terminal-handoff-stop", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let key = manager
+            .create_client_transaction_on_route(
+                request,
+                TransportRoute::new("192.0.2.122:5060".parse().unwrap())
+                    .with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        saturate_tu_queue(&manager, "terminal-handoff-stop-blocker");
+        manager.terminate_transaction(&key).await?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while manager.slot_cleanup_stats().terminal_publication_handoffs == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stalled publication is handed off");
+
+        tokio::time::timeout(Duration::from_secs(2), manager.shutdown())
+            .await
+            .expect("shutdown does not wait for a TU that never drains");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.slot_cleanup_stats().terminal_publications_detached != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown stops the detached publication");
+        Ok(())
+    }
+
+    /// The hand-off path retires only the transaction it terminates. A client
+    /// INVITE that has been written and is still waiting for its final
+    /// response (or a transport error on its flow) keeps its slot, state,
+    /// runner and completion until that terminal event reaches it.
+    #[tokio::test]
+    async fn outstanding_client_invite_survives_terminal_handoff_until_its_final_response(
+    ) -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(8);
+        let (manager, mut events) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(4)).await?;
+        let peer: SocketAddr = "192.0.2.121:5060".parse().unwrap();
+        let route = TransportRoute::new(peer).with_transport_type(TransportType::Udp);
+
+        let invite =
+            create_test_invite_with_identity("handoff-survivor", "z9hG4bK.handoff-survivor", "UDP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        let invite_key = manager
+            .create_client_transaction_on_route(invite.clone(), route.clone())
+            .await?;
+        manager.send_request(&invite_key).await?;
+        assert!(
+            manager
+                .wait_for_transaction_state(
+                    &invite_key,
+                    TransactionState::Calling,
+                    Duration::from_secs(1),
+                )
+                .await?
+        );
+        drain_events_for(&mut events, Duration::from_millis(50)).await;
+        let survivor = manager
+            .client_transactions
+            .get(&invite_key)
+            .unwrap()
+            .clone();
+
+        // Terminate an unrelated transaction while the TU is stalled, long
+        // enough for its terminal publication to be handed off.
+        let options = create_dispatch_request(Method::Options, "z9hG4bK-handoff-other", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        let options_key = manager
+            .create_client_transaction_on_route(
+                options,
+                TransportRoute::new(peer).with_transport_type(TransportType::Tcp),
+            )
+            .await?;
+        saturate_tu_queue(&manager, "handoff-survivor-blocker");
+        manager.terminate_transaction(&options_key).await?;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(
+            manager.slot_cleanup_stats().terminal_publication_handoffs,
+            1
+        );
+        assert_eq!(
+            manager.admission_lifecycle.state(),
+            super::super::MANAGER_ADMISSION_RUNNING
+        );
+
+        // The outstanding INVITE is untouched by the cleanup path.
+        let still_indexed = manager
+            .client_transactions
+            .get(&invite_key)
+            .is_some_and(|entry| Arc::ptr_eq(entry.value(), &survivor));
+        assert!(
+            still_indexed,
+            "cleanup retired an outstanding client INVITE"
+        );
+        assert_eq!(survivor.state(), TransactionState::Calling);
+        assert!(survivor.data().event_loop_handle.lock().await.is_some());
+
+        // The TU resumes: the handed-off publication completes, and the INVITE
+        // is still live afterwards.
+        let drained = drain_events_for(&mut events, Duration::from_millis(500)).await;
+        assert!(drained.iter().any(|event| matches!(
+            event,
+            TransactionEvent::TransactionTerminated { transaction_id } if transaction_id == &options_key
+        )));
+        assert_eq!(
+            manager.slot_cleanup_stats().terminal_publications_detached,
+            0
+        );
+        assert!(manager.client_transactions.contains_key(&invite_key));
+        assert_eq!(survivor.state(), TransactionState::Calling);
+
+        // Its own terminal event still lands on the live transaction.
+        let unavailable = SimpleResponseBuilder::response_from_request(
+            &invite,
+            StatusCode::ServiceUnavailable,
+            Some("Service Unavailable"),
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-handoff"))
+        .build();
+        manager
+            .handle_transport_event(dispatch_udp_event_from(
+                Message::Response(unavailable),
+                peer,
+            ))
+            .await?;
+        let final_response = manager
+            .wait_for_final_response(&invite_key, Duration::from_secs(2))
+            .await?
+            .expect("the outstanding INVITE receives its final response");
+        assert_eq!(final_response.status(), StatusCode::ServiceUnavailable);
+
+        let drained = drain_events_for(&mut events, Duration::from_millis(500)).await;
+        assert!(
+            drained.iter().any(|event| matches!(
+                event,
+                TransactionEvent::FailureResponse { transaction_id, response, .. }
+                    if transaction_id == &invite_key
+                        && response.status() == StatusCode::ServiceUnavailable
+            )),
+            "the INVITE's final response must reach the TU: {drained:?}"
+        );
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    fn sent_503s(sent: &[(Message, SocketAddr)]) -> Vec<Response> {
+        sent.iter()
+            .filter_map(|(message, _)| match message {
+                Message::Response(response)
+                    if response.status() == StatusCode::ServiceUnavailable =>
+                {
+                    Some(response.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn retry_after_of(response: &Response) -> Option<String> {
+        response
+            .header(&HeaderName::RetryAfter)
+            .map(|header| header.to_string())
+    }
+
+    fn ack_for_rejection(invite: &Request, rejection: &Response) -> Request {
+        let tag = rejection
+            .to()
+            .and_then(|to| to.tag())
+            .expect("rejection To tag")
+            .to_owned();
+        let branch = invite
+            .first_via()
+            .and_then(|via| via.branch().map(str::to_owned))
+            .expect("INVITE branch");
+        SimpleRequestBuilder::new(Method::Ack, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", Some(&tag))
+            .call_id(invite.call_id().unwrap().as_str())
+            .cseq(101)
+            .via("127.0.0.1:5060", "TCP", Some(&branch))
+            .max_forwards(70)
+            .build()
+    }
+
+    /// An enforcing gate answers a new INVITE with a stateless 503 and
+    /// `Retry-After` before any transaction exists, answers its
+    /// retransmission identically, absorbs the ACK for that 503, and never
+    /// touches in-dialog requests or outstanding client transactions.
+    #[tokio::test]
+    async fn enforced_admission_rejects_new_invite_statelessly_and_absorbs_its_ack() -> Result<()> {
+        use crate::transaction::{AdmissionLevel, AdmissionMode};
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+
+        // A written client INVITE waiting for its final response.
+        let peer: SocketAddr = "192.0.2.130:5060".parse().unwrap();
+        let outbound = create_test_invite_with_identity(
+            "admission-outbound",
+            "z9hG4bK.admission-outbound",
+            "UDP",
+        )
+        .map_err(|error| Error::Other(error.to_string()))?;
+        let outbound_key = manager
+            .create_client_transaction_on_route(
+                outbound.clone(),
+                TransportRoute::new(peer).with_transport_type(TransportType::Udp),
+            )
+            .await?;
+        manager.send_request(&outbound_key).await?;
+        assert!(
+            manager
+                .wait_for_transaction_state(
+                    &outbound_key,
+                    TransactionState::Calling,
+                    Duration::from_secs(1),
+                )
+                .await?
+        );
+
+        let gate = manager.new_call_admission();
+        assert_eq!(gate.mode(), AdmissionMode::Off);
+        gate.set_mode(AdmissionMode::Enforce);
+        gate.set_level(AdmissionLevel::closed(Some(9)));
+
+        let invite =
+            create_test_invite_with_identity("admission-reject", "z9hG4bK.admission-reject", "TCP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        let invite_key = TransactionKey::from_request(&invite)
+            .ok_or_else(|| Error::Other("INVITE transaction key missing".to_string()))?;
+        for _ in 0..2 {
+            manager
+                .handle_transport_event(dispatch_event(Message::Request(invite.clone())))
+                .await?;
+        }
+        let rejections = sent_503s(&transport.get_sent_messages().await);
+        assert_eq!(rejections.len(), 2, "each copy of the INVITE gets a 503");
+        let tag = rejections[0]
+            .to()
+            .and_then(|to| to.tag())
+            .map(str::to_owned);
+        assert!(tag.as_deref().is_some_and(
+            |tag| tag.starts_with(crate::transaction::overload::OVERLOAD_TO_TAG_PREFIX)
+        ));
+        assert_eq!(
+            rejections[1]
+                .to()
+                .and_then(|to| to.tag())
+                .map(str::to_owned),
+            tag,
+            "a retransmission must get an identical 503"
+        );
+        assert!(retry_after_of(&rejections[0]).is_some_and(|value| value.contains('9')));
+        assert!(!manager.server_transactions.contains_key(&invite_key));
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a rejected INVITE must not reach the transaction user"
+        );
+
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(ack_for_rejection(
+                &invite,
+                &rejections[0],
+            ))))
+            .await?;
+        let leaked = drain_events_for(&mut event_rx, Duration::from_millis(100)).await;
+        assert!(
+            !leaked.iter().any(|event| matches!(
+                event,
+                TransactionEvent::AckRequest { .. }
+                    | TransactionEvent::StrayAckRequest { .. }
+                    | TransactionEvent::StrayAck { .. }
+                    | TransactionEvent::AckReceived { .. }
+            )),
+            "the ACK for a stateless 503 must be absorbed: {leaked:?}"
+        );
+
+        let bye = create_dispatch_request(Method::Bye, "z9hG4bK.admission-in-dialog-bye", 2)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(bye)))
+            .await?;
+        assert!(
+            matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+                Some(TransactionEvent::NonInviteRequest { .. })
+            ),
+            "an in-dialog BYE is never decided by the gate"
+        );
+
+        let stats = gate.stats();
+        assert_eq!(stats.decisions, 2);
+        assert_eq!(stats.rejected, 2);
+        assert_eq!(stats.acks_absorbed, 1);
+        assert_eq!(stats.reject_sends_dropped, 0);
+        assert_eq!(stats.tls_ingress_rejected, 0);
+
+        // The outstanding client INVITE was never touched and still
+        // completes on its own final response.
+        assert!(manager.client_transactions.contains_key(&outbound_key));
+        let unavailable = SimpleResponseBuilder::response_from_request(
+            &outbound,
+            StatusCode::ServiceUnavailable,
+            Some("Service Unavailable"),
+        )
+        .to("Bob", "sip:bob@example.com", Some("bob-admission"))
+        .build();
+        manager
+            .handle_transport_event(dispatch_udp_event_from(
+                Message::Response(unavailable),
+                peer,
+            ))
+            .await?;
+        let final_response = manager
+            .wait_for_final_response(&outbound_key, Duration::from_secs(2))
+            .await?
+            .expect("the outstanding INVITE receives its final response");
+        assert_eq!(final_response.status(), StatusCode::ServiceUnavailable);
+
+        // Off again: a new INVITE reaches the transaction user.
+        gate.set_mode(AdmissionMode::Off);
+        let admitted =
+            create_test_invite_with_identity("admission-off", "z9hG4bK.admission-off", "TCP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(admitted)))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// A TLS INVITE that already passed the gate on its connection reader is
+    /// not decided a second time by the transaction layer.
+    #[tokio::test]
+    async fn tls_invite_admitted_at_ingress_is_not_decided_again() -> Result<()> {
+        use crate::transaction::{AdmissionLevel, AdmissionMode};
+
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5061"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        let gate = Arc::clone(manager.new_call_admission());
+        gate.set_mode(AdmissionMode::Enforce);
+        let _hook = gate.tls_ingress_hook();
+        gate.set_level(AdmissionLevel::closed(None));
+
+        let invite =
+            create_test_invite_with_identity("admission-tls", "z9hG4bK.admission-tls", "TLS")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(TransportEvent::MessageReceived {
+                message: Message::Request(invite),
+                source: "127.0.0.1:5070".parse().unwrap(),
+                destination: "127.0.0.1:5061".parse().unwrap(),
+                transport_type: TransportType::Tls,
+                flow_id: None,
+                raw_bytes: None,
+                timing: None,
+                connection_metadata: None,
+            })
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+        assert_eq!(gate.stats().decisions, 0);
+        assert!(sent_503s(&transport.get_sent_messages().await).is_empty());
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// At the TU's session-slot cap a new INVITE gets a stateless 503 with
+    /// `Retry-After` before any transaction exists, while an in-dialog BYE is
+    /// still admitted and published to the TU.
+    #[tokio::test]
+    async fn slot_cap_rejects_new_invite_with_503_retry_after_while_bye_processes() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, mut event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        manager.set_stateless_overload_retry_after_secs(7);
+        let slots_full = Arc::new(AtomicBool::new(true));
+        assert!(
+            manager.set_new_dialog_capacity_guard(super::super::NewDialogCapacityGuard::new({
+                let slots_full = Arc::clone(&slots_full);
+                move || slots_full.load(Ordering::Acquire)
+            }))
+        );
+        assert!(
+            !manager
+                .set_new_dialog_capacity_guard(super::super::NewDialogCapacityGuard::new(|| false)),
+            "one probe per manager"
+        );
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        let invite_key = TransactionKey::from_request(&invite)
+            .ok_or_else(|| Error::Other("INVITE transaction key missing".to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(invite)))
+            .await?;
+        let rejection = sent_503s(&transport.get_sent_messages().await)
+            .into_iter()
+            .next()
+            .expect("a new INVITE at the slot cap must be answered with 503");
+        assert!(
+            retry_after_of(&rejection).is_some_and(|value| value.contains('7')),
+            "configured backoff missing: {rejection:?}"
+        );
+        assert!(
+            !manager.server_transactions.contains_key(&invite_key),
+            "a slot-cap rejection must not allocate a server transaction"
+        );
+        assert!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(50))
+                .await
+                .is_none(),
+            "a rejected INVITE must not reach the transaction user"
+        );
+        assert_eq!(
+            manager.slot_cleanup_stats().new_invite_capacity_rejections,
+            1
+        );
+        assert_eq!(
+            manager.new_call_admission().stats().decisions,
+            0,
+            "the slot cap applies while the gate is off"
+        );
+
+        let bye = create_dispatch_request(Method::Bye, "z9hG4bK.slot-cap-in-dialog-bye", 2)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(bye)))
+            .await?;
+        assert!(
+            matches!(
+                drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+                Some(TransactionEvent::NonInviteRequest { .. })
+            ),
+            "an in-dialog BYE must still reach the transaction user at the cap"
+        );
+
+        // A freed slot admits new INVITEs again; the guard holds no state.
+        slots_full.store(false, Ordering::Release);
+        let next =
+            create_test_invite_with_identity("slot-cap-after", "z9hG4bK.slot-cap-after", "UDP")
+                .map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(next)))
+            .await?;
+        assert!(matches!(
+            drain_for_request_event(&mut event_rx, Duration::from_millis(250)).await,
+            Some(TransactionEvent::InviteRequest { .. })
+        ));
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    /// Once admission has closed, a new INVITE is answered with 503 and
+    /// `Retry-After` instead of being dropped with an error the caller never
+    /// sees. Other requests keep the existing error.
+    #[tokio::test]
+    async fn draining_manager_answers_new_invite_with_503_retry_after() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(32)).await?;
+        manager.set_stateless_overload_retry_after_secs(4);
+        assert!(manager.admission_lifecycle.begin_draining());
+
+        let invite = create_test_invite().map_err(|error| Error::Other(error.to_string()))?;
+        manager
+            .handle_transport_event(dispatch_event(Message::Request(invite)))
+            .await?;
+        let rejections = sent_503s(&transport.get_sent_messages().await);
+        assert_eq!(rejections.len(), 1);
+        assert!(retry_after_of(&rejections[0]).is_some_and(|value| value.contains('4')));
+        assert_eq!(manager.slot_cleanup_stats().draining_invite_rejections, 1);
+
+        let options = create_dispatch_request(Method::Options, "z9hG4bK.draining-options", 1)
+            .map_err(|error| Error::Other(error.to_string()))?;
+        assert!(manager
+            .handle_transport_event(dispatch_event(Message::Request(options)))
+            .await
+            .is_err());
+        assert_eq!(sent_503s(&transport.get_sent_messages().await).len(), 1);
 
         manager.shutdown().await;
         Ok(())

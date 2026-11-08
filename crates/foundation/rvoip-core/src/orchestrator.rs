@@ -500,6 +500,17 @@ impl ConnectionLifecycleTaskSupervisor {
         &self,
         task: impl Future<Output = ()> + Send + 'static,
     ) -> Option<tokio::task::AbortHandle> {
+        self.try_spawn(task).ok()
+    }
+
+    /// Like [`Self::spawn_abortable`], but hands a refused task back. Work
+    /// that must not be dropped (terminal teardown and publication) then runs
+    /// inline, so saturation or drain becomes backpressure on the caller
+    /// rather than a lost outcome.
+    fn try_spawn<F>(&self, task: F) -> std::result::Result<tokio::task::AbortHandle, F>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         let mut tasks = self
             .tasks
             .lock()
@@ -510,7 +521,7 @@ impl ConnectionLifecycleTaskSupervisor {
             }
         }
         if self.draining.load(Ordering::Acquire) {
-            return None;
+            return Err(task);
         }
         if tasks.len() >= self.capacity {
             metrics::counter!(
@@ -518,9 +529,9 @@ impl ConnectionLifecycleTaskSupervisor {
                 "reason" => "capacity"
             )
             .increment(1);
-            return None;
+            return Err(task);
         }
-        Some(tasks.spawn(task))
+        Ok(tasks.spawn(task))
     }
 
     /// Execute a synchronous ownership commit and install its lifecycle task
@@ -876,6 +887,22 @@ impl InboundAdmissionNotification {
     }
 }
 
+/// Where the remaining cleanup of an already retired connection runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RetiredCleanup {
+    /// The caller awaits the cleanup.
+    Inline,
+    /// The lifecycle supervisor owns the cleanup; it runs inline only when
+    /// the supervisor is saturated or draining.
+    Supervised,
+}
+
+/// Adapter-reported terminal outcome, published after connection teardown.
+enum AdapterTerminalOutcome {
+    Ended(EndReason),
+    Failed(String),
+}
+
 /// Breaks the Orchestrator↔adapter ownership cycle while still providing a
 /// direct cleanup path when an adapter's bounded event queue cannot accept a
 /// terminal event.
@@ -907,7 +934,32 @@ impl AdapterLifecycleSink for OrchestratorLifecycleSink {
         }
 
         let transport = self.transport;
-        orchestrator.handle_adapter_event(transport, event).await;
+        // The adapter calls this from its serial translator when its event
+        // queue is full, and may cancel the call on its own deadline. Hand
+        // the event to the lifecycle supervisor so cancellation cannot drop an
+        // owed terminal outcome. The guard fails the stream closed if drain
+        // aborts the task before it is handled. This returns once the
+        // connection is retired and its teardown is owned, not after media
+        // cleanup; a refused spawn handles the event inline.
+        let mut delivery_guard = orchestrator
+            .operational_event_stream
+            .get()
+            .map(OperationalEventStream::delivery_guard);
+        let owner = Arc::clone(&orchestrator);
+        let (handled, handled_rx) = oneshot::channel();
+        let delivery = async move {
+            owner.handle_adapter_event(transport, event).await;
+            if let Some(guard) = delivery_guard.as_mut() {
+                guard.disarm();
+            }
+            let _ = handled.send(());
+        };
+        match orchestrator.connection_lifecycle_tasks.try_spawn(delivery) {
+            Ok(_) => {
+                let _ = handled_rx.await;
+            }
+            Err(delivery) => delivery.await,
+        }
     }
 }
 
@@ -1466,6 +1518,9 @@ pub struct Orchestrator {
     /// Safe self-reference used by opaque tickets without requiring every
     /// existing command method to change its `&self` receiver to `&Arc<Self>`.
     self_weak: OnceLock<Weak<Orchestrator>>,
+    /// Test hook: holds `finish_connection_teardown` open for one connection.
+    #[cfg(test)]
+    teardown_progress_test_gate: Mutex<Option<(ConnectionId, Arc<Notify>, Arc<Notify>)>>,
     adapters: Arc<DashMap<Transport, Arc<dyn ConnectionAdapter>>>,
     /// Transport reservations for adapter registrations whose callbacks are
     /// in progress. Trait methods are never called while this lock is held.
@@ -1487,7 +1542,6 @@ pub struct Orchestrator {
     connection_id_budget: AtomicUsize,
     bounded_connection_lifecycles: AtomicBool,
     connection_lifecycle_started: AtomicBool,
-    lifecycle_reap_counter: AtomicUsize,
     connections: Arc<DashMap<ConnectionId, ConnectionEntry>>,
     /// Generation-checked setup commit barrier. Async setup can do slow work
     /// without holding a mutex, then atomically commit only if every source is
@@ -1984,6 +2038,8 @@ impl Orchestrator {
             periodic_tasks: ConnectionLifecycleTaskSupervisor::new(PERIODIC_TASK_CAPACITY),
             periodic_workers: Mutex::new(HashMap::new()),
             self_weak: OnceLock::new(),
+            #[cfg(test)]
+            teardown_progress_test_gate: Mutex::new(None),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
             inbound_admission_gate: OnceLock::new(),
@@ -1993,7 +2049,6 @@ impl Orchestrator {
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             bounded_connection_lifecycles: AtomicBool::new(false),
             connection_lifecycle_started: AtomicBool::new(false),
-            lifecycle_reap_counter: AtomicUsize::new(0),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
@@ -2077,6 +2132,8 @@ impl Orchestrator {
             periodic_tasks: ConnectionLifecycleTaskSupervisor::new(PERIODIC_TASK_CAPACITY),
             periodic_workers: Mutex::new(HashMap::new()),
             self_weak: OnceLock::new(),
+            #[cfg(test)]
+            teardown_progress_test_gate: Mutex::new(None),
             adapters: Arc::new(DashMap::new()),
             adapter_registrations: Mutex::new(HashSet::new()),
             inbound_admission_gate: OnceLock::new(),
@@ -2086,7 +2143,6 @@ impl Orchestrator {
             connection_id_budget: AtomicUsize::new(DEFAULT_CONNECTION_ID_BUDGET),
             bounded_connection_lifecycles: AtomicBool::new(false),
             connection_lifecycle_started: AtomicBool::new(false),
-            lifecycle_reap_counter: AtomicUsize::new(0),
             connections: Arc::new(DashMap::new()),
             connection_lifecycles: Arc::new(DashMap::new()),
             adapter_cleanup_quarantines: Arc::new(DashMap::new()),
@@ -2213,24 +2269,16 @@ impl Orchestrator {
         }
         // The Orchestrator consumes the adapter's atomic lifecycle stream.
         // Public direct subscribers retain the pre-atomic normalized sequence.
-        let mut events = adapter.subscribe_orchestrator_events();
+        let events = adapter.subscribe_orchestrator_events();
         self.adapters.insert(transport, adapter);
 
         // Retain the per-adapter event-normalize loop under the lifecycle
         // supervisor. A Weak owner avoids a task/Orchestrator reference cycle
         // when callers drop an Orchestrator without an explicit drain.
         let owner = Arc::downgrade(self);
-        let spawned = self.connection_lifecycle_tasks.spawn(async move {
-            while let Some(event) = events.recv().await {
-                let Some(orchestrator) = owner.upgrade() else {
-                    break;
-                };
-                orchestrator
-                    .handle_orchestrator_adapter_event(transport, event)
-                    .await;
-            }
-            debug!(?transport, "adapter event stream ended");
-        });
+        let spawned = self
+            .connection_lifecycle_tasks
+            .spawn(Self::consume_adapter_events(owner, transport, events));
         if !spawned {
             self.adapters.remove(&transport);
             self.adapter_registrations
@@ -2751,21 +2799,6 @@ impl Orchestrator {
         self.bounded_connection_lifecycles.load(Ordering::Acquire)
     }
 
-    // Caller holds registry lock. Inactive records can be removed because the
-    // capability is retired first; stale queued IDs retain that retirement.
-    // Cleanup quarantines retain capacity until their route is conclusively gone.
-    fn reap_retired_connection_lifecycles_locked(&self) {
-        if !self.bounded_connection_lifecycles_enabled() {
-            return;
-        }
-        self.connection_lifecycles.retain(|id, state| {
-            let state = state.lock().unwrap_or_else(|p| p.into_inner());
-            !(state.retired
-                && id.lifecycle_reclaimable()
-                && !self.adapter_cleanup_quarantines.contains_key(id))
-        });
-    }
-
     fn adapter_identity_is_authoritative(&self, id: &ConnectionId) -> bool {
         if !self.bounded_connection_lifecycles_enabled() {
             return true;
@@ -2807,6 +2840,18 @@ impl Orchestrator {
             .connection_registry_lock
             .lock()
             .unwrap_or_else(|p| p.into_inner());
+        self.reclaim_completed_connection_lifecycle_locked(id);
+    }
+
+    // Caller holds the registry lock. A bounded lifecycle row becomes
+    // reclaimable only when its cleanup completes (`finish_connection_teardown`,
+    // `reject_colliding_adapter_route`) or its adapter cleanup quarantine
+    // resolves, and each of those transitions reclaims its exact identity
+    // here. Admission therefore never scans, or locks, unrelated live
+    // lifecycles to recover capacity. Cleanup quarantines retain capacity
+    // until their route is conclusively gone, and the retired capability
+    // still fences queued clones after the row is removed.
+    fn reclaim_completed_connection_lifecycle_locked(&self, id: &ConnectionId) {
         self.connection_lifecycles.remove_if(id, |key, state| {
             let state = state.lock().unwrap_or_else(|p| p.into_inner());
             state.retired
@@ -2991,10 +3036,48 @@ impl Orchestrator {
         transport: Transport,
         detail: String,
     ) {
+        // The failure is owed once a caller gets here, but callers may run
+        // under a timeout or `select!`. Arm the delivery guard and hand the
+        // publication to the lifecycle supervisor before the first await, so
+        // cancelling the caller cannot drop the outcome and degrade the stream
+        // for every connection. The caller still waits for the publication; a
+        // refused spawn publishes inline.
         let mut delivery_guard = self
             .operational_event_stream
             .get()
             .map(OperationalEventStream::delivery_guard);
+        let Some(owner) = self.self_weak.get().and_then(Weak::upgrade) else {
+            self.publish_core_connection_failure(connection_id, transport, detail)
+                .await;
+            if let Some(guard) = delivery_guard.as_mut() {
+                guard.disarm();
+            }
+            return;
+        };
+        let (published, published_rx) = oneshot::channel();
+        let publication = async move {
+            owner
+                .publish_core_connection_failure(connection_id, transport, detail)
+                .await;
+            if let Some(guard) = delivery_guard.as_mut() {
+                guard.disarm();
+            }
+            let _ = published.send(());
+        };
+        match self.connection_lifecycle_tasks.try_spawn(publication) {
+            Ok(_) => {
+                let _ = published_rx.await;
+            }
+            Err(publication) => publication.await,
+        }
+    }
+
+    async fn publish_core_connection_failure(
+        &self,
+        connection_id: ConnectionId,
+        transport: Transport,
+        detail: String,
+    ) {
         let at = Utc::now();
         let _operational_order = if self.operational_event_stream.get().is_some() {
             Some(self.operational_event_order.lock().await)
@@ -3016,9 +3099,6 @@ impl Orchestrator {
             detail,
             at,
         });
-        if let Some(guard) = delivery_guard.as_mut() {
-            guard.disarm();
-        }
     }
 
     /// Look up which adapter owns a given connection. Returns
@@ -3853,7 +3933,7 @@ impl Orchestrator {
                     current.key().complete_lifecycle_cleanup();
                 }
             }
-            self.reap_retired_connection_lifecycles_locked();
+            self.reclaim_completed_connection_lifecycle_locked(&connection_id);
         }
     }
 
@@ -3994,12 +4074,6 @@ impl Orchestrator {
                 || connection_id.lifecycle_retired()
             {
                 return false;
-            }
-            if self.lifecycle_reap_counter.fetch_add(1, Ordering::Relaxed) % 64 == 0
-                || self.connection_lifecycles.len()
-                    >= self.connection_id_budget.load(Ordering::Relaxed)
-            {
-                self.reap_retired_connection_lifecycles_locked();
             }
         }
         if let Some(state) = self.connection_lifecycles.get(connection_id) {
@@ -4209,7 +4283,6 @@ impl Orchestrator {
         self.connection_lifecycle_started
             .store(true, Ordering::Release);
         if self.bounded_connection_lifecycles_enabled() {
-            self.reap_retired_connection_lifecycles_locked();
             if !self.adapter_identity_is_authoritative(connection_id)
                 || connection_id.lifecycle_retired()
             {
@@ -5429,6 +5502,25 @@ impl Orchestrator {
         })
     }
 
+    #[cfg(test)]
+    async fn wait_at_teardown_progress_test_gate(&self, conn: &ConnectionId) {
+        let gate = {
+            let mut gate = self
+                .teardown_progress_test_gate
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if gate.as_ref().is_some_and(|(id, _, _)| id == conn) {
+                gate.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, entered, release)) = gate {
+            entered.notify_one();
+            release.notified().await;
+        }
+    }
+
     async fn forget_inbound_connection(
         &self,
         conn: &ConnectionId,
@@ -5449,6 +5541,8 @@ impl Orchestrator {
         conn: &ConnectionId,
         forgotten: ForgottenConnection,
     ) -> ForgottenConnection {
+        #[cfg(test)]
+        self.wait_at_teardown_progress_test_gate(conn).await;
         // Tear down bridge routes before shutting down the source graph.
         if let Some(bridge_id) = self
             .cross_bridge_owners
@@ -5512,12 +5606,7 @@ impl Orchestrator {
             } else {
                 conn.complete_lifecycle_cleanup();
             }
-            self.connection_lifecycles.remove_if(conn, |id, state| {
-                let state = state.lock().unwrap_or_else(|p| p.into_inner());
-                state.retired
-                    && id.lifecycle_reclaimable()
-                    && !self.adapter_cleanup_quarantines.contains_key(id)
-            });
+            self.reclaim_completed_connection_lifecycle_locked(conn);
         }
         forgotten
     }
@@ -6325,7 +6414,7 @@ impl Orchestrator {
             .ok_or_else(|| RvoipError::SessionNotFound(session_id.clone()))?;
 
         let now = Utc::now();
-        let conv_id = {
+        let (conv_id, members) = {
             let mut sess = sess_arc.write().expect("session lock poisoned");
             if matches!(sess.state, SessionState::Ended | SessionState::Failed) {
                 return Ok(());
@@ -6333,13 +6422,25 @@ impl Orchestrator {
             sess.state = SessionState::Ended;
             sess.ended_at = Some(now);
             sess.end_reason = Some(reason);
-            sess.conversation_id.clone()
+            // Binding commits insert the membership and the reverse index
+            // together under this session lock and refuse an Ended session,
+            // so this snapshot covers every binding this session owns.
+            (
+                sess.conversation_id.clone(),
+                sess.connections.keys().cloned().collect::<Vec<_>>(),
+            )
         };
 
-        // Multi-party cleanup + reverse-index cleanup.
+        // Multi-party cleanup + reverse-index cleanup. Remove only this
+        // session's own bindings: ending one call must not scan, and
+        // write-lock, every other live call's reverse-index entry.
         self.drop_session_subscriptions(&session_id);
-        self.sessions_by_connection
-            .retain(|_, sid| sid != &session_id);
+        for connection_id in members {
+            // A concurrent detach and rebind may already have given the
+            // connection another owner; never remove that binding.
+            self.sessions_by_connection
+                .remove_if(&connection_id, |_, owner| owner == &session_id);
+        }
 
         // P3 — finalize the Session's vCon: convert into the canonical
         // model, validate, serialize, persist, then emit VconReady.
@@ -7232,6 +7333,26 @@ impl Orchestrator {
         reason: RejectReason,
         result: &'static str,
     ) -> bool {
+        self.reject_claimed_unadmitted_connection_with(
+            claimed,
+            reason,
+            result,
+            RetiredCleanup::Inline,
+        )
+        .await
+    }
+
+    /// Retire a claimed, unadmitted inbound connection synchronously, then run
+    /// its bounded cleanup (adapter reject/end, core teardown and failure
+    /// publication) as `cleanup` selects. With [`RetiredCleanup::Supervised`]
+    /// the result only reports that the connection was retired.
+    async fn reject_claimed_unadmitted_connection_with(
+        self: &Arc<Self>,
+        claimed: ClaimedInboundRejection,
+        reason: RejectReason,
+        result: &'static str,
+        cleanup: RetiredCleanup,
+    ) -> bool {
         let transport = claimed.transport;
         let connection_id = claimed.connection_id.clone();
         let normalized_lifecycle_was_visible = claimed.normalized_lifecycle_was_visible;
@@ -7250,81 +7371,98 @@ impl Orchestrator {
         let Some(forgotten) = forgotten else {
             return false;
         };
+        let cleanup_generation = claimed.lifecycle.generation;
         self.adapter_cleanup_quarantines.insert(
             connection_id.clone(),
             AdapterCleanupQuarantine {
                 transport,
-                lifecycle_generation: claimed.lifecycle.generation,
+                lifecycle_generation: cleanup_generation,
             },
         );
-        let adapter = self.adapter(transport).ok();
-        let cleanup_generation = claimed.lifecycle.generation;
-        let adapter_cleanup = async {
-            let stopped = if let Some(adapter) = adapter {
-                let rejected = tokio::time::timeout(
-                    INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT,
-                    adapter.reject(connection_id.clone(), reason),
-                )
-                .await
-                .is_ok_and(|result| result.is_ok());
-                if rejected {
-                    true
-                } else {
-                    tokio::time::timeout(
+        let owner = Arc::clone(self);
+        let completion = async move {
+            let adapter = owner.adapter(transport).ok();
+            let adapter_cleanup = async {
+                let stopped = if let Some(adapter) = adapter {
+                    let rejected = tokio::time::timeout(
                         INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT,
-                        adapter.end(
-                            connection_id.clone(),
-                            EndReason::Failed {
-                                detail: "inbound admission rejected".into(),
-                            },
-                        ),
+                        adapter.reject(connection_id.clone(), reason),
                     )
                     .await
-                    .is_ok_and(|result| result.is_ok())
+                    .is_ok_and(|result| result.is_ok());
+                    if rejected {
+                        true
+                    } else {
+                        tokio::time::timeout(
+                            INBOUND_ADMISSION_ADAPTER_ATTEMPT_TIMEOUT,
+                            adapter.end(
+                                connection_id.clone(),
+                                EndReason::Failed {
+                                    detail: "inbound admission rejected".into(),
+                                },
+                            ),
+                        )
+                        .await
+                        .is_ok_and(|result| result.is_ok())
+                    }
+                } else {
+                    false
+                };
+                if stopped {
+                    owner.resolve_adapter_cleanup_quarantine(
+                        &connection_id,
+                        transport,
+                        cleanup_generation,
+                    );
                 }
-            } else {
-                false
+                stopped
             };
-            if stopped {
-                self.resolve_adapter_cleanup_quarantine(
-                    &connection_id,
-                    transport,
-                    cleanup_generation,
-                );
+            // Core teardown is never canceled by an uncooperative adapter.
+            // Inline, the caller's admission permit stays held while this
+            // completes; supervised, the lifecycle supervisor's capacity bounds
+            // it. Adapter reject/end each has its own deadline and runs
+            // concurrently.
+            let core_cleanup = owner.finish_connection_teardown(&connection_id, forgotten);
+            let (stopped, forgotten) = tokio::join!(adapter_cleanup, core_cleanup);
+            debug_assert!(forgotten.was_tracked);
+            if normalized_lifecycle_was_visible {
+                owner
+                    .emit_core_connection_failure(
+                        connection_id.clone(),
+                        transport,
+                        "connection authentication policy rejected".into(),
+                    )
+                    .await;
             }
-            stopped
-        };
-        // Core teardown is never canceled by an uncooperative adapter. The
-        // admission permit remains held while this completes, bounding the
-        // number of cleanup tasks; adapter reject/end each has its own
-        // deadline and runs concurrently.
-        let core_cleanup = self.finish_connection_teardown(&connection_id, forgotten);
-        let (stopped, forgotten) = tokio::join!(adapter_cleanup, core_cleanup);
-        debug_assert!(forgotten.was_tracked);
-        if normalized_lifecycle_was_visible {
-            self.emit_core_connection_failure(
-                connection_id.clone(),
-                transport,
-                "connection authentication policy rejected".into(),
-            )
-            .await;
-        }
-        if !stopped {
+            if !stopped {
+                metrics::counter!(
+                    "rvoip_core_inbound_admission_cleanup_total",
+                    "result" => "quarantined",
+                    "transport" => format!("{transport:?}")
+                )
+                .increment(1);
+                return false;
+            }
             metrics::counter!(
-                "rvoip_core_inbound_admission_cleanup_total",
-                "result" => "quarantined",
+                "rvoip_core_inbound_admission_total",
+                "result" => result,
                 "transport" => format!("{transport:?}")
             )
             .increment(1);
-            return false;
+            true
+        };
+        match cleanup {
+            RetiredCleanup::Inline => completion.await,
+            RetiredCleanup::Supervised => {
+                let completion = async move {
+                    completion.await;
+                };
+                if let Err(completion) = self.connection_lifecycle_tasks.try_spawn(completion) {
+                    completion.await;
+                }
+                true
+            }
         }
-        metrics::counter!(
-            "rvoip_core_inbound_admission_total",
-            "result" => result,
-            "transport" => format!("{transport:?}")
-        )
-        .increment(1);
-        true
     }
 
     async fn reject_expected_unadmitted_connection(
@@ -7342,6 +7480,33 @@ impl Orchestrator {
         };
         self.reject_claimed_unadmitted_connection(claimed, reason, result)
             .await
+    }
+
+    /// Like [`Self::reject_expected_unadmitted_connection`], but hands the
+    /// cleanup to the lifecycle supervisor once the connection is retired.
+    /// Saturated admission is rejected on the adapter's serial event
+    /// consumer, and adapter reject/end can each take up to its attempt
+    /// timeout; that must not delay every other connection's events.
+    async fn schedule_expected_unadmitted_rejection(
+        self: &Arc<Self>,
+        pending: &PendingInboundPublication,
+        reason: RejectReason,
+        result: &'static str,
+    ) -> bool {
+        let Some(claimed) = self.claim_pending_inbound_rejection(
+            &pending.connection_id,
+            pending.transport,
+            Some(&pending.lifecycle),
+        ) else {
+            return false;
+        };
+        self.reject_claimed_unadmitted_connection_with(
+            claimed,
+            reason,
+            result,
+            RetiredCleanup::Supervised,
+        )
+        .await
     }
 
     async fn wait_for_inbound_admission(
@@ -7495,7 +7660,7 @@ impl Orchestrator {
         let permit = match Arc::clone(&gate.permits).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => {
-                self.reject_expected_unadmitted_connection(
+                self.schedule_expected_unadmitted_rejection(
                     &pending,
                     RejectReason::ServerError,
                     "capacity",
@@ -7517,7 +7682,7 @@ impl Orchestrator {
         if let Err(error) = gate.sender.try_send(admission) {
             drop(resolved);
             drop(error.into_inner());
-            self.reject_expected_unadmitted_connection(
+            self.schedule_expected_unadmitted_rejection(
                 &pending,
                 RejectReason::ServerError,
                 "queue_unavailable",
@@ -7850,6 +8015,29 @@ impl Orchestrator {
         AtomicPublishedDuplicateDecision::Drop
     }
 
+    /// Serial consumer for one adapter's orchestrator event stream.
+    ///
+    /// Events are handled one at a time, in adapter order. Terminal events
+    /// retire their connection here and hand the slow part (bridge and media
+    /// graph teardown, then the terminal publication) to the lifecycle
+    /// supervisor, so one slow teardown cannot stall every other connection
+    /// on this transport.
+    async fn consume_adapter_events(
+        owner: Weak<Self>,
+        transport: Transport,
+        mut events: mpsc::Receiver<OrchestratorAdapterEvent>,
+    ) {
+        while let Some(event) = events.recv().await {
+            let Some(orchestrator) = owner.upgrade() else {
+                break;
+            };
+            orchestrator
+                .handle_orchestrator_adapter_event(transport, event)
+                .await;
+        }
+        debug!(?transport, "adapter event stream ended");
+    }
+
     async fn handle_orchestrator_adapter_event(
         self: &Arc<Self>,
         transport: Transport,
@@ -8125,6 +8313,117 @@ impl Orchestrator {
                     lifecycle,
                 })
                 .await;
+            }
+        }
+    }
+
+    /// Retire a connection for its adapter-reported terminal event, then hand
+    /// its teardown and terminal publication to the lifecycle supervisor.
+    ///
+    /// Retirement runs synchronously, in adapter event order, while the
+    /// caller still holds the operational order lock, so later events (and
+    /// core-originated publications) can no longer find the connection live.
+    /// The order lock is then released: teardown awaits bridge and media
+    /// graph shutdown, and holding the lock or the serial adapter consumer
+    /// across it stalled every other connection. The publication re-acquires
+    /// the lock after teardown. A saturated or draining supervisor runs the
+    /// remaining work inline, which applies backpressure instead of dropping
+    /// the outcome.
+    async fn retire_adapter_terminal(
+        self: &Arc<Self>,
+        transport: Transport,
+        connection_id: ConnectionId,
+        termination: InboundAdmissionTermination,
+        outcome: AdapterTerminalOutcome,
+        operational_order: Option<tokio::sync::MutexGuard<'_, ()>>,
+    ) {
+        // Retiring the core route precedes media/session teardown and
+        // authoritative publication. Cancellation or a supervisor abort
+        // anywhere in that window must make the stream visibly unusable
+        // rather than silently erase the terminal outcome.
+        let mut delivery_guard = self
+            .operational_event_stream
+            .get()
+            .map(OperationalEventStream::delivery_guard);
+        let admission_notification = self.claim_current_inbound_admission_notification(
+            &connection_id,
+            transport,
+            false,
+            true,
+        );
+        let forgotten = self.begin_connection_teardown(&connection_id, termination);
+        if let Some(notification) = admission_notification {
+            notification.deliver();
+        }
+        drop(operational_order);
+        let owner = Arc::clone(self);
+        let completion = async move {
+            owner
+                .finish_adapter_terminal(transport, connection_id, forgotten, outcome)
+                .await;
+            if let Some(guard) = delivery_guard.as_mut() {
+                guard.disarm();
+            }
+        };
+        if let Err(completion) = self.connection_lifecycle_tasks.try_spawn(completion) {
+            completion.await;
+        }
+    }
+
+    async fn finish_adapter_terminal(
+        &self,
+        transport: Transport,
+        connection_id: ConnectionId,
+        forgotten: ForgottenConnection,
+        outcome: AdapterTerminalOutcome,
+    ) {
+        let forgotten = self
+            .finish_connection_teardown(&connection_id, forgotten)
+            .await;
+        self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
+        if !forgotten.was_tracked || !forgotten.normalized_lifecycle_was_visible {
+            return;
+        }
+        let _operational_order = if self.operational_event_stream.get().is_some() {
+            Some(self.operational_event_order.lock().await)
+        } else {
+            None
+        };
+        let at = Utc::now();
+        match outcome {
+            AdapterTerminalOutcome::Ended(reason) => {
+                let _ = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::Ended {
+                            reason: OperationalEndReason::from(&reason),
+                        },
+                    )
+                    .await;
+                self.emit(Event::ConnectionEnded {
+                    connection_id,
+                    reason,
+                    at,
+                });
+            }
+            AdapterTerminalOutcome::Failed(detail) => {
+                let _ = self
+                    .emit_operational(
+                        connection_id.clone(),
+                        transport,
+                        at,
+                        OperationalEventKind::Failed {
+                            reason: OperationalFailureReason::AdapterReported,
+                        },
+                    )
+                    .await;
+                self.emit(Event::ConnectionFailed {
+                    connection_id,
+                    detail,
+                    at,
+                });
             }
         }
     }
@@ -8495,14 +8794,6 @@ impl Orchestrator {
                 if self.connection_owned_by_other_transport(&connection_id, transport) {
                     return;
                 }
-                // Retiring the core route precedes media/session teardown and
-                // authoritative publication. Cancellation anywhere in that
-                // window must make the stream visibly unusable rather than
-                // silently erase the terminal outcome.
-                let mut delivery_guard = self
-                    .operational_event_stream
-                    .get()
-                    .map(OperationalEventStream::delivery_guard);
                 let termination = match &reason {
                     EndReason::Cancelled => InboundAdmissionTermination::Cancelled,
                     EndReason::Normal => InboundAdmissionTermination::RemoteEnded,
@@ -8510,32 +8801,14 @@ impl Orchestrator {
                         InboundAdmissionTermination::Failed
                     }
                 };
-                let forgotten = self
-                    .forget_inbound_connection(&connection_id, transport, termination)
-                    .await;
-                self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
-                if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
-                    let at = Utc::now();
-                    let operational_reason = OperationalEndReason::from(&reason);
-                    let _ = self
-                        .emit_operational(
-                            connection_id.clone(),
-                            transport,
-                            at,
-                            OperationalEventKind::Ended {
-                                reason: operational_reason,
-                            },
-                        )
-                        .await;
-                    self.emit(Event::ConnectionEnded {
-                        connection_id,
-                        reason,
-                        at,
-                    });
-                }
-                if let Some(guard) = delivery_guard.as_mut() {
-                    guard.disarm();
-                }
+                self.retire_adapter_terminal(
+                    transport,
+                    connection_id,
+                    termination,
+                    AdapterTerminalOutcome::Ended(reason),
+                    _operational_order,
+                )
+                .await;
             }
             AdapterEvent::Failed {
                 connection_id,
@@ -8544,39 +8817,14 @@ impl Orchestrator {
                 if self.connection_owned_by_other_transport(&connection_id, transport) {
                     return;
                 }
-                let mut delivery_guard = self
-                    .operational_event_stream
-                    .get()
-                    .map(OperationalEventStream::delivery_guard);
-                let forgotten = self
-                    .forget_inbound_connection(
-                        &connection_id,
-                        transport,
-                        InboundAdmissionTermination::Failed,
-                    )
-                    .await;
-                self.resolve_adapter_cleanup_quarantine_from_terminal(&connection_id, transport);
-                if forgotten.was_tracked && forgotten.normalized_lifecycle_was_visible {
-                    let at = Utc::now();
-                    let _ = self
-                        .emit_operational(
-                            connection_id.clone(),
-                            transport,
-                            at,
-                            OperationalEventKind::Failed {
-                                reason: OperationalFailureReason::AdapterReported,
-                            },
-                        )
-                        .await;
-                    self.emit(Event::ConnectionFailed {
-                        connection_id,
-                        detail,
-                        at,
-                    });
-                }
-                if let Some(guard) = delivery_guard.as_mut() {
-                    guard.disarm();
-                }
+                self.retire_adapter_terminal(
+                    transport,
+                    connection_id,
+                    InboundAdmissionTermination::Failed,
+                    AdapterTerminalOutcome::Failed(detail),
+                    _operational_order,
+                )
+                .await;
             }
             AdapterEvent::Dtmf {
                 connection_id,
@@ -14099,5 +14347,582 @@ mod bounded_lifecycle_tests {
             assert_eq!(retained_rows(&core), (0, 0, 0));
             assert!(!core.conversations_by_tenant.contains_key(&tenant));
         }
+    }
+
+    fn assert_admission_does_not_lock_unrelated_lifecycle(outbound: bool) {
+        let core = Orchestrator::new(Config::default());
+        core.configure_bounded_connection_lifecycles(128).unwrap();
+        let survivor = ConnectionId::new();
+        assert!(core.track_connection(&survivor, Transport::Sip, None));
+        let state = Arc::clone(core.connection_lifecycles.get(&survivor).unwrap().value());
+        // Hold one unrelated live lifecycle's lock. Admission that scans the
+        // lifecycle table to recover capacity has to wait for it.
+        let held = state.lock().unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let owner = Arc::clone(&core);
+        let admission = std::thread::spawn(move || {
+            // 65 admissions cross the former every-64 inbound sweep interval;
+            // outbound admission used to sweep on every claim.
+            let admitted = (0..65).all(|_| {
+                let id = ConnectionId::new();
+                if outbound {
+                    owner.claim_outbound_connection(&id, Transport::Sip).is_ok()
+                } else {
+                    owner.track_connection(&id, Transport::Sip, None)
+                }
+            });
+            sender.send(admitted).unwrap();
+        });
+        let progressed = receiver.recv_timeout(Duration::from_secs(1));
+        // Release and join before asserting so a scanning build fails cleanly.
+        drop(held);
+        admission.join().unwrap();
+        assert_eq!(
+            progressed,
+            Ok(true),
+            "admission scanned an unrelated live lifecycle"
+        );
+        assert_eq!(core.connection_id_budget_usage(), (66, 128));
+        assert!(core.capture_connection_lifecycles(&[survivor]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn inbound_admission_does_not_scan_unrelated_live_lifecycles() {
+        assert_admission_does_not_lock_unrelated_lifecycle(false);
+    }
+
+    #[tokio::test]
+    async fn outbound_admission_does_not_scan_unrelated_live_lifecycles() {
+        assert_admission_does_not_lock_unrelated_lifecycle(true);
+    }
+
+    #[tokio::test]
+    async fn exact_reclamation_requires_both_cleanup_and_matching_quarantine_resolution() {
+        for cleanup_first in [false, true] {
+            let core = Orchestrator::new(Config::default());
+            core.configure_bounded_connection_lifecycles(1).unwrap();
+            let id = ConnectionId::new();
+            assert!(core.track_connection(&id, Transport::Sip, None));
+            core.adapter_cleanup_quarantines.insert(
+                id.clone(),
+                AdapterCleanupQuarantine {
+                    transport: Transport::Sip,
+                    lifecycle_generation: 1,
+                },
+            );
+            let ended =
+                core.begin_connection_teardown(&id, InboundAdmissionTermination::RemoteEnded);
+            assert!(!core.track_connection(&ConnectionId::new(), Transport::Sip, None));
+            assert!(core
+                .claim_outbound_connection(&ConnectionId::new(), Transport::Sip)
+                .is_err());
+            if cleanup_first {
+                core.finish_connection_teardown(&id, ended).await;
+                assert_eq!(core.connection_id_budget_usage(), (1, 1));
+                assert!(id.lifecycle_reclaimable());
+                // A stale generation must not release the quarantine.
+                core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 2);
+                assert_eq!(core.adapter_cleanup_quarantine_count(), 1);
+                assert_eq!(core.connection_id_budget_usage(), (1, 1));
+                core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 1);
+            } else {
+                core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 1);
+                assert_eq!(core.adapter_cleanup_quarantine_count(), 0);
+                assert_eq!(core.connection_id_budget_usage(), (1, 1));
+                assert!(!id.lifecycle_reclaimable());
+                core.finish_connection_teardown(&id, ended).await;
+            }
+            assert_eq!(core.connection_id_budget_usage(), (0, 1));
+            assert!(!core.track_connection(&id, Transport::Sip, None));
+            assert!(core.claim_outbound_connection(&id, Transport::Sip).is_err());
+            let replacement = ConnectionId::new();
+            assert!(core.track_connection(&replacement, Transport::Sip, None));
+            // A duplicate completion for the retired identity cannot release
+            // the replacement's capacity or revive the stale capability.
+            core.resolve_adapter_cleanup_quarantine(&id, Transport::Sip, 1);
+            assert_eq!(core.connection_id_budget_usage(), (1, 1));
+            assert!(core.capture_connection_lifecycles(&[replacement]).is_ok());
+        }
+    }
+
+    fn bind_outbound(core: &Orchestrator, id: &ConnectionId, session: &SessionId) {
+        let ticket = core.claim_outbound_connection(id, Transport::Sip).unwrap();
+        core.commit_outbound_connection(&ticket, Transport::Sip, session, ParticipantId::new())
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ending_session_removes_exact_members_and_preserves_rebound_owner() {
+        let core = Orchestrator::new(Config {
+            capture_session_vcon: false,
+            ..Config::default()
+        });
+        core.configure_bounded_connection_lifecycles(8).unwrap();
+        let conversation = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral {
+                    idle_close_secs: 30,
+                },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let first = core
+            .start_session(conversation.clone(), SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let other = core
+            .start_session(conversation, SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let own = ConnectionId::new();
+        let rebound = ConnectionId::new();
+        let unrelated = ConnectionId::new();
+        bind_outbound(&core, &own, &first);
+        bind_outbound(&core, &rebound, &first);
+        bind_outbound(&core, &unrelated, &other);
+        // Model a membership snapshot whose reverse-index entry has already
+        // moved to another owner. Terminal cleanup must be conditional.
+        core.sessions_by_connection
+            .insert(rebound.clone(), other.clone());
+        core.end_session(first.clone(), EndReason::Normal)
+            .await
+            .unwrap();
+        assert!(!core.sessions_by_connection.contains_key(&own));
+        assert_eq!(core.session_of(&rebound), Some(other.clone()));
+        assert_eq!(core.session_of(&unrelated), Some(other.clone()));
+        let session = core.sessions.get(&first).unwrap().clone();
+        assert_eq!(session.read().unwrap().state, SessionState::Ended);
+        assert_eq!(
+            session.read().unwrap().connections.len(),
+            2,
+            "historical membership stays available"
+        );
+        let late = ConnectionId::new();
+        let ticket = core
+            .claim_outbound_connection(&late, Transport::Sip)
+            .unwrap();
+        assert!(core
+            .commit_outbound_connection(&ticket, Transport::Sip, &first, ParticipantId::new())
+            .is_err());
+        assert!(!core.sessions_by_connection.contains_key(&late));
+        core.end_session(first, EndReason::Normal).await.unwrap();
+        assert_eq!(core.session_of(&rebound), Some(other));
+    }
+
+    #[tokio::test]
+    async fn ending_session_does_not_scan_unrelated_session_bindings() {
+        let core = Orchestrator::new(Config {
+            capture_session_vcon: false,
+            ..Config::default()
+        });
+        core.configure_bounded_connection_lifecycles(64).unwrap();
+        let conversation = core
+            .open_conversation(
+                TenantId::new(),
+                ConversationPolicy::Ephemeral {
+                    idle_close_secs: 30,
+                },
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let ending = core
+            .start_session(conversation.clone(), SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let live = core
+            .start_session(conversation, SessionMedium::Voice, Vec::new())
+            .await
+            .unwrap();
+        let member = ConnectionId::new();
+        bind_outbound(&core, &member, &ending);
+        // Find another live call's binding in a different reverse-index shard
+        // than the ending session's member.
+        let unrelated = loop {
+            let candidate = ConnectionId::new();
+            bind_outbound(&core, &candidate, &live);
+            let held = core.sessions_by_connection.get(&candidate).unwrap();
+            let shares_shard = core.sessions_by_connection.try_get_mut(&member).is_locked();
+            drop(held);
+            if !shares_shard {
+                break candidate;
+            }
+        };
+        // Hold a reader on that unrelated binding. Ending the session must
+        // not need to write-lock the whole reverse index.
+        let held = core.sessions_by_connection.get(&unrelated).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let owner = Arc::clone(&core);
+        let ending_session = ending.clone();
+        let ender = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let ended = runtime.block_on(owner.end_session(ending_session, EndReason::Normal));
+            sender.send(ended.is_ok()).unwrap();
+        });
+        let progressed = receiver.recv_timeout(Duration::from_secs(1));
+        // Release and join before asserting so a scanning build fails cleanly.
+        drop(held);
+        ender.join().unwrap();
+        assert_eq!(
+            progressed,
+            Ok(true),
+            "ending one session scanned every live session binding"
+        );
+        assert!(!core.sessions_by_connection.contains_key(&member));
+        assert_eq!(core.session_of(&unrelated), Some(live));
+    }
+}
+
+#[cfg(test)]
+mod adapter_event_consumer_tests {
+    use super::*;
+
+    /// Hold `finish_connection_teardown` open for `id` until `release`.
+    fn hold_teardown(core: &Orchestrator, id: &ConnectionId) -> (Arc<Notify>, Arc<Notify>) {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        *core.teardown_progress_test_gate.lock().unwrap() =
+            Some((id.clone(), Arc::clone(&entered), Arc::clone(&release)));
+        (entered, release)
+    }
+
+    fn track_visible(core: &Orchestrator, id: &ConnectionId) {
+        assert!(core.track_connection(id, Transport::Sip, None));
+        core.connections
+            .get_mut(id)
+            .unwrap()
+            .normalized_lifecycle_was_visible = true;
+    }
+
+    fn ended(connection_id: &ConnectionId) -> AdapterEvent {
+        AdapterEvent::Ended {
+            connection_id: connection_id.clone(),
+            reason: EndReason::Normal,
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_terminal_teardown_does_not_block_unrelated_adapter_event() {
+        let core = Orchestrator::new(Config::default());
+        let mut events = core.install_operational_event_stream(8).unwrap();
+        let first = ConnectionId::new();
+        let second = ConnectionId::new();
+        track_visible(&core, &first);
+        track_visible(&core, &second);
+        let (entered, release) = hold_teardown(&core, &first);
+        let (sender, receiver) = mpsc::channel(4);
+        let consumer = tokio::spawn(Orchestrator::consume_adapter_events(
+            Arc::downgrade(&core),
+            Transport::Sip,
+            receiver,
+        ));
+        sender
+            .send(OrchestratorAdapterEvent::Public(ended(&first)))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("first teardown entered");
+        sender
+            .send(OrchestratorAdapterEvent::Public(ended(&second)))
+            .await
+            .unwrap();
+        let progressed = tokio::time::timeout(Duration::from_millis(250), async {
+            while core.connections.contains_key(&second) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        let unrelated_terminal =
+            tokio::time::timeout(Duration::from_millis(250), events.recv()).await;
+        // A late event for the retired connection must not revive it while
+        // its teardown is still held open.
+        sender
+            .send(OrchestratorAdapterEvent::Public(AdapterEvent::Connected {
+                connection_id: first.clone(),
+            }))
+            .await
+            .unwrap();
+        release.notify_one();
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(2), consumer)
+            .await
+            .expect("consumer settled")
+            .unwrap();
+        let held_terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("held terminal published")
+            .unwrap();
+        assert!(
+            progressed.is_ok(),
+            "one slow teardown stalled an unrelated connection's terminal event"
+        );
+        let unrelated_terminal = unrelated_terminal
+            .expect("unrelated publication must progress")
+            .unwrap();
+        assert_eq!(unrelated_terminal.connection_id, second);
+        assert!(matches!(
+            unrelated_terminal.kind,
+            OperationalEventKind::Ended { .. }
+        ));
+        assert_eq!(held_terminal.connection_id, first);
+        assert!(matches!(
+            held_terminal.kind,
+            OperationalEventKind::Ended { .. }
+        ));
+        assert!(events.try_recv().is_err());
+        assert!(!core.connections.contains_key(&first));
+        core.drain_connection_lifecycle_tasks().await;
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_fallback_retains_cleanup_without_stalling_translator() {
+        let core = Orchestrator::new(Config::default());
+        let mut events = core.install_operational_event_stream(8).unwrap();
+        let id = ConnectionId::new();
+        track_visible(&core, &id);
+        let (entered, release) = hold_teardown(&core, &id);
+        let sink = OrchestratorLifecycleSink {
+            orchestrator: Arc::downgrade(&core),
+            transport: Transport::Sip,
+        };
+        let terminal = ended(&id);
+        let waiter = tokio::spawn(async move { sink.deliver_terminal(terminal).await });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        assert!(!core.connections.contains_key(&id));
+        assert!(
+            events.try_recv().is_err(),
+            "terminal publication must still follow cleanup"
+        );
+        let progressed = tokio::time::timeout(Duration::from_millis(250), async {
+            while !waiter.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        release.notify_one();
+        waiter.await.unwrap();
+        // Drain aborts retained work; observe the publication first.
+        let terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        core.drain_connection_lifecycle_tasks().await;
+        assert!(
+            progressed.is_ok(),
+            "the terminal fallback made the adapter wait for media cleanup"
+        );
+        assert_eq!(terminal.connection_id, id);
+        assert!(matches!(terminal.kind, OperationalEventKind::Ended { .. }));
+        assert!(events.try_recv().is_err());
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_fallback_waiter_preserves_backpressured_terminal_delivery() {
+        let core = Orchestrator::new(Config::default());
+        let mut events = core.install_operational_event_stream(1).unwrap();
+        let id = ConnectionId::new();
+        track_visible(&core, &id);
+        // Fill the single-slot stream so terminal publication must wait.
+        core.emit_operational(
+            id.clone(),
+            Transport::Sip,
+            Utc::now(),
+            OperationalEventKind::Connected,
+        )
+        .await;
+        let waiter = {
+            let sink = OrchestratorLifecycleSink {
+                orchestrator: Arc::downgrade(&core),
+                transport: Transport::Sip,
+            };
+            let terminal = ended(&id);
+            tokio::spawn(async move { sink.deliver_terminal(terminal).await })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while core.connections.contains_key(&id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal retirement must start before cancellation");
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+        assert!(matches!(
+            events.recv().await.unwrap().kind,
+            OperationalEventKind::Connected
+        ));
+        let terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.connection_id, id);
+        assert_eq!(terminal.sequence, 2);
+        assert!(matches!(
+            terminal.kind,
+            OperationalEventKind::Ended {
+                reason: OperationalEndReason::Normal
+            }
+        ));
+        core.drain_connection_lifecycle_tasks().await;
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_failure_waiter_preserves_backpressured_terminal_delivery() {
+        let core = Orchestrator::new(Config::default());
+        let mut events = core.install_operational_event_stream(1).unwrap();
+        let first = ConnectionId::new();
+        core.emit_operational(
+            first.clone(),
+            Transport::Sip,
+            Utc::now(),
+            OperationalEventKind::Connected,
+        )
+        .await;
+        let failed = ConnectionId::new();
+        let waiter = {
+            let core = Arc::clone(&core);
+            let failed = failed.clone();
+            tokio::spawn(async move {
+                core.emit_core_connection_failure(failed, Transport::Sip, "test failure".into())
+                    .await;
+            })
+        };
+        // The order lock is held once publication waits on the full stream.
+        while core.operational_event_order.try_lock().is_ok() {
+            tokio::task::yield_now().await;
+        }
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+        assert_eq!(events.recv().await.unwrap().connection_id, first);
+        let terminal = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(terminal.connection_id, failed);
+        assert_eq!(terminal.sequence, 2);
+        assert!(matches!(
+            terminal.kind,
+            OperationalEventKind::Failed {
+                reason: OperationalFailureReason::CoreReported
+            }
+        ));
+        core.drain_connection_lifecycle_tasks().await;
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn core_failure_publication_runs_inline_when_supervisor_refuses() {
+        let core = Orchestrator::new(Config::default());
+        let mut events = core.install_operational_event_stream(1).unwrap();
+        core.drain_connection_lifecycle_tasks().await;
+        let failed = ConnectionId::new();
+        core.emit_core_connection_failure(failed.clone(), Transport::Sip, "test failure".into())
+            .await;
+        let terminal = events.try_recv().unwrap();
+        assert_eq!(terminal.connection_id, failed);
+        assert!(matches!(
+            terminal.kind,
+            OperationalEventKind::Failed {
+                reason: OperationalFailureReason::CoreReported
+            }
+        ));
+        assert_eq!(
+            core.operational_event_stream_health(),
+            OperationalEventStreamHealth::Healthy
+        );
+    }
+
+    #[tokio::test]
+    async fn saturated_admission_does_not_wait_for_rejection_teardown() {
+        check_saturated_admission_cleanup(false).await;
+    }
+
+    #[tokio::test]
+    async fn saturated_admission_retains_inline_cleanup_when_supervisor_drains() {
+        check_saturated_admission_cleanup(true).await;
+    }
+
+    async fn check_saturated_admission_cleanup(draining: bool) {
+        let core = Orchestrator::new(Config::default());
+        if draining {
+            core.drain_connection_lifecycle_tasks().await;
+        }
+        let _admissions = core
+            .install_inbound_admission_gate(1, Duration::from_secs(2))
+            .unwrap();
+        let _occupied = Arc::clone(&core.inbound_admission_gate.get().unwrap().permits)
+            .acquire_owned()
+            .await
+            .unwrap();
+        let id = ConnectionId::new();
+        assert!(core.track_connection(&id, Transport::Sip, None));
+        core.mark_connection_inbound(&id).unwrap();
+        let lifecycle = core
+            .capture_connection_lifecycles(std::slice::from_ref(&id))
+            .unwrap()
+            .remove(0);
+        let (entered, release) = hold_teardown(&core, &id);
+        let owner = Arc::clone(&core);
+        let pending = PendingInboundPublication {
+            connection_id: id.clone(),
+            transport: Transport::Sip,
+            participant_id: None,
+            principal: None,
+            observed_at: Utc::now(),
+            lifecycle,
+        };
+        let gate = tokio::spawn(async move { owner.gate_or_publish_inbound(pending).await });
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .unwrap();
+        assert!(
+            !core.connections.contains_key(&id),
+            "rejection must retire the connection synchronously"
+        );
+        let progressed = tokio::time::timeout(Duration::from_millis(250), async {
+            while !gate.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        release.notify_one();
+        gate.await.unwrap();
+        core.drain_connection_lifecycle_tasks().await;
+        assert_eq!(
+            progressed.is_ok(),
+            !draining,
+            "rejection cleanup must leave the admission path only while the supervisor accepts work"
+        );
     }
 }

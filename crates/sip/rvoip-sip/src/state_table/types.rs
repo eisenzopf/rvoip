@@ -258,6 +258,13 @@ pub enum EventType {
         sdp_answer: Option<String>,
     },
     DialogInvite,
+    /// A 100 Trying to the initial INVITE: RFC 3261 section 9.1 lets the UAC
+    /// send CANCEL from now on, but the peer is not ringing yet.
+    Dialog100Trying,
+    /// Internal lookup key for a user hangup or cancel of an initial INVITE
+    /// that has received 100 but no other provisional response. The executor
+    /// derives it; it cannot be submitted as an event.
+    CancelAfterTrying,
     Dialog180Ringing,
     Dialog183SessionProgress,
     Dialog200OK,

@@ -3449,11 +3449,46 @@ impl StateMachine {
             _ => {}
         }
 
+        // CancelAfterTrying is derived below from a user hangup or cancel; it
+        // is never a command of its own.
+        if matches!(event, EventType::CancelAfterTrying) {
+            return Err(crate::errors::SessionError::InvalidTransition(
+                "CancelAfterTrying is derived from a user hangup or cancel".into(),
+            )
+            .into());
+        }
+        // Record 100 as transaction progress, never as ringing. Like every
+        // other staged mutation, it commits only if a table row matches.
+        if matches!(event, EventType::Dialog100Trying) {
+            session.initial_invite_trying_received = true;
+        }
+        // RFC 3261 section 9.1: after a provisional response a user hangup or
+        // cancel of the initial INVITE sends CANCEL now instead of waiting in
+        // CancelPending for a 180/183 that may never come. A table without a
+        // CancelAfterTrying row keeps its own HangupCall/CancelCall rows.
+        let lookup_event = if session.role == crate::state_table::Role::UAC
+            && session.call_state == CallState::Initiating
+            && session.initial_invite_trying_received
+            && matches!(event, EventType::HangupCall | EventType::CancelCall)
+            && self
+                .table
+                .get(&StateKey {
+                    role: session.role,
+                    state: CallState::Initiating,
+                    event: EventType::CancelAfterTrying,
+                })
+                .is_some()
+        {
+            EventType::CancelAfterTrying
+        } else {
+            event.clone()
+        };
+
         // 2. Build state key for lookup
         let key = StateKey {
             role: session.role,
             state: session.call_state,
-            event: event.clone(),
+            event: lookup_event,
         };
 
         // 3. Look up transition in table

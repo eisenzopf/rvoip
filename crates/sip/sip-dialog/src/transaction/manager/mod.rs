@@ -1687,6 +1687,35 @@ fn new_server_transaction_registries() -> (
     (admissions, matches)
 }
 
+/// The transaction user's answer to "are my session slots full?" for a new
+/// dialog-forming INVITE. See
+/// [`TransactionManager::set_new_dialog_capacity_guard`].
+///
+/// It runs on the transaction dispatch path for every new INVITE, so it must
+/// be cheap and must not block.
+#[derive(Clone)]
+pub struct NewDialogCapacityGuard(Arc<dyn Fn() -> bool + Send + Sync>);
+
+impl NewDialogCapacityGuard {
+    /// Wrap a probe that returns `true` while the session slots are full.
+    pub fn new<F>(exhausted: F) -> Self
+    where
+        F: Fn() -> bool + Send + Sync + 'static,
+    {
+        Self(Arc::new(exhausted))
+    }
+
+    fn exhausted(&self) -> bool {
+        (self.0)()
+    }
+}
+
+impl std::fmt::Debug for NewDialogCapacityGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NewDialogCapacityGuard(..)")
+    }
+}
+
 const MANAGER_ADMISSION_RUNNING: u8 = 0;
 const MANAGER_ADMISSION_DRAINING: u8 = 1;
 const MANAGER_ADMISSION_STOPPING: u8 = 2;
@@ -2179,6 +2208,15 @@ pub struct TransactionManager {
     transaction_dispatch_queue_capacity: usize,
     transaction_command_channel_capacity: usize,
     stateless_overload_retry_after_secs: Arc<AtomicU32>,
+    /// Stateless admission for new dialog-forming INVITEs. Shared with the
+    /// `TransportManager` this manager was built from, whose TLS readers may
+    /// apply it before a request is queued.
+    new_call_admission: Arc<crate::transaction::overload::NewCallAdmission>,
+    /// The TU's session-slot probe for new dialog-forming INVITEs. Unset
+    /// keeps the historical behaviour: every new INVITE reaches the TU.
+    new_dialog_capacity_guard: Arc<OnceLock<NewDialogCapacityGuard>>,
+    /// Slot-cleanup decisions, reported by [`Self::slot_cleanup_stats`].
+    slot_cleanup: Arc<crate::transaction::slot_cleanup::SlotCleanupCounters>,
     transaction_dispatch_priority_burst_max: Arc<AtomicUsize>,
     invite_2xx_retransmit_max_due_per_tick: Arc<AtomicUsize>,
 }
@@ -2773,10 +2811,66 @@ impl TransactionManager {
 
     fn install_terminal_delivery_failure_hook(&self) {
         let lifecycle = Arc::clone(&self.admission_lifecycle);
+        let slot_cleanup = Arc::clone(&self.slot_cleanup);
         self.events_tx
             .install_terminal_delivery_failure_hook(Arc::new(move || {
-                lifecycle.begin_draining();
+                // This latch is permanent and refuses every later new
+                // transaction, inbound requests and local BYEs alike, so it
+                // must never be silent.
+                if lifecycle.begin_draining() {
+                    slot_cleanup.record_admission_fail_closed();
+                    error!(
+                        "Transaction manager closed new-transaction admission: a terminal event \
+                         could not reach the transaction user"
+                    );
+                }
             }));
+    }
+
+    /// Snapshot of this manager's slot-cleanup counters: terminal
+    /// publications continued in the background instead of closing
+    /// admission, real fail-closed latches, and new INVITEs answered with a
+    /// stateless 503 at the session-slot cap or while draining.
+    pub fn slot_cleanup_stats(&self) -> crate::transaction::SlotCleanupStats {
+        self.slot_cleanup.snapshot()
+    }
+
+    /// This manager's new-call admission gate.
+    ///
+    /// The gate is [`AdmissionMode::Off`](crate::transaction::AdmissionMode::Off)
+    /// unless configured, either through
+    /// [`TransportManagerConfig::new_call_admission`](crate::transaction::transport::TransportManagerConfig::new_call_admission)
+    /// or at run time through the returned handle. While it is enforcing, a
+    /// new dialog-forming INVITE it rejects is answered with a stateless 503
+    /// before any transaction, dialog or session state exists, and the ACK
+    /// for that 503 is absorbed. Requests inside a dialog, retransmissions,
+    /// ACK and CANCEL are never decided.
+    pub fn new_call_admission(&self) -> &Arc<crate::transaction::overload::NewCallAdmission> {
+        &self.new_call_admission
+    }
+
+    /// Install the TU's session-slot probe.
+    ///
+    /// While the probe returns `true`, a new dialog-forming INVITE is
+    /// answered with a stateless 503 carrying the stateless-overload
+    /// `Retry-After` (see [`Self::set_stateless_overload_retry_after_secs`])
+    /// before any transaction state exists, whatever the admission gate's
+    /// mode. Every other request is unaffected. One probe per manager: a
+    /// second install is ignored and returns `false`.
+    pub fn set_new_dialog_capacity_guard(&self, guard: NewDialogCapacityGuard) -> bool {
+        self.new_dialog_capacity_guard.set(guard).is_ok()
+    }
+
+    pub(crate) fn new_dialog_capacity_exhausted(&self) -> bool {
+        self.new_dialog_capacity_guard
+            .get()
+            .is_some_and(NewDialogCapacityGuard::exhausted)
+    }
+
+    pub(crate) fn stateless_overload_retry_after(&self) -> u32 {
+        self.stateless_overload_retry_after_secs
+            .load(Ordering::Acquire)
+            .max(1)
     }
 
     fn retained_client_deadline_context(&self) -> RetainedClientDeadlineContext {
@@ -4107,6 +4201,9 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
+            new_call_admission: Arc::default(),
+            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4308,6 +4405,9 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
+            new_call_admission: Arc::default(),
+            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4591,6 +4691,7 @@ impl TransactionManager {
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
         // manager only has a single flavour registered (typical
         // UDP-only setup) the multiplexer transparently delegates to it.
+        let new_call_admission = transport_manager.new_call_admission();
         let sip_trace = transport_manager.sip_trace_runtime();
         let default_transport = transport_manager
             .build_multiplexed_transport()
@@ -4762,6 +4863,9 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
+            new_call_admission,
+            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4943,6 +5047,9 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: 100,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
+            new_call_admission: Arc::default(),
+            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -5087,6 +5194,9 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: 10,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
+            slot_cleanup: Arc::default(),
+            new_call_admission: Arc::default(),
+            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -5387,9 +5497,7 @@ impl TransactionManager {
         use crate::transaction::server::TransactionExt;
         if let Some(server_tx) = tx.as_server_transaction() {
             let original_method = if is_200_ok {
-                server_tx
-                    .original_request_sync()
-                    .map(|request| request.method().clone())
+                Some(server_tx.data().request.method().clone())
             } else {
                 None
             };
@@ -5741,6 +5849,23 @@ impl TransactionManager {
     /// * `Arc<dyn Transport>` - The transport layer
     pub fn transport(&self) -> Arc<dyn Transport> {
         self.transport.clone()
+    }
+
+    /// Return the request held by an active server transaction.
+    ///
+    /// This is the transaction's own shared copy of the request the
+    /// transport parsed, so transaction users can read it without the deep
+    /// copy [`Self::original_request`] makes. Returns `None` once the
+    /// transaction has left the active transaction map (for example after it
+    /// terminated or compacted); callers that must also cover retired
+    /// transactions fall back to [`Self::original_request`].
+    pub fn server_transaction_request(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<Arc<Request>> {
+        self.server_transactions
+            .get(transaction_id)
+            .map(|transaction| Arc::clone(&transaction.value().data().request))
     }
 
     /// Return the exact ingress route retained by an active server

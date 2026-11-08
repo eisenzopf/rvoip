@@ -34,6 +34,7 @@ use std::env;
 /// abstract traits rather than concrete implementations, allowing new transaction types
 /// to be added without modifying the runner itself.
 use std::sync::Arc;
+use std::{future::Future, task::Poll};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, trace};
 
@@ -44,6 +45,42 @@ use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, TransactionEvent, TransactionKey,
     TransactionState,
 };
+
+/// Commit the one-way internal-error fence without publishing anything.
+///
+/// Split from [`fence_internal_error`] so a runner that has already reserved
+/// its place in the primary TU queue can fence protocol processing, release a
+/// waiting response with the error, and publish the scoped `Error` after the
+/// reserved event.
+async fn commit_internal_error_fence<D, TH, L>(data: &Arc<D>, logic: &L, timer_handles: &mut TH)
+where
+    D: AsRefState
+        + AsRefKey
+        + HasTransactionEvents
+        + HasTransport
+        + HasCommandSender
+        + HasLifecycle
+        + Send
+        + Sync
+        + 'static,
+    TH: Default + Send + Sync + 'static,
+    L: TransactionLogic<D, TH> + Send + Sync + 'static,
+{
+    logic.cancel_all_specific_timers(timer_handles);
+
+    // Failure must win ahead of the generic Terminated fallback in the exact
+    // completion cell. A final SIP response or a more-specific failure that
+    // already won remains authoritative by the cell's first-writer rule.
+    data.record_completion_failure(crate::transaction::ClientTransactionFailure::Internal);
+    data.as_ref_state().set(TransactionState::Terminated);
+    data.record_completion_state(TransactionState::Terminated);
+    data.await_protocol_writes().await;
+
+    // Destroyed is the irreversible protocol-processing fence.  The cleanup
+    // queue is submitted by the common epilogue after this scoped event has
+    // retained its transaction/dialog routing context.
+    data.set_lifecycle(TransactionLifecycle::Destroyed);
+}
 
 /// Fence an unrecoverable transaction-runner fault before publishing its
 /// transaction-scoped `Error` event.
@@ -75,20 +112,7 @@ async fn fence_internal_error<D, TH, L>(
     TH: Default + Send + Sync + 'static,
     L: TransactionLogic<D, TH> + Send + Sync + 'static,
 {
-    logic.cancel_all_specific_timers(timer_handles);
-
-    // Failure must win ahead of the generic Terminated fallback in the exact
-    // completion cell. A final SIP response or a more-specific failure that
-    // already won remains authoritative by the cell's first-writer rule.
-    data.record_completion_failure(crate::transaction::ClientTransactionFailure::Internal);
-    data.as_ref_state().set(TransactionState::Terminated);
-    data.record_completion_state(TransactionState::Terminated);
-    data.await_protocol_writes().await;
-
-    // Destroyed is the irreversible protocol-processing fence.  The cleanup
-    // queue is submitted by the common epilogue after this scoped event has
-    // retained its transaction/dialog routing context.
-    data.set_lifecycle(TransactionLifecycle::Destroyed);
+    commit_internal_error_fence(data, logic, timer_handles).await;
 
     let _ = data
         .get_tu_event_sender()
@@ -223,7 +247,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     command
                 }
             };
-            let response_completion = locally_owned_response_completion.take();
+            let mut response_completion = locally_owned_response_completion.take();
             let current_state = data.as_ref_state().get();
             let tx_id_clone = data.as_ref_key().clone();
 
@@ -345,7 +369,7 @@ pub async fn run_transaction_loop<D, TH, L>(
                     // visible. That race lost later INVITE 2xx responses and
                     // left retransmitted non-INVITEs spinning on a retiring
                     // match registration.
-                    let entered_state_before_event = entering_accepted;
+                    let mut entered_state_before_event = entering_accepted;
                     if entered_state_before_event {
                         if let Err(e) = logic
                             .on_enter_state(
@@ -382,26 +406,104 @@ pub async fn run_transaction_loop<D, TH, L>(
                     } else {
                         data.should_emit_events()
                     };
-                    if should_send_event {
-                        // The primary TU stream is lossless. Optional observers
-                        // are fanned out nonblocking after this send is accepted.
-                        let sender = data.get_tu_event_sender();
+                    let sender = data.get_tu_event_sender();
+                    let mut state_entry_error = None;
+                    let publication_result = {
                         let event = TransactionEvent::StateChanged {
                             transaction_id: tx_id_clone.clone(),
                             previous_state,
                             new_state: requested_new_state,
                         };
-
-                        let result = if requested_new_state == TransactionState::Terminated {
-                            if let Some(claim) = terminal_publication_claim.as_ref() {
-                                sender.send_terminal_prefix(event, claim).await
+                        let publication = async {
+                            if !should_send_event {
+                                return Ok(());
+                            }
+                            if requested_new_state == TransactionState::Terminated {
+                                if let Some(claim) = terminal_publication_claim.as_ref() {
+                                    sender.send_terminal_prefix(event, claim).await
+                                } else {
+                                    sender.send(event).await
+                                }
                             } else {
                                 sender.send(event).await
                             }
-                        } else {
-                            sender.send(event).await
                         };
-                        if result.is_err() {
+                        tokio::pin!(publication);
+
+                        // A TU handler can be awaiting this response while it
+                        // is the only consumer able to drain the primary queue.
+                        // Retain the lossless publication in this runner, but
+                        // complete the response after its state/retention hooks
+                        // commit and before waiting for that consumer.
+                        //
+                        // Poll once first to join the channel's FIFO reservation
+                        // queue. This preserves Completed-before-Terminated even
+                        // if a compact Timer J expires during the state hook.
+                        // Disable the cooperative budget for this single poll:
+                        // Pending must mean queued for capacity, not merely that
+                        // Tokio yielded before registering the reservation.
+                        let first_poll = if response_completion.is_some() {
+                            Some(
+                                std::future::poll_fn(|cx| {
+                                    let mut first_poll = std::pin::pin!(
+                                        tokio::task::unconstrained(publication.as_mut())
+                                    );
+                                    Poll::Ready(first_poll.as_mut().poll(cx))
+                                })
+                                .await,
+                            )
+                        } else {
+                            None
+                        };
+                        if response_completion.is_some() && !entered_state_before_event {
+                            entered_state_before_event = true;
+                            if let Err(error) = logic
+                                .on_enter_state(
+                                    &data,
+                                    requested_new_state,
+                                    previous_state,
+                                    &mut timer_handles,
+                                    data.get_self_command_sender(),
+                                )
+                                .await
+                            {
+                                static RESPONSE_ENTER_FAILURES: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
+                                if let Some(occurrences) =
+                                    crate::diagnostics::thin_log(&RESPONSE_ENTER_FAILURES)
+                                {
+                                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), occurrences, "Error in on_enter_state for state {:?}", requested_new_state);
+                                }
+                                state_entry_error = Some(format!(
+                                    "Error entering state {:?}: {}",
+                                    requested_new_state, error
+                                ));
+                                // Never acknowledge a failed state hook as a
+                                // successful response. Fence protocol processing
+                                // before releasing the waiting TU; its Error event
+                                // follows the already-reserved state event.
+                                commit_internal_error_fence(
+                                    &data,
+                                    logic.as_ref(),
+                                    &mut timer_handles,
+                                )
+                                .await;
+                                if let Some((operation, _execution, _)) = response_completion.take()
+                                {
+                                    operation.complete(Err(error));
+                                }
+                            }
+                        }
+                        if let Some((operation, _execution, result)) = response_completion.take() {
+                            operation.complete(result);
+                        }
+                        match first_poll {
+                            Some(Poll::Ready(result)) => result,
+                            _ => publication.await,
+                        }
+                    };
+                    if should_send_event {
+                        if publication_result.is_err() {
                             if requested_new_state == TransactionState::Terminated {
                                 if let Some(claim) = terminal_publication_claim.take() {
                                     claim.mark_failed_closed();
@@ -413,6 +515,15 @@ pub async fn run_transaction_loop<D, TH, L>(
                         }
                     } else {
                         debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), "Transaction in draining state, not emitting StateChanged event");
+                    }
+                    if let Some(message) = state_entry_error {
+                        let _ = sender
+                            .send(TransactionEvent::Error {
+                                transaction_id: Some(tx_id_clone.clone()),
+                                error: message,
+                            })
+                            .await;
+                        break;
                     }
 
                     // If we've reached Terminated state, register its grace and
@@ -438,7 +549,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                             )
                             .await
                         {
-                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error in on_enter_state for state {:?}", requested_new_state);
+                            static ENTER_FAILURES: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            if let Some(occurrences) = crate::diagnostics::thin_log(&ENTER_FAILURES)
+                            {
+                                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), occurrences, "Error in on_enter_state for state {:?}", requested_new_state);
+                            }
 
                             fence_internal_error(
                                 &data,

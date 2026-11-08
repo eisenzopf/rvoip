@@ -749,10 +749,19 @@ fn lifecycle_timeout_fire_paths_use_exact_dispatch() {
 
     let media_hangup = compact(function_source(
         &source,
-        "async fn hangup_exact_with_reason",
+        "async fn hangup_exact_with_reason(",
     ));
     assert!(
-        media_hangup.contains("coordinator.hangup_serialized_exact(&retained_handle,reason)"),
+        media_hangup.contains(".hangup_exact_with_reason_reporting(handle,reason.into(),None)"),
+        "automatic hangup must join the same reporting hangup operation as public hangup"
+    );
+    let reporting_hangup = compact(function_source(
+        &source,
+        "async fn hangup_exact_with_reason_reporting(",
+    ));
+    assert!(
+        reporting_hangup
+            .contains("coordinator.hangup_serialized_exact(&retained_handle,reason,dispatched)"),
         "automatic and public hangup must share the retained exact serialized operation"
     );
     assert!(
@@ -1458,7 +1467,7 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         &strip_cfg_test_items(&lifecycle),
         "pub(crate) fn publish_exact",
     ));
-    assert!(publish_exact.contains("offer_to_control_owner(&event,Some(lifecycle_handle))"));
+    assert!(publish_exact.contains("offer_to_control_owner(event,Some(lifecycle_handle))"));
     assert!(publish_exact.contains("sanitize_session_api_observation(&event)"));
     assert!(publish_exact.contains("record_event_exact(lifecycle_handle,&event)"));
     assert!(lifecycle.contains("pub(crate) fn watcher_exact("));
@@ -1468,9 +1477,7 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         "pub(crate) fn publish_terminal_best_effort_exact",
     ));
     assert!(publish_terminal_exact.contains("record_event_exact(lifecycle_handle,&event)"));
-    assert!(
-        publish_terminal_exact.contains("offer_to_control_owner(&event,Some(lifecycle_handle))")
-    );
+    assert!(publish_terminal_exact.contains("offer_to_control_owner(event,Some(lifecycle_handle))"));
 
     let stream_path = manifest.join("src/api/stream_peer.rs");
     let stream = fs::read_to_string(&stream_path)
