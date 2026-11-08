@@ -1436,6 +1436,26 @@ async fn in_process_ai_bridge_on_the_callers_media_lane_matches_the_unplaced_bri
     }
 }
 
+/// With lane-inline delivery, the same AI bridge on the caller's lane hands
+/// caller audio to the AI and AI audio to the caller from the graphs' actors
+/// on the lane, and the caller still hears exactly what it hears with no
+/// lane, through the same hold, resume and end.
+#[tokio::test]
+async fn in_process_ai_bridge_inline_on_the_callers_lane_matches_the_unplaced_bridge() {
+    let lane = TestLane::start();
+    let reference = run_caller_to_echo_ai_bridge(false).await;
+    assert_eq!(reference.len(), 12);
+    for gated_input in [false, true] {
+        let inline = run_caller_to_echo_ai_bridge_on(
+            gated_input,
+            Some(&lane),
+            Config::default().with_lane_inline_graph_delivery(true),
+        )
+        .await;
+        assert_eq!(inline, reference, "gated_input={gated_input}");
+    }
+}
+
 /// Each graph of a bridge runs where its streams' published lanes put it:
 /// on the source's lane when the source hosts reader graphs, on the
 /// target's lane when only the target has one and hosts writer graphs, and

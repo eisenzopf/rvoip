@@ -1439,6 +1439,38 @@ struct DirectionalGraphSource {
     /// The media lane this source's graph runs on, if any (see
     /// [`media_graph_placement`]).
     placement: Option<tokio::runtime::Handle>,
+    /// Whether a placed graph delivers inline (see
+    /// [`bridge_lane_inline_delivery`]).
+    lane_inline: bool,
+}
+
+/// Whether a bridge between streams with these lanes delivers inline on the
+/// lane its graphs run on: only with
+/// [`crate::Config::lane_inline_graph_delivery`], and only when exactly one
+/// side publishes a lane (a SIP leg bridged to an in-process AI, WebRTC or
+/// WebSocket leg). Bridges between two laned legs keep the queued path.
+fn bridge_lane_inline_delivery(
+    enabled: bool,
+    a_lane: Option<&crate::stream::MediaLanePlacement>,
+    b_lane: Option<&crate::stream::MediaLanePlacement>,
+) -> bool {
+    enabled && a_lane.is_some() != b_lane.is_some()
+}
+
+/// Start a directional bridge graph where [`media_graph_placement`] put it.
+fn start_directional_media_graph(
+    receiver: tokio::sync::mpsc::Receiver<crate::stream::MediaFrame>,
+    codec: crate::capability::CodecInfo,
+    policy: MediaGraphPolicy,
+    placement: Option<tokio::runtime::Handle>,
+    lane_inline: bool,
+) -> Result<MediaGraphHandle> {
+    match placement {
+        Some(lane) if lane_inline => {
+            crate::media_graph::start_media_graph_lane_inline(receiver, codec, policy, &lane)
+        }
+        placement => start_media_graph_on(receiver, codec, policy, placement.as_ref()),
+    }
 }
 
 /// Where the media graph that reads from a stream with `source_lane` and
@@ -12761,6 +12793,11 @@ impl Orchestrator {
         );
         let a_lane = a_stream.media_lane();
         let b_lane = b_stream.media_lane();
+        let lane_inline = bridge_lane_inline_delivery(
+            self.config.lane_inline_graph_delivery,
+            a_lane.as_ref(),
+            b_lane.as_ref(),
+        );
         let mut sources = Vec::with_capacity(2);
         if media_plan.a_to_b() {
             sources.push(DirectionalGraphSource {
@@ -12770,6 +12807,7 @@ impl Orchestrator {
                 stream: a_stream,
                 policy: bridge_policy.clone(),
                 placement: media_graph_placement(a_lane.clone(), b_lane.clone()),
+                lane_inline,
             });
         }
         if media_plan.b_to_a() {
@@ -12780,6 +12818,7 @@ impl Orchestrator {
                 stream: b_stream,
                 policy: bridge_policy,
                 placement: media_graph_placement(b_lane, a_lane),
+                lane_inline,
             });
         }
         sources.sort_by(|left, right| left.connection_id.cmp(&right.connection_id));
@@ -12879,9 +12918,11 @@ impl Orchestrator {
             let codec = reserved_source.source.codec;
             let policy = reserved_source.source.policy;
             let placement = reserved_source.source.placement;
+            let lane_inline = reserved_source.source.lane_inline;
             let receiver = reserved_source.receiver.commit();
-            let graph = start_media_graph_on(receiver, codec, policy, placement.as_ref())
-                .expect("directional graph codec was validated before receiver commit");
+            let graph =
+                start_directional_media_graph(receiver, codec, policy, placement, lane_inline)
+                    .expect("directional graph codec was validated before receiver commit");
             self.media_graphs
                 .insert(connection_id.clone(), graph.clone());
             if let Err(error) = self.supervise_media_activity(
@@ -14973,6 +15014,28 @@ mod media_graph_placement_tests {
 
     fn placed_on(placement: Option<tokio::runtime::Handle>) -> Option<tokio::runtime::Id> {
         placement.map(|handle| handle.id())
+    }
+
+    #[test]
+    fn lane_inline_delivery_needs_the_switch_and_exactly_one_laned_side() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("lane");
+        let lane = MediaLanePlacement::new(runtime.handle().clone())
+            .with_reader_graphs(true)
+            .with_writer_graphs(true);
+        assert!(bridge_lane_inline_delivery(true, Some(&lane), None));
+        assert!(bridge_lane_inline_delivery(true, None, Some(&lane)));
+        assert!(!bridge_lane_inline_delivery(true, Some(&lane), Some(&lane)));
+        assert!(!bridge_lane_inline_delivery(true, None, None));
+        assert!(!bridge_lane_inline_delivery(false, Some(&lane), None));
+        assert!(!bridge_lane_inline_delivery(false, None, Some(&lane)));
+        assert!(!crate::Config::default().lane_inline_graph_delivery);
+        assert!(
+            crate::Config::default()
+                .with_lane_inline_graph_delivery(true)
+                .lane_inline_graph_delivery
+        );
     }
 
     #[test]

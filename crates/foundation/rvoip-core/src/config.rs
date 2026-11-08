@@ -86,6 +86,31 @@ pub struct Config {
     /// P6 — `Event::CapacityReport` emit cadence. None disables the
     /// scheduler entirely.
     pub capacity_report_interval: Option<Duration>,
+    /// Deliver a bridge's media inline on the media lane its graphs run on.
+    ///
+    /// Applies to a bridge where exactly one side publishes a media lane
+    /// (see `MediaStream::media_lane`), such as a SIP leg bridged to an
+    /// in-process AI, and only to the graphs placed on that lane. Their actor
+    /// then hands each routed frame to its target itself while the route's
+    /// queue is idle, and the route's delivery task only drains a backlog,
+    /// saving a task wake-up and a queue hop per frame. Targets receive the
+    /// same frames, in the same order, under the same peer-switch, cutover
+    /// and gate fences. Combined with `rvoip_harness::InProcessAiConfig::
+    /// gated_input`, caller audio reaches the AI session from the SIP leg's
+    /// lane without any task hop.
+    ///
+    /// Bridges where both or neither side publishes a lane, and listener,
+    /// broadcast and recording graphs, keep the queued delivery. Default
+    /// `false`; it has no effect when no stream publishes a lane.
+    pub lane_inline_graph_delivery: bool,
+}
+
+impl Config {
+    /// Set [`Self::lane_inline_graph_delivery`].
+    pub fn with_lane_inline_graph_delivery(mut self, enabled: bool) -> Self {
+        self.lane_inline_graph_delivery = enabled;
+        self
+    }
 }
 
 impl Default for Config {
@@ -103,6 +128,7 @@ impl Default for Config {
             bridge_stream_deadline: Duration::from_secs(5),
             outbound_preparation_timeout: Duration::from_secs(30),
             capacity_report_interval: Some(Duration::from_secs(30)),
+            lane_inline_graph_delivery: false,
         }
     }
 }
