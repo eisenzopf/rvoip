@@ -1,15 +1,23 @@
 use super::SrtpAuthenticationAlgorithm;
 use crate::error::Error;
 use crate::Result;
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
+use sha1::digest::generic_array::GenericArray;
 
-// Define type for HMAC-SHA1
-type HmacSha1 = Hmac<Sha1>;
+/// SHA-1's block length in bytes.
+const SHA1_BLOCK: usize = 64;
+
+/// SHA-1's initial hash value (FIPS 180-4, 5.3.1).
+const SHA1_INITIAL_STATE: [u32; 5] = [
+    0x6745_2301,
+    0xefcd_ab89,
+    0x98ba_dcfe,
+    0x1032_5476,
+    0xc3d2_e1f0,
+];
 
 /// An HMAC-SHA1 tag truncated to the suite's tag length, on the stack.
 pub(crate) struct HmacSha1Tag {
-    bytes: hmac::digest::Output<HmacSha1>,
+    bytes: [u8; 20],
     len: usize,
 }
 
@@ -19,27 +27,119 @@ impl HmacSha1Tag {
     }
 }
 
-/// An HMAC-SHA1 state already keyed (the inner and outer pads absorbed),
-/// without a block buffer.
-pub(crate) type HmacSha1Core = hmac::HmacCore<Sha1>;
+/// An HMAC-SHA1 key absorbed once (RFC 2104): the SHA-1 states after the
+/// inner (`key ^ ipad`) and outer (`key ^ opad`) blocks.
+#[derive(Clone)]
+pub(crate) struct HmacSha1Core {
+    inner: [u32; 5],
+    outer: [u32; 5],
+}
 
 /// The key of one HMAC-SHA1 tag.
 #[derive(Clone, Copy)]
 pub(crate) enum HmacSha1Key<'a> {
-    /// The raw authentication key, keyed for this tag (two SHA-1
+    /// The raw authentication key, absorbed for this tag (two extra SHA-1
     /// compressions for the pads).
     Raw(&'a [u8]),
-    /// A state keyed once with the authentication key (each RTP session key
-    /// set keeps one in its [`SrtpAuthenticator`], hot call state one per
-    /// SRTP direction); the tag is the same.
+    /// A key absorbed once (each RTP session key set keeps one in its
+    /// [`SrtpAuthenticator`], hot call state one per SRTP direction); the tag
+    /// is the same.
     Keyed(&'a HmacSha1Core),
 }
 
-/// Key an HMAC-SHA1 state with `key` once, for [`HmacSha1Key::Keyed`].
+/// The SHA-1 compression of `blocks` into `state`: the only place SRTP runs
+/// SHA-1 (`sha1`'s SHA-NI or portable compression).
+///
+/// Deliberately kept out of line, and kept to the compression alone. The
+/// SHA extensions are legacy-SSE instructions (`sha1rnds4`,
+/// `sha1msg1`/`sha1msg2` and `sha1nexte` have no VEX encoding). Executed
+/// while a YMM/ZMM register's upper half is dirty, every legacy-SSE
+/// instruction takes an SSE/AVX transition assist (~200 cycles), which made
+/// SRTP several times slower when this code shared a function with AVX code
+/// (inlined into the packet paths, or into the HMAC's own key and state
+/// copies, which a build for an AVX target vectorises with YMM/ZMM moves).
+/// In its own frame the compression runs with clean upper state: a caller
+/// that used AVX executes `vzeroupper` before the call. The invariant (no
+/// other SRTP function computes SHA-1) is checked by
+/// `every_srtp_sha1_computation_runs_in_the_out_of_line_compression`. A
+/// regression shows as a non-zero `assists.sse_avx_mix` perf event
+/// (`cpu/event=0xc1,umask=0x10/` on Golden Cove and Redwood Cove), or as a
+/// function of the final binary that names YMM/ZMM registers ahead of a
+/// SHA-1 instruction with no `vzeroupper` between them.
+#[inline(never)]
+fn sha1_compress(state: &mut [u32; 5], blocks: &[[u8; SHA1_BLOCK]]) {
+    for block in blocks {
+        sha1::compress(
+            state,
+            std::slice::from_ref(GenericArray::from_slice(block.as_slice())),
+        );
+    }
+}
+
+/// Finish a SHA-1 hash that has absorbed `absorbed` bytes into `state` (a
+/// whole number of blocks): hash `data` followed by `trailer`, pad, and
+/// return the digest. `trailer` is at most one block (the SRTP ROC, or
+/// nothing).
+fn sha1_finish(
+    state: &mut [u32; 5],
+    absorbed: usize,
+    data: &[u8],
+    trailer: &[u8],
+) -> Result<[u8; 20]> {
+    if trailer.len() > SHA1_BLOCK {
+        return Err(Error::SrtpError(format!(
+            "HMAC-SHA1 trailer of {} bytes exceeds one block",
+            trailer.len()
+        )));
+    }
+    let (blocks, rest) = data.as_chunks::<SHA1_BLOCK>();
+    sha1_compress(state, blocks);
+    // `rest` (< 64) + `trailer` (<= 64) + 0x80 + the 64-bit length fit in
+    // three blocks.
+    let mut tail = [[0u8; SHA1_BLOCK]; 3];
+    let tail_bytes = tail.as_flattened_mut();
+    tail_bytes[..rest.len()].copy_from_slice(rest);
+    let mut filled = rest.len();
+    tail_bytes[filled..filled + trailer.len()].copy_from_slice(trailer);
+    filled += trailer.len();
+    tail_bytes[filled] = 0x80;
+    let tail_blocks = (filled + 1 + 8).div_ceil(SHA1_BLOCK);
+    let bits = ((absorbed + data.len() + trailer.len()) as u64).wrapping_mul(8);
+    let end = tail_blocks * SHA1_BLOCK;
+    tail_bytes[end - 8..end].copy_from_slice(&bits.to_be_bytes());
+    sha1_compress(state, &tail[..tail_blocks]);
+    let mut digest = [0u8; 20];
+    for (bytes, word) in digest.chunks_exact_mut(4).zip(state.iter()) {
+        bytes.copy_from_slice(&word.to_be_bytes());
+    }
+    Ok(digest)
+}
+
+/// Absorb an HMAC-SHA1 key once, for [`HmacSha1Key::Keyed`]. Any key length
+/// is accepted (a key longer than a block is hashed first, RFC 2104).
 pub(crate) fn hmac_sha1_core(key: &[u8]) -> Result<HmacSha1Core> {
-    HmacSha1::new_from_slice(key)
-        .map(|mac| mac.decompose().0)
-        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))
+    let mut block = [0u8; SHA1_BLOCK];
+    if key.len() > SHA1_BLOCK {
+        let mut state = SHA1_INITIAL_STATE;
+        block[..20].copy_from_slice(&sha1_finish(&mut state, 0, key, &[])?);
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut pads = [[0u8; SHA1_BLOCK]; 2];
+    let [inner_pad, outer_pad] = &mut pads;
+    for ((inner, outer), byte) in inner_pad
+        .iter_mut()
+        .zip(outer_pad.iter_mut())
+        .zip(block.iter())
+    {
+        *inner = byte ^ 0x36;
+        *outer = byte ^ 0x5c;
+    }
+    let mut inner = SHA1_INITIAL_STATE;
+    sha1_compress(&mut inner, &pads[..1]);
+    let mut outer = SHA1_INITIAL_STATE;
+    sha1_compress(&mut outer, &pads[1..]);
+    Ok(HmacSha1Core { inner, outer })
 }
 
 /// HMAC-SHA1 over `data` followed by `trailer` (the ROC for SRTP, nothing
@@ -55,15 +155,11 @@ pub(crate) fn hmac_sha1_tag(
     hmac_sha1_tag_with(HmacSha1Key::Raw(key), data, trailer, tag_length)
 }
 
-/// HMAC-SHA1 over `data` followed by `trailer` (the ROC for SRTP, nothing
-/// for SRTCP), truncated to `tag_length`: the one computation behind every
-/// SRTP and SRTCP authentication tag this crate creates or verifies, from a
-/// raw key or from a keyed state (hot call state's packed SRTP block).
-///
-/// Deliberately kept out of line. The SHA extensions' compression is
-/// legacy-SSE code: inlined into the AVX code of a packet path (the socket
-/// owner's receive loop, the synchronous TX path, SRTCP) under fat LTO or
-/// PGO it causes SSE/AVX transition stalls that cost more than the call.
+/// HMAC-SHA1 (RFC 2104) over `data` followed by `trailer` (the ROC for
+/// SRTP, nothing for SRTCP), truncated to `tag_length`: the one computation
+/// behind every SRTP and SRTCP authentication tag this crate creates or
+/// verifies, from a raw key or from an absorbed key (hot call state's packed
+/// SRTP block). Its SHA-1 work runs in [`sha1_compress`], out of line.
 #[inline(never)]
 pub(crate) fn hmac_sha1_tag_with(
     key: HmacSha1Key<'_>,
@@ -71,25 +167,28 @@ pub(crate) fn hmac_sha1_tag_with(
     trailer: &[u8],
     tag_length: usize,
 ) -> Result<HmacSha1Tag> {
-    let mut mac = match key {
-        HmacSha1Key::Raw(key) => HmacSha1::new_from_slice(key)
-            .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?,
-        HmacSha1Key::Keyed(core) => HmacSha1::from_core(core.clone()),
-    };
-    mac.update(data);
-    mac.update(trailer);
-    let result = mac.finalize().into_bytes();
     // Guard against a misconfigured suite whose tag_length exceeds the
     // 20-byte HMAC-SHA1 output (a slice would otherwise panic).
-    if tag_length > result.len() {
+    if tag_length > 20 {
         return Err(Error::SrtpError(format!(
             "auth tag_length {} exceeds HMAC-SHA1 output {}",
-            tag_length,
-            result.len()
+            tag_length, 20
         )));
     }
+    let raw;
+    let core = match key {
+        HmacSha1Key::Raw(key) => {
+            raw = hmac_sha1_core(key)?;
+            &raw
+        }
+        HmacSha1Key::Keyed(core) => core,
+    };
+    let mut inner = core.inner;
+    let inner_digest = sha1_finish(&mut inner, SHA1_BLOCK, data, trailer)?;
+    let mut outer = core.outer;
+    let bytes = sha1_finish(&mut outer, SHA1_BLOCK, &inner_digest, &[])?;
     Ok(HmacSha1Tag {
-        bytes: result,
+        bytes,
         len: tag_length,
     })
 }
@@ -428,6 +527,146 @@ impl SrtpReplayProtection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hmac::{Hmac, Mac};
+
+    /// The `hmac` crate's HMAC-SHA1: the reference the tags are checked
+    /// against.
+    type HmacSha1 = Hmac<sha1::Sha1>;
+
+    /// The HMAC-SHA1 over the out-of-line compression equals the `hmac`
+    /// crate's for random keys of every length up to past two blocks (a key
+    /// longer than a block is hashed first), every message length across
+    /// the first five block and padding boundaries plus long packets, with
+    /// and without the 4-byte ROC trailer, raw and absorbed, at every tag
+    /// length; a reused absorbed key carries no state between tags.
+    #[test]
+    fn hmac_sha1_matches_the_reference_for_every_key_and_message_length() {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let check = |key: &[u8], data: &[u8], trailer: &[u8]| {
+            let mut reference = HmacSha1::new_from_slice(key).unwrap();
+            reference.update(data);
+            reference.update(trailer);
+            let reference = reference.finalize().into_bytes();
+            let core = hmac_sha1_core(key).unwrap();
+            for tag_length in [4, 10, 20] {
+                let raw = hmac_sha1_tag(key, data, trailer, tag_length).unwrap();
+                let keyed =
+                    hmac_sha1_tag_with(HmacSha1Key::Keyed(&core), data, trailer, tag_length)
+                        .unwrap();
+                assert_eq!(
+                    raw.as_slice(),
+                    &reference[..tag_length],
+                    "{}/{}",
+                    key.len(),
+                    data.len()
+                );
+                assert_eq!(keyed.as_slice(), &reference[..tag_length]);
+            }
+        };
+        for key_length in 0..=140 {
+            let key: Vec<u8> = (0..key_length).map(|_| rng.gen()).collect();
+            let data: Vec<u8> = (0..rng.gen_range(0..300)).map(|_| rng.gen()).collect();
+            check(&key, &data, &rng.gen::<u32>().to_be_bytes());
+        }
+        let key: [u8; 20] = rng.gen();
+        for length in (0..=330).chain([1_172, 1_200, 1_500, 4_096]) {
+            let data: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
+            check(&key, &data, &[]);
+            check(&key, &data, &rng.gen::<u32>().to_be_bytes());
+        }
+        let trailer: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
+        check(&key, &key, &trailer);
+        assert!(
+            hmac_sha1_tag(&key, &[], &[0; 65], 10).is_err(),
+            "a trailer is at most one block"
+        );
+        assert!(
+            hmac_sha1_tag(&key, &[], &[], 21).is_err(),
+            "a tag is at most 20 bytes"
+        );
+    }
+
+    /// The SSE/AVX guard on [`sha1_compress`] holds only while every SHA-1
+    /// computation of the SRTP code runs in that one `#[inline(never)]`
+    /// function: SHA-1 inlined into a function that also uses AVX (a packet
+    /// path, or HMAC's own state copies) would bring the transition assists
+    /// back in builds for AVX targets. Scans the production code (test
+    /// modules may compute reference tags) of the SRTP module and of the
+    /// hot-state and owner SRTP receive paths.
+    #[test]
+    fn every_srtp_sha1_computation_runs_in_the_out_of_line_compression() {
+        const OUT_OF_LINE: [&str; 1] = ["sha1_compress"];
+        const SHA1_WORK: [&str; 8] = [
+            "sha1::compress",
+            "HmacSha1::",
+            "Hmac::<",
+            "Sha1::",
+            "Mac::new",
+            ".finalize(",
+            "from_core(",
+            "Digest",
+        ];
+        let sources = [
+            ("srtp/auth.rs", include_str!("auth.rs")),
+            ("srtp/crypto.rs", include_str!("crypto.rs")),
+            ("srtp/key_derivation.rs", include_str!("key_derivation.rs")),
+            ("srtp/mod.rs", include_str!("mod.rs")),
+            ("hot_state.rs", include_str!("../hot_state.rs")),
+            (
+                "transport/srtp_rx.rs",
+                include_str!("../transport/srtp_rx.rs"),
+            ),
+            ("session/inline.rs", include_str!("../session/inline.rs")),
+        ];
+        let mut computing = std::collections::BTreeSet::new();
+        let mut out_of_line = std::collections::BTreeSet::new();
+        for (path, source) in sources {
+            let production = source.split("#[cfg(test)]\nmod ").next().unwrap();
+            let mut function = "";
+            let mut previous = "";
+            for (number, line) in production.lines().enumerate() {
+                let code = line.trim();
+                if code.starts_with("//") {
+                    continue;
+                }
+                if let Some(signature) = code.split("fn ").nth(1).filter(|_| {
+                    code.starts_with("fn ")
+                        || code.starts_with("pub fn ")
+                        || code.starts_with("pub(crate) fn ")
+                        || code.starts_with("pub(super) fn ")
+                        || code.starts_with("const fn ")
+                        || code.starts_with("pub const fn ")
+                        || code.starts_with("pub(crate) const fn ")
+                        || code.starts_with("unsafe fn ")
+                }) {
+                    function = signature
+                        .split(|c: char| c == '(' || c == '<')
+                        .next()
+                        .unwrap_or("");
+                    if path == "srtp/auth.rs"
+                        && OUT_OF_LINE.contains(&function)
+                        && previous == "#[inline(never)]"
+                    {
+                        out_of_line.insert(function);
+                    }
+                }
+                if SHA1_WORK.iter().any(|token| code.contains(token)) {
+                    assert!(
+                        path == "srtp/auth.rs" && OUT_OF_LINE.contains(&function),
+                        "{path}:{}: SHA-1 computed in `{function}`, outside the \
+                         out-of-line HMAC functions: {code}",
+                        number + 1
+                    );
+                    computing.insert(function);
+                }
+                previous = code;
+            }
+        }
+        let all = OUT_OF_LINE.into_iter().collect();
+        assert_eq!(out_of_line, all, "the compression is #[inline(never)]");
+        assert_eq!(computing, all, "the scan still finds the SHA-1 work");
+    }
 
     /// A keyed state (hot call state) produces exactly the raw key's tags
     /// and errors, for random keys and data, at every tag length.
