@@ -23,7 +23,9 @@ workspace = true
 [features]
 default = ["sdp"]  # Include sdp in the default features
 generated-validation = []  # Heavy generated-message serialize/strict-parse verifier for tests/dev diagnostics
-lenient_parsing = []  # More lenient parsing for torture tests
+# Enables the standalone `torture_tests` target (release gate `test.rfc4475`);
+# parsing is the same with or without it.
+lenient_parsing = []
 sdp = []  # Session Description Protocol support
 
 [dependencies]
@@ -49,7 +51,7 @@ criterion.workspace = true
 # Integration tests configuration
 [[test]]
 name = "torture_tests"
-path = "tests/rfc_compliance/torture_test.rs"
+path = "tests/torture_tests.rs"
 required-features = ["lenient_parsing"]
 
 [[test]]
