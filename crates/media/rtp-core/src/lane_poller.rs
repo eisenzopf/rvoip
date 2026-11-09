@@ -506,6 +506,9 @@ async fn run_poller_with(
                 crate::lane_table::enter(&mut table, tick_waker.as_ref().unwrap_or(cx.waker()));
             let has_table = table_guard.is_some();
             let mut table_fires = 0u64;
+            // Receive entries' handler calls in this pass (work for the tick
+            // and the idle check).
+            let mut table_rx = 0u64;
             // The tick's due-check reading, the last of the pass.
             let mut last_reading: Option<tokio::time::Instant> = None;
             while accepting {
@@ -558,13 +561,21 @@ async fn run_poller_with(
                 // round woke the lane clock by (the entries a hosted paced
                 // future would have been woken for). After the woken futures:
                 // a supervisor that saw a cancellation in this round has
-                // already retired its entry.
+                // already retired its entry. Before the fires, the receive
+                // entries whose wakers fired (I/O before timers, as hosted
+                // futures woken by readiness are polled before those the
+                // clock woke).
                 let mut table_returned = false;
                 if let (true, Some(now)) = (has_table, round_now) {
-                    if let Some(report) =
-                        crate::lane_table::with_current(|table| table.fire_due(now))
-                    {
+                    if let Some(report) = crate::lane_table::with_current(|table| {
+                        let ready = table.serve_ready();
+                        let mut report = table.fire_due(now);
+                        report.returned += ready.returned;
+                        report.rx_calls += ready.rx_calls;
+                        report
+                    }) {
                         table_fires += report.fires;
+                        table_rx += report.rx_calls;
                         table_returned = report.returned > 0;
                     }
                 }
@@ -625,15 +636,18 @@ async fn run_poller_with(
                 // the lane table fired nothing.
                 batch.pass_end(
                     table_fires == 0
+                        && table_rx == 0
                         && (loops.is_empty() || left == Some(LANE_SOCKET_POLLS_PER_WAKEUP)),
                 );
             }
             // Lane table: entries a fire budget left due keep the lane going,
-            // and the table's entries count as hosted work for the tick.
+            // and the table's entries count as hosted work for the tick. So
+            // do receive entries still marked ready (a service budget left
+            // them, or a wake marked them during the pass).
             let (table_carried, table_entries) = if has_table {
                 crate::lane_table::with_current(|table| {
                     table.end_pass();
-                    (table.carried() > 0, table.len())
+                    (table.carried() > 0 || table.rx_pending(), table.len())
                 })
                 .unwrap_or((false, 0))
             } else {
@@ -660,7 +674,9 @@ async fn run_poller_with(
             };
             let polled =
                 LANE_SOCKET_POLLS_PER_WAKEUP - left.unwrap_or(LANE_SOCKET_POLLS_PER_WAKEUP);
-            tick_counters.pass(polled > 0 || datagrams > 0 || timer_wakes > 0 || table_fires > 0);
+            tick_counters.pass(
+                polled > 0 || datagrams > 0 || timer_wakes > 0 || table_fires > 0 || table_rx > 0,
+            );
             // With the pass clock the tick's due-check reading, taken after
             // the last poll of the pass, also ends it.
             let ended = match (pass_clock, last_reading) {
@@ -680,7 +696,9 @@ async fn run_poller_with(
                     if lane_timer {
                         let clock_ready = clock.poll_timer(cx).is_ready();
                         let table_ready = has_table && table_timer_ready(cx);
-                        if clock_ready || table_ready {
+                        // A receive entry still marked ready is work the
+                        // lane must not park on.
+                        if clock_ready || table_ready || table_carried {
                             cx.waker().wake_by_ref();
                         }
                     }

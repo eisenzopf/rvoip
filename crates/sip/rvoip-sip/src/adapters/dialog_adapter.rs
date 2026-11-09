@@ -326,6 +326,22 @@ impl Drop for OutgoingByeWaitOwner {
     }
 }
 
+/// How an exact local-BYE confirmation wait ended without a wire failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutgoingByeWait {
+    /// A 2xx, or an exact 481 (RFC 3261 §15.1.1), answered the latest BYE.
+    Confirmed,
+    /// Exact cleanup of the lifetime removed the BYE receipt before any
+    /// final response was recorded for it.
+    CleanupInterrupted,
+}
+
+/// The error a caller sees for [`OutgoingByeWait::CleanupInterrupted`] when
+/// nothing else proves how the lifetime ended.
+pub(crate) fn outgoing_bye_cleanup_interrupted_error() -> SessionError {
+    SessionError::Timeout("SIP BYE confirmation ended during exact local cleanup".to_string())
+}
+
 enum OutgoingByeGenerationWake {
     UseExactOutcome(
         rvoip_sip_dialog::transaction::TransactionResult<Option<ClientTransactionOutcome>>,
@@ -4080,11 +4096,27 @@ impl DialogAdapter {
     /// as an already-terminated peer dialog and therefore a graceful BYE
     /// result. A 401/407 is not terminal: the generic request-auth flow may
     /// install one newer transaction, which this loop follows. Every other
-    /// non-2xx, timeout, or unobservable transaction fails closed.
+    /// non-2xx, timeout, or unobservable transaction fails closed, and so
+    /// does a wait that exact cleanup interrupts.
     pub(crate) async fn wait_for_outgoing_bye_final_response_exact(
         &self,
         handle: &SessionRegistryHandle,
     ) -> Result<()> {
+        match self.wait_for_outgoing_bye_outcome_exact(handle).await? {
+            OutgoingByeWait::Confirmed => Ok(()),
+            OutgoingByeWait::CleanupInterrupted => Err(outgoing_bye_cleanup_interrupted_error()),
+        }
+    }
+
+    /// [`Self::wait_for_outgoing_bye_final_response_exact`], except that a
+    /// wait which exact cleanup of the lifetime interrupts before any final
+    /// response was recorded is reported as
+    /// [`OutgoingByeWait::CleanupInterrupted`] instead of an error, so the
+    /// caller can tell it from a wire failure.
+    pub(crate) async fn wait_for_outgoing_bye_outcome_exact(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<OutgoingByeWait> {
         let deadline = tokio::time::Instant::now() + self.non_invite_transaction_timeout;
         let mut after_generation = 0;
         let mut last_transaction = None;
@@ -4157,9 +4189,7 @@ impl DialogAdapter {
                         }
                         OutgoingByeGenerationWake::RetryCurrentGeneration => continue,
                         OutgoingByeGenerationWake::CleanupInterrupted => {
-                            return Err(SessionError::Timeout(
-                                "SIP BYE confirmation ended during exact local cleanup".to_string(),
-                            ));
+                            return Ok(OutgoingByeWait::CleanupInterrupted);
                         }
                     }
                 }
@@ -4172,7 +4202,7 @@ impl DialogAdapter {
                     match classify_outgoing_bye_final_response(response.status_code()) {
                         OutgoingByeFinalDisposition::Confirmed => {
                             self.clear_outgoing_bye_transaction(&transaction);
-                            return Ok(());
+                            return Ok(OutgoingByeWait::Confirmed);
                         }
                         OutgoingByeFinalDisposition::PeerAlreadyTerminated => {
                             tracing::debug!(
@@ -4180,7 +4210,7 @@ impl DialogAdapter {
                                 "SIP BYE peer already terminated the exact dialog"
                             );
                             self.clear_outgoing_bye_transaction(&transaction);
-                            return Ok(());
+                            return Ok(OutgoingByeWait::Confirmed);
                         }
                         OutgoingByeFinalDisposition::AuthenticationChallenge => {
                             after_generation = transaction.generation;

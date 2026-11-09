@@ -347,6 +347,33 @@ use crate::packet::RtpPacket;
 use crate::traits::RtpEvent;
 use crate::Result;
 
+/// A graduated receive loop as a lane-table entry.
+mod callback_rx;
+/// The receive loop's call state and per-datagram step.
+mod rx_core;
+use rx_core::{RxConfig, RxCore};
+
+#[cfg(test)]
+thread_local! {
+    /// Tests: reads of a receive socket that found it empty (`WouldBlock`
+    /// from a read the receive loop made without awaiting readiness), on
+    /// this thread.
+    static EMPTY_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// A receive loop's read found its socket empty (counted for tests only).
+#[inline(always)]
+fn note_empty_read() {
+    #[cfg(test)]
+    EMPTY_READS.with(|reads| reads.set(reads.get() + 1));
+}
+
+/// Tests: [`note_empty_read`]'s count on this thread.
+#[cfg(test)]
+fn empty_reads_on_this_thread() -> u64 {
+    EMPTY_READS.with(std::cell::Cell::get)
+}
+
 /// Executor v2 state owned by the socket's receive loop: the session's
 /// inline ingress, the one owner timer that serves every inline deadline
 /// (reorder hold, decoded pacing, a consumer's playout clock), and the
@@ -360,6 +387,10 @@ struct InlineRx {
     /// Receives taken back-to-back without parking on the socket.
     drained: usize,
     counters: InlineOwnerCounters,
+    /// The loop graduated into its lane's table, which files the owner
+    /// deadline itself; the owner timer keeps its bookkeeping (and its
+    /// counters) without a runtime timer.
+    callback: bool,
 }
 
 /// What woke the inline receive loop.
@@ -376,16 +407,51 @@ impl InlineRx {
             timer: OwnerTimer::new(),
             drained: 0,
             counters: InlineOwnerCounters::new(),
+            callback: false,
         }
     }
 
     /// Point the owner timer at the earliest inline deadline. The runtime
     /// timer is re-registered only when that deadline moved earlier or the
     /// timer fired (see `OwnerTimer`).
+    ///
+    /// On a lane-table entry: the same bookkeeping, without the runtime
+    /// timer (the table files [`OwnerTimer::deadline`] on its wheel).
     fn rearm(&mut self, now: Instant) {
         let deadline = self.ingress.next_deadline(now);
-        let outcome = self.timer.arm(deadline, now);
+        let outcome = if self.callback {
+            self.timer.note(deadline, now)
+        } else {
+            self.timer.arm(deadline, now)
+        };
         self.counters.armed(outcome);
+    }
+
+    /// The loop's state moves into its lane's table.
+    fn graduate(&mut self) {
+        self.callback = true;
+        self.timer.unback();
+    }
+
+    /// The loop's state is back in its async loop, which waits on the owner
+    /// timer again.
+    fn degrade(&mut self, now: Instant) {
+        self.callback = false;
+        let outcome = self.timer.reback(now);
+        self.counters.armed(outcome);
+    }
+
+    /// What [`Self::next_wake`] does after its budget yield, for an entry
+    /// served again after the drain budget stopped it: whether a due owner
+    /// deadline was served.
+    fn resume_after_yield(&mut self) -> bool {
+        self.drained = 0;
+        self.counters.budget_yield();
+        if self.timer.is_due(crate::media_clock::now_std()) {
+            self.on_timer();
+            return true;
+        }
+        false
     }
 
     fn on_timer(&mut self) {
@@ -425,7 +491,7 @@ impl InlineRx {
                 self.drained += 1;
                 return InlineWake::Received(Ok(received));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => note_empty_read(),
             Err(error) => {
                 self.drained = 0;
                 return InlineWake::Received(Err(error));
@@ -463,6 +529,106 @@ fn adopt_inline_ingress(
     if inline.is_none() && slot.is_dirty() {
         if let Some(ingress) = slot.take() {
             *inline = Some(InlineRx::new(ingress));
+        }
+    }
+}
+
+/// The receive loop's inputs besides its call state ([`RxConfig`]).
+/// Built by `UdpRtpTransport::start_receiver` (and by tests).
+struct ReceiveLoop {
+    config: RxConfig,
+    socket: Arc<UdpSocket>,
+    /// The loop may move into its lane's table
+    /// ([`MediaExecutorConfig::callback_rx_kernel`]).
+    ///
+    /// [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
+    callback_kernel: bool,
+    /// A graduated loop reads on its lane's readiness reports
+    /// ([`MediaExecutorConfig::lane_rx_readiness`]; needs `callback_kernel`).
+    ///
+    /// [`MediaExecutorConfig::lane_rx_readiness`]: crate::executor::MediaExecutorConfig::lane_rx_readiness
+    rx_readiness: bool,
+}
+
+/// The RTP receive loop of a transport. Every received datagram goes
+/// through [`RxCore::on_datagram`] (the loop body, inlined here).
+///
+/// With [`MediaExecutorConfig::callback_rx_kernel`], once the loop owns its
+/// call state (the inline ingress is adopted) and runs on a lane with a
+/// table, it *graduates*: its state moves into a lane-table entry that the
+/// lane serves from its socket's readiness and its owner deadline, and this
+/// future only waits for the entry to come back (it stopped, or needs this
+/// async path for a receive error). With the switch off nothing graduates
+/// and this is the loop as it was.
+///
+/// The future captures its inputs once (the call state is not stored twice,
+/// as the argument and as the core), places the core on its first poll, on
+/// the thread that polls it, and boxes the graduation future, so its state
+/// (a whole [`callback_rx::RxCall`]) is not part of this future's layout.
+///
+/// [`MediaExecutorConfig::callback_rx_kernel`]: crate::executor::MediaExecutorConfig::callback_rx_kernel
+fn receive_loop(parts: ReceiveLoop) -> impl std::future::Future<Output = ()> + Send + 'static {
+    let ReceiveLoop {
+        config,
+        socket: rtp_socket,
+        callback_kernel,
+        rx_readiness,
+    } = parts;
+    let mut core = RxCore::unplaced(config);
+    async move {
+        core.place();
+        debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
+        // Whether this loop may still graduate (cleared for good when its
+        // lane has no table).
+        let mut graduate = callback_kernel;
+        loop {
+            // Check if we should continue running (hot call state: only when
+            // the doorbell rang since the last check).
+            if core.stopped() {
+                break;
+            }
+
+            // Graduate between two waits, where the loop holds no datagram.
+            if graduate && core.graduation_ready() {
+                let call = callback_rx::RxCall::new(core, Arc::clone(&rtp_socket), rx_readiness);
+                match Box::pin(callback_rx::run_on_lane(call)).await {
+                    // The entry stopped (the transport's `active` check),
+                    // panicked or lost its lane: the loop ends.
+                    callback_rx::Graduated::Ended => return,
+                    callback_rx::Graduated::Back { call, refused } => {
+                        let (back, error) = (*call).into_loop();
+                        core = back;
+                        if refused {
+                            graduate = false;
+                        }
+                        if let Some(e) = error {
+                            core.on_error(e);
+                            // Short delay before retrying
+                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Receive packet
+            let received = match core.inline.as_mut() {
+                // The drain budget plus the one owner timer that serves every
+                // inline deadline of the call.
+                Some(rx) => match rx.next_wake(&rtp_socket, &mut core.recv_storage).await {
+                    InlineWake::Received(received) => received,
+                    InlineWake::Timer => continue,
+                },
+                None => rtp_socket.recv_from(&mut core.recv_storage).await,
+            };
+            match received {
+                Ok((size, addr)) => core.on_datagram(size, addr),
+                Err(e) => {
+                    core.on_error(e);
+                    // Short delay before retrying
+                    tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                }
+            }
         }
     }
 }
@@ -1200,533 +1366,56 @@ impl UdpRtpTransport {
 
         // Start RTP receiver
         let rtp_socket = self.rtp_socket.clone();
-        let event_tx = self.event_tx.clone();
-        let active_state = self.active.clone();
-        let srtp_recv = self.srtp_recv.clone();
-        let secure_media_required = self.secure_media_required.clone();
-        let dtmf_seen = self.dtmf_seen.clone();
-        let symmetric_rtp_policy = self.symmetric_rtp_policy;
-        let symmetric_rtp_counters = self.symmetric_rtp_counters.clone();
-        let symmetric_rtp_latched = self.symmetric_rtp_latched.clone();
-        let symmetric_rtp_generation = self.symmetric_rtp_generation.clone();
-        let remote_rtp_addr = self.remote_rtp_addr.clone();
-        let remote_rtcp_addr = self.remote_rtcp_addr.clone();
-        let rtcp_mux = self.rtcp_mux.clone();
-        let latched_rtp_ssrc = self.latched_rtp_ssrc.clone();
-        // Hot call state: the doorbell gates the per-datagram control loads.
-        let hot_doorbell = self.hot_doorbell.clone();
-        #[cfg(feature = "dtls-webrtc")]
-        let dtls_tx = self.dtls_tx.clone();
-        let srtp_diagnostics = srtp_diagnostics_enabled();
-        let rtp_diagnostics = rtp_diagnostics_enabled();
-        let local_rtp_addr = rtp_socket.local_addr().ok();
-        let recv_buffer_size = self.config.buffer_config.recv_buffer_size;
-        let inline_slot = self.inline_ingress.clone();
         // Executor v2: the loop can adopt an inline ingress, and with the lane
         // poller it runs inside its lane's poller task (one task wakeup
         // serves every socket that became ready together).
         let on_lane = crate::executor::lane_poller_enabled();
-        // The loop owns the inbound SRTP context when it is that context's
-        // only datagram user: no separate RTCP socket, whose receive task
-        // unprotects SRTCP with the same context. A transport only ever loses
-        // its RTCP socket, so this cannot become wrong later.
-        let owner_srtp = crate::executor::owner_srtp_enabled() && self.rtcp_socket.load().is_none();
-
+        let config = RxConfig {
+            event_tx: self.event_tx.clone(),
+            active_state: self.active.clone(),
+            srtp_recv: self.srtp_recv.clone(),
+            secure_media_required: self.secure_media_required.clone(),
+            dtmf_seen: self.dtmf_seen.clone(),
+            symmetric_rtp_policy: self.symmetric_rtp_policy,
+            symmetric_rtp_counters: self.symmetric_rtp_counters.clone(),
+            symmetric_rtp_latched: self.symmetric_rtp_latched.clone(),
+            symmetric_rtp_generation: self.symmetric_rtp_generation.clone(),
+            remote_rtp_addr: self.remote_rtp_addr.clone(),
+            remote_rtcp_addr: self.remote_rtcp_addr.clone(),
+            rtcp_mux: self.rtcp_mux.clone(),
+            latched_rtp_ssrc: self.latched_rtp_ssrc.clone(),
+            // Hot call state: the doorbell gates the per-datagram control
+            // loads.
+            hot_doorbell: self.hot_doorbell.clone(),
+            #[cfg(feature = "dtls-webrtc")]
+            dtls_tx: self.dtls_tx.clone(),
+            srtp_diagnostics: srtp_diagnostics_enabled(),
+            rtp_diagnostics: rtp_diagnostics_enabled(),
+            local_rtp_addr: rtp_socket.local_addr().ok(),
+            recv_buffer_size: self.config.buffer_config.recv_buffer_size,
+            inline_slot: self.inline_ingress.clone(),
+            on_lane,
+            // The loop owns the inbound SRTP context when it is that
+            // context's only datagram user: no separate RTCP socket, whose
+            // receive task unprotects SRTCP with the same context. A
+            // transport only ever loses its RTCP socket, so this cannot
+            // become wrong later.
+            owner_srtp: crate::executor::owner_srtp_enabled() && self.rtcp_socket.load().is_none(),
+        };
+        // A v2 loop hosted on its lane poller may move into its lane's table
+        // once it owns its call state (read once per loop).
+        let callback_kernel = callback_rx::switch_for_loop(on_lane);
+        // Linux: a graduated loop reads on its lane epoll's readiness
+        // reports (read once per loop).
+        let rx_readiness = callback_rx::readiness_for_loop(callback_kernel);
         let rtp_receiver_future = memory_tracked(
             "rtp_core.udp_transport.rtp_receiver_task",
-            async move {
-                let mut first_inbound_rtp_logged = false;
-                let mut srtp_unprotect_failures = 0_u64;
-                let mut non_rtp_drop_count = 0_u64;
-                let mut malformed_rtp_drop_count = 0_u64;
-                let mut symmetric_rtp = SymmetricRtpLearner::new(symmetric_rtp_policy);
-                let mut observed_symmetric_generation =
-                    symmetric_rtp_generation.load(Ordering::Acquire);
-                debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
-                // Executor v2 (None under v1): see `InlineRx`.
-                let mut inline: Option<InlineRx> = None;
-                // The inbound SRTP context this loop holds (`None` under v1
-                // or without `owner_srtp`). Dropped with the loop, which gives
-                // the context back to the transport.
-                let mut owner_rx: Option<OwnerSrtpRx> =
-                    owner_srtp.then(|| OwnerSrtpRx::new(srtp_recv.clone()));
-                // Hot call state (`None` when off): the per-check doorbell
-                // snapshots and the symmetric-RTP learner, in the lane's slab
-                // when this loop runs on a dedicated current-thread lane.
-                // Placed on the first poll, on the thread that polls the loop.
-                let mut rx_hot: Option<RxHot> = hot_doorbell
-                    .as_ref()
-                    .map(|_| RxHot::new(symmetric_rtp_policy));
-                // One receive buffer serves the whole loop. The inline path
-                // authenticates and decrypts RTP in place in it; on the v1
-                // path every event copies the bytes it keeps, and each
-                // iteration reads only the `size` bytes recv_from returned.
-                let mut storage = vec![0u8; recv_buffer_size];
-
-                loop {
-                    // Check if we should continue running (hot call state:
-                    // only when the doorbell rang since the last check).
-                    let check_active = match (rx_hot.as_mut(), hot_doorbell.as_deref()) {
-                        (Some(hot), Some(doorbell)) => hot.gate_top(doorbell.read()),
-                        _ => true,
-                    };
-                    if check_active && !active_state.load(Ordering::Acquire) {
-                        break;
-                    }
-
-                    let buffer: &mut [u8] = &mut storage;
-
-                    // Receive packet
-                    let received = match inline.as_mut() {
-                        // The drain budget plus the one owner timer that
-                        // serves every inline deadline of the call.
-                        Some(rx) => match rx.next_wake(&rtp_socket, buffer).await {
-                            InlineWake::Received(received) => received,
-                            InlineWake::Timer => continue,
-                        },
-                        None => rtp_socket.recv_from(buffer).await,
-                    };
-                    match received {
-                        Ok((size, addr)) => {
-                            if on_lane {
-                                crate::lane_poller::note_lane_datagram();
-                            }
-                            // Hot call state: one doorbell read per datagram,
-                            // after it was received; each gated check below
-                            // compares it with its own snapshot.
-                            let bell = hot_doorbell.as_deref().map_or(0, HotDoorbell::read);
-                            trace!("UDP recv_from returned {} bytes from {}", size, addr);
-
-                            let packet_class = classify_rtp_mux_packet(&buffer[..size]);
-                            if packet_class == RtpMuxPacketClass::Stun {
-                                // ICE connectivity checks share the media
-                                // port by design. Forward them to whoever
-                                // subscribed (the ICE agent's pump); with no
-                                // subscriber this send fails silently, which
-                                // is exactly the old drop behavior.
-                                let Some(local) = local_rtp_addr else {
-                                    continue;
-                                };
-                                let _ = event_tx.send(RtpEvent::StunPacket {
-                                    local,
-                                    source: addr,
-                                    payload: Bytes::copy_from_slice(&buffer[..size]),
-                                });
-                                continue;
-                            }
-
-                            #[cfg(feature = "dtls-webrtc")]
-                            if packet_class == RtpMuxPacketClass::Dtls {
-                                let forwarded = dtls_tx
-                                    .lock()
-                                    .as_ref()
-                                    .map(|tx| {
-                                        tx.try_send(
-                                            crate::transport::dtls_bridge::DtlsDatagram::new(
-                                                Bytes::copy_from_slice(&buffer[..size]),
-                                            ),
-                                        )
-                                        .is_ok()
-                                    })
-                                    .unwrap_or(false);
-                                if !forwarded {
-                                    // No handshake in flight (or its
-                                    // receiver is backed up) to hand this
-                                    // to; nothing else can use it either.
-                                    non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
-                                    log_dropped_non_rtp_packet(
-                                        rtp_diagnostics,
-                                        non_rtp_drop_count,
-                                        local_rtp_addr,
-                                        addr,
-                                        size,
-                                        packet_class,
-                                        &buffer[..size],
-                                    );
-                                }
-                                continue;
-                            }
-
-                            if !packet_class.is_media() {
-                                non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
-                                log_dropped_non_rtp_packet(
-                                    rtp_diagnostics,
-                                    non_rtp_drop_count,
-                                    local_rtp_addr,
-                                    addr,
-                                    size,
-                                    packet_class,
-                                    &buffer[..size],
-                                );
-                                continue;
-                            }
-
-                            // Check if it's RTCP according to RFC 5761
-                            if packet_class == RtpMuxPacketClass::Rtcp {
-                                // Once an RTP tuple is latched, multiplexed
-                                // RTCP must arrive on that tuple too. A new
-                                // tuple earns trust through RTP probation,
-                                // never through a single unauthenticated RTCP
-                                // packet.
-                                if rtcp_mux.load(Ordering::Acquire)
-                                    && symmetric_rtp_policy.enabled
-                                    && symmetric_rtp_latched.load(Ordering::Acquire)
-                                    && remote_rtp_addr
-                                        .load()
-                                        .as_deref()
-                                        .is_some_and(|expected| *expected != addr)
-                                {
-                                    symmetric_rtp_counters
-                                        .rejected_packets
-                                        .fetch_add(1, Ordering::Relaxed);
-                                    continue;
-                                }
-                                debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
-                                let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
-                                    let mut recv = RecvContext::open(
-                                        &mut owner_rx,
-                                        &srtp_recv,
-                                        rx_hot.as_mut().is_none_or(|hot| hot.gate_srtp(bell)),
-                                    );
-                                    let Some(context) = recv.get() else {
-                                        trace!("SRTCP is required but no receive context is installed; dropping packet");
-                                        continue;
-                                    };
-                                    match context.unprotect_rtcp(&buffer[..size]) {
-                                        Ok(plaintext) => plaintext,
-                                        Err(error) => {
-                                            trace!(
-                                                "SRTCP unprotect failed; dropping packet: {error}"
-                                            );
-                                            continue;
-                                        }
-                                    }
-                                } else {
-                                    Bytes::copy_from_slice(&buffer[..size])
-                                };
-                                // Executor v2: the session's inline ingress
-                                // may process RTCP here (`owner_rtcp`).
-                                adopt_inline_ingress(&mut inline, &inline_slot);
-                                if let Some(rx) = inline.as_mut() {
-                                    if rx.ingress.on_rtcp(&rtcp_data, addr, Instant::now()) {
-                                        continue;
-                                    }
-                                }
-                                let event = RtpEvent::RtcpReceived {
-                                    data: rtcp_data,
-                                    source: addr,
-                                };
-
-                                // Only log errors if there are receivers
-                                if event_tx.receiver_count() > 0 {
-                                    if let Err(e) = event_tx.send(event) {
-                                        warn!("Failed to send RTCP event: {}", e);
-                                    }
-                                } else {
-                                    // Still send the event but ignore errors if no one is listening
-                                    let _ = event_tx.send(event);
-                                }
-                            } else {
-                                // Executor v2: adopt the session's inline
-                                // ingress before the first RTP packet it can
-                                // own.
-                                adopt_inline_ingress(&mut inline, &inline_slot);
-                                if let Some(rx) = inline.as_mut() {
-                                    // Authenticate and decrypt in place in the
-                                    // receive buffer: no copy and no
-                                    // per-packet allocation.
-                                    let data = &mut buffer[..size];
-                                    let parsed = {
-                                        let mut srtp_guard = RecvContext::open(
-                                            &mut owner_rx,
-                                            &srtp_recv,
-                                            rx_hot.as_mut().is_none_or(|hot| hot.gate_srtp(bell)),
-                                        );
-                                        if srtp_diagnostics && !first_inbound_rtp_logged {
-                                            info!(
-                                                "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
-                                                local_rtp_addr,
-                                                addr,
-                                                size,
-                                                srtp_guard.get().is_some()
-                                            );
-                                            first_inbound_rtp_logged = true;
-                                        }
-                                        if let Some(ctx) = srtp_guard.get() {
-                                            match ctx.unprotect_in_place(data) {
-                                                Ok(bounds) => Ok(bounds),
-                                                Err(_) => {
-                                                    srtp_unprotect_failures += 1;
-                                                    if srtp_diagnostics
-                                                        && (srtp_unprotect_failures <= 5
-                                                            || srtp_unprotect_failures % 50 == 0)
-                                                    {
-                                                        info!(
-                                                            "SRTP_DIAG unprotect_failed local={:?} source={} size={} failures={}",
-                                                            local_rtp_addr,
-                                                            addr,
-                                                            size,
-                                                            srtp_unprotect_failures
-                                                        );
-                                                    }
-                                                    trace!(
-                                                        "SRTP unprotect failed; dropping packet"
-                                                    );
-                                                    continue;
-                                                }
-                                            }
-                                        } else if secure_media_required.load(Ordering::Acquire) {
-                                            trace!("SRTP is required but no receive context is installed; dropping packet");
-                                            continue;
-                                        } else {
-                                            RtpPacket::parse_bounds(data)
-                                        }
-                                    };
-                                    let bounds = match parsed {
-                                        Ok(bounds) => bounds,
-                                        Err(e) => {
-                                            malformed_rtp_drop_count =
-                                                malformed_rtp_drop_count.saturating_add(1);
-                                            log_malformed_rtp_packet(
-                                                rtp_diagnostics,
-                                                malformed_rtp_drop_count,
-                                                local_rtp_addr,
-                                                addr,
-                                                size,
-                                                &e,
-                                                Some(&*data),
-                                            );
-                                            continue;
-                                        }
-                                    };
-                                    // One pass reading for the datagrams of
-                                    // a lane pass (bounded staleness; see
-                                    // `lane_clock`), else a clock read.
-                                    let now = crate::media_clock::now_std();
-                                    let verdict = observe_symmetric_rtp(
-                                        rx_hot.as_mut(),
-                                        bell,
-                                        &symmetric_rtp_generation,
-                                        &mut symmetric_rtp,
-                                        &mut observed_symmetric_generation,
-                                        addr,
-                                        bounds.header.ssrc,
-                                        bounds.header.sequence_number,
-                                        now,
-                                    );
-                                    if !admit_symmetric_rtp(
-                                        verdict,
-                                        addr,
-                                        bounds.header.ssrc,
-                                        &rtcp_mux,
-                                        &symmetric_rtp_latched,
-                                        &latched_rtp_ssrc,
-                                        &remote_rtp_addr,
-                                        &remote_rtcp_addr,
-                                        &symmetric_rtp_counters,
-                                        hot_doorbell.as_deref(),
-                                    ) {
-                                        continue;
-                                    }
-                                    let payload = &data[bounds.payload.clone()];
-                                    if bounds.header.payload_type == 101 && payload.len() >= 4 {
-                                        // DTMF stays on the broadcast path.
-                                        if let Some(dtmf) = rfc4733_event(
-                                            payload,
-                                            bounds.header.timestamp,
-                                            bounds.header.ssrc,
-                                            addr,
-                                            &dtmf_seen,
-                                        ) {
-                                            publish_dtmf(&event_tx, dtmf);
-                                        }
-                                        continue;
-                                    }
-                                    let packet = InlineRtpPacket {
-                                        payload_type: bounds.header.payload_type,
-                                        sequence_number: bounds.header.sequence_number,
-                                        timestamp: bounds.header.timestamp,
-                                        marker: bounds.header.marker,
-                                        ssrc: bounds.header.ssrc,
-                                        padding_size: bounds.padding_size,
-                                        payload,
-                                        source: addr,
-                                    };
-                                    rx.ingress.on_rtp(&packet, now);
-                                    rx.rearm(now);
-                                    continue;
-                                }
-                                // SRTP unprotect (RFC 3711 §3.4) when an
-                                // inbound SrtpContext is configured. Auth
-                                // failures MUST be silently dropped — no
-                                // event, no warn-level log — to avoid
-                                // leaking timing or distinguishing failure
-                                // modes to a network attacker.
-                                let mut srtp_guard = RecvContext::open(
-                                    &mut owner_rx,
-                                    &srtp_recv,
-                                    rx_hot.as_mut().is_none_or(|hot| hot.gate_srtp(bell)),
-                                );
-                                if srtp_diagnostics && !first_inbound_rtp_logged {
-                                    info!(
-                                    "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
-                                    local_rtp_addr,
-                                    addr,
-                                    size,
-                                    srtp_guard.get().is_some()
-                                );
-                                    first_inbound_rtp_logged = true;
-                                }
-                                let parse_result: Result<RtpPacket> = if let Some(ctx) =
-                                    srtp_guard.get()
-                                {
-                                    match ctx.unprotect(&buffer[0..size]) {
-                                        Ok(packet) => Ok(packet),
-                                        Err(_) => {
-                                            srtp_unprotect_failures += 1;
-                                            if srtp_diagnostics
-                                                && (srtp_unprotect_failures <= 5
-                                                    || srtp_unprotect_failures % 50 == 0)
-                                            {
-                                                info!(
-                                                    "SRTP_DIAG unprotect_failed local={:?} source={} size={} failures={}",
-                                                    local_rtp_addr,
-                                                    addr,
-                                                    size,
-                                                    srtp_unprotect_failures
-                                                );
-                                            }
-                                            trace!("SRTP unprotect failed; dropping packet");
-                                            drop(srtp_guard);
-                                            continue;
-                                        }
-                                    }
-                                } else if secure_media_required.load(Ordering::Acquire) {
-                                    trace!("SRTP is required but no receive context is installed; dropping packet");
-                                    drop(srtp_guard);
-                                    continue;
-                                } else {
-                                    RtpPacket::parse(&buffer[..size])
-                                };
-                                drop(srtp_guard);
-                                match parse_result {
-                                    Ok(packet) => {
-                                        let verdict = observe_symmetric_rtp(
-                                            rx_hot.as_mut(),
-                                            bell,
-                                            &symmetric_rtp_generation,
-                                            &mut symmetric_rtp,
-                                            &mut observed_symmetric_generation,
-                                            addr,
-                                            packet.header.ssrc,
-                                            packet.header.sequence_number,
-                                            Instant::now(),
-                                        );
-                                        if !admit_symmetric_rtp(
-                                            verdict,
-                                            addr,
-                                            packet.header.ssrc,
-                                            &rtcp_mux,
-                                            &symmetric_rtp_latched,
-                                            &latched_rtp_ssrc,
-                                            &remote_rtp_addr,
-                                            &remote_rtcp_addr,
-                                            &symmetric_rtp_counters,
-                                            hot_doorbell.as_deref(),
-                                        ) {
-                                            continue;
-                                        }
-
-                                        // Log packet reception at transport level (debug only)
-                                        debug!(
-                                        "Transport received packet with SSRC={:08x}, seq={}, ts={}",
-                                        packet.header.ssrc,
-                                        packet.header.sequence_number,
-                                        packet.header.timestamp
-                                    );
-
-                                        // Debug: Log SSRC demultiplexing info
-                                        debug!("SSRC demultiplexing: Forwarding packet with SSRC={:08x}, seq={}, payload size={} bytes",
-                                           packet.header.ssrc, packet.header.sequence_number, packet.payload.len());
-
-                                        // RFC 4733: PT 101 (by default) is `telephone-event` —
-                                        // DTMF tones carried as RTP events rather than audio
-                                        // samples. Decode the 4-byte body inline and emit a
-                                        // typed `DtmfEvent` instead of a generic
-                                        // `MediaReceived`, so the media layer doesn't have
-                                        // to re-parse and doesn't try to feed the bytes to
-                                        // a PCMU/PCMA/Opus decoder. Oversized payloads are
-                                        // tolerated per RFC 4733's forward-compat clause
-                                        // (read only first 4 bytes).
-                                        if packet.header.payload_type == 101
-                                            && packet.payload.len() >= 4
-                                        {
-                                            if let Some(dtmf) = rfc4733_event(
-                                                &packet.payload,
-                                                packet.header.timestamp,
-                                                packet.header.ssrc,
-                                                addr,
-                                                &dtmf_seen,
-                                            ) {
-                                                publish_dtmf(&event_tx, dtmf);
-                                            }
-                                            continue;
-                                        }
-
-                                        // Create RTP event
-                                        let event = RtpEvent::MediaReceived {
-                                            payload_type: packet.header.payload_type,
-                                            sequence_number: packet.header.sequence_number,
-                                            timestamp: packet.header.timestamp,
-                                            marker: packet.header.marker,
-                                            payload: packet.payload.clone(), // Use the parsed payload
-                                            padding_size: packet.padding_size,
-                                            source: addr,
-                                            ssrc: packet.header.ssrc, // Include the SSRC from the parsed packet
-                                        };
-
-                                        // Only log errors if there are receivers
-                                        if event_tx.receiver_count() > 0 {
-                                            if let Err(e) = event_tx.send(event) {
-                                                warn!("Failed to send RTP event: {}", e);
-                                            }
-                                        } else {
-                                            // Still send the event but ignore errors if no one is listening
-                                            let _ = event_tx.send(event);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        malformed_rtp_drop_count =
-                                            malformed_rtp_drop_count.saturating_add(1);
-                                        log_malformed_rtp_packet(
-                                            rtp_diagnostics,
-                                            malformed_rtp_drop_count,
-                                            local_rtp_addr,
-                                            addr,
-                                            size,
-                                            &e,
-                                            Some(&buffer[..size]),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Error receiving packet: {}", e);
-
-                            // Send error event
-                            let err_event =
-                                RtpEvent::Error(Error::Transport(format!("Socket error: {}", e)));
-                            if event_tx.receiver_count() > 0 {
-                                let _ = event_tx.send(err_event);
-                            }
-
-                            // Short delay before retrying
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                        }
-                    }
-                }
-            },
+            receive_loop(ReceiveLoop {
+                config,
+                socket: rtp_socket,
+                callback_kernel,
+                rx_readiness,
+            }),
         );
         let rtp_receiver = if on_lane {
             match crate::lane_poller::host_on_lane(&self.media_runtime, rtp_receiver_future) {
