@@ -3694,6 +3694,15 @@ impl std::fmt::Debug for Config {
     }
 }
 
+/// The `sip:<name>@<hostport>` address of record for a local endpoint.
+///
+/// `SocketAddr` displays the RFC 3261 §25.1 `hostport`, so an IPv6 address
+/// is written as an `IPv6reference` (`sip:alice@[::1]:5060`, RFC 5118 §4.1)
+/// rather than as bare colons that would read as a port.
+pub(crate) fn local_sip_uri(name: &str, ip: IpAddr, port: u16) -> String {
+    format!("sip:{}@{}", name, SocketAddr::new(ip, port))
+}
+
 impl Config {
     /// Default RTP media port range start.
     pub const DEFAULT_MEDIA_PORT_START: u16 = DEFAULT_RTP_PORT_RANGE_START;
@@ -3772,7 +3781,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
-            local_uri: format!("sip:{}@{}:{}", name, ip, port),
+            local_uri: local_sip_uri(name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
             auto_100_trying: true,
@@ -3917,7 +3926,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
-            local_uri: format!("sip:{}@{}:{}", name, ip, port),
+            local_uri: local_sip_uri(name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
             auto_100_trying: true,
@@ -5650,6 +5659,50 @@ impl Config {
         self
     }
 
+    /// Reject address settings this release cannot honour: mixed address
+    /// families and IPv6 zone identifiers.
+    ///
+    /// Every SIP and media address of one endpoint must belong to one
+    /// family. The SIP and RTP sockets are bound to one address each, and a
+    /// socket of one family cannot reach the other, so a Via sent-by, a
+    /// Contact, or an SDP `c=` of the other family would advertise an
+    /// address the endpoint does not listen on. Dual-stack operation
+    /// (separate IPv4 and IPv6 listeners) is not supported yet.
+    ///
+    /// A `SocketAddrV6` with a nonzero scope id (a link-local zone such as
+    /// `fe80::1%eth0`) is rejected: the SIP `host` grammar (RFC 3261 §25.1,
+    /// RFC 5118) has no zone-identifier syntax — RFC 6874 extends only the
+    /// generic URI grammar — so the zone could not be advertised in a Via,
+    /// Contact or SIP URI, and SDP (RFC 8866 §5.7) cannot carry it either.
+    fn validate_address_family(&self) -> Result<()> {
+        let addresses = [
+            ("bind_addr", Some(self.bind_addr)),
+            ("sip_advertised_addr", self.sip_advertised_addr),
+            ("tls_bind_addr", self.tls_bind_addr),
+            ("tls_advertised_addr", self.tls_advertised_addr),
+            ("media_public_addr", self.media_public_addr),
+        ];
+        let family_name = |ip: IpAddr| if ip.is_ipv4() { "IPv4" } else { "IPv6" };
+        let local_family = family_name(self.local_ip);
+        for (name, address) in addresses {
+            let Some(address) = address else {
+                continue;
+            };
+            if matches!(address, SocketAddr::V6(v6) if v6.scope_id() != 0) {
+                return Err(SessionError::ConfigError(format!(
+                    "{name} must not carry an IPv6 zone identifier: SIP hosts (RFC 3261 §25.1, RFC 5118) and SDP addresses (RFC 8866 §5.7) have no zone syntax"
+                )));
+            }
+            let family = family_name(address.ip());
+            if family != local_family {
+                return Err(SessionError::ConfigError(format!(
+                    "{name} is {family} but local_ip is {local_family}: every SIP and media address of an endpoint must use one address family (dual-stack is not supported)"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// [`Config::uas_capabilities`] as the dialog layer applies it: without
     /// `100rel` when [`Config::use_100rel`] is [`RelUsage::NotSupported`], so
     /// a request that requires it gets 420 (RFC 3262 §4).
@@ -5674,6 +5727,8 @@ impl Config {
     /// ```
     pub fn validate(&self) -> Result<()> {
         let effective_tls_mode = self.effective_tls_mode();
+
+        self.validate_address_family()?;
 
         if let Some(address) = self.sip_advertised_addr {
             if address.ip().is_unspecified() || address.port() == 0 {

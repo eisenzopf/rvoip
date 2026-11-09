@@ -365,7 +365,7 @@ impl InviteBuilder {
         builder = builder
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), &via_transport, Some(&branch))
+            .via_socket_addr(local_addr, &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
         // INVITE establishes or refreshes a dialog, so Contact is mandatory.
@@ -776,7 +776,7 @@ impl ByeBuilder {
             .to("", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), &via_transport, Some(&branch))
+            .via_socket_addr(local_addr, &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into())
             .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
@@ -966,7 +966,7 @@ impl RegisterBuilder {
             .to("", &aor_uri, None)
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), &via_transport, Some(&branch))
+            .via_socket_addr(local_addr, &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into())
             .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
@@ -1295,7 +1295,7 @@ impl InDialogRequestBuilder {
             .to("", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), &via_transport, Some(&branch))
+            .via_socket_addr(local_addr, &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
         let has_contact_override = self
@@ -1642,8 +1642,8 @@ pub mod quick {
             .to("", target_uri, None)
             .call_id(&format!("options-{}", Uuid::new_v4()))
             .cseq(1)
-            .via(
-                &local_addr.to_string(),
+            .via_socket_addr(
+                local_addr,
                 &via_transport_for_uris(target_uri, Some(from_uri)),
                 Some(&generate_branch()),
             )
@@ -1678,8 +1678,8 @@ pub mod quick {
             .to("", target_uri, None)
             .call_id(&format!("message-{}", Uuid::new_v4()))
             .cseq(1)
-            .via(
-                &local_addr.to_string(),
+            .via_socket_addr(
+                local_addr,
                 &via_transport_for_uris(target_uri, Some(from_uri)),
                 Some(&generate_branch()),
             )

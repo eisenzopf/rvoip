@@ -2764,7 +2764,10 @@ impl UnifiedDialogApi {
             .build()
             .map_err(|_error| ApiError::protocol("Failed to build REGISTER request"))?;
 
-        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(destination_uri)
+        let destination = self
+            .manager
+            .inner_manager()
+            .resolve_uri_to_socketaddr(destination_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve REGISTER destination URI"))?;
 
@@ -2825,7 +2828,10 @@ impl UnifiedDialogApi {
         )
         .map_err(|_error| ApiError::protocol("Failed to build SUBSCRIBE request"))?;
 
-        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+        let destination = self
+            .manager
+            .inner_manager()
+            .resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE target URI"))?;
 
@@ -2872,7 +2878,10 @@ impl UnifiedDialogApi {
         )
         .map_err(|_error| ApiError::protocol("Failed to build MESSAGE request"))?;
 
-        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+        let destination = self
+            .manager
+            .inner_manager()
+            .resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve MESSAGE target URI"))?;
 
@@ -3225,7 +3234,10 @@ impl UnifiedDialogApi {
         )
         .map_err(|_error| ApiError::protocol("Failed to build OPTIONS request"))?;
 
-        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+        let destination = self
+            .manager
+            .inner_manager()
+            .resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve OPTIONS target URI"))?;
 

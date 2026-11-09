@@ -596,6 +596,9 @@ impl fmt::Debug for SdpInfo {
 
 /// Parse SDP connection information
 ///
+/// The connection address may be IPv4 (`c=IN IP4`) or IPv6 (`c=IN IP6`);
+/// [`SdpInfo::ip`] holds it in its bare SDP form (no IPv6 brackets).
+///
 /// # Example
 /// ```no_run
 /// use rvoip_sip::api::parse_sdp_connection;
@@ -611,8 +614,12 @@ pub fn parse_sdp_connection(sdp: &str) -> Result<SdpInfo> {
     let mut codecs = Vec::new();
 
     for line in sdp.lines() {
-        if line.starts_with("c=IN IP4 ") {
-            ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
+        // RFC 8866 §5.7: `c=IN IP4 <address>` or `c=IN IP6 <address>`.
+        if let Some(address) = line
+            .strip_prefix("c=IN IP4 ")
+            .or_else(|| line.strip_prefix("c=IN IP6 "))
+        {
+            ip = Some(address.to_string());
         } else if line.starts_with("m=audio ") {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() > 1 {
@@ -857,6 +864,17 @@ impl AudioFrameSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_sdp_connection_accepts_both_address_types() {
+        let v4 = parse_sdp_connection("v=0\r\nc=IN IP4 192.0.2.1\r\nm=audio 5004 RTP/AVP 0\r\n")
+            .expect("IPv4 SDP");
+        assert_eq!((v4.ip.as_str(), v4.port), ("192.0.2.1", 5004));
+
+        let v6 = parse_sdp_connection("v=0\r\nc=IN IP6 2001:db8::1\r\nm=audio 5006 RTP/AVP 0\r\n")
+            .expect("IPv6 SDP");
+        assert_eq!((v6.ip.as_str(), v6.port), ("2001:db8::1", 5006));
+    }
 
     #[test]
     fn test_session_id_creation() {

@@ -177,15 +177,13 @@ pub fn create_update_request(
         rvoip_sip_core::types::via::Via::new("SIP", "2.0", via_transport, &host, port, params)?;
     update = update.with_header(TypedHeader::Via(via));
 
-    // Create a Contact header - recommended for UPDATE
+    // Create a Contact header - recommended for UPDATE. `SocketAddr`
+    // displays the RFC 3261 §25.1 hostport, bracketing an IPv6 address as
+    // an IPv6reference (RFC 5118 §4.1).
     let contact_uri = if via_transport.eq_ignore_ascii_case("TLS") {
-        format!(
-            "sips:{}:{};transport=tls",
-            local_addr.ip(),
-            local_addr.port()
-        )
+        format!("sips:{local_addr};transport=tls")
     } else {
-        format!("sip:{}:{}", local_addr.ip(), local_addr.port())
+        format!("sip:{local_addr}")
     };
     let contact_addr = rvoip_sip_core::types::address::Address::new(
         rvoip_sip_core::types::uri::Uri::from_str(&contact_uri)?,
@@ -518,6 +516,37 @@ mod tests {
         } else {
             panic!("UPDATE missing Content-Length header");
         }
+    }
+
+    #[test]
+    fn update_over_ipv6_brackets_via_and_contact() {
+        let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@[2001:db8::2]")
+            .unwrap()
+            .from("Alice", "sip:alice@[2001:db8::1]", Some("alice-tag"))
+            .to("Bob", "sip:bob@[2001:db8::2]", Some("bob-tag"))
+            .call_id("update-ipv6")
+            .cseq(101)
+            .via("[2001:db8::1]:5060", "UDP", Some("z9hG4bK.ipv6"))
+            .max_forwards(70)
+            .build();
+
+        let local_addr = SocketAddr::from_str("[2001:db8::1]:5060").unwrap();
+        let update = create_update_request(&invite, &local_addr, None).unwrap();
+        let wire = update.to_string();
+
+        // RFC 3261 §25.1 / RFC 5118 §4.1: IPv6 hosts are IPv6references.
+        assert!(
+            wire.contains("Via: SIP/2.0/UDP [2001:db8::1]:5060;branch="),
+            "{wire}"
+        );
+        assert!(wire.contains("sip:[2001:db8::1]:5060>"), "{wire}");
+        // The bytes sent on the wire (`to_string` omits the empty line that
+        // ends the header section).
+        rvoip_sip_core::parse_message_with_mode(
+            &update.to_bytes(),
+            rvoip_sip_core::ParseMode::Strict,
+        )
+        .expect("UPDATE over IPv6 parses in Strict mode");
     }
 
     #[test]

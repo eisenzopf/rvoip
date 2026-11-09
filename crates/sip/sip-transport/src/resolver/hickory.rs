@@ -26,7 +26,9 @@ use crate::resolver::srv::{
     default_port_for_scheme, expand_srv_priority_group, fallback_srv_chain, map_naptr_service,
     srv_service_name,
 };
-use crate::resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
+use crate::resolver::{
+    select_transport_for_uri, AddressFamily, ResolvedTarget, Resolver, ResolverError,
+};
 use crate::transport::TransportType;
 
 /// `HickoryResolver` runs the full RFC 3263 §4 ladder against an
@@ -36,6 +38,9 @@ use crate::transport::TransportType;
 /// that need to point at a fixture DNS server.
 pub struct HickoryResolver {
     inner: Arc<TokioResolver>,
+    /// When set, host lookups query only this family's records (A or
+    /// AAAA); see [`HickoryResolver::with_address_family`].
+    address_family: Option<AddressFamily>,
 }
 
 impl std::fmt::Debug for HickoryResolver {
@@ -59,6 +64,7 @@ impl HickoryResolver {
         let inner = build_tokio_resolver(config, opts)?;
         Ok(Self {
             inner: Arc::new(inner),
+            address_family: None,
         })
     }
 
@@ -107,6 +113,7 @@ impl HickoryResolver {
         });
         Self {
             inner: Arc::new(inner),
+            address_family: None,
         }
     }
 
@@ -118,6 +125,7 @@ impl HickoryResolver {
             .expect("explicit Hickory resolver config should build");
         Self {
             inner: Arc::new(inner),
+            address_family: None,
         }
     }
 
@@ -141,10 +149,60 @@ impl HickoryResolver {
     pub fn from_tokio(inner: TokioResolver) -> Self {
         Self {
             inner: Arc::new(inner),
+            address_family: None,
         }
     }
 
+    /// Restrict host lookups to one address family.
+    ///
+    /// A transport bound to an IPv4 (or IPv6) address cannot reach an IPv6
+    /// (or IPv4) destination, so every A/AAAA step of the RFC 3263 §4 ladder
+    /// (explicit port, SRV targets, last-resort fallback) then queries only
+    /// that family's record type: A for [`AddressFamily::Ipv4`], AAAA for
+    /// [`AddressFamily::Ipv6`]. NAPTR/SRV ordering is unchanged; an SRV
+    /// target with no record of the family is skipped like one with no
+    /// address records at all. IP-literal URIs name one exact address and
+    /// are returned as-is. `None` (the default) queries both record types.
+    pub fn with_address_family(mut self, family: Option<AddressFamily>) -> Self {
+        self.address_family = family;
+        self
+    }
+
+    /// The address family host lookups are restricted to, if any.
+    pub fn address_family(&self) -> Option<AddressFamily> {
+        self.address_family
+    }
+
     async fn lookup_ip(&self, host: &str) -> Result<Vec<(IpAddr, Option<Instant>)>, ResolverError> {
+        let record_type = match self.address_family {
+            None => return self.lookup_ip_any_family(host).await,
+            Some(AddressFamily::Ipv4) => RecordType::A,
+            Some(AddressFamily::Ipv6) => RecordType::AAAA,
+        };
+        match self.inner.lookup(host, record_type).await {
+            Ok(lookup) => {
+                let ttl_deadline = lookup_ttl_deadline(lookup.valid_until());
+                Ok(lookup
+                    .answers()
+                    .iter()
+                    .filter(|record| record.record_type() == record_type)
+                    .filter_map(|record| record.data.ip_addr())
+                    .map(|ip| (ip, ttl_deadline))
+                    .collect())
+            }
+            Err(e) => {
+                if is_no_records_error(&e) {
+                    return Ok(Vec::new());
+                }
+                Err(map_resolve_err(e))
+            }
+        }
+    }
+
+    async fn lookup_ip_any_family(
+        &self,
+        host: &str,
+    ) -> Result<Vec<(IpAddr, Option<Instant>)>, ResolverError> {
         match self.inner.lookup_ip(host).await {
             Ok(lookup) => {
                 let ttl_deadline = lookup_ttl_deadline(lookup.valid_until());

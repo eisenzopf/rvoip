@@ -1,5 +1,11 @@
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::str::FromStr;
+
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::types::{via::Via, Param, TypedHeader};
+use crate::error::{Error, Result};
+use crate::types::uri::Host;
+use crate::types::via::{SentProtocol, Via, ViaHeader};
+use crate::types::{Param, TypedHeader};
 
 /// Extension trait for adding Via headers to SIP message builders.
 ///
@@ -218,7 +224,10 @@ pub trait ViaBuilderExt {
     /// The Via header indicates the path taken by the request so far and helps route responses back.
     ///
     /// # Parameters
-    /// - `host`: The host or IP address (e.g., "192.168.1.1" or "example.com:5060")
+    /// - `host`: The sent-by, `host [":" port]` (e.g., "192.168.1.1", "example.com:5060",
+    ///   "[2001:db8::1]:5060" or a bare "2001:db8::1"). An IPv6 host followed by a port must
+    ///   be bracketed (RFC 3261 §25.1 `IPv6reference`, RFC 5118 §4.1), which is the form
+    ///   `SocketAddr` displays.
     /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
     /// - `branch`: Optional branch parameter (should be prefixed with z9hG4bK per RFC 3261)
     ///
@@ -254,77 +263,134 @@ pub trait ViaBuilderExt {
     ///
     /// # Note
     ///
+    /// The builder API is infallible, so a `host` that is not a valid sent-by is logged and
+    /// no Via is added. Use [`via_socket_addr`](Self::via_socket_addr) when the sent-by is a
+    /// socket address; it cannot fail.
+    ///
     /// For more complex Via headers with additional parameters (received, rport, ttl, etc.),
     /// you should use the TypedHeader approach with Via constructor directly, as shown in
     /// the trait documentation examples.
     fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self;
+
+    /// Add a Via header whose sent-by is a socket address.
+    ///
+    /// This is the infallible form of [`via`](Self::via) for the common case
+    /// of advertising a bound or configured transport address. The address is
+    /// written as `sent-by = host [ COLON port ]` (RFC 3261 §20.42, §25.1):
+    /// an IPv6 address becomes an `IPv6reference` (`[2001:db8::1]:5060`,
+    /// RFC 5118 §4.1). The SIP grammar has no zone-identifier syntax, so the
+    /// scope id of a link-local `SocketAddrV6` is not representable and is
+    /// not written; configurations that need one are rejected before this
+    /// point.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use rvoip_sip_core::builder::SimpleRequestBuilder;
+    /// use rvoip_sip_core::builder::headers::ViaBuilderExt;
+    ///
+    /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+    ///     .via_socket_addr("[2001:db8::1]:5060".parse().unwrap(), "UDP", Some("z9hG4bK776asdhds"))
+    ///     .build();
+    /// assert!(request.to_string().contains("Via: SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK776asdhds"));
+    /// ```
+    fn via_socket_addr(self, addr: SocketAddr, transport: &str, branch: Option<&str>) -> Self;
+}
+
+/// Parse the `sent-by = host [ COLON port ]` text accepted by
+/// [`ViaBuilderExt::via`] (RFC 3261 §20.42, §25.1).
+///
+/// An IPv6 host is accepted both as an `IPv6reference` (`[2001:db8::1]`,
+/// optionally followed by `:port`, the form `SocketAddr` displays) and as a
+/// bare `IPv6address` without a port. A bare IPv6 address cannot carry a
+/// port: its colons make the split ambiguous, which is why RFC 3261 requires
+/// the bracketed form whenever a port follows (RFC 5118 §4.1).
+pub(crate) fn parse_sent_by(text: &str) -> Result<(Host, Option<u16>)> {
+    let invalid = || Error::InvalidUri(format!("Invalid Via sent-by: {text}"));
+    let parse_port = |port: &str| port.parse::<u16>().map_err(|_| invalid());
+
+    if let Some(reference) = text.strip_prefix('[') {
+        let (address, rest) = reference.split_once(']').ok_or_else(invalid)?;
+        let address = address.parse::<Ipv6Addr>().map_err(|_| invalid())?;
+        let port = match rest {
+            "" => None,
+            _ => Some(parse_port(rest.strip_prefix(':').ok_or_else(invalid)?)?),
+        };
+        return Ok((Host::Address(IpAddr::V6(address)), port));
+    }
+
+    if let Ok(address) = text.parse::<Ipv6Addr>() {
+        return Ok((Host::Address(IpAddr::V6(address)), None));
+    }
+
+    match text.split_once(':') {
+        Some((host, port)) => Ok((Host::from_str(host)?, Some(parse_port(port)?))),
+        None => Ok((Host::from_str(text)?, None)),
+    }
+}
+
+fn via_header(host: Host, port: Option<u16>, transport: &str, branch: Option<&str>) -> TypedHeader {
+    let params = branch.map(Param::branch).into_iter().collect();
+    TypedHeader::Via(Via(vec![ViaHeader {
+        sent_protocol: SentProtocol {
+            name: "SIP".to_string(),
+            version: "2.0".to_string(),
+            transport: transport.to_string(),
+        },
+        sent_by_host: host,
+        sent_by_port: port,
+        params,
+    }]))
+}
+
+/// Build the Via for [`ViaBuilderExt::via`], or `None` (with a warning) when
+/// `host` is not a valid sent-by. The builder API is infallible, so an
+/// invalid sent-by cannot be returned as an error; it is logged rather than
+/// dropped silently. Callers holding a socket address should use
+/// [`ViaBuilderExt::via_socket_addr`], which cannot fail.
+fn via_from_text(host: &str, transport: &str, branch: Option<&str>) -> Option<TypedHeader> {
+    match parse_sent_by(host) {
+        Ok((host, port)) => Some(via_header(host, port, transport, branch)),
+        Err(error) => {
+            tracing::warn!(%error, "Via header not added: invalid sent-by");
+            None
+        }
+    }
 }
 
 impl ViaBuilderExt for SimpleRequestBuilder {
     fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
-        let mut params = Vec::new();
-
-        // Add branch parameter if provided
-        if let Some(branch_value) = branch {
-            params.push(Param::branch(branch_value));
+        match via_from_text(host, transport, branch) {
+            Some(via) => self.header(via),
+            None => self,
         }
+    }
 
-        // Parse host to separate hostname and port
-        let (hostname, port) = if host.contains(':') {
-            let parts: Vec<&str> = host.split(':').collect();
-            if parts.len() == 2 {
-                if let Ok(port_num) = parts[1].parse::<u16>() {
-                    (parts[0].to_string(), Some(port_num))
-                } else {
-                    (host.to_string(), None)
-                }
-            } else {
-                (host.to_string(), None)
-            }
-        } else {
-            (host.to_string(), None)
-        };
-
-        // Create Via header
-        if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
-            self.header(TypedHeader::Via(via))
-        } else {
-            self
-        }
+    fn via_socket_addr(self, addr: SocketAddr, transport: &str, branch: Option<&str>) -> Self {
+        self.header(via_header(
+            Host::Address(addr.ip()),
+            Some(addr.port()),
+            transport,
+            branch,
+        ))
     }
 }
 
 impl ViaBuilderExt for SimpleResponseBuilder {
     fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
-        let mut params = Vec::new();
-
-        // Add branch parameter if provided
-        if let Some(branch_value) = branch {
-            params.push(Param::branch(branch_value));
+        match via_from_text(host, transport, branch) {
+            Some(via) => self.header(via),
+            None => self,
         }
+    }
 
-        // Parse host to separate hostname and port
-        let (hostname, port) = if host.contains(':') {
-            let parts: Vec<&str> = host.split(':').collect();
-            if parts.len() == 2 {
-                if let Ok(port_num) = parts[1].parse::<u16>() {
-                    (parts[0].to_string(), Some(port_num))
-                } else {
-                    (host.to_string(), None)
-                }
-            } else {
-                (host.to_string(), None)
-            }
-        } else {
-            (host.to_string(), None)
-        };
-
-        // Create Via header
-        if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
-            self.header(TypedHeader::Via(via))
-        } else {
-            self
-        }
+    fn via_socket_addr(self, addr: SocketAddr, transport: &str, branch: Option<&str>) -> Self {
+        self.header(via_header(
+            Host::Address(addr.ip()),
+            Some(addr.port()),
+            transport,
+            branch,
+        ))
     }
 }
 
@@ -385,28 +451,18 @@ mod tests {
         assert_eq!(header.transport(), "TCP");
         assert_eq!(header.branch(), None);
 
-        // Test with invalid port format (should use host as is)
+        // An invalid port is not a sent-by (RFC 3261 §25.1: `port = 1*DIGIT`,
+        // and `example.com:invalid` is not a hostname), so no Via is added
+        // rather than one whose host is the whole text.
         let request = SimpleRequestBuilder::invite("sip:bob@example.com")
             .unwrap()
             .via("example.com:invalid", "UDP", Some("z9hG4bK776asdhds"))
             .build();
 
-        let via_headers = request
+        assert!(!request
             .all_headers()
             .iter()
-            .filter_map(|h| {
-                if let TypedHeader::Via(v) = h {
-                    Some(v)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(via_headers.len(), 1);
-        let header = &via_headers[0].headers()[0]; // Get first ViaHeader
-        assert_eq!(header.host().to_string(), "example.com:invalid");
-        assert_eq!(header.port(), None);
+            .any(|h| matches!(h, TypedHeader::Via(_))));
     }
 
     #[test]
@@ -466,5 +522,110 @@ mod tests {
         assert_eq!(header.port(), None);
         assert_eq!(header.transport(), "TCP");
         assert_eq!(header.branch(), None);
+    }
+
+    fn only_via(request: &crate::types::sip_request::Request) -> ViaHeader {
+        let vias: Vec<_> = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| match h {
+                TypedHeader::Via(v) => Some(v.headers().to_vec()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(vias.len(), 1, "exactly one Via expected");
+        vias[0].clone()
+    }
+
+    fn invite_with_via(sent_by: &str) -> crate::types::sip_request::Request {
+        SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
+            .via(sent_by, "UDP", Some("z9hG4bK776asdhds"))
+            .build()
+    }
+
+    #[test]
+    fn via_accepts_bracketed_ipv6_with_port() {
+        // `SocketAddr` displays an IPv6 address as an IPv6reference with
+        // a port; the builder must not drop that Via (RFC 5118 §4.1).
+        let via = only_via(&invite_with_via("[2001:db8::1]:5060"));
+        assert_eq!(
+            via.sent_by_host,
+            Host::Address("2001:db8::1".parse().unwrap())
+        );
+        assert_eq!(via.sent_by_port, Some(5060));
+        assert_eq!(
+            via.to_string(),
+            "SIP/2.0/UDP [2001:db8::1]:5060;branch=z9hG4bK776asdhds"
+        );
+    }
+
+    #[test]
+    fn via_accepts_ipv6_without_port() {
+        for sent_by in ["[2001:db8::1]", "2001:db8::1"] {
+            let via = only_via(&invite_with_via(sent_by));
+            assert_eq!(
+                via.sent_by_host,
+                Host::Address("2001:db8::1".parse().unwrap())
+            );
+            assert_eq!(via.sent_by_port, None, "{sent_by}");
+            assert_eq!(
+                via.to_string(),
+                "SIP/2.0/UDP [2001:db8::1];branch=z9hG4bK776asdhds"
+            );
+        }
+    }
+
+    #[test]
+    fn via_accepts_ipv4_and_domain_sent_by() {
+        let via = only_via(&invite_with_via("192.0.2.1:5070"));
+        assert_eq!(
+            via.sent_by_host,
+            Host::Address("192.0.2.1".parse().unwrap())
+        );
+        assert_eq!(via.sent_by_port, Some(5070));
+
+        let via = only_via(&invite_with_via("proxy.example.com"));
+        assert_eq!(via.sent_by_host, Host::domain("proxy.example.com"));
+        assert_eq!(via.sent_by_port, None);
+    }
+
+    #[test]
+    fn via_rejects_malformed_sent_by() {
+        for sent_by in [
+            "[2001:db8::1",
+            "[2001:db8::1]5060",
+            "[2001:db8::1]:port",
+            "[192.0.2.1]:5060",
+            "[fe80::1%eth0]:5060",
+            "example.com:99999",
+        ] {
+            assert!(parse_sent_by(sent_by).is_err(), "{sent_by}");
+        }
+    }
+
+    #[test]
+    fn via_socket_addr_writes_sent_by_for_both_families() {
+        for (addr, expected) in [
+            (
+                "192.0.2.1:5060",
+                "SIP/2.0/TCP 192.0.2.1:5060;branch=z9hG4bK1",
+            ),
+            ("[::1]:5062", "SIP/2.0/TCP [::1]:5062;branch=z9hG4bK1"),
+        ] {
+            let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+                .unwrap()
+                .via_socket_addr(addr.parse().unwrap(), "TCP", Some("z9hG4bK1"))
+                .build();
+            assert_eq!(only_via(&request).to_string(), expected);
+        }
+
+        let response = SimpleResponseBuilder::ok()
+            .via_socket_addr("[2001:db8::7]:5060".parse().unwrap(), "UDP", None)
+            .build();
+        assert!(response
+            .to_string()
+            .contains("Via: SIP/2.0/UDP [2001:db8::7]:5060\r\n"));
     }
 }

@@ -24,6 +24,17 @@ fn extract_ip_from_uri(uri: &Uri) -> Option<String> {
     Some(uri.host.to_string())
 }
 
+/// The SDP `<addrtype>` for a connection address taken from a SIP host:
+/// `IP6` for an IPv6 address, otherwise `IP4` (RFC 8866 §5.2, §5.7). The
+/// address itself is the bare form `Host` displays, never an IPv6reference.
+fn addrtype_for(address: &str) -> &'static str {
+    if address.parse::<std::net::Ipv6Addr>().is_ok() {
+        "IP6"
+    } else {
+        "IP4"
+    }
+}
+
 /// Generate a default session ID for SDP
 ///
 /// This uses the current Unix timestamp as a default session ID, which is a common
@@ -72,10 +83,11 @@ pub fn sdp_from_request(request: &Request, session_name: Option<&str>) -> SdpBui
             extract_ip_from_uri(&address.uri).unwrap_or_else(|| "0.0.0.0".to_string())
         };
 
-        builder = builder.origin(&username, &sess_id, &sess_id, "IN", "IP4", &ip);
+        let addrtype = addrtype_for(&ip);
+        builder = builder.origin(&username, &sess_id, &sess_id, "IN", addrtype, &ip);
 
         // Set connection data
-        builder = builder.connection("IN", "IP4", &ip);
+        builder = builder.connection("IN", addrtype, &ip);
     }
 
     // Always add a time field (required by SDP spec)
@@ -121,10 +133,11 @@ pub fn sdp_from_response(response: &Response, session_name: Option<&str>) -> Sdp
             extract_ip_from_uri(&address.uri).unwrap_or_else(|| "0.0.0.0".to_string())
         };
 
-        builder = builder.origin(&username, &sess_id, &sess_id, "IN", "IP4", &ip);
+        let addrtype = addrtype_for(&ip);
+        builder = builder.origin(&username, &sess_id, &sess_id, "IN", addrtype, &ip);
 
         // Set connection data
-        builder = builder.connection("IN", "IP4", &ip);
+        builder = builder.connection("IN", addrtype, &ip);
     }
 
     // Always add a time field (required by SDP spec)
@@ -379,6 +392,35 @@ mod tests {
         assert_eq!(media.port, 49170);
         assert!(media.formats.contains(&"0".to_string()));
         assert!(media.formats.contains(&"8".to_string()));
+    }
+
+    #[test]
+    fn sdp_from_request_uses_ip6_for_an_ipv6_contact() {
+        let invite = RequestBuilder::new(Method::Invite, "sip:bob@[2001:db8::2]")
+            .unwrap()
+            .header(TypedHeader::From(From::new(Address {
+                display_name: None,
+                uri: Uri::from_str("sip:alice@[2001:db8::1]").unwrap(),
+                params: vec![],
+            })))
+            .header(TypedHeader::Contact(Contact::new_params(vec![
+                ContactParamInfo {
+                    address: Address {
+                        display_name: None,
+                        uri: Uri::from_str("sip:alice@[2001:db8::1]:5060").unwrap(),
+                        params: vec![],
+                    },
+                },
+            ])))
+            .build();
+
+        let sdp = add_audio_profile(sdp_from_request(&invite, None), 49170, None)
+            .build()
+            .expect("IPv6 SDP is valid")
+            .to_string();
+        // RFC 8866 §5.2/§5.7: `IN IP6` with the bare (unbracketed) address.
+        assert!(sdp.contains(" IN IP6 2001:db8::1\r\n"), "{sdp}");
+        assert!(sdp.contains("c=IN IP6 2001:db8::1\r\n"), "{sdp}");
     }
 
     #[test]
