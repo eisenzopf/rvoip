@@ -274,6 +274,17 @@ pub fn create_ok_response_for_register(request: &Request, expires: u32) -> Respo
     response
 }
 
+/// A `sip:` URI whose host is `contact_host`, parsed so that an IP address
+/// (bare or bracketed IPv6) becomes an address host and is written as an
+/// `IPv6reference` (RFC 3261 §25.1, RFC 5118 §4.1); anything else is a
+/// domain name.
+fn contact_host_uri(contact_host: &str) -> Uri {
+    let host = contact_host
+        .parse::<Host>()
+        .unwrap_or_else(|_| Host::domain(contact_host));
+    Uri::new(Scheme::Sip, host)
+}
+
 /// Create a 200 OK response with To-tag and Contact header for dialog establishment
 ///
 /// This function creates a proper 200 OK response for INVITE requests that includes:
@@ -299,7 +310,7 @@ pub fn create_ok_response_with_dialog_info(
     let mut response = create_response(request, StatusCode::Ok);
 
     // Create Contact header using proper sip-core URI builder
-    let mut contact_uri = Uri::sip(contact_host).with_user(contact_user);
+    let mut contact_uri = contact_host_uri(contact_host).with_user(contact_user);
     if let Some(port) = contact_port {
         contact_uri = contact_uri.with_port(port);
     }
@@ -367,7 +378,7 @@ pub fn create_ringing_response_with_dialog_info(
     let mut response = create_ringing_response(request);
 
     // Create Contact header using proper sip-core URI builder
-    let mut contact_uri = Uri::sip(contact_host).with_user(contact_user);
+    let mut contact_uri = contact_host_uri(contact_host).with_user(contact_user);
     if let Some(port) = contact_port {
         contact_uri = contact_uri.with_port(port);
     }
@@ -380,4 +391,25 @@ pub fn create_ringing_response_with_dialog_info(
     response.headers.push(TypedHeader::Contact(contact));
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contact_host_uri_brackets_ipv6_hosts() {
+        for host in ["2001:db8::1", "[2001:db8::1]"] {
+            let uri = contact_host_uri(host).with_user("bob").with_port(5060);
+            assert_eq!(uri.to_string(), "sip:bob@[2001:db8::1]:5060", "{host}");
+        }
+        assert_eq!(
+            contact_host_uri("192.0.2.1").with_user("bob").to_string(),
+            "sip:bob@192.0.2.1"
+        );
+        assert_eq!(
+            contact_host_uri("pbx.example.com").to_string(),
+            "sip:pbx.example.com"
+        );
+    }
 }

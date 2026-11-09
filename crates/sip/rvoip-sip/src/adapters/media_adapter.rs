@@ -962,6 +962,16 @@ fn exact_initial_uac_offer(session: &SessionState) -> Option<&str> {
         .or(session.local_sdp.as_deref())
 }
 
+/// The SDP `<addrtype>` of a unicast address: `IP4` or `IP6` (RFC 8866
+/// §5.2 `o=` and §5.7 `c=`; RFC 4566 §5.2/§5.7). The address itself is
+/// written in its bare textual form — an `IP6-address` is never bracketed.
+pub(crate) fn sdp_addrtype(address: IpAddr) -> &'static str {
+    match address {
+        IpAddr::V4(_) => "IP4",
+        IpAddr::V6(_) => "IP6",
+    }
+}
+
 /// Build the SDP answer that declines an offered audio m-line per
 /// RFC 3264 §6 / RFC 4568 §7.3. Port=0 signals refusal; the proto is
 /// echoed from the offer so the peer can distinguish a policy
@@ -971,13 +981,22 @@ fn exact_initial_uac_offer(session: &SessionState) -> Option<&str> {
 pub(crate) fn build_port_zero_rejection_sdp(
     origin_session_id: &str,
     origin_version: u64,
-    local_ip: &str,
+    local_ip: IpAddr,
     offered_transport: &str,
 ) -> Result<String> {
     let version_str = origin_version.to_string();
+    let addrtype = sdp_addrtype(local_ip);
+    let local_ip = local_ip.to_string();
     let session = SdpBuilder::new("Session")
-        .origin("-", origin_session_id, &version_str, "IN", "IP4", local_ip)
-        .connection("IN", "IP4", local_ip)
+        .origin(
+            "-",
+            origin_session_id,
+            &version_str,
+            "IN",
+            addrtype,
+            &local_ip,
+        )
+        .connection("IN", addrtype, &local_ip)
         .time("0", "0")
         .media_audio(0, offered_transport)
         .formats(&["0"])
@@ -3225,7 +3244,7 @@ impl MediaAdapter {
             let sdp_answer = build_port_zero_rejection_sdp(
                 &origin_session_id,
                 origin_version,
-                &advertised_ip.to_string(),
+                advertised_ip,
                 offered_transport.as_str(),
             )?;
             let config = NegotiatedConfig {
@@ -3387,10 +3406,10 @@ impl MediaAdapter {
                 &origin_session_id,
                 &origin_version,
                 "IN",
-                "IP4",
+                sdp_addrtype(advertised_ip),
                 &local_ip_str,
             )
-            .connection("IN", "IP4", &local_ip_str)
+            .connection("IN", sdp_addrtype(advertised_ip), &local_ip_str)
             .time("0", "0");
         if let Some(material) = &ice_material {
             if material.lite {
@@ -5156,10 +5175,10 @@ impl MediaAdapter {
                 &origin_session_id,
                 &origin_version,
                 "IN",
-                "IP4",
+                sdp_addrtype(advertised_ip),
                 &local_ip_str,
             )
-            .connection("IN", "IP4", &local_ip_str)
+            .connection("IN", sdp_addrtype(advertised_ip), &local_ip_str)
             .time("0", "0");
         if let Some(material) = &ice_material {
             if material.lite {
@@ -5535,8 +5554,8 @@ impl MediaAdapter {
             &["0", "8", "101"]
         };
         let media_builder = SdpBuilder::new("Session")
-            .origin("-", "0", "0", "IN", "IP4", &local_ip)
-            .connection("IN", "IP4", &local_ip)
+            .origin("-", "0", "0", "IN", sdp_addrtype(self.local_ip), &local_ip)
+            .connection("IN", sdp_addrtype(self.local_ip), &local_ip)
             .time("0", "0")
             .media_audio(self.media_port_start, "RTP/AVP")
             .formats(formats);
@@ -6079,10 +6098,10 @@ impl MediaAdapter {
                 &origin_session_id,
                 &origin_version,
                 "IN",
-                "IP4",
+                sdp_addrtype(advertised_ip),
                 &local_ip_str,
             )
-            .connection("IN", "IP4", &local_ip_str)
+            .connection("IN", sdp_addrtype(advertised_ip), &local_ip_str)
             .time("0", "0")
             .media_audio(port, transport)
             .formats(&formats_ref);
@@ -10703,8 +10722,9 @@ a=fmtp:101 0-15\r\n";
         // the answer's m-line port must be 0 and the proto must echo
         // the offer's proto so the peer distinguishes a policy
         // rejection from a parse error.
-        let sdp = build_port_zero_rejection_sdp("1234", 7, "192.0.2.10", "RTP/SAVP")
-            .expect("rejection SDP builds");
+        let sdp =
+            build_port_zero_rejection_sdp("1234", 7, "192.0.2.10".parse().unwrap(), "RTP/SAVP")
+                .expect("rejection SDP builds");
 
         assert!(
             sdp.contains("m=audio 0 RTP/SAVP"),
@@ -10729,11 +10749,25 @@ a=fmtp:101 0-15\r\n";
     }
 
     #[test]
+    fn sdp_addrtype_follows_the_address_family() {
+        assert_eq!(sdp_addrtype("192.0.2.10".parse().unwrap()), "IP4");
+        assert_eq!(sdp_addrtype("2001:db8::10".parse().unwrap()), "IP6");
+
+        // RFC 8866 §5.2/§5.7: an IPv6 origin/connection is `IN IP6` with a
+        // bare (unbracketed) address, and the builder must accept it.
+        let sdp = build_port_zero_rejection_sdp("9", 1, "2001:db8::10".parse().unwrap(), "RTP/AVP")
+            .expect("IPv6 rejection SDP builds");
+        assert!(sdp.contains("o=- 9 1 IN IP6 2001:db8::10\r\n"), "{sdp}");
+        assert!(sdp.contains("c=IN IP6 2001:db8::10\r\n"), "{sdp}");
+        assert!(!sdp.contains("IP4"), "{sdp}");
+    }
+
+    #[test]
     fn port_zero_rejection_echoes_avp_proto_when_offered() {
         // If peer ever offers plaintext but we still want to decline
         // (e.g. require_srtp branch wired through this helper later),
         // the proto echoed must be `RTP/AVP`, not the SAVP default.
-        let sdp = build_port_zero_rejection_sdp("1", 0, "10.0.0.1", "RTP/AVP")
+        let sdp = build_port_zero_rejection_sdp("1", 0, "10.0.0.1".parse().unwrap(), "RTP/AVP")
             .expect("rejection SDP builds");
 
         assert!(

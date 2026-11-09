@@ -1062,7 +1062,8 @@ impl StreamPeer {
     /// ```
     pub async fn new(name: &str) -> Result<Self> {
         let mut config = Config::default();
-        config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
+        config.local_uri =
+            crate::api::unified::local_sip_uri(name, config.local_ip, config.sip_port);
         Self::with_config(config).await
     }
 
@@ -1956,9 +1957,10 @@ impl StreamPeerBuilder {
     /// ```
     pub async fn build(mut self) -> Result<StreamPeer> {
         if let Some(name) = self.name {
-            self.config.local_uri = format!(
-                "sip:{}@{}:{}",
-                name, self.config.local_ip, self.config.sip_port
+            self.config.local_uri = crate::api::unified::local_sip_uri(
+                &name,
+                self.config.local_ip,
+                self.config.sip_port,
             );
         }
         let runtime = SipRuntimeConfig::default()

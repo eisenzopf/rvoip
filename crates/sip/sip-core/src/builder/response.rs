@@ -305,38 +305,12 @@ impl SimpleResponseBuilder {
             builder = builder.cseq(cseq.sequence(), cseq.method().clone());
         }
 
-        // Copy all Via headers in same order (must be copied unchanged)
+        // Copy all Via headers in same order (must be copied unchanged).
+        // RFC 3261 §8.2.6.2: the response's Via values MUST equal the
+        // request's, so each header is cloned rather than rebuilt from its
+        // host text (which would lose an IPv6reference's brackets).
         for via in request.via_headers() {
-            for via_header in via.headers() {
-                // Reconstruct the full host:port string to preserve port information
-                let _host = if let Some(port) = via_header.sent_by_port {
-                    format!("{}:{}", via_header.sent_by_host, port)
-                } else {
-                    via_header.sent_by_host.to_string()
-                };
-                let transport = via_header.sent_protocol.transport.clone();
-
-                // RFC 3261 requires preserving ALL Via header parameters, not just branch
-                // So instead of using the simplified via() method, we need to copy the complete header
-                let mut params = Vec::new();
-
-                // Copy all parameters from the original Via header
-                for param in &via_header.params {
-                    params.push(param.clone());
-                }
-
-                // Create Via header with all parameters preserved
-                if let Ok(complete_via) = Via::new(
-                    &via_header.sent_protocol.name,
-                    &via_header.sent_protocol.version,
-                    &transport,
-                    &via_header.sent_by_host.to_string(),
-                    via_header.sent_by_port,
-                    params,
-                ) {
-                    builder = builder.header(TypedHeader::Via(complete_via));
-                }
-            }
+            builder = builder.header(TypedHeader::Via(via));
         }
 
         // Copy Record-Route headers in the same order for potential dialog establishment
@@ -534,11 +508,9 @@ impl SimpleResponseBuilder {
         // Copy ONLY the first Via header for error responses
         if let Some(via) = request.via_headers().first() {
             if let Some(via_header) = via.headers().first() {
-                let host = via_header.sent_by_host.to_string();
-                let transport = via_header.sent_protocol.transport.clone();
-                let branch = via_header.branch();
-
-                builder = builder.via(&host, &transport, branch);
+                // Keep sent-by (including its port) and every parameter
+                // exactly as received (RFC 3261 §8.2.6.2).
+                builder = builder.header(TypedHeader::Via(Via(vec![via_header.clone()])));
             }
         }
 
@@ -1252,7 +1224,8 @@ impl SimpleResponseBuilder {
     /// In responses, the Via headers are copied from the request in the same order.
     ///
     /// # Parameters
-    /// - `host`: The host or IP address (e.g., "192.168.1.1" or "example.com:5060")
+    /// - `host`: The sent-by, `host [":" port]` (e.g., "192.168.1.1", "example.com:5060" or
+    ///   "[2001:db8::1]:5060"; an IPv6 host followed by a port is bracketed)
     /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
     /// - `branch`: Optional branch parameter (should be the same as in the request)
     ///
@@ -1271,6 +1244,21 @@ impl SimpleResponseBuilder {
     pub fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
         use crate::builder::headers::ViaBuilderExt;
         ViaBuilderExt::via(self, host, transport, branch)
+    }
+
+    /// Add a Via header whose sent-by is a socket address
+    ///
+    /// Infallible form of [`via`](Self::via); an IPv6 address is written as
+    /// an `IPv6reference` (`[2001:db8::1]:5060`, RFC 3261 §25.1, RFC 5118
+    /// §4.1). See [`ViaBuilderExt::via_socket_addr`](crate::builder::headers::ViaBuilderExt::via_socket_addr).
+    pub fn via_socket_addr(
+        self,
+        addr: std::net::SocketAddr,
+        transport: &str,
+        branch: Option<&str>,
+    ) -> Self {
+        use crate::builder::headers::ViaBuilderExt;
+        ViaBuilderExt::via_socket_addr(self, addr, transport, branch)
     }
 
     /// Add a Contact header

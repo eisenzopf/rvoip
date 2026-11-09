@@ -1118,7 +1118,7 @@ pub fn subscribe_out_of_dialog_with_extras(
     .to("", &target_uri, None)
     .call_id(&call_id)
     .cseq(cseq)
-    .via(&local_address.to_string(), via_transport, Some(&branch))
+    .via_socket_addr(local_address, via_transport, Some(&branch))
     .max_forwards(70)
     .contact(&contact_uri, None)
     .build();
@@ -1213,7 +1213,7 @@ pub fn subscribe_out_of_dialog_with_identity_and_extras(
     .to("", &target_uri, None)
     .call_id(&call_id)
     .cseq(cseq)
-    .via(&local_address.to_string(), via_transport, Some(&branch))
+    .via_socket_addr(local_address, via_transport, Some(&branch))
     .max_forwards(70)
     .contact(&contact_uri, None)
     .build();
@@ -1283,7 +1283,7 @@ pub fn message_out_of_dialog_with_extras(
             .to("", &target_uri, None)
             .call_id(&call_id)
             .cseq(cseq)
-            .via(&local_address.to_string(), via_transport, Some(&branch))
+            .via_socket_addr(local_address, via_transport, Some(&branch))
             .max_forwards(70)
             .content_type(&ct)
             .body(bytes::Bytes::from(body))
@@ -1339,7 +1339,7 @@ pub fn options_out_of_dialog_with_extras(
             .to("", &target_uri, None)
             .call_id(&call_id)
             .cseq(cseq)
-            .via(&local_address.to_string(), via_transport, Some(&branch))
+            .via_socket_addr(local_address, via_transport, Some(&branch))
             .max_forwards(70);
 
     if let Some(accept_value) = accept {

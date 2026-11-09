@@ -33,7 +33,7 @@ use rvoip_sip_dialog::transaction::{
     TransactionManager,
 };
 use rvoip_sip_dialog::FinalResponseCompletionDisposition;
-use rvoip_sip_transport::resolver::{ResolvedTarget, Resolver};
+use rvoip_sip_transport::resolver::{AddressFamily, ResolvedTarget, Resolver};
 use rvoip_sip_transport::transport::{TransportAuthority, TransportRoute, TransportType};
 use sha2::{Digest, Sha256};
 use tokio::sync::{broadcast, mpsc};
@@ -1765,6 +1765,7 @@ impl StatefulProxy {
             Ok(candidates) => {
                 let secure = matches!(prepared.next_hop_uri.scheme(), Scheme::Sips)
                     || matches!(prepared.request.uri().scheme(), Scheme::Sips);
+                let literal = matches!(prepared.next_hop_uri.host, Host::Address(_));
                 let routes: Vec<_> = candidates
                     .into_iter()
                     .filter(|candidate| {
@@ -1774,6 +1775,7 @@ impl StatefulProxy {
                                 TransportType::Tls | TransportType::Wss
                             )
                     })
+                    .filter(|candidate| literal || self.transport_reaches_family(candidate))
                     .filter_map(|candidate| {
                         resolved_target_route(candidate, &prepared.next_hop_uri).ok()
                     })
@@ -1799,6 +1801,18 @@ impl StatefulProxy {
                 preparation_failure: Some(format!("RFC 3263 resolution failed: {error}")),
             },
         }
+    }
+
+    /// Whether the local transport selected for a DNS-derived `candidate` is
+    /// bound to the candidate's address family. RFC 3263 §4.2 may yield A
+    /// and AAAA targets, but a socket of one family cannot reach the other,
+    /// so a candidate of the other family is skipped rather than attempted.
+    /// A transport without a known local address keeps every candidate.
+    fn transport_reaches_family(&self, candidate: &ResolvedTarget) -> bool {
+        self.tm
+            .get_transport_info(candidate.transport)
+            .and_then(|info| info.local_addr)
+            .is_none_or(|local| AddressFamily::of(local.ip()).contains(candidate.addr.ip()))
     }
 
     fn via_sent_by(&self, transport: TransportType) -> Result<SocketAddr, ProxyError> {

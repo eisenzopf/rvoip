@@ -755,15 +755,13 @@ impl SubscriptionManager {
             builder = builder.cseq(cseq.seq, cseq.method.clone());
         }
 
-        if let Some(via) = request.first_via() {
-            if let Some(first_via_header) = via.0.first() {
-                let host = format!(
-                    "{}:{}",
-                    first_via_header.sent_by_host,
-                    first_via_header.sent_by_port.unwrap_or(5060)
-                );
-                let transport = &first_via_header.sent_protocol.transport;
-                builder = builder.via(&host, transport, first_via_header.branch().as_deref());
+        // RFC 3261 §8.2.6.2: the response's Via values MUST equal the
+        // request's, in order. Copy each header unchanged rather than
+        // rebuilding it from host text, which would lose the sent-by port's
+        // absence, `received`/`rport`, and an IPv6reference's brackets.
+        for header in &request.headers {
+            if let TypedHeader::Via(via) = header {
+                builder = builder.header(TypedHeader::Via(via.clone()));
             }
         }
 
@@ -904,6 +902,38 @@ mod tests {
         })
         .await
         .expect("expiry task record must be released");
+    }
+
+    #[tokio::test]
+    async fn subscribe_response_copies_ipv6_vias_unchanged() {
+        let (manager, _dialogs, _events, _dialog_id) = manager_with_subscription();
+        let request = rvoip_sip_core::builder::SimpleRequestBuilder::new(
+            rvoip_sip_core::Method::Subscribe,
+            "sip:notifier@[2001:db8::2]",
+        )
+        .unwrap()
+        .from("", "sip:subscriber@[2001:db8::1]", Some("from-tag"))
+        .to("", "sip:notifier@[2001:db8::2]", None)
+        .call_id("subscribe-ipv6")
+        .cseq(1)
+        .via("[2001:db8::9]:5070", "UDP", Some("z9hG4bK.proxy"))
+        .via("[2001:db8::1]", "UDP", Some("z9hG4bK.uac"))
+        .build();
+
+        let response = manager
+            .build_response_from_request(StatusCode::Ok, None, &request)
+            .build();
+        let wire = response.to_string();
+        // RFC 3261 §8.2.6.2: Via values equal the request's, in order; an
+        // absent sent-by port stays absent and IPv6 stays bracketed.
+        let proxy = wire
+            .find("Via: SIP/2.0/UDP [2001:db8::9]:5070;branch=z9hG4bK.proxy")
+            .expect(&wire);
+        let uac = wire
+            .find("Via: SIP/2.0/UDP [2001:db8::1];branch=z9hG4bK.uac")
+            .expect(&wire);
+        assert!(proxy < uac, "{wire}");
+        manager.close_expiry_tasks().await.unwrap();
     }
 
     #[tokio::test]

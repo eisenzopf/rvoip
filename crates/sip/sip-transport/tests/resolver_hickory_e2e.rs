@@ -5,7 +5,7 @@
 
 #![cfg(feature = "dns")]
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,11 +17,13 @@ use hickory_server::store::in_memory::InMemoryZoneHandler;
 use hickory_server::zone_handler::{AxfrPolicy, Catalog, ZoneHandler, ZoneType};
 use hickory_server::Server;
 use rvoip_sip_core::Uri;
-use rvoip_sip_transport::resolver::{HickoryResolver, Resolver};
+use rvoip_sip_transport::resolver::{AddressFamily, HickoryResolver, Resolver, ResolverError};
 use rvoip_sip_transport::transport::{TransportAuthority, TransportType};
 use tokio::net::UdpSocket;
 
 const TTL: u32 = 300;
+const DUAL_V4: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 10);
+const DUAL_V6: Ipv6Addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x10);
 
 fn name(s: &str) -> Name {
     Name::from_str(s).expect("valid DNS name")
@@ -98,6 +100,24 @@ fn build_fixture_authority() -> InMemoryZoneHandler {
 
     // A record for the SRV target — same loopback for both flavours.
     add_record(&mut authority, "host.example.test.", host_rdata());
+
+    // A dual-stack host (A + AAAA) reached through its own SRV, used by the
+    // address-family tests.
+    add_record(
+        &mut authority,
+        "dual.example.test.",
+        RData::A(hickory_proto::rr::rdata::A(DUAL_V4)),
+    );
+    add_record(
+        &mut authority,
+        "dual.example.test.",
+        RData::AAAA(hickory_proto::rr::rdata::AAAA(DUAL_V6)),
+    );
+    add_record(
+        &mut authority,
+        "_sip._udp.dualsrv.example.test.",
+        srv_rdata(1, 1, 5070, "dual.example.test."),
+    );
 
     authority
 }
@@ -198,5 +218,66 @@ async fn hickory_client_resolves_naptr_then_srv_then_a() {
         "NAPTR/SRV targets must retain the original SIP authority for TLS SNI: {candidates:?}"
     );
 
+    server.abort();
+}
+
+#[tokio::test]
+async fn unrestricted_resolver_returns_both_families() {
+    let (_addr, resolver, server) = spin_up_fixture().await;
+    let uri = Uri::from_str("sip:dual.example.test:5070").unwrap();
+    let candidates = resolver.resolve(&uri).await.expect("resolve");
+    let addrs: Vec<IpAddr> = candidates.iter().map(|c| c.addr.ip()).collect();
+    assert!(addrs.contains(&IpAddr::V4(DUAL_V4)), "{candidates:?}");
+    assert!(addrs.contains(&IpAddr::V6(DUAL_V6)), "{candidates:?}");
+    server.abort();
+}
+
+#[tokio::test]
+async fn ipv4_restricted_resolver_never_returns_aaaa_targets() {
+    let (_addr, resolver, server) = spin_up_fixture().await;
+    let resolver = resolver.with_address_family(Some(AddressFamily::Ipv4));
+    for uri in [
+        "sip:dual.example.test:5070",
+        "sip:dualsrv.example.test;transport=udp",
+    ] {
+        let candidates = resolver
+            .resolve(&Uri::from_str(uri).unwrap())
+            .await
+            .expect("resolve");
+        assert_eq!(
+            candidates.iter().map(|c| c.addr).collect::<Vec<_>>(),
+            vec![SocketAddr::new(IpAddr::V4(DUAL_V4), 5070)],
+            "{uri}"
+        );
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn ipv6_restricted_resolver_never_returns_a_targets() {
+    let (_addr, resolver, server) = spin_up_fixture().await;
+    let resolver = resolver.with_address_family(Some(AddressFamily::Ipv6));
+    for uri in [
+        "sip:dual.example.test:5070",
+        "sip:dualsrv.example.test;transport=udp",
+    ] {
+        let candidates = resolver
+            .resolve(&Uri::from_str(uri).unwrap())
+            .await
+            .expect("resolve");
+        assert_eq!(
+            candidates.iter().map(|c| c.addr).collect::<Vec<_>>(),
+            vec![SocketAddr::new(IpAddr::V6(DUAL_V6), 5070)],
+            "{uri}"
+        );
+    }
+
+    // `example.test`'s NAPTR/SRV ladder only reaches an A record, so an
+    // IPv6-only stack has no candidate rather than an unreachable one.
+    let error = resolver
+        .resolve(&Uri::from_str("sip:example.test").unwrap())
+        .await
+        .expect_err("no AAAA anywhere in the ladder");
+    assert!(matches!(error, ResolverError::NoCandidates), "{error:?}");
     server.abort();
 }

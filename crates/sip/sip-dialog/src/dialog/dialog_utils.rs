@@ -139,35 +139,11 @@ pub fn extract_uri_from_contact(contact: &ContactValue) -> Result<Uri, &'static 
 /// [`DialogManager::resolve_uri_to_socketaddr`](crate::manager::DialogManager::resolve_uri_to_socketaddr)
 /// rather than this free function.
 pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-    use rvoip_sip_core::types::uri::{Host, Scheme};
-
-    // IP-literal short-circuit so this works even if the system DNS
-    // resolver is unavailable.
-    if let Host::Address(ip) = &uri.host {
-        let default_port = match uri.scheme() {
-            Scheme::Sips => 5061,
-            _ => 5060,
-        };
-        let port = uri.port.filter(|p| *p > 0).unwrap_or(default_port);
-        return Some(SocketAddr::new(ip.clone(), port));
-    }
-
-    // `localhost` is loopback by convention — resolve it directly so a
-    // localhost target never triggers system-DNS resolver init (which can
-    // block for seconds on a slow/misconfigured host). See
-    // [`loopback_for_localhost`].
-    if let Some(addr) = loopback_for_localhost(uri) {
-        return Some(addr);
-    }
-
-    let resolver = process_default_resolver().await?;
-    match resolver.resolve(uri).await {
-        Ok(candidates) => candidates.into_iter().next().map(|t| t.addr),
-        Err(e) => {
-            tracing::debug!("Default resolver failed for URI class: {}", error_class(&e));
-            None
-        }
-    }
+    resolve_uri_to_candidates_for_family(uri, None)
+        .await
+        .into_iter()
+        .next()
+        .map(|target| target.addr)
 }
 
 /// Resolve a destination URI to the FULL list of candidates produced
@@ -184,8 +160,26 @@ pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
 pub async fn resolve_uri_to_candidates(
     uri: &Uri,
 ) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
+    resolve_uri_to_candidates_for_family(uri, None).await
+}
+
+/// [`resolve_uri_to_candidates`] for a stack whose transports are bound to
+/// one address family.
+///
+/// With `Some(family)`, DNS-derived candidates of the other family are
+/// dropped (keeping the RFC 3263 order of the rest), since a socket of one
+/// family cannot reach the other, and `localhost` resolves to that family's
+/// loopback (RFC 6761 §6.3). An IP-literal URI names one exact address and
+/// is returned as-is. `None` keeps every candidate and maps `localhost` to
+/// `127.0.0.1`.
+pub async fn resolve_uri_to_candidates_for_family(
+    uri: &Uri,
+    family: Option<rvoip_sip_transport::AddressFamily>,
+) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
     use rvoip_sip_core::types::uri::{Host, Scheme};
-    use rvoip_sip_transport::resolver::{select_transport_for_uri, ResolvedTarget};
+    use rvoip_sip_transport::resolver::{
+        retain_address_family, select_transport_for_uri, ResolvedTarget,
+    };
 
     if let Host::Address(ip) = &uri.host {
         let default_port = match uri.scheme() {
@@ -195,13 +189,13 @@ pub async fn resolve_uri_to_candidates(
         let port = uri.port.filter(|p| *p > 0).unwrap_or(default_port);
         let transport = select_transport_for_uri(uri);
         return vec![ResolvedTarget::immediate(
-            SocketAddr::new(ip.clone(), port),
+            SocketAddr::new(*ip, port),
             transport,
         )];
     }
 
     // `localhost` → loopback, bypassing system-DNS resolver init.
-    if let Some(addr) = loopback_for_localhost(uri) {
+    if let Some(addr) = loopback_for_localhost(uri, family) {
         let transport = select_transport_for_uri(uri);
         return vec![ResolvedTarget::immediate(addr, transport)];
     }
@@ -210,7 +204,12 @@ pub async fn resolve_uri_to_candidates(
         return Vec::new();
     };
     match resolver.resolve(uri).await {
-        Ok(candidates) => candidates,
+        Ok(mut candidates) => {
+            if let Some(family) = family {
+                retain_address_family(&mut candidates, family);
+            }
+            candidates
+        }
         Err(e) => {
             tracing::debug!("Default resolver failed for URI class: {}", error_class(&e));
             Vec::new()
@@ -220,12 +219,18 @@ pub async fn resolve_uri_to_candidates(
 
 /// Loopback short-circuit for the special `localhost` name.
 ///
-/// `localhost` is loopback by convention, so resolving it through the system
-/// DNS resolver is both unnecessary and risky: the one-time resolver init
-/// (`read_system_conf`) can block for many seconds on a slow or misconfigured
-/// host. Returning loopback directly keeps localhost targets fast and works in
-/// sandboxes with no `/etc/resolv.conf`. Honors the `sips:`→5061 default port.
-fn loopback_for_localhost(uri: &Uri) -> Option<SocketAddr> {
+/// `localhost` is loopback by convention (RFC 6761 §6.3), so resolving it
+/// through the system DNS resolver is both unnecessary and risky: the
+/// one-time resolver init (`read_system_conf`) can block for many seconds on
+/// a slow or misconfigured host. Returning loopback directly keeps localhost
+/// targets fast and works in sandboxes with no `/etc/resolv.conf`. The
+/// loopback is that of the bound address `family` (`::1` for an IPv6 stack;
+/// `127.0.0.1` when the family is IPv4 or unknown). Honors the `sips:`→5061
+/// default port.
+fn loopback_for_localhost(
+    uri: &Uri,
+    family: Option<rvoip_sip_transport::AddressFamily>,
+) -> Option<SocketAddr> {
     use rvoip_sip_core::types::uri::{Host, Scheme};
     if let Host::Domain(name) = &uri.host {
         if name.eq_ignore_ascii_case("localhost") {
@@ -234,10 +239,8 @@ fn loopback_for_localhost(uri: &Uri) -> Option<SocketAddr> {
                 _ => 5060,
             };
             let port = uri.port.filter(|p| *p > 0).unwrap_or(default_port);
-            return Some(SocketAddr::new(
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                port,
-            ));
+            let family = family.unwrap_or(rvoip_sip_transport::AddressFamily::Ipv4);
+            return Some(SocketAddr::new(family.loopback(), port));
         }
     }
     None
@@ -388,6 +391,35 @@ mod tests {
         let uri = extract_uri(header_value);
         assert!(uri.is_some());
         assert_eq!(uri.unwrap().to_string(), "sip:192.168.1.1");
+    }
+
+    #[tokio::test]
+    async fn localhost_resolves_to_the_bound_family_loopback() {
+        use rvoip_sip_transport::AddressFamily;
+
+        let uri = Uri::from_str("sip:alice@localhost:5070").unwrap();
+        let first = |candidates: Vec<rvoip_sip_transport::ResolvedTarget>| {
+            candidates.into_iter().next().map(|target| target.addr)
+        };
+        assert_eq!(
+            first(resolve_uri_to_candidates_for_family(&uri, Some(AddressFamily::Ipv6)).await),
+            Some("[::1]:5070".parse().unwrap())
+        );
+        assert_eq!(
+            first(resolve_uri_to_candidates_for_family(&uri, Some(AddressFamily::Ipv4)).await),
+            Some("127.0.0.1:5070".parse().unwrap())
+        );
+        assert_eq!(
+            resolve_uri_to_socketaddr(&uri).await,
+            Some("127.0.0.1:5070".parse().unwrap())
+        );
+
+        // An IP literal names one exact address and is never rewritten.
+        let literal = Uri::from_str("sips:alice@[2001:db8::1]").unwrap();
+        assert_eq!(
+            first(resolve_uri_to_candidates_for_family(&literal, Some(AddressFamily::Ipv6)).await),
+            Some("[2001:db8::1]:5061".parse().unwrap())
+        );
     }
 
     #[tokio::test]

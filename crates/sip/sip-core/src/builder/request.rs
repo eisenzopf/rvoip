@@ -947,7 +947,8 @@ impl SimpleRequestBuilder {
     /// The Via header indicates the path taken by the request so far and helps route responses back.
     ///
     /// # Parameters
-    /// - `host`: The host or IP address (e.g., "192.168.1.1" or "example.com:5060")
+    /// - `host`: The sent-by, `host [":" port]` (e.g., "192.168.1.1", "example.com:5060" or
+    ///   "[2001:db8::1]:5060"; an IPv6 host followed by a port is bracketed)
     /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
     /// - `branch`: Optional branch parameter (should be prefixed with z9hG4bK per RFC 3261)
     ///
@@ -966,6 +967,21 @@ impl SimpleRequestBuilder {
     pub fn via(self, host: &str, transport: &str, branch: Option<&str>) -> Self {
         use crate::builder::headers::ViaBuilderExt;
         ViaBuilderExt::via(self, host, transport, branch)
+    }
+
+    /// Add a Via header whose sent-by is a socket address
+    ///
+    /// Infallible form of [`via`](Self::via); an IPv6 address is written as
+    /// an `IPv6reference` (`[2001:db8::1]:5060`, RFC 3261 §25.1, RFC 5118
+    /// §4.1). See [`ViaBuilderExt::via_socket_addr`](crate::builder::headers::ViaBuilderExt::via_socket_addr).
+    pub fn via_socket_addr(
+        self,
+        addr: std::net::SocketAddr,
+        transport: &str,
+        branch: Option<&str>,
+    ) -> Self {
+        use crate::builder::headers::ViaBuilderExt;
+        ViaBuilderExt::via_socket_addr(self, addr, transport, branch)
     }
 
     /// Add a Max-Forwards header

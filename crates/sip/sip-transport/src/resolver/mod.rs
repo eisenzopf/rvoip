@@ -18,7 +18,7 @@
 //! transport trait still takes `SocketAddr` directly. The resolver is
 //! consulted upstream, at the URI→candidate boundary.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -76,6 +76,51 @@ impl ResolvedTarget {
         self.authority = Some(authority);
         self
     }
+}
+
+/// The IP address family a SIP transport is bound to.
+///
+/// RFC 3263 §4.2 resolves a host to A and/or AAAA records, but a transport
+/// socket bound to one family can only reach destinations of that family.
+/// Resolution therefore keeps only the candidates of the bound family (RFC
+/// 3263 §4.3 then fails over within that list), so an IPv4-only stack never
+/// selects an AAAA target and an IPv6-only stack never selects an A target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AddressFamily {
+    /// IPv4 (A records).
+    Ipv4,
+    /// IPv6 (AAAA records).
+    Ipv6,
+}
+
+impl AddressFamily {
+    /// The family of `ip`.
+    pub fn of(ip: IpAddr) -> Self {
+        match ip {
+            IpAddr::V4(_) => Self::Ipv4,
+            IpAddr::V6(_) => Self::Ipv6,
+        }
+    }
+
+    /// Whether `ip` belongs to this family.
+    pub fn contains(self, ip: IpAddr) -> bool {
+        Self::of(ip) == self
+    }
+
+    /// The loopback address of this family (`127.0.0.1` or `::1`), which is
+    /// what the special-use name `localhost` resolves to (RFC 6761 §6.3).
+    pub fn loopback(self) -> IpAddr {
+        match self {
+            Self::Ipv4 => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            Self::Ipv6 => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        }
+    }
+}
+
+/// Keep only the candidates of `family`, preserving the RFC 3263 order of
+/// the remaining ones.
+pub fn retain_address_family(candidates: &mut Vec<ResolvedTarget>, family: AddressFamily) {
+    candidates.retain(|candidate| family.contains(candidate.addr.ip()));
 }
 
 /// Errors surfaced from a [`Resolver::resolve`] call.

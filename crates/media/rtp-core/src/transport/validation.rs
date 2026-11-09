@@ -128,6 +128,14 @@ impl PlatformSocketStrategy {
         }
     }
 
+    /// Whether `IPV6_V6ONLY` should be applied to `socket`: the strategy asks
+    /// for it and the socket is bound to the IPv6 wildcard address, the only
+    /// bind for which the option changes behaviour (RFC 3493 §5.3).
+    fn wants_ipv6_only_option(&self, socket: &UdpSocket) -> io::Result<bool> {
+        let local = socket.local_addr()?;
+        Ok(self.set_ipv6_only && local.is_ipv6() && local.ip().is_unspecified())
+    }
+
     /// Apply this strategy to a socket
     pub async fn apply_to_socket(&self, socket: &UdpSocket) -> io::Result<()> {
         // Set socket buffer size using the socket's fd
@@ -178,15 +186,36 @@ impl PlatformSocketStrategy {
                 }
             }
 
-            // Set IPV6_V6ONLY if needed
-            if self.set_ipv6_only && socket.local_addr()?.is_ipv6() {
-                let optval =
-                    if self.ipv6_only { &1 } else { &0 } as *const i32 as *const libc::c_void;
-                if unsafe {
-                    libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, optval, optlen)
-                } < 0
-                {
-                    return Err(io::Error::last_os_error());
+            // IPV6_V6ONLY (RFC 3493 §5.3) only decides whether a socket bound
+            // to the IPv6 wildcard also receives IPv4-mapped traffic; it has
+            // no effect on a socket bound to one IPv6 address. It is a
+            // pre-bind option: Linux rejects changing it on a bound socket
+            // with EINVAL, so a wildcard socket whose value already differs
+            // keeps it (logged) instead of failing the media session.
+            if self.wants_ipv6_only_option(socket)? {
+                let mut current: i32 = 0;
+                let mut current_len = optlen;
+                let read = unsafe {
+                    libc::getsockopt(
+                        fd,
+                        libc::IPPROTO_IPV6,
+                        libc::IPV6_V6ONLY,
+                        &mut current as *mut i32 as *mut libc::c_void,
+                        &mut current_len,
+                    )
+                };
+                if read < 0 || (current != 0) != self.ipv6_only {
+                    let optval =
+                        if self.ipv6_only { &1 } else { &0 } as *const i32 as *const libc::c_void;
+                    if unsafe {
+                        libc::setsockopt(fd, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, optval, optlen)
+                    } < 0
+                    {
+                        warn!(
+                            error = %io::Error::last_os_error(),
+                            "IPV6_V6ONLY cannot be changed on a bound wildcard socket; keeping the system default"
+                        );
+                    }
                 }
             }
         }
@@ -236,8 +265,9 @@ impl PlatformSocketStrategy {
                 }
             }
 
-            // Set IPV6_V6ONLY if needed
-            if self.set_ipv6_only && socket.local_addr()?.is_ipv6() {
+            // IPV6_V6ONLY matters only for a wildcard-bound IPv6 socket
+            // (RFC 3493 §5.3); see the Unix branch.
+            if self.wants_ipv6_only_option(socket)? {
                 let optval =
                     if self.ipv6_only { &1 } else { &0 } as *const i32 as *const libc::c_char;
                 const IPV6_V6ONLY: i32 = 27; // Defined in ws2ipdef.h but not in winapi crate
@@ -558,6 +588,30 @@ mod tests {
         assert_ne!(win_strategy, mac_strategy);
         assert_ne!(win_strategy, linux_strategy);
         assert_ne!(mac_strategy, linux_strategy);
+    }
+
+    #[tokio::test]
+    async fn strategy_applies_to_sockets_bound_to_one_ipv6_address() {
+        // A socket bound to one IPv6 address must be configurable: changing
+        // IPV6_V6ONLY after bind fails with EINVAL on Linux, and the option
+        // has no effect on a non-wildcard bind anyway (RFC 3493 §5.3).
+        let Ok(socket) = UdpSocket::bind("[::1]:0").await else {
+            println!("IPv6 loopback unavailable; skipping");
+            return;
+        };
+        PlatformSocketStrategy::for_current_platform()
+            .apply_to_socket(&socket)
+            .await
+            .expect("an IPv6 RTP socket is configurable after bind");
+
+        // A wildcard bind keeps working even where the option can no
+        // longer be changed.
+        if let Ok(wildcard) = UdpSocket::bind("[::]:0").await {
+            PlatformSocketStrategy::for_current_platform()
+                .apply_to_socket(&wildcard)
+                .await
+                .expect("an IPv6 wildcard RTP socket is configurable after bind");
+        }
     }
 
     #[test]
