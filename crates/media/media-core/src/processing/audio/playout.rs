@@ -142,12 +142,109 @@ pub struct PlayoutStats {
     pub depth: usize,
 }
 
+/// Pending frames keyed by RTP timestamp.
+///
+/// Every query is answered from the key values alone (keys are unique), so
+/// both storages give the same answers whatever their internal order.
+enum PendingFrames {
+    /// An ordered map. Removing the next frame shifts the rest of its B-tree
+    /// node (a `memmove` of keys and frame headers).
+    Tree(BTreeMap<u32, AudioFrame>),
+    /// Parallel unordered vectors, a few entries long (at most
+    /// `max_depth_frames + 1`). Lookup scans the keys; removal is
+    /// `swap_remove`, which moves one frame header and never shifts or
+    /// copies PCM.
+    Slots {
+        keys: Vec<u32>,
+        frames: Vec<AudioFrame>,
+    },
+}
+
+impl PendingFrames {
+    fn slots(capacity: usize) -> Self {
+        Self::Slots {
+            keys: Vec::with_capacity(capacity),
+            frames: Vec::with_capacity(capacity),
+        }
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        match self {
+            Self::Tree(map) => map.len(),
+            Self::Slots { keys, .. } => keys.len(),
+        }
+    }
+
+    #[inline]
+    fn contains_key(&self, timestamp: u32) -> bool {
+        match self {
+            Self::Tree(map) => map.contains_key(&timestamp),
+            Self::Slots { keys, .. } => keys.contains(&timestamp),
+        }
+    }
+
+    /// Insert a frame whose timestamp is not pending (the caller checks).
+    #[inline]
+    fn insert(&mut self, timestamp: u32, frame: AudioFrame) {
+        match self {
+            Self::Tree(map) => {
+                map.insert(timestamp, frame);
+            }
+            Self::Slots { keys, frames } => {
+                keys.push(timestamp);
+                frames.push(frame);
+            }
+        }
+    }
+
+    #[inline]
+    fn remove(&mut self, timestamp: u32) -> Option<AudioFrame> {
+        match self {
+            Self::Tree(map) => map.remove(&timestamp),
+            Self::Slots { keys, frames } => {
+                let index = keys.iter().position(|key| *key == timestamp)?;
+                keys.swap_remove(index);
+                Some(frames.swap_remove(index))
+            }
+        }
+    }
+
+    /// The pending timestamp earliest in wrapping order from `origin`.
+    fn oldest(&self, origin: u32) -> Option<u32> {
+        // A signed wrapping delta gives the correct order for the practical
+        // RTP window on either side of 2^32 wrap. Keys are unique, so the
+        // minimum is unique and independent of iteration order.
+        let order = |timestamp: &u32| timestamp.wrapping_sub(origin) as i32;
+        match self {
+            Self::Tree(map) => map.keys().copied().min_by_key(order),
+            Self::Slots { keys, .. } => keys.iter().copied().min_by_key(order),
+        }
+    }
+
+    /// The frame with the numerically smallest timestamp (the ordered map's
+    /// first value).
+    fn first_by_key(&self) -> Option<&AudioFrame> {
+        match self {
+            Self::Tree(map) => map.values().next(),
+            Self::Slots { keys, frames } => {
+                let index = keys
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, key)| **key)
+                    .map(|(index, _)| index)?;
+                frames.get(index)
+            }
+        }
+    }
+}
+
 /// Reorders, paces, and conceals a decoded audio stream.
 pub struct PlayoutBuffer {
     config: PlayoutConfig,
     /// Pending frames keyed by RTP timestamp, which is the media clock and
     /// therefore the correct playout order even when arrival order differs.
-    pending: BTreeMap<u32, AudioFrame>,
+    pending: PendingFrames,
     /// Timestamp of the first arrival, used as the wrap-safe ordering origin
     /// until the first frame is emitted.
     origin_timestamp: Option<u32>,
@@ -191,9 +288,25 @@ impl std::fmt::Debug for PlayoutBuffer {
 impl PlayoutBuffer {
     #[must_use]
     pub fn new(config: PlayoutConfig) -> Self {
+        Self::with_pending(config, PendingFrames::Tree(BTreeMap::new()))
+    }
+
+    /// The same buffer with slot storage for its pending frames: a few
+    /// unordered slots instead of an ordered map, so taking the next frame
+    /// moves one frame header instead of shifting a B-tree node. Every
+    /// decision, frame and statistic equals [`Self::new`]'s. Pair it with
+    /// [`Self::pop_due_with`] to also keep each emitted frame as the
+    /// concealment template without copying its PCM.
+    #[must_use]
+    pub fn with_slot_storage(config: PlayoutConfig) -> Self {
+        let capacity = config.max_depth_frames.saturating_add(2).min(64);
+        Self::with_pending(config, PendingFrames::slots(capacity))
+    }
+
+    fn with_pending(config: PlayoutConfig, pending: PendingFrames) -> Self {
         Self {
             config,
-            pending: BTreeMap::new(),
+            pending,
             origin_timestamp: None,
             next_timestamp: None,
             samples_per_frame: None,
@@ -255,7 +368,7 @@ impl PlayoutBuffer {
         }
         self.late_run = 0;
         self.last_late_arrival = None;
-        if self.pending.contains_key(&frame.timestamp) {
+        if self.pending.contains_key(frame.timestamp) {
             self.stats.frames_duplicate += 1;
             crate::pcm_pool::recycle_pcm_buffer(frame.samples);
             return;
@@ -266,7 +379,7 @@ impl PlayoutBuffer {
         // by waiting; release the oldest rather than growing latency.
         while self.pending.len() > self.config.max_depth_frames {
             if let Some(oldest) = self.oldest_pending_timestamp() {
-                if let Some(evicted) = self.pending.remove(&oldest) {
+                if let Some(evicted) = self.pending.remove(oldest) {
                     crate::pcm_pool::recycle_pcm_buffer(evicted.samples);
                 }
                 self.stats.frames_late += 1;
@@ -385,6 +498,44 @@ impl PlayoutBuffer {
     /// clock. The early-drain path deliberately leaves the deadline unchanged:
     /// it is the equivalent of a jitter buffer's skip-timer valve.
     pub fn pop_due(&mut self, now: Instant) -> Option<AudioFrame> {
+        let (deadline, due) = self.due_decision(now)?;
+        let frame = self.pop_next()?;
+        // `pop_next` copied `frame` into the template, so the fallback
+        // duration reads the same frame either way.
+        let duration = due.then(|| self.ordinary_duration(&frame));
+        self.finish_pop(deadline, duration);
+        Some(frame)
+    }
+
+    /// Zero-copy twin of [`Self::pop_due`]: the same decision, frame,
+    /// timestamps and statistics, but the frame is lent to `consume` and
+    /// then kept as the concealment template itself, instead of its PCM
+    /// being copied into the template and the frame handed out. Returns
+    /// `None` exactly when `pop_due` would, and then does not call
+    /// `consume`.
+    ///
+    /// The displaced template's PCM goes back to the per-thread PCM pool,
+    /// where a `pop_due` caller returns the emitted frame's.
+    pub fn pop_due_with<R>(
+        &mut self,
+        now: Instant,
+        consume: impl FnOnce(&AudioFrame) -> R,
+    ) -> Option<R> {
+        let (deadline, due) = self.due_decision(now)?;
+        let frame = self.pop_next_inner(false)?;
+        if let Some(previous) = self.last_emitted.replace(frame) {
+            crate::pcm_pool::recycle_pcm_buffer(previous.samples);
+        }
+        let template = self.last_emitted.as_ref()?;
+        let duration = due.then(|| self.ordinary_duration(template));
+        self.finish_pop(deadline, duration);
+        self.last_emitted.as_ref().map(consume)
+    }
+
+    /// `Some((deadline, due))` when a frame leaves now: due on the media
+    /// clock, or early to drain excess depth.
+    #[inline]
+    fn due_decision(&self, now: Instant) -> Option<(Instant, bool)> {
         if !self.primed {
             return None;
         }
@@ -395,31 +546,46 @@ impl PlayoutBuffer {
         if !due && !drain_down {
             return None;
         }
+        Some((deadline, due))
+    }
 
-        let frame = self.pop_next()?;
-        if due {
-            let nominal = nonzero_frame_duration(&frame)
-                .or_else(|| self.frame_duration())
-                .unwrap_or(Duration::from_millis(20));
-            let duration = scale_duration(nominal, self.clock_skew_ppm);
-            self.next_playout_at = Some(deadline + duration);
-        } else {
-            self.stats.frames_catch_up += 1;
+    /// The ordinary playout interval after `frame` (by now the template).
+    fn ordinary_duration(&self, frame: &AudioFrame) -> Duration {
+        let nominal = nonzero_frame_duration(frame)
+            .or_else(|| self.frame_duration())
+            .unwrap_or(Duration::from_millis(20));
+        scale_duration(nominal, self.clock_skew_ppm)
+    }
+
+    /// Advance the media clock from `deadline` by `duration` (a due frame),
+    /// or count an early catch-up frame (`None`).
+    fn finish_pop(&mut self, deadline: Instant, duration: Option<Duration>) {
+        match duration {
+            Some(duration) => self.next_playout_at = Some(deadline + duration),
+            None => self.stats.frames_catch_up += 1,
         }
-        Some(frame)
     }
 
     fn pop_next(&mut self) -> Option<AudioFrame> {
+        self.pop_next_inner(true)
+    }
+
+    /// The next frame in media order, emitted or concealed. `remember`:
+    /// copy it into the concealment template (otherwise the caller makes
+    /// the frame itself the template).
+    fn pop_next_inner(&mut self, remember: bool) -> Option<AudioFrame> {
         let expected = match self.next_timestamp {
             Some(timestamp) => timestamp,
             None => self.oldest_pending_timestamp()?,
         };
 
-        if let Some(frame) = self.pending.remove(&expected) {
+        if let Some(frame) = self.pending.remove(expected) {
             self.consecutive_concealed = 0;
             self.advance(&frame);
             self.stats.frames_emitted += 1;
-            self.remember_frame(&frame);
+            if remember {
+                self.remember_frame(&frame);
+            }
             return Some(frame);
         }
 
@@ -427,21 +593,17 @@ impl PlayoutBuffer {
         // started cannot wait: the concealment *is* the wait. Bounded by
         // `max_consecutive_concealed`, past which it becomes silence, so a
         // far end that has simply gone quiet does not buzz forever.
-        self.conceal(expected)
+        self.conceal(expected, remember)
     }
 
     fn oldest_pending_timestamp(&self) -> Option<u32> {
         let origin = self.origin_timestamp?;
-        self.pending
-            .keys()
-            .copied()
-            // A signed wrapping delta gives the correct order for the
-            // practical RTP window on either side of 2^32 wrap.
-            .min_by_key(|timestamp| timestamp.wrapping_sub(origin) as i32)
+        self.pending.oldest(origin)
     }
 
-    /// Synthesize the frame that should have arrived.
-    fn conceal(&mut self, expected: u32) -> Option<AudioFrame> {
+    /// Synthesize the frame that should have arrived. `remember`: copy it
+    /// into the concealment template (otherwise the caller adopts it).
+    fn conceal(&mut self, expected: u32, remember: bool) -> Option<AudioFrame> {
         // `last_emitted.clone()`, with the PCM copy taken from the pool when
         // it is enabled (same samples).
         let last = self.last_emitted.as_ref()?;
@@ -461,7 +623,9 @@ impl PlayoutBuffer {
             self.stats.frames_concealed += 1;
             self.stats.frames_emitted += 1;
             self.advance(&concealed);
-            self.remember_frame(&concealed);
+            if remember {
+                self.remember_frame(&concealed);
+            }
             return Some(concealed);
         }
 
@@ -477,7 +641,9 @@ impl PlayoutBuffer {
         self.stats.frames_concealed += 1;
         self.stats.frames_emitted += 1;
         self.advance(&concealed);
-        self.remember_frame(&concealed);
+        if remember {
+            self.remember_frame(&concealed);
+        }
         Some(concealed)
     }
 
@@ -532,8 +698,7 @@ impl PlayoutBuffer {
             .filter(|duration| !duration.is_zero())
             .or_else(|| {
                 self.pending
-                    .values()
-                    .next()
+                    .first_by_key()
                     .map(|frame| frame.duration)
                     .filter(|duration| !duration.is_zero())
             })
@@ -654,7 +819,7 @@ mod tests {
             timestamp: u32::MAX - 100,
         };
         playout.remember_frame(&changed);
-        let output = playout.conceal(859).unwrap();
+        let output = playout.conceal(859, true).unwrap();
         assert_eq!(output.samples, vec![61; 1_920]);
         assert_eq!(output.sample_rate, 48_000);
         assert_eq!(output.channels, 2);
@@ -1094,5 +1259,327 @@ mod tests {
                 .timestamp,
             0
         );
+    }
+
+    // ---- Slot storage and lent frames (zero-copy playout) ----
+
+    /// xorshift64*: deterministic, no dependency.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn below(&mut self, bound: u64) -> u64 {
+            self.next() % bound
+        }
+    }
+
+    type Emitted = (u32, Vec<i16>, u32, u8, Duration);
+
+    fn emitted(frame: &AudioFrame) -> Emitted {
+        (
+            frame.timestamp,
+            frame.samples.clone(),
+            frame.sample_rate,
+            frame.channels,
+            frame.duration,
+        )
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Arm {
+        TreeCopy,
+        SlotsCopy,
+        SlotsLent,
+        TreeLent,
+    }
+
+    /// One scripted stream through the four storage/pop combinations, as
+    /// the fused pump drives it (push, then at most eight due pops, at every
+    /// event). Returns what each arm emitted and when, after asserting that
+    /// every arm made the same decisions at every step and never emitted a
+    /// frame early, nor later than one step after its deadline.
+    fn run_script(seed: u64, steps: usize) -> Vec<(Instant, Emitted)> {
+        let mut rng = Rng(seed | 1);
+        let config = PlayoutConfig {
+            target_depth_frames: 1 + rng.below(4) as usize,
+            max_depth_frames: 4 + rng.below(8) as usize,
+            max_consecutive_concealed: 1 + rng.below(6) as usize,
+            adaptive: rng.below(2) == 0,
+        };
+        // 8 kHz mono G.711 frames, or 48 kHz stereo frames (the timestamp
+        // advances by sample times, not interleaved samples).
+        let (sample_rate, channels, sample_times) = if rng.below(4) == 0 {
+            (48_000, 2u8, 960u32)
+        } else {
+            (8_000, 1u8, 160u32)
+        };
+        let base: u32 = if rng.below(2) == 0 {
+            u32::MAX - sample_times * 20
+        } else {
+            rng.next() as u32
+        };
+        let start = Instant::now();
+        // Arrivals: (arrival ms, frame index), with jitter (reorder), loss,
+        // duplicates and occasional long stalls that release a burst.
+        let mut arrivals = Vec::new();
+        let mut stall = 0u64;
+        for index in 0..(steps as u64 / 3) {
+            if rng.below(40) == 0 {
+                stall = 40 + rng.below(200);
+            }
+            if rng.below(10) == 0 {
+                continue; // lost
+            }
+            let at = index * 20 + rng.below(45) + stall;
+            arrivals.push((at, index));
+            if rng.below(20) == 0 {
+                arrivals.push((at + rng.below(30), index)); // duplicate
+            }
+        }
+        arrivals.sort();
+        let interleaved = (sample_times * u32::from(channels)) as i32;
+        let make = |index: u64| AudioFrame {
+            samples: (0..interleaved)
+                .map(|n| ((index as i32 * 131 + n * 7) % 3000 - 1500) as i16)
+                .collect(),
+            sample_rate,
+            channels,
+            // Some frames carry no duration: the fallback interval comes
+            // from the template, which the lent path must keep identically.
+            duration: if index % 17 == 5 {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(20)
+            },
+            timestamp: base.wrapping_add((index as u32).wrapping_mul(sample_times)),
+        };
+        let arms = [Arm::TreeCopy, Arm::SlotsCopy, Arm::SlotsLent, Arm::TreeLent];
+        let mut buffers: Vec<PlayoutBuffer> = arms
+            .iter()
+            .map(|arm| match arm {
+                Arm::TreeCopy | Arm::TreeLent => PlayoutBuffer::new(config),
+                Arm::SlotsCopy | Arm::SlotsLent => PlayoutBuffer::with_slot_storage(config),
+            })
+            .collect();
+        let mut out: Vec<Vec<(Instant, Emitted)>> = vec![Vec::new(); arms.len()];
+        let mut next_arrival = 0;
+        let mut now = start;
+        let mut max_step = Duration::ZERO;
+        for _ in 0..steps {
+            let step = Duration::from_millis(1 + rng.below(5));
+            max_step = max_step.max(step);
+            now += step;
+            while next_arrival < arrivals.len()
+                && start + Duration::from_millis(arrivals[next_arrival].0) <= now
+            {
+                let index = arrivals[next_arrival].1;
+                for buffer in &mut buffers {
+                    buffer.push(make(index), now);
+                }
+                next_arrival += 1;
+            }
+            for (arm, (buffer, output)) in arms.iter().zip(buffers.iter_mut().zip(out.iter_mut())) {
+                for _ in 0..8 {
+                    let deadline = buffer.next_deadline();
+                    let catch_up = buffer.stats().frames_catch_up;
+                    let frame = match arm {
+                        Arm::TreeCopy | Arm::SlotsCopy => {
+                            buffer.pop_due(now).map(|frame| emitted(&frame))
+                        }
+                        Arm::SlotsLent | Arm::TreeLent => buffer.pop_due_with(now, emitted),
+                    };
+                    let Some(frame) = frame else { break };
+                    if buffer.stats().frames_catch_up == catch_up {
+                        let deadline = deadline.expect("a due frame had a deadline");
+                        assert!(
+                            now >= deadline,
+                            "{arm:?} seed {seed}: emitted before its deadline"
+                        );
+                        assert!(
+                            now - deadline <= max_step,
+                            "{arm:?} seed {seed}: emitted more than one step late"
+                        );
+                    }
+                    output.push((now, frame));
+                }
+            }
+            let reference = (buffers[0].stats(), buffers[0].next_deadline());
+            for (arm, buffer) in arms.iter().zip(&buffers).skip(1) {
+                assert_eq!(
+                    (buffer.stats(), buffer.next_deadline()),
+                    reference,
+                    "{arm:?} seed {seed}"
+                );
+            }
+        }
+        for (arm, output) in arms.iter().zip(&out).skip(1) {
+            assert_eq!(
+                output, &out[0],
+                "{arm:?} seed {seed}: emitted frames differ"
+            );
+        }
+        out.swap_remove(0)
+    }
+
+    /// Slot storage and lent frames make every decision `pop_due` with the
+    /// ordered map makes (frames, PCM, timestamps, durations, emission
+    /// instants, statistics, deadlines, depth) under jitter, reorder, loss,
+    /// duplicates, stalls with catch-up bursts, concealment into silence,
+    /// late drops, zero-duration frames, stereo and RTP timestamp wrap.
+    #[test]
+    fn zero_copy_playout_is_identical_under_loss_reorder_and_bursts() {
+        let mut emitted_frames = 0;
+        let mut silent = 0;
+        let mut stereo = 0;
+        for seed in 0..64u64 {
+            let output = run_script(0x0e57_0000 + seed * 7919, 600);
+            emitted_frames += output.len();
+            silent += output
+                .iter()
+                .filter(|(_, frame)| frame.1.iter().all(|sample| *sample == 0))
+                .count();
+            stereo += usize::from(output.first().is_some_and(|(_, frame)| frame.3 == 2));
+        }
+        assert!(
+            emitted_frames > 64 * 50,
+            "the scripts exercise playout ({emitted_frames})"
+        );
+        assert!(silent > 0, "some scripts conceal into silence");
+        assert!(stereo > 0, "some scripts are stereo");
+    }
+
+    /// A hand-written loss + reorder + late-arrival script, frame by frame,
+    /// on both pops.
+    #[test]
+    fn zero_copy_playout_matches_a_scripted_loss_and_reorder() {
+        let config = PlayoutConfig {
+            adaptive: false,
+            ..PlayoutConfig::default()
+        };
+        let mut copy = PlayoutBuffer::new(config);
+        let mut lent = PlayoutBuffer::with_slot_storage(config);
+        let start = Instant::now();
+        // 0, 1 prime; 3 before 2 (reorder); 4 lost; 5 arrives after its slot.
+        let script: [(u64, u32); 7] = [
+            (0, 0),
+            (5, 1),
+            (30, 3),
+            (35, 2),
+            (80, 6),
+            (130, 5),
+            (140, 7),
+        ];
+        let mut copied = Vec::new();
+        let mut borrowed = Vec::new();
+        let mut script_index = 0;
+        for ms in 0..=220u64 {
+            let now = start + Duration::from_millis(ms);
+            while script_index < script.len() && script[script_index].0 == ms {
+                let index = script[script_index].1;
+                copy.push(frame(index * 160, index as i16 + 1), now);
+                lent.push(frame(index * 160, index as i16 + 1), now);
+                script_index += 1;
+            }
+            while let Some(frame) = copy.pop_due(now) {
+                copied.push((ms, frame.timestamp, frame.samples.clone()));
+            }
+            while let Some(frame) =
+                lent.pop_due_with(now, |frame| (ms, frame.timestamp, frame.samples.clone()))
+            {
+                borrowed.push(frame);
+            }
+        }
+        assert_eq!(borrowed, copied);
+        assert_eq!(lent.stats(), copy.stats());
+        let timestamps: Vec<u32> = copied
+            .iter()
+            .map(|(_, timestamp, _)| timestamp / 160)
+            .collect();
+        assert_eq!(
+            &timestamps[..8],
+            &[0, 1, 2, 3, 4, 5, 6, 7],
+            "media order, 4 concealed, 5's slot concealed"
+        );
+        assert!(copy.stats().frames_concealed >= 2 && copy.stats().frames_late >= 1);
+    }
+
+    /// The lent frame becomes the template by move: the PCM allocation each
+    /// pop lends is the one that was pushed (or, for a concealed slot, the
+    /// one concealment produced), and it stays the template until the next
+    /// pop; the copying pop instead hands out the pushed allocation and
+    /// keeps a separate template. `consume` is not called when nothing is
+    /// due.
+    #[test]
+    fn zero_copy_pop_keeps_the_emitted_frame_as_the_template_without_copying() {
+        let config = PlayoutConfig {
+            adaptive: false,
+            ..PlayoutConfig::default()
+        };
+        let mut lent = PlayoutBuffer::with_slot_storage(config);
+        let mut copy = PlayoutBuffer::new(config);
+        let start = Instant::now();
+        let mut pushed = Vec::new();
+        let push = |lent: &mut PlayoutBuffer,
+                    copy: &mut PlayoutBuffer,
+                    pushed: &mut Vec<(u32, usize)>,
+                    index: u32,
+                    at: Instant| {
+            let lent_frame = frame(index * 160, index as i16 + 1);
+            pushed.push((index * 160, lent_frame.samples.as_ptr() as usize));
+            lent.push(lent_frame, at);
+            copy.push(frame(index * 160, index as i16 + 1), at);
+        };
+        push(&mut lent, &mut copy, &mut pushed, 0, start);
+        push(&mut lent, &mut copy, &mut pushed, 1, start);
+        let mut called = false;
+        assert!(lent.pop_due_with(start, |_| called = true).is_none());
+        assert!(!called, "nothing due: consume is not called");
+        let mut lent_frames = 0;
+        let mut concealed = 0;
+        // Frames 2, 4 and 5 arrive one slot ahead of their turn; 3 is lost.
+        for slot in 1..=6u32 {
+            let now = start + Duration::from_millis(20 * u64::from(slot));
+            if [2, 4, 5].contains(&(slot + 1)) {
+                push(&mut lent, &mut copy, &mut pushed, slot + 1, now);
+            }
+            let (timestamp, lent_pcm) = lent
+                .pop_due_with(now, |frame| {
+                    (frame.timestamp, frame.samples.as_ptr() as usize)
+                })
+                .expect("due");
+            let template = lent.last_emitted.as_ref().expect("template");
+            assert_eq!(
+                template.samples.as_ptr() as usize,
+                lent_pcm,
+                "the template is the lent frame itself"
+            );
+            assert_eq!(template.timestamp, timestamp);
+            match pushed.iter().find(|(pushed_at, _)| *pushed_at == timestamp) {
+                Some((_, pushed_pcm)) => {
+                    assert_eq!(lent_pcm, *pushed_pcm, "lent where it was pushed");
+                    lent_frames += 1;
+                }
+                None => concealed += 1,
+            }
+            let handed_out = copy.pop_due(now).expect("due");
+            assert_eq!(handed_out.timestamp, timestamp);
+            assert_ne!(
+                copy.last_emitted
+                    .as_ref()
+                    .expect("template")
+                    .samples
+                    .as_ptr(),
+                handed_out.samples.as_ptr(),
+                "the copying pop keeps a copy"
+            );
+        }
+        assert_eq!((lent_frames, concealed), (5, 1));
+        assert_eq!(lent.stats(), copy.stats());
     }
 }
