@@ -22,7 +22,7 @@ use crate::errors::{DialogError, DialogResult};
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::types::header::{HeaderName, TypedHeader};
 use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_sip_core::{Method, Request, Response, StatusCode};
+use rvoip_sip_core::{Request, Response, StatusCode};
 
 // Import all the specialized protocol handlers
 use crate::protocol::{
@@ -879,22 +879,16 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         request: &Request,
     ) -> DialogResult<()> {
-        // Use transaction-core helper for OPTIONS response with Allow header
-        let allowed_methods = vec![
-            Method::Invite,
-            Method::Bye,
-            Method::Cancel,
-            Method::Ack,
-            Method::Options,
-            Method::Update,
-            Method::Info,
-            Method::Refer,
-        ];
-
-        let response = crate::transaction::utils::response_builders::create_ok_response_for_options(
+        // The capabilities a UAS lists in a 200 to OPTIONS (RFC 3261 §11.2):
+        // the same ones its requests are checked against.
+        let capabilities = self.uas_capabilities();
+        let mut response = crate::transaction::utils::response_builders::create_response(
             request,
-            &allowed_methods,
+            rvoip_sip_core::StatusCode::Ok,
         );
+        response.headers.push(capabilities.allow_header());
+        response.headers.push(capabilities.accept_header());
+        response.headers.push(capabilities.supported_header());
 
         self.transaction_manager
             .send_response(transaction_id, response)
