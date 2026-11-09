@@ -234,11 +234,7 @@ pub(crate) fn create_ack_for_2xx_from_template(
         .header(TypedHeader::To(to))
         .header(TypedHeader::CallId(call_id))
         .header(TypedHeader::CSeq(CSeq::new(cseq_num, Method::Ack)))
-        .via(
-            &local_addr.to_string(),
-            &template.via_transport,
-            Some(&branch),
-        )
+        .via_socket_addr(*local_addr, &template.via_transport, Some(&branch))
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)));
 

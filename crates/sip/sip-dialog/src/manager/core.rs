@@ -1292,23 +1292,20 @@ impl DialogManager {
     /// when one is installed and falling back to the process-wide
     /// `HickoryResolver` otherwise. IP-literal URIs short-circuit
     /// without touching DNS so this works in sandboxed environments
-    /// even when no system resolver is available.
+    /// even when no system resolver is available. The first candidate of
+    /// [`Self::resolve_uri_to_candidates`] is returned, so DNS targets are
+    /// restricted to [`Self::bound_address_family`].
     ///
     /// Returns `None` when the URI cannot be resolved.
     pub async fn resolve_uri_to_socketaddr(
         &self,
         uri: &rvoip_sip_core::Uri,
     ) -> Option<std::net::SocketAddr> {
-        if let Some(resolver) = self.resolver() {
-            match resolver.resolve(uri).await {
-                Ok(candidates) => return candidates.into_iter().next().map(|t| t.addr),
-                Err(_error) => {
-                    tracing::debug!("Configured resolver returned an error");
-                    return None;
-                }
-            }
-        }
-        crate::dialog::dialog_utils::resolve_uri_to_socketaddr(uri).await
+        self.resolve_uri_to_candidates(uri)
+            .await
+            .into_iter()
+            .next()
+            .map(|target| target.addr)
     }
 
     /// Resolve a destination URI to the FULL candidate list (RFC 3263
@@ -1323,16 +1320,30 @@ impl DialogManager {
         &self,
         uri: &rvoip_sip_core::Uri,
     ) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
+        // RFC 3263 §4.2 may yield A and AAAA targets; a transport bound to
+        // one family can reach only that family, so keep just those (in
+        // order). An IP literal names one exact address and is kept as-is.
+        let family = self.bound_address_family();
         if let Some(resolver) = self.resolver() {
-            match resolver.resolve(uri).await {
-                Ok(candidates) => return candidates,
+            return match resolver.resolve(uri).await {
+                Ok(mut candidates) => {
+                    if let (Some(family), rvoip_sip_core::types::uri::Host::Domain(_)) =
+                        (family, &uri.host)
+                    {
+                        rvoip_sip_transport::resolver::retain_address_family(
+                            &mut candidates,
+                            family,
+                        );
+                    }
+                    candidates
+                }
                 Err(_error) => {
                     tracing::debug!("Configured resolver returned an error");
-                    return Vec::new();
+                    Vec::new()
                 }
-            }
+            };
         }
-        crate::dialog::dialog_utils::resolve_uri_to_candidates(uri).await
+        crate::dialog::dialog_utils::resolve_uri_to_candidates_for_family(uri, family).await
     }
 
     /// Decision returned by [`Self::run_identity_verification`].
@@ -2914,6 +2925,21 @@ impl DialogManager {
             .read()
             .ok()
             .and_then(|g| g.as_ref().and_then(|c| c.tls_local_address()))
+    }
+
+    /// The address family shared by this manager's bound transports.
+    ///
+    /// `None` when the UDP/TCP bind address and the TLS bind address belong
+    /// to different families, in which case resolution keeps every RFC 3263
+    /// candidate. A bind to the unspecified address keeps its family
+    /// (`0.0.0.0` is IPv4, `::` is IPv6).
+    pub fn bound_address_family(&self) -> Option<rvoip_sip_transport::AddressFamily> {
+        use rvoip_sip_transport::AddressFamily;
+        let family = AddressFamily::of(self.local_address.ip());
+        match self.tls_local_address() {
+            Some(tls) if !family.contains(tls.ip()) => None,
+            _ => Some(family),
+        }
     }
 
     /// Configured SIP TLS advertised sent-by address, if supplied.

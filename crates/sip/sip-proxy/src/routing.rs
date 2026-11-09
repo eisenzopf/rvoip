@@ -7,7 +7,7 @@
 //! packet-testable.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -176,13 +176,19 @@ impl Resolver for DefaultProxyResolver {
                 transport,
             )]);
         }
+        // RFC 6761 §6.3: `localhost` is the loopback of either family. Both
+        // are returned (IPv4 first) and the proxy keeps the one its selected
+        // transport is bound to.
         if matches!(&uri.host, Host::Domain(domain) if domain.eq_ignore_ascii_case("localhost")) {
             let transport = rvoip_sip_transport::resolver::select_transport_for_uri(uri);
             let port = uri.port.unwrap_or_else(|| default_port(transport));
-            return Ok(vec![ResolvedTarget::immediate(
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
-                transport,
-            )]);
+            return Ok([
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ]
+            .into_iter()
+            .map(|loopback| ResolvedTarget::immediate(SocketAddr::new(loopback, port), transport))
+            .collect());
         }
 
         let resolver = self
@@ -723,6 +729,22 @@ mod tests {
 
     fn uri(value: &str) -> Uri {
         Uri::from_str(value).expect("valid URI")
+    }
+
+    #[tokio::test]
+    async fn default_resolver_maps_localhost_to_both_loopbacks() {
+        let candidates = DefaultProxyResolver::default()
+            .resolve(&uri("sip:bob@localhost:5070"))
+            .await
+            .expect("localhost resolves without DNS");
+        let addrs: Vec<SocketAddr> = candidates.iter().map(|c| c.addr).collect();
+        assert_eq!(
+            addrs,
+            vec![
+                "127.0.0.1:5070".parse::<SocketAddr>().unwrap(),
+                "[::1]:5070".parse::<SocketAddr>().unwrap()
+            ]
+        );
     }
 
     fn policy() -> ProxyRoutingPolicy {

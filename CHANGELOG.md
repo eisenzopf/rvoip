@@ -307,6 +307,76 @@ Each item has a one-line migration.
   `SipMediaStream pump stopped: audio source closed` at `debug` instead of a
   per-call `warn` (#342). Other pump failures still warn.
 
+#### IPv6 (single address family)
+
+An endpoint bound to one IPv6 address now completes calls end to end: every
+SIP and media address it advertises is IPv6 and RFC 3261/5118 compliant on
+the wire. Dual-stack operation (IPv4 and IPv6 listeners at once) is not
+supported yet and is rejected by `Config::validate`.
+
+- Via sent-by built from an IPv6 socket address is no longer dropped. The
+  `ViaBuilderExt::via` parser split `host:port` on every colon, so
+  `[2001:db8::1]:5060` failed to parse and the INVITE, BYE, REGISTER, ACK,
+  OPTIONS and in-dialog request builders silently omitted the Via. It now
+  accepts an `IPv6reference` with or without a port and a bare IPv6 address
+  (RFC 3261 §25.1, RFC 5118 §4.1), and logs instead of silently skipping an
+  invalid sent-by. New `via_socket_addr` (on `ViaBuilderExt` and both
+  builders) adds a Via from a `SocketAddr` and cannot fail; the request
+  builders use it.
+- Generated SDP declares the connection's address type: `o=` and `c=` use
+  `IN IP6` for an IPv6 media address (RFC 8866 §5.2, §5.7) in offers,
+  answers, port-zero rejections, hold/resume fallbacks and signalling-only
+  offers, and in `rvoip_sip_core::sdp::sdp_from_request`/`sdp_from_response`.
+  `IN IP4` was hard-coded, which the SDP builder rejected for an IPv6
+  address.
+- RTP sockets bound to an IPv6 address can be set up.
+  `PlatformSocketStrategy::apply_to_socket` set `IPV6_V6ONLY` after bind,
+  which Linux rejects with `EINVAL`, so every IPv6 media session failed with
+  `Failed to configure RTP socket`. The option is now applied only to a
+  wildcard (`[::]`) bind, the one case it affects (RFC 3493 §5.3), and a
+  wildcard socket whose value can no longer change keeps the system default
+  with a warning instead of failing.
+- IPv6 hosts are bracketed wherever SIP needs a `hostport`: the local URI
+  built by `Config::on`, `StreamPeer::new` and `StreamPeerBuilder::name`
+  (`sip:alice@[::1]:5060`), the UPDATE Contact,
+  `Uri::host_port`, and the Contact of `create_ok_response_with_dialog_info`
+  and `create_ringing_response_with_dialog_info` (an IP `contact_host` was
+  stored as a domain name and written bare). New `Host::to_hostport`
+  formats a host for those contexts; `Host`'s `Display` stays the bare
+  address used by `received=` (RFC 5118 §4.5) and SDP.
+- Responses to SUBSCRIBE copy every request Via unchanged (RFC 3261
+  §8.2.6.2). They rebuilt only the top Via from its host text, which wrote
+  an IPv6 sent-by without brackets (a different address once a port
+  followed), added port 5060 when none was present, and dropped
+  `received`, `rport` and every lower Via.
+  `SimpleResponseBuilder::response_from_request` and `error_response` also
+  clone Via headers instead of rebuilding them; `error_response` no longer
+  drops the top Via's port and parameters.
+- RFC 3263 resolution keeps only the address family the transport is bound
+  to: an IPv4 stack never selects an AAAA target and an IPv6 stack never an
+  A target, with the NAPTR/SRV order otherwise unchanged. New
+  `AddressFamily`, `retain_address_family`,
+  `HickoryResolver::with_address_family` (queries only A or AAAA) and
+  `DialogManager::bound_address_family`; the dialog manager and the
+  stateful proxy filter by the bound family. Previously Hickory's default
+  ordering put AAAA first, so an IPv4 stack could pick an unreachable IPv6
+  target for a dual-stack name. Out-of-dialog SUBSCRIBE, MESSAGE, OPTIONS
+  and REGISTER now resolve through the dialog manager, so an installed
+  resolver applies to them too.
+- `localhost` resolves to the loopback of the bound family (`::1` on an
+  IPv6 stack, RFC 6761 §6.3); the proxy's default resolver returns both
+  loopbacks and keeps the one its transport can reach.
+- `Endpoint` keeps an IPv6 loopback bind in the `Local` and `AsteriskUdp`
+  profiles instead of rewriting it to `127.0.0.1`, and a profile's default
+  bind is the unspecified address of the advertised address's family
+  (`[::]` for an IPv6 `advertised_addr`).
+- `Config::validate` rejects mixing address families across `local_ip`,
+  `bind_addr`, `sip_advertised_addr`, `tls_bind_addr`,
+  `tls_advertised_addr` and `media_public_addr`, and rejects an IPv6 zone
+  identifier (`fe80::1%eth0`): neither the SIP host grammar nor SDP can
+  carry one.
+- `parse_sdp_connection` accepts `c=IN IP6`.
+
 ### Signaling performance
 
 Wire output, published events and STIR/SHAKEN behaviour are unchanged unless a

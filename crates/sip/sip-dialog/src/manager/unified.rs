@@ -2016,11 +2016,13 @@ impl UnifiedDialogManager {
             )
             .map_err(|_error| ApiError::protocol("Failed to build SUBSCRIBE"))?;
             drop(dialog);
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE target URI"))?;
+            let destination = self
+                .core
+                .resolve_uri_to_socketaddr(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+                )
+                .await
+                .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE target URI"))?;
             (destination, request)
         };
 
@@ -2194,11 +2196,13 @@ impl UnifiedDialogManager {
                 request.headers.push(hdr);
             }
             drop(dialog);
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE refresh URI"))?;
+            let destination = self
+                .core
+                .resolve_uri_to_socketaddr(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+                )
+                .await
+                .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE refresh URI"))?;
             (destination, request)
         };
 

@@ -72,7 +72,79 @@ fn test_config_on_ipv6() {
     let ip: IpAddr = "::1".parse().unwrap();
     let c = Config::on("ipv6user", ip, 5060);
     assert_eq!(c.local_ip, ip);
-    assert!(c.local_uri.contains("::1"));
+    // RFC 3261 §25.1 / RFC 5118 §4.1: an IPv6 host is an IPv6reference.
+    assert_eq!(c.local_uri, "sip:ipv6user@[::1]:5060");
+    let uri: rvoip_sip_core::Uri = c.local_uri.parse().expect("local_uri parses");
+    assert_eq!(uri.host, rvoip_sip_core::Host::Address(ip));
+    assert_eq!(uri.port, Some(5060));
+    c.validate().expect("single-family IPv6 config is valid");
+}
+
+/// A named change to an otherwise valid configuration.
+type ConfigCase = (&'static str, fn(&mut Config));
+
+#[test]
+fn test_config_rejects_mixed_address_families() {
+    let v6: IpAddr = "2001:db8::10".parse().unwrap();
+    let cases: [ConfigCase; 5] = [
+        ("bind_addr", |c| {
+            c.bind_addr = "0.0.0.0:5060".parse().unwrap()
+        }),
+        ("sip_advertised_addr", |c| {
+            c.sip_advertised_addr = Some("192.0.2.10:5060".parse().unwrap())
+        }),
+        ("tls_bind_addr", |c| {
+            c.tls_bind_addr = Some("0.0.0.0:5061".parse().unwrap())
+        }),
+        ("tls_advertised_addr", |c| {
+            c.tls_advertised_addr = Some("192.0.2.10:5061".parse().unwrap())
+        }),
+        ("media_public_addr", |c| {
+            c.media_public_addr = Some("192.0.2.10:0".parse().unwrap())
+        }),
+    ];
+    for (field, mutate) in cases {
+        let mut c = Config::on("alice", v6, 5060);
+        mutate(&mut c);
+        match c.validate() {
+            Err(SessionError::ConfigError(message)) => {
+                assert!(message.starts_with(field), "{field}: {message}");
+                assert!(message.contains("one address family"), "{message}");
+            }
+            other => panic!("{field}: expected a family-mismatch error, got {other:?}"),
+        }
+    }
+
+    // The same fields of the bound family are accepted, including the
+    // unspecified address of that family.
+    let mut c = Config::on("alice", v6, 5060);
+    c.bind_addr = "[::]:5060".parse().unwrap();
+    c.sip_advertised_addr = Some("[2001:db8::10]:5060".parse().unwrap());
+    c.media_public_addr = Some("[2001:db8::10]:0".parse().unwrap());
+    c.validate().expect("IPv6-only config is valid");
+
+    // An IPv4 local_ip with an IPv6 bind is just as mixed.
+    let mut c = Config::local("alice", 5060);
+    c.bind_addr = "[::1]:5060".parse().unwrap();
+    assert!(matches!(c.validate(), Err(SessionError::ConfigError(_))));
+}
+
+#[test]
+fn test_config_rejects_ipv6_zone_identifiers() {
+    let link_local: IpAddr = "fe80::1".parse().unwrap();
+    let mut c = Config::on("alice", link_local, 5060);
+    c.bind_addr = SocketAddr::V6(std::net::SocketAddrV6::new(
+        "fe80::1".parse().unwrap(),
+        5060,
+        0,
+        2,
+    ));
+    match c.validate() {
+        Err(SessionError::ConfigError(message)) => {
+            assert!(message.contains("zone identifier"), "{message}");
+        }
+        other => panic!("expected a zone-identifier error, got {other:?}"),
+    }
 }
 
 // ── Config::default ─────────────────────────────────────────────────────────
