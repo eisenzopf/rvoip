@@ -2671,10 +2671,7 @@ impl DialogManager {
         if let TransactionEvent::InviteRequest { request, .. }
         | TransactionEvent::NonInviteRequest { request, .. } = &event
         {
-            if let Err(rejection) = rvoip_sip_core::validation::validate_request_for_uas(
-                request,
-                &rvoip_sip_core::validation::UasCapabilities::default(),
-            ) {
+            if let Err(rejection) = self.validate_request_for_uas(request) {
                 debug!(
                     method = %method_class(&request.method()),
                     status = rejection.status.as_u16(),
@@ -4099,6 +4096,36 @@ impl DialogManager {
 
     /// Whether the opt-in TLS Contact compatibility is enabled for this
     /// manager. Reads the shared config without cloning it.
+    /// The RFC 3261 §8.2 UAS checks against the configured
+    /// [`UasCapabilities`](rvoip_sip_core::validation::UasCapabilities), or
+    /// the defaults when no configuration is set.
+    fn validate_request_for_uas(
+        &self,
+        request: &Request,
+    ) -> std::result::Result<(), rvoip_sip_core::validation::Rejection> {
+        static DEFAULT: std::sync::LazyLock<rvoip_sip_core::validation::UasCapabilities> =
+            std::sync::LazyLock::new(Default::default);
+        let config = self.config.read().ok();
+        let capabilities = config
+            .as_ref()
+            .and_then(|guard| guard.as_ref())
+            .map_or(&*DEFAULT, |config| &config.dialog_config().uas_capabilities);
+        rvoip_sip_core::validation::validate_request_for_uas(request, capabilities)
+    }
+
+    /// The configured [`UasCapabilities`](rvoip_sip_core::validation::UasCapabilities),
+    /// or the defaults when no configuration is set.
+    pub(crate) fn uas_capabilities(&self) -> rvoip_sip_core::validation::UasCapabilities {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.as_ref()
+                    .map(|c| c.dialog_config().uas_capabilities.clone())
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn tls_contact_compatibility_enabled(&self) -> bool {
         self.config
             .read()

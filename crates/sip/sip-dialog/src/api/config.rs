@@ -291,6 +291,14 @@ pub struct DialogConfig {
     /// Default is 90 s (the RFC's recommended minimum).
     #[serde(default = "default_min_se")]
     pub session_timer_min_se: u32,
+
+    /// What this UAS implements: the methods, option tags, Request-URI
+    /// schemes and session body types a request is checked against before
+    /// it is processed (RFC 3261 §8.2: 405/501, 420, 416, 415, 406), and
+    /// that the OPTIONS response advertises in Allow, Supported and Accept
+    /// (RFC 3261 §11.2). List only what is implemented.
+    #[serde(default)]
+    pub uas_capabilities: rvoip_sip_core::validation::UasCapabilities,
 }
 
 fn default_min_se() -> u32 {
@@ -316,6 +324,7 @@ impl Default for DialogConfig {
             use_100rel: RelUsage::default(),
             session_timer_secs: None,
             session_timer_min_se: default_min_se(),
+            uas_capabilities: rvoip_sip_core::validation::UasCapabilities::default(),
         }
     }
 }
@@ -373,6 +382,15 @@ impl DialogConfig {
     /// ```
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
         self.user_agent = Some(user_agent.into());
+        self
+    }
+
+    /// Set what this UAS implements (see [`DialogConfig::uas_capabilities`]).
+    pub fn with_uas_capabilities(
+        mut self,
+        capabilities: rvoip_sip_core::validation::UasCapabilities,
+    ) -> Self {
+        self.uas_capabilities = capabilities;
         self
     }
 

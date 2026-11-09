@@ -96,6 +96,7 @@ pub use rvoip_rtp_core::executor::{MediaExecutorConfig, MediaExecutorMode};
 pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
+pub use rvoip_sip_core::validation::UasCapabilities;
 pub use rvoip_sip_dialog::api::RelUsage;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
@@ -2516,6 +2517,17 @@ pub struct Config {
     /// environment variable for it, so embedders map deployment settings here.
     pub sip_allow_tls_contact_on_sips: bool,
 
+    /// What this endpoint implements as a UAS. Inbound requests are checked
+    /// against it before they are processed (RFC 3261 §8.2: 405/501 with
+    /// Allow, 416, 420 with Unsupported, 415 with Accept, 406), and the
+    /// automatic OPTIONS response advertises it in Allow, Supported and
+    /// Accept (RFC 3261 §11.2). The default lists what rvoip implements.
+    /// Add an option tag only when the application implements that
+    /// extension, for example `replaces` (RFC 3891) for an application that
+    /// performs call replacement itself. `100rel` is withdrawn automatically
+    /// when [`Config::use_100rel`] is [`RelUsage::NotSupported`].
+    pub uas_capabilities: UasCapabilities,
+
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
     /// When unset, rvoip-sip-dialog retains its legacy default of deriving the
@@ -3603,6 +3615,7 @@ impl std::fmt::Debug for Config {
             )
             .field("sip_tls_mode", &self.sip_tls_mode)
             .field("sip_contact_mode", &self.sip_contact_mode)
+            .field("uas_capabilities", &self.uas_capabilities)
             .field("tls_bind_configured", &self.tls_bind_addr.is_some())
             .field(
                 "tls_advertised_configured",
@@ -3823,6 +3836,7 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
+            uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3969,6 +3983,7 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
+            uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -5669,6 +5684,19 @@ impl Config {
         self.sip_contact_mode = SipContactMode::RegisteredFlowSymmetric;
         self.sip_instance = Some(sip_instance.into());
         self
+    }
+
+    /// [`Config::uas_capabilities`] as the dialog layer applies it: without
+    /// `100rel` when [`Config::use_100rel`] is [`RelUsage::NotSupported`], so
+    /// a request that requires it gets 420 (RFC 3262 §4).
+    pub(crate) fn effective_uas_capabilities(&self) -> UasCapabilities {
+        let mut capabilities = self.uas_capabilities.clone();
+        if matches!(self.use_100rel, RelUsage::NotSupported) {
+            capabilities
+                .supported_extensions
+                .retain(|tag| !tag.eq_ignore_ascii_case("100rel"));
+        }
+        capabilities
     }
 
     /// Validate the SIP TLS/contact-mode configuration.
@@ -14944,6 +14972,7 @@ impl UnifiedCoordinator {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
+                dialog.uas_capabilities = config.effective_uas_capabilities();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());

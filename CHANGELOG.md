@@ -30,6 +30,16 @@ Xeon 6 SMT in production; load qualification of executor v2 is part of the
 
 Each item has a one-line migration.
 
+- **`Require: replaces` is answered with 420 Bad Extension** (#379). rvoip
+  does not perform RFC 3891 dialog replacement, so the default
+  `Config::uas_capabilities` no longer claims the `replaces` option tag. A
+  request that requires it, such as an INVITE that asks to replace one of
+  this endpoint's dialogs, is rejected as RFC 3261 §8.2.2.3 requires. It
+  used to be processed as an unrelated new call. Attended transfer where
+  rvoip is the transferee (an inbound REFER, then an INVITE with Replaces
+  sent to the target) is unaffected. Migration, for an application that
+  performs the replacement itself:
+  `config.uas_capabilities.supported_extensions.push("replaces".into());`.
 - **`RejectReason` gains `ServiceUnavailable { retry_after_secs }`** (#355).
   `rvoip-core-traits`' `RejectReason` is not `#[non_exhaustive]`. rvoip-sip
   answers it with `503 Service Unavailable` and `Retry-After`; QUIC,
@@ -126,6 +136,20 @@ Each item has a one-line migration.
   makes later sends return `SessionError::MediaError`; the new
   `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
   unchanged.
+
+#### Configurable UAS capabilities
+
+- `Config::uas_capabilities` (an `rvoip_sip::api::unified::UasCapabilities`)
+  sets what the endpoint implements as a UAS. Inbound requests are checked
+  against it before processing (RFC 3261 §8.2): 405/501 with Allow, 416, 420
+  with Unsupported, 415 with Accept, 406. The automatic OPTIONS 200 now
+  advertises the same lists in Allow, Supported and Accept (RFC 3261 §11.2).
+  It used to send a fixed 8-method Allow that omitted REGISTER, MESSAGE,
+  NOTIFY, SUBSCRIBE and PRACK, with no Supported or Accept.
+- The default no longer lists `replaces`; see Breaking changes.
+- `100rel` is withdrawn when `Config::use_100rel` is `NotSupported`, so
+  `Require: 100rel` gets 420 (RFC 3262 §4).
+- sip-dialog: `DialogConfig::uas_capabilities` / `with_uas_capabilities`.
 
 #### TLS flow back-pressure (#338)
 
