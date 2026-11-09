@@ -3209,7 +3209,10 @@ mod tests {
             .bind_addr("[::1]:5060".parse().unwrap())
             .build_parts()
             .unwrap();
-        assert_eq!(parts.config.bind_addr, "[::1]:5060".parse().unwrap());
+        assert_eq!(
+            parts.config.bind_addr,
+            "[::1]:5060".parse::<SocketAddr>().unwrap()
+        );
         assert_eq!(parts.config.local_ip, "::1".parse::<IpAddr>().unwrap());
         assert_eq!(parts.config.local_uri, "sip:alice@[::1]:5060");
         parts.config.validate().unwrap();
@@ -3222,7 +3225,10 @@ mod tests {
             .advertised_addr("[2001:db8::50]:5060".parse().unwrap())
             .build_parts()
             .unwrap();
-        assert_eq!(parts.config.bind_addr, "[::]:5060".parse().unwrap());
+        assert_eq!(
+            parts.config.bind_addr,
+            "[::]:5060".parse::<SocketAddr>().unwrap()
+        );
         parts.config.validate().unwrap();
     }
 
