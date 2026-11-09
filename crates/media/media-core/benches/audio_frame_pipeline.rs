@@ -21,13 +21,14 @@
 //!   refactor.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_media_core::performance::{
     pool::{AudioFramePool, PoolConfig},
     zero_copy::ZeroCopyAudioFrame,
 };
 use rvoip_media_core::relay::controller::MediaSessionController;
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;

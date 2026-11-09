@@ -22,10 +22,11 @@
 //! end-to-end forward throughput will land on top via
 //! `audio_frame_pipeline` and any future full-bridge bench.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dashmap::DashMap;
 use rvoip_media_core::types::DialogId;
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;

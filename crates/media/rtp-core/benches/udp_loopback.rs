@@ -19,11 +19,12 @@
 //! `RtpEvent::MediaReceived`.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
 use rvoip_rtp_core::traits::RtpEvent;
 use rvoip_rtp_core::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
+use std::hint::black_box;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::runtime::Builder;

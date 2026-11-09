@@ -14,10 +14,9 @@
 //! `crates/sip/rvoip-sip/docs/PROFILING.md` for the broader workflow.
 
 use bytes::{Bytes, BytesMut};
-use criterion::{
-    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
+use std::hint::black_box;
 
 const PAYLOAD_SIZES: [(&str, usize); 4] = [
     ("opus_80", 80),

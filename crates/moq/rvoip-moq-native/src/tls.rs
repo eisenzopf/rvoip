@@ -221,9 +221,13 @@ impl Args {
 fn load_server_roots(paths: &[path::PathBuf]) -> anyhow::Result<RootCertStore> {
     if paths.is_empty() {
         let mut roots = RootCertStore::empty();
-        for cert in
-            rustls_native_certs::load_native_certs().context("could not load platform certs")?
-        {
+        // rustls-native-certs 0.8 returns whatever it could load alongside
+        // the errors it hit; keep failing on any error, as 0.7 did.
+        let native = rustls_native_certs::load_native_certs();
+        if let Some(error) = native.errors.into_iter().next() {
+            return Err(anyhow::Error::new(error).context("could not load platform certs"));
+        }
+        for cert in native.certs {
             roots.add(cert).context("failed to add platform root")?;
         }
         Ok(roots)

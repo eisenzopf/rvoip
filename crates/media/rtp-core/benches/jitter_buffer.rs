@@ -21,9 +21,10 @@
 //! grows with depth.
 
 use bytes::Bytes;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_rtp_core::buffer::{AdaptiveJitterBuffer, JitterBufferConfig};
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
+use std::hint::black_box;
 use tokio::runtime::Builder;
 
 const DEPTHS: [usize; 4] = [0, 10, 100, 1000];

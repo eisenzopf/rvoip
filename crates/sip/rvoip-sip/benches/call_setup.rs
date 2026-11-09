@@ -9,8 +9,9 @@
 //! construction cost, run the `profiling_call_setup_loop` example
 //! under `samply` instead — see `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip::{Config, StreamPeer};
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;

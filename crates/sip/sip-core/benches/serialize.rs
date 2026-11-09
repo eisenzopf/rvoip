@@ -4,8 +4,9 @@
 //! is invoked once during setup so each iteration only times the
 //! serialization path (Vec allocation + per-header `format!`).
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip_core::parse_message;
+use std::hint::black_box;
 
 #[path = "common/fixtures.rs"]
 mod fixtures;

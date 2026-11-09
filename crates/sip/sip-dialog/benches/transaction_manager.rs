@@ -14,11 +14,12 @@
 //! `crates/sip/rvoip-sip/benches/call_setup.rs` and the `dialog_steady_state`
 //! profiling example. See `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dashmap::DashMap;
 use rvoip_sip_core::types::Method;
 use rvoip_sip_dialog::transaction::TransactionKey;
 use std::collections::HashMap;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
