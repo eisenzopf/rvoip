@@ -250,7 +250,7 @@ pub struct SrtpContext {
 }
 
 /// Hot call state: one RTP direction's per-packet SRTP state, packed into
-/// three or four cache lines instead of the eight or nine the session-key path
+/// three cache lines instead of the eight or nine the session-key path
 /// touches (the context's suite and session-key headers, the heap key, salt
 /// and authentication key `Vec`s, the HMAC key schedule run per packet, and
 /// the per-SSRC map's header, control bytes and bucket).
@@ -261,8 +261,8 @@ pub struct SrtpContext {
 ///   plus the salt, the key and tag lengths and the authentication
 ///   algorithm.
 /// - Line 1: the AES key.
-/// - Line 2: the HMAC-SHA1 state keyed once with the authentication key (64
-///   bytes; 96, spilling into line 3, when hmac's `reset` feature is on).
+/// - Line 2: the HMAC-SHA1 inner and outer states keyed once with the
+///   authentication key (40 bytes).
 ///
 /// The key material is a copy of the immutable session keys, so the
 /// keystream, tags, replay and rollover decisions and every error are those
@@ -1681,10 +1681,9 @@ mod tests {
             2 * CACHE_LINE,
             "keyed HMAC on line 2"
         );
-        // 64 bytes, or 96 when a dependency enables hmac's `reset` feature.
-        assert!(std::mem::size_of::<auth::HmacSha1Core>() <= 96);
-        assert_eq!(std::mem::size_of::<SrtpDirectionHot>() % CACHE_LINE, 0);
-        assert!(std::mem::size_of::<SrtpDirectionHot>() <= 4 * CACHE_LINE);
+        // The inner and outer SHA-1 states.
+        assert_eq!(std::mem::size_of::<auth::HmacSha1Core>(), 40);
+        assert_eq!(std::mem::size_of::<SrtpDirectionHot>(), 3 * CACHE_LINE);
         let suite = SRTP_AES256_CM_SHA1_80;
         let (packed, _) = hot_pair(&suite, &hot_keys(&suite), true);
         let hot = packed.hot.as_deref().unwrap();
