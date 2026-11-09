@@ -74,10 +74,15 @@ impl Rejection {
     }
 }
 
-/// What a UAS implements, for [`validate_request_for_uas`].
-#[derive(Debug, Clone)]
+/// What a UAS implements, for [`validate_request_for_uas`]. The same lists
+/// are advertised in Allow, Supported and Accept (RFC 3261 §11.2), so they
+/// must name only what the UAS really processes: an option tag listed here
+/// is one the UAS implements, and a request that requires any other gets 420
+/// (RFC 3261 §8.2.2.3).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct UasCapabilities {
-    /// Methods the UAS processes (the Allow header of a 501).
+    /// Methods the UAS processes (the Allow header of a 405 or 501).
     pub methods: Vec<Method>,
     /// Option tags the UAS supports (checked against Require).
     pub supported_extensions: Vec<String>,
@@ -106,12 +111,37 @@ impl Default for UasCapabilities {
                 Method::Update,
                 Method::Prack,
             ],
-            supported_extensions: ["100rel", "timer", "replaces", "path", "outbound"]
+            // RFC 3262, RFC 4028, RFC 3327 (registrar Path echo), RFC 5626.
+            // Not `replaces`: RFC 3891 call replacement is not implemented.
+            supported_extensions: ["100rel", "timer", "path", "outbound"]
                 .map(str::to_string)
                 .to_vec(),
             uri_schemes: vec![Scheme::Sip, Scheme::Sips],
             session_body_types: vec!["application/sdp".to_string()],
         }
+    }
+}
+
+impl UasCapabilities {
+    /// `Allow` listing [`Self::methods`].
+    pub fn allow_header(&self) -> TypedHeader {
+        TypedHeader::Allow(crate::types::Allow(self.methods.clone()))
+    }
+
+    /// `Supported` listing [`Self::supported_extensions`].
+    pub fn supported_header(&self) -> TypedHeader {
+        TypedHeader::Supported(crate::types::Supported::new(
+            self.supported_extensions.clone(),
+        ))
+    }
+
+    /// `Accept` listing [`Self::session_body_types`].
+    pub fn accept_header(&self) -> TypedHeader {
+        TypedHeader::Accept(crate::types::Accept::from_media_types(
+            self.session_body_types
+                .iter()
+                .filter_map(|media_type| accept_value(media_type)),
+        ))
     }
 }
 
@@ -218,11 +248,7 @@ pub fn validate_request_for_uas(
             }
             _ => Rejection::new(StatusCode::MethodNotAllowed, "method not supported"),
         };
-        return Err(
-            rejection.with_header(TypedHeader::Allow(crate::types::Allow(
-                capabilities.methods.clone(),
-            ))),
-        );
+        return Err(rejection.with_header(capabilities.allow_header()));
     }
 
     if !capabilities.uri_schemes.contains(&request.uri().scheme) {
@@ -287,12 +313,7 @@ pub fn validate_request_for_uas(
                 StatusCode::UnsupportedMediaType,
                 "message body type not supported",
             )
-            .with_header(TypedHeader::Accept(crate::types::Accept::from_media_types(
-                capabilities
-                    .session_body_types
-                    .iter()
-                    .filter_map(|media_type| accept_value(media_type)),
-            ))));
+            .with_header(capabilities.accept_header()));
         }
     }
 
@@ -410,4 +431,75 @@ pub fn recover_request_for_rejection(input: &[u8]) -> Option<Request> {
         .iter()
         .all(|name| count(name) == 1);
     complete.then_some(request)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_message_with_mode;
+    use crate::types::Message;
+
+    fn options(extra: &str) -> Request {
+        let text = format!(
+            "OPTIONS sip:uas@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP client.example.com;branch=z9hG4bK-caps\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:uac@example.com>;tag=1\r\n\
+             To: <sip:uas@example.com>\r\n\
+             Call-ID: caps@example.com\r\n\
+             CSeq: 1 OPTIONS\r\n\
+             {extra}\
+             Content-Length: 0\r\n\r\n"
+        );
+        match parse_message_with_mode(text.as_bytes(), ParseMode::Strict).unwrap() {
+            Message::Request(request) => request,
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn capabilities_round_trip_through_serde_and_default_missing_fields() {
+        let mut capabilities = UasCapabilities::default();
+        capabilities.supported_extensions.push("replaces".into());
+        let json = serde_json::to_string(&capabilities).unwrap();
+        assert_eq!(
+            serde_json::from_str::<UasCapabilities>(&json).unwrap(),
+            capabilities
+        );
+        // A configuration naming only some fields keeps the defaults for the rest.
+        let partial: UasCapabilities =
+            serde_json::from_str(r#"{"supported_extensions":["timer"]}"#).unwrap();
+        assert_eq!(partial.supported_extensions, ["timer"]);
+        assert_eq!(partial.methods, UasCapabilities::default().methods);
+    }
+
+    #[test]
+    fn advertised_headers_list_the_capabilities() {
+        let capabilities = UasCapabilities::default();
+        let allow = capabilities.allow_header().to_string();
+        assert!(
+            allow.starts_with("Allow:") && allow.contains("PRACK"),
+            "{allow}"
+        );
+        let supported = capabilities.supported_header().to_string();
+        assert!(supported.starts_with("Supported:"), "{supported}");
+        assert!(supported.contains("100rel") && !supported.contains("replaces"));
+        let accept = capabilities.accept_header().to_string();
+        assert!(accept.starts_with("Accept:") && accept.contains("application/sdp"));
+    }
+
+    /// RFC 3891 call replacement is not implemented, so a request that
+    /// requires it gets 420 (RFC 3261 §8.2.2.3) unless an application adds
+    /// the option tag.
+    #[test]
+    fn replaces_is_supported_only_when_configured() {
+        let request = options("Require: replaces\r\n");
+        let rejection =
+            validate_request_for_uas(&request, &UasCapabilities::default()).unwrap_err();
+        assert_eq!(rejection.status, StatusCode::BadExtension);
+
+        let mut capabilities = UasCapabilities::default();
+        capabilities.supported_extensions.push("replaces".into());
+        assert!(validate_request_for_uas(&request, &capabilities).is_ok());
+    }
 }
