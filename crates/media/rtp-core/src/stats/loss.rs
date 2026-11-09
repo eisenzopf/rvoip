@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use crate::RtpSequenceNumber;
 
 /// Number of recent extended sequence numbers retained for duplicate and
@@ -42,11 +40,20 @@ pub struct PacketLossTracker {
     /// Sequence number cycle count of the highest packet.
     cycles: u32,
 
-    /// Recently received extended sequence numbers.
-    received_window: HashSet<i64>,
+    /// Recently received extended sequence numbers, in a ring addressed by
+    /// `extended_seq mod RECEIVED_WINDOW_SIZE`. A slot only counts while its
+    /// value is inside the window behind the highest packet, so slots left
+    /// behind by a jump expire without being cleared, and recording a packet
+    /// never visits the other entries.
+    received_window: Vec<i64>,
 
     /// Recent loss history (1=received, 0=lost) for burst detection
     loss_history: Vec<bool>,
+
+    /// Whether `loss_history` is maintained. Nothing reads it (burst
+    /// statistics come from `update_burst_stats`), so a hot-call-state
+    /// stream skips the per-packet shift and its heap line.
+    history_enabled: bool,
 
     /// Size of the loss history window
     history_size: usize,
@@ -76,8 +83,9 @@ impl PacketLossTracker {
             duplicates: 0,
             reordered: 0,
             cycles: 0,
-            received_window: HashSet::with_capacity(RECEIVED_WINDOW_SIZE as usize),
+            received_window: vec![i64::MIN; RECEIVED_WINDOW_SIZE as usize],
             loss_history: Vec::with_capacity(64),
+            history_enabled: true,
             history_size: 64,
             burst_count: 0,
             max_burst_length: 0,
@@ -95,13 +103,13 @@ impl PacketLossTracker {
             self.base_extended = Some(seq as i64);
             self.highest_seq = seq as i64;
             self.unique_received = 1;
-            self.received_window.insert(seq as i64);
-            self.loss_history.push(true); // First packet is received
+            self.remember_received(seq as i64);
+            self.add_to_history(true); // First packet is received
             return PacketLossResult::FirstPacket { seq };
         }
 
         let extended_seq = self.extend_sequence(seq);
-        if self.received_window.contains(&extended_seq) {
+        if self.was_received(extended_seq) {
             self.duplicates += 1;
             return PacketLossResult::Duplicate { seq };
         }
@@ -115,7 +123,7 @@ impl PacketLossTracker {
             // not change the established loss total.
             let oldest_tracked = highest_seq - (RECEIVED_WINDOW_SIZE - 1);
             if extended_seq >= oldest_tracked {
-                self.received_window.insert(extended_seq);
+                self.remember_received(extended_seq);
                 if extended_seq >= self.base_extended.expect("tracker is initialized") {
                     self.unique_received += 1;
                     self.lost = self.lost.saturating_sub(1);
@@ -132,7 +140,7 @@ impl PacketLossTracker {
         if extended_seq > highest_seq {
             let gap = (extended_seq - highest_seq) as u64;
             self.unique_received += 1;
-            self.received_window.insert(extended_seq);
+            self.remember_received(extended_seq);
 
             if gap > 1 {
                 let lost_packets = gap - 1;
@@ -262,7 +270,7 @@ impl PacketLossTracker {
         self.duplicates = 0;
         self.reordered = 0;
         self.cycles = 0;
-        self.received_window.clear();
+        self.received_window.fill(i64::MIN);
         self.loss_history.clear();
         self.burst_count = 0;
         self.max_burst_length = 0;
@@ -291,14 +299,34 @@ impl PacketLossTracker {
     fn advance_highest(&mut self, extended_seq: i64) {
         self.highest_seq = extended_seq;
         self.cycles = (extended_seq >> 16).clamp(0, u32::MAX as i64) as u32;
+    }
 
-        let oldest_tracked = extended_seq - (RECEIVED_WINDOW_SIZE - 1);
-        self.received_window
-            .retain(|received| *received >= oldest_tracked);
+    /// Whether `extended_seq` was recorded and is still inside the window.
+    fn was_received(&self, extended_seq: i64) -> bool {
+        extended_seq >= self.highest_seq - (RECEIVED_WINDOW_SIZE - 1)
+            && self.received_window[Self::window_slot(extended_seq)] == extended_seq
+    }
+
+    fn remember_received(&mut self, extended_seq: i64) {
+        self.received_window[Self::window_slot(extended_seq)] = extended_seq;
+    }
+
+    fn window_slot(extended_seq: i64) -> usize {
+        extended_seq.rem_euclid(RECEIVED_WINDOW_SIZE) as usize
+    }
+
+    /// Stop maintaining the write-only loss history (hot call state; see
+    /// `history_enabled`). Every statistic is unchanged.
+    pub(crate) fn disable_history(&mut self) {
+        self.history_enabled = false;
+        self.loss_history = Vec::new();
     }
 
     /// Add a packet status to the loss history
     fn add_to_history(&mut self, received: bool) {
+        if !self.history_enabled {
+            return;
+        }
         if self.loss_history.len() >= self.history_size {
             self.loss_history.remove(0);
         }
@@ -386,6 +414,86 @@ pub struct PacketLossStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ring answers duplicate queries exactly like the bounded set it
+    /// replaced (every recorded sequence at or above the window floor),
+    /// across sequence wraps, reordering, duplicates and large jumps.
+    #[test]
+    fn direct_window_matches_bounded_set_across_wraps_reordering_and_jumps() {
+        use std::collections::HashSet;
+        let mut tracker = PacketLossTracker::new();
+        let mut reference = HashSet::new();
+        let mut cursor = 64_000_i64;
+        let mut seed = 0x1234_5678_u64;
+        for step in 0..20_000 {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let extended = match step % 7 {
+                0 => {
+                    cursor += 1;
+                    cursor
+                }
+                1 => {
+                    cursor += 37;
+                    cursor
+                }
+                2 => cursor - (seed % 2048) as i64,
+                3 => cursor,
+                4 => cursor - 2048 - (seed % 100) as i64,
+                5 => {
+                    cursor += 2100;
+                    cursor
+                }
+                _ => cursor - 1,
+            };
+            let seq = extended as u16;
+            let interpreted = if tracker.base_seq.is_none() {
+                i64::from(seq)
+            } else {
+                tracker.extend_sequence(seq)
+            };
+            let duplicate = reference.contains(&interpreted);
+            let result = tracker.process(seq);
+            assert_eq!(
+                matches!(result, PacketLossResult::Duplicate { .. }),
+                duplicate,
+                "step {step}"
+            );
+            let floor = tracker.highest_seq - (RECEIVED_WINDOW_SIZE - 1);
+            if interpreted >= floor {
+                reference.insert(interpreted);
+            }
+            reference.retain(|value| *value >= floor);
+        }
+        tracker.reset();
+        assert_eq!(tracker.process(0), PacketLossResult::FirstPacket { seq: 0 });
+        assert!(matches!(
+            tracker.process(65535),
+            PacketLossResult::Reordered { .. }
+        ));
+        assert_eq!(
+            tracker.process(65535),
+            PacketLossResult::Duplicate { seq: 65535 }
+        );
+    }
+
+    /// A slot left behind by a jump is outside the window: a late copy of
+    /// its sequence is a reordered packet, not a duplicate, and it cannot
+    /// reduce the loss count.
+    #[test]
+    fn expired_unoverwritten_slot_is_reordered_and_cannot_reduce_loss() {
+        let mut tracker = PacketLossTracker::new();
+        tracker.process(100);
+        tracker.process(3000);
+        let lost = tracker.get_cumulative_lost();
+        for _ in 0..2 {
+            assert!(matches!(
+                tracker.process(100),
+                PacketLossResult::Reordered { .. }
+            ));
+            assert_eq!(tracker.get_cumulative_lost(), lost);
+        }
+        assert_eq!(tracker.get_stats().duplicates, 0);
+    }
 
     #[test]
     fn test_sequential_packets() {

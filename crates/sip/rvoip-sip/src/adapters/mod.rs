@@ -5,6 +5,7 @@ pub mod ice_adapter;
 pub mod media_adapter;
 pub(crate) mod outbound_request_tracker;
 pub mod registration_adapter;
+mod server_admission;
 pub mod session_api_event;
 pub mod session_event_handler;
 pub mod srtp_negotiator;

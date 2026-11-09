@@ -9,14 +9,10 @@ use aes::{
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use bytes::{BufMut, Bytes, BytesMut};
 use ctr::Ctr64BE;
-use hmac::{Hmac, Mac};
-use sha1::Sha1;
 
 // Define types for AES-CM
 type Aes128Ctr64BE = Ctr64BE<Aes128>;
 type Aes256Ctr64BE = Ctr64BE<Aes256>;
-// Define type for HMAC-SHA1
-type HmacSha1 = Hmac<Sha1>;
 
 /// Basic cryptographic key/salt for SRTP
 #[derive(Debug, Clone)]
@@ -88,7 +84,7 @@ struct SrtpSessionKeys {
     rtp_enc_key: Vec<u8>,
 
     /// Key for RTP authentication
-    rtp_auth_key: Vec<u8>,
+    rtp_authenticator: super::auth::SrtpAuthenticator,
 
     /// Salt for RTP encryption
     rtp_salt: Vec<u8>,
@@ -136,6 +132,28 @@ impl SrtpCrypto {
 
     pub(crate) fn suite(&self) -> &SrtpCryptoSuite {
         &self.suite
+    }
+
+    /// Hot call state: the RTP session key material the packed SRTP block
+    /// copies, as (encryption key, salt, keyed HMAC-SHA1 state, tag length).
+    /// `None` unless the suite is AES-CM with HMAC-SHA1 and the keys are
+    /// derived (every suite `SrtpCryptoSuite::validate` admits), so the block
+    /// is only built where its path is the session-key path, byte for byte.
+    pub(crate) fn rtp_hot_material(
+        &self,
+    ) -> Option<(&[u8], &[u8], &super::auth::HmacSha1Core, usize)> {
+        if self.suite.encryption != SrtpEncryptionAlgorithm::AesCm
+            || self.suite.authentication == SrtpAuthenticationAlgorithm::Null
+        {
+            return None;
+        }
+        let keys = self.session_keys.as_ref()?;
+        Some((
+            keys.rtp_enc_key.as_slice(),
+            keys.rtp_salt.as_slice(),
+            keys.rtp_authenticator.keyed_mac()?,
+            self.suite.tag_length,
+        ))
     }
 
     /// Derive session keys from master key
@@ -195,7 +213,11 @@ impl SrtpCrypto {
         // Store the derived keys
         let session_keys = SrtpSessionKeys {
             rtp_enc_key,
-            rtp_auth_key,
+            rtp_authenticator: super::auth::SrtpAuthenticator::new(
+                self.suite.authentication,
+                rtp_auth_key,
+                self.suite.tag_length,
+            ),
             rtp_salt,
             rtcp_enc_key,
             rtcp_auth_key,
@@ -306,6 +328,62 @@ impl SrtpCrypto {
         Ok((encrypted_packet, auth_tag))
     }
 
+    /// Executor v2 twin of [`Self::encrypt_rtp_with_roc`] for an unpadded
+    /// packet already serialised at `buffer[start..]` (a header of
+    /// `header_size` bytes, then the payload): the payload is encrypted in
+    /// place and the authentication tag appended, so the bytes from `start`
+    /// equal `ProtectedRtpPacket::serialize` of the allocating path.
+    pub(crate) fn encrypt_rtp_in_place_with_roc(
+        &self,
+        buffer: &mut Vec<u8>,
+        start: usize,
+        header_size: usize,
+        ssrc: u32,
+        sequence: u16,
+        roc: u32,
+    ) -> Result<()> {
+        if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
+            if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
+                return Ok(());
+            }
+            let session_keys = self
+                .session_keys
+                .as_ref()
+                .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+            return session_keys
+                .rtp_authenticator
+                .append_auth_tag(buffer, start, roc);
+        }
+        let session_keys = self
+            .session_keys
+            .as_ref()
+            .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+        let packet_index = (roc as u64) << 16 | u64::from(sequence);
+        let iv = match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AesCm => super::key_derivation::create_srtp_iv_array(
+                &session_keys.rtp_salt,
+                ssrc,
+                packet_index,
+            )?,
+            _ => {
+                return Err(Error::SrtpError(
+                    "Unsupported encryption algorithm".to_string(),
+                ))
+            }
+        };
+        aes_cm_encrypt(
+            &mut buffer[start + header_size..],
+            &session_keys.rtp_enc_key,
+            &iv,
+        )?;
+        if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            session_keys
+                .rtp_authenticator
+                .append_auth_tag(buffer, start, roc)?;
+        }
+        Ok(())
+    }
+
     /// Calculate authentication tag for a packet
     fn calculate_auth_tag(&self, packet_data: &[u8], roc: u32) -> Result<Vec<u8>> {
         if self.suite.authentication == SrtpAuthenticationAlgorithm::Null {
@@ -320,15 +398,10 @@ impl SrtpCrypto {
             .as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
-        // Create an authenticator
-        let authenticator = super::auth::SrtpAuthenticator::new(
-            self.suite.authentication,
-            session_keys.rtp_auth_key.clone(),
-            self.suite.tag_length,
-        );
-
         // Calculate the authentication tag
-        authenticator.calculate_auth_tag(packet_data, roc)
+        session_keys
+            .rtp_authenticator
+            .calculate_auth_tag(packet_data, roc)
     }
 
     /// Decrypt an SRTP packet in the initial rollover cycle.
@@ -379,15 +452,11 @@ impl SrtpCrypto {
 
         // Verify authentication if enabled
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            // Create an authenticator
-            let authenticator = super::auth::SrtpAuthenticator::new(
-                self.suite.authentication,
-                session_keys.rtp_auth_key.clone(),
-                self.suite.tag_length,
-            );
-
             // Verify the authentication tag
-            let is_valid = authenticator.verify_auth_tag(packet_data, auth_tag, roc)?;
+            let is_valid =
+                session_keys
+                    .rtp_authenticator
+                    .verify_auth_tag(packet_data, auth_tag, roc)?;
             if !is_valid {
                 return Err(Error::AuthenticationFailed(
                     "SRTP authentication tag mismatch".to_string(),
@@ -462,6 +531,90 @@ impl SrtpCrypto {
             payload: decrypted_payload.slice(..payload_end),
             padding_size,
         })
+    }
+
+    /// In-place twin of [`Self::decrypt_rtp_with_roc`] for the executor v2
+    /// inline receive path. The tag is verified over `data` and the payload is
+    /// decrypted inside `data`; the result points into it. Every check, its
+    /// order and its error are the same as the allocating path. `data` is
+    /// left modified only when this returns `Ok` or fails after
+    /// authentication (decrypted padding errors).
+    pub(crate) fn decrypt_rtp_in_place_with_roc(
+        &self,
+        data: &mut [u8],
+        roc: u32,
+    ) -> Result<crate::packet::rtp::RtpPacketBounds> {
+        if self.suite.encryption == SrtpEncryptionAlgorithm::Null
+            && self.suite.authentication == SrtpAuthenticationAlgorithm::Null
+        {
+            return RtpPacket::parse_bounds(data);
+        }
+
+        let session_keys = self
+            .session_keys
+            .as_ref()
+            .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
+
+        let auth_tag_size = if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            self.suite.tag_length
+        } else {
+            0
+        };
+        if auth_tag_size > 0 && data.len() < auth_tag_size {
+            return Err(Error::SrtpError(
+                "Packet too short to contain authentication tag".to_string(),
+            ));
+        }
+        let tag_start = data.len() - auth_tag_size;
+        let (packet_data, auth_tag) = data.split_at_mut(tag_start);
+
+        if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            let is_valid = session_keys.rtp_authenticator.verify_auth_tag_in_place(
+                packet_data,
+                auth_tag,
+                roc,
+            )?;
+            if !is_valid {
+                return Err(Error::AuthenticationFailed(
+                    "SRTP authentication tag mismatch".to_string(),
+                ));
+            }
+        }
+
+        if self.suite.encryption == SrtpEncryptionAlgorithm::Null {
+            return RtpPacket::parse_bounds(packet_data);
+        }
+
+        let (header, header_size) = crate::packet::RtpHeader::parse_without_consuming(packet_data)?;
+        let ssrc = header.ssrc;
+        let sequence = header.sequence_number as u64;
+        let packet_index = (roc as u64) << 16 | sequence;
+        let iv = match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AesCm => super::key_derivation::create_srtp_iv_array(
+                &session_keys.rtp_salt,
+                ssrc,
+                packet_index,
+            )?,
+            _ => {
+                return Err(Error::SrtpError(
+                    "Unsupported encryption algorithm".to_string(),
+                ))
+            }
+        };
+
+        let encrypted = &mut packet_data[header_size..];
+        match self.suite.encryption {
+            SrtpEncryptionAlgorithm::AesCm => {
+                aes_cm_decrypt(encrypted, &session_keys.rtp_enc_key, &iv)?;
+            }
+            _ => {
+                return Err(Error::SrtpError(
+                    "Unsupported encryption algorithm".to_string(),
+                ))
+            }
+        }
+
+        rtp_bounds_after_decrypt(header, header_size, encrypted)
     }
 
     /// Legacy stateless SRTCP encryption entry point.
@@ -732,8 +885,41 @@ impl SrtpCrypto {
     }
 }
 
-/// AES Counter Mode encryption for SRTP
-fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
+/// The bounds of an in-place decrypted RTP packet whose header (of
+/// `header_size` bytes) was parsed as `header` and whose decrypted payload
+/// and padding are `decrypted`: the padding is checked and excluded.
+pub(super) fn rtp_bounds_after_decrypt(
+    header: crate::packet::RtpHeader,
+    header_size: usize,
+    decrypted: &[u8],
+) -> Result<crate::packet::rtp::RtpPacketBounds> {
+    let padding_size = if header.padding {
+        let Some(&padding_size) = decrypted.last() else {
+            return Err(Error::InvalidPacket(
+                "decrypted RTP padding flag is set but no padding is present".to_string(),
+            ));
+        };
+        if padding_size == 0 || usize::from(padding_size) > decrypted.len() {
+            return Err(Error::InvalidPacket(format!(
+                "invalid decrypted RTP padding length {padding_size} for {} payload octets",
+                decrypted.len()
+            )));
+        }
+        padding_size
+    } else {
+        0
+    };
+    let payload_end = header_size + decrypted.len() - usize::from(padding_size);
+    Ok(crate::packet::rtp::RtpPacketBounds {
+        header,
+        payload: header_size..payload_end,
+        padding_size,
+    })
+}
+
+/// AES Counter Mode encryption for SRTP (also the packed hot-state block's
+/// keystream, with its inline key copy)
+pub(super) fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
     if iv.len() < 16 {
         return Err(Error::SrtpError(format!(
             "AES-CM IV too short: expected 16 bytes, got {}",
@@ -772,29 +958,8 @@ fn aes_cm_decrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
 
 /// HMAC-SHA1 authentication for SRTP
 fn hmac_sha1(data: &[u8], key: &[u8], tag_length: usize) -> Result<Vec<u8>> {
-    // Create a new HMAC-SHA1 instance
-    let mut mac = HmacSha1::new_from_slice(key)
-        .map_err(|e| Error::SrtpError(format!("Failed to create HMAC: {}", e)))?;
-
-    // Update with data
-    mac.update(data);
-
-    // Finalize and get the result
-    let result = mac.finalize().into_bytes();
-
-    // Truncate to the requested tag length. Guard against a misconfigured
-    // suite whose tag_length exceeds the 20-byte HMAC-SHA1 output (otherwise
-    // the slice below panics).
-    if tag_length > result.len() {
-        return Err(Error::SrtpError(format!(
-            "auth tag_length {} exceeds HMAC-SHA1 output {}",
-            tag_length,
-            result.len()
-        )));
-    }
-    let tag = result.as_slice()[..tag_length].to_vec();
-
-    Ok(tag)
+    let tag = super::auth::hmac_sha1_tag(key, data, &[], tag_length)?;
+    Ok(tag.as_slice().to_vec())
 }
 
 #[cfg(test)]

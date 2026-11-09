@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use rvoip_sip_core::prelude::*;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::diagnostics;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
@@ -17,6 +17,10 @@ use crate::transaction::{
 };
 
 use super::TransactionManager;
+
+/// How long an explicit termination keeps its terminal publication inline,
+/// on the manager's cleanup worker, before continuing it in the background.
+const TERMINAL_PUBLICATION_INLINE_WAIT: Duration = Duration::from_secs(1);
 
 /// Exact transaction generation accepted by an explicit termination request.
 ///
@@ -925,23 +929,31 @@ impl TransactionManager {
         // the exact owner in this manager-owned future while publishing the
         // ordered terminal batch. Waiting for that publication before waking
         // its TU consumer would create a bounded-queue dependency cycle.
-        let terminal_delivery = async {
+        //
+        // The publication owns everything it needs (sender, claim, exact
+        // admission owner), so a slow one can outlive this cleanup job. Only
+        // a closed TU channel fails closed. A full one means the TU is behind,
+        // not gone: closing admission for it would refuse every later request
+        // and local BYE for the rest of the manager's life.
+        let events_tx = self.events_tx.clone();
+        let terminal_tx_id = tx_id.clone();
+        let pending_prefix = publication.pending_prefix();
+        let mut terminal_delivery = Box::pin(async move {
             if let (Some(claim), Some(prefix_previous_state)) =
-                (publication_claim.as_ref(), publication.pending_prefix())
+                (publication_claim.as_ref(), pending_prefix)
             {
-                let delivery = self.events_tx.send_terminal_prefix(
-                    crate::transaction::TransactionEvent::StateChanged {
-                        transaction_id: tx_id.clone(),
-                        previous_state: prefix_previous_state,
-                        new_state: TransactionState::Terminated,
-                    },
-                    claim,
-                );
-                if !matches!(
-                    tokio::time::timeout(Duration::from_secs(1), delivery).await,
-                    Ok(Ok(()))
-                ) {
-                    self.events_tx.fail_closed_terminal_batch();
+                let delivery = events_tx
+                    .send_terminal_prefix(
+                        crate::transaction::TransactionEvent::StateChanged {
+                            transaction_id: terminal_tx_id.clone(),
+                            previous_state: prefix_previous_state,
+                            new_state: TransactionState::Terminated,
+                        },
+                        claim,
+                    )
+                    .await;
+                if delivery.is_err() {
+                    events_tx.fail_closed_terminal_batch();
                     publication_claim
                         .take()
                         .expect("terminal publication claim is live")
@@ -952,39 +964,25 @@ impl TransactionManager {
             let Some(publication_claim) = publication_claim else {
                 return;
             };
-            let delivered = {
-                let mut delivery = std::pin::pin!(self.events_tx.send_terminal(
+            // `send_terminal` keeps the exact sidecar and admission owner until
+            // the event is enqueued, so waiting here never frees the wire key
+            // early.
+            let delivery = events_tx
+                .send_terminal(
                     crate::transaction::TransactionEvent::TransactionTerminated {
-                        transaction_id: tx_id.clone(),
+                        transaction_id: terminal_tx_id,
                     },
                     None,
                     terminal_owner,
-                ));
-                tokio::select! {
-                    result = &mut delivery => {
-                        if result.is_err() {
-                            self.events_tx.fail_closed_terminal_batch();
-                            false
-                        } else {
-                            true
-                        }
-                    }
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                        // `delivery` still owns its exact sidecar/admission owner
-                        // while this closes admission. The enclosing scope drops
-                        // the future before the publication claim is completed.
-                        self.events_tx.fail_closed_terminal_batch();
-                        false
-                    }
-                }
-            };
-            if delivered {
-                publication_claim.mark_delivered();
-            } else {
+                )
+                .await;
+            if delivery.is_err() {
+                events_tx.fail_closed_terminal_batch();
                 publication_claim.mark_failed_closed();
+            } else {
+                publication_claim.mark_delivered();
             }
-        };
-        tokio::pin!(terminal_delivery);
+        });
         // Register the real FIFO queue reservation before waking the TU, and
         // observe an already-closed receiver before acknowledging completion.
         // A single unconstrained poll avoids mistaking cooperative yielding
@@ -997,9 +995,49 @@ impl TransactionManager {
         .await;
         if first_poll.is_pending() {
             operation.complete_waiter(Ok(()));
-            terminal_delivery.await;
+            if tokio::time::timeout(TERMINAL_PUBLICATION_INLINE_WAIT, terminal_delivery.as_mut())
+                .await
+                .is_err()
+            {
+                self.hand_off_terminal_publication(terminal_delivery);
+            }
         }
         Ok(())
+    }
+
+    /// Continue a terminal publication that is waiting on a full TU queue in
+    /// the background, so the cleanup worker can serve the next termination.
+    ///
+    /// The task keeps the publication's order and exact owners. It holds a
+    /// shutdown guard and stops on manager shutdown, which drops the claim
+    /// back to the shutdown fallback, exactly as cancelling the inline wait
+    /// would.
+    fn hand_off_terminal_publication<F>(&self, publication: std::pin::Pin<Box<F>>)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let Some(shutdown_guard) = self.admission_lifecycle.try_enter_existing() else {
+            // Shutdown is already stopping and owns what is left.
+            return;
+        };
+        let cancellation = std::sync::Arc::clone(&self.operation_cancellation);
+        let counters = std::sync::Arc::clone(&self.slot_cleanup);
+        if let Some(occurrences) = counters.record_terminal_publication_handoff() {
+            warn!(
+                occurrences,
+                detached = counters.terminal_publications_detached(),
+                "Terminal transaction events are waiting on a full transaction-user queue; \
+                 continuing in the background instead of closing admission"
+            );
+        }
+        tokio::spawn(async move {
+            let _shutdown_guard = shutdown_guard;
+            tokio::select! {
+                _ = cancellation.cancelled() => {}
+                _ = publication => {}
+            }
+            counters.record_detached_terminal_publication_finished();
+        });
     }
 
     /// Cleanup terminated transactions.

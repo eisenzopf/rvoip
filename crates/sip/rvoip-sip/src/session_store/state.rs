@@ -285,6 +285,9 @@ pub struct SessionStateCold {
     /// authentication and timer retries until the final response consumes
     /// the offer/answer exchange.
     pub(crate) initial_invite_offer_sdp: Option<String>,
+    /// A 100 to the initial INVITE permits CANCEL without implying that the
+    /// peer is ringing. Reset whenever a fresh initial INVITE is sent.
+    pub(crate) initial_invite_trying_received: bool,
     pub pending_reinvite_options:
         Option<Arc<rvoip_sip_dialog::api::unified::ReInviteRequestOptions>>,
     pub pending_register_options:
@@ -890,6 +893,29 @@ impl SessionHangupControl {
 /// for this exact session, then publish a complete immutable revision in one
 /// swap. Cross-session index changes are coordinated separately by
 /// `SessionStore`; ordinary state changes never take that global boundary.
+/// What a media driver waits for before binding: a media owner, a decided
+/// SDP negotiation, or the end of the call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MediaReadinessSignal {
+    pub owner_ready: bool,
+    pub negotiation_decided: bool,
+    pub terminal: bool,
+}
+
+impl MediaReadinessSignal {
+    fn from_state(state: &SessionState) -> Self {
+        Self {
+            owner_ready: state.media_session_id.is_some(),
+            // Mirrors when `negotiated_media_config` stops answering None:
+            // a negotiated config with its payload type, or an SDP exchange
+            // that ended without one (which fails the stream).
+            negotiation_decided: state.sdp_negotiated
+                || (state.negotiated_config.is_some() && state.negotiated_payload_type().is_some()),
+            terminal: state.call_state.is_final() || state.call_state == CallState::Terminating,
+        }
+    }
+}
+
 pub(crate) struct SessionStateCell {
     current: ArcSwap<SessionStateSnapshot>,
     update_lock: StdMutex<()>,
@@ -903,6 +929,13 @@ pub(crate) struct SessionStateCell {
     /// control. Keeping it on the cell makes raw-ID reuse allocate a distinct
     /// lane and lets ordinary sessions pay only for an empty `OnceLock`.
     hangup_control: OnceLock<Arc<SessionHangupControl>>,
+    /// Committed call-state changes of this exact lifetime, allocated only
+    /// when something waits for one (an inbound accept awaiting its ACK).
+    /// Revisions that leave the call state unchanged wake nobody.
+    call_state_updates: OnceLock<tokio::sync::watch::Sender<Option<CallState>>>,
+    /// Committed media-readiness changes of this exact lifetime, allocated
+    /// only when a media driver waits for one.
+    media_readiness_updates: OnceLock<tokio::sync::watch::Sender<Option<MediaReadinessSignal>>>,
 }
 
 impl SessionStateCell {
@@ -912,6 +945,8 @@ impl SessionStateCell {
             update_lock: StdMutex::new(()),
             state_machine_lane: OnceLock::new(),
             hangup_control: OnceLock::new(),
+            call_state_updates: OnceLock::new(),
+            media_readiness_updates: OnceLock::new(),
         }
     }
 
@@ -930,6 +965,68 @@ impl SessionStateCell {
             self.hangup_control
                 .get_or_init(|| Arc::new(SessionHangupControl::new())),
         )
+    }
+
+    /// Subscribe to committed call-state changes. Call with `lock_update`
+    /// held, so the initial value cannot be a revision that a failed
+    /// lifecycle commit later rolls back.
+    pub(crate) fn subscribe_call_state(&self) -> tokio::sync::watch::Receiver<Option<CallState>> {
+        self.call_state_updates
+            .get_or_init(|| tokio::sync::watch::channel(Some(self.snapshot().call_state)).0)
+            .subscribe()
+    }
+
+    /// Wake call-state and media-readiness subscribers after a lifecycle
+    /// commit succeeded, with `lock_update` still held. Never call this from
+    /// `publish`: a published revision can still roll back. Subscribers wake
+    /// only when their own value changes.
+    pub(crate) fn notify_state_committed(&self, state: &SessionState) {
+        if let Some(updates) = self.call_state_updates.get() {
+            updates.send_if_modified(|previous| {
+                if *previous == Some(state.call_state) {
+                    false
+                } else {
+                    *previous = Some(state.call_state);
+                    true
+                }
+            });
+        }
+        if let Some(updates) = self.media_readiness_updates.get() {
+            let signal = Some(MediaReadinessSignal::from_state(state));
+            updates.send_if_modified(|previous| {
+                if *previous == signal {
+                    false
+                } else {
+                    *previous = signal;
+                    true
+                }
+            });
+        }
+    }
+
+    /// Subscribe to committed media-readiness changes. Call with
+    /// `lock_update` held, like [`Self::subscribe_call_state`].
+    pub(crate) fn subscribe_media_readiness(
+        &self,
+    ) -> tokio::sync::watch::Receiver<Option<MediaReadinessSignal>> {
+        self.media_readiness_updates
+            .get_or_init(|| {
+                tokio::sync::watch::channel(Some(MediaReadinessSignal::from_state(
+                    self.snapshot().state(),
+                )))
+                .0
+            })
+            .subscribe()
+    }
+
+    /// Tell call-state and media-readiness subscribers this lifetime is gone.
+    pub(crate) fn close_call_state_updates(&self) {
+        if let Some(updates) = self.call_state_updates.get() {
+            updates.send_replace(None);
+        }
+        if let Some(updates) = self.media_readiness_updates.get() {
+            updates.send_replace(None);
+        }
     }
 
     pub(crate) fn state_machine_lane(&self) -> Arc<tokio::sync::Mutex<()>> {
@@ -1042,6 +1139,7 @@ impl SessionState {
                 pending_bye_reason: None,
                 pending_invite_options: None,
                 initial_invite_offer_sdp: None,
+                initial_invite_trying_received: false,
                 pending_reinvite_options: None,
                 pending_register_options: None,
                 pending_refer_options: None,
@@ -1251,6 +1349,7 @@ impl SessionState {
         let cold = Arc::make_mut(&mut self.cold);
         cold.pending_invite_options = None;
         cold.initial_invite_offer_sdp = None;
+        cold.initial_invite_trying_received = false;
         cold.invite_authorization_credentials.clear();
         cold.invite_auth_retry_count = 0;
         cold.pending_auth = None;

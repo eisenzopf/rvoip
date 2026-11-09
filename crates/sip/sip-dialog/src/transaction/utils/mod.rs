@@ -50,6 +50,7 @@ pub use response_builders::{
 // Transaction helpers
 pub use transaction_helpers::{
     determine_transaction_kind, extract_transaction_parts, transaction_key_from_message,
+    transaction_key_from_request, transaction_key_from_response,
 };
 
 // Request builders

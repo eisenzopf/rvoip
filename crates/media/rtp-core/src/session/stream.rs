@@ -143,14 +143,47 @@ impl RtpStream {
     }
 
     fn process_packet_at(&mut self, packet: RtpPacket, now: Instant) -> Option<RtpPacket> {
-        self.last_packet_time = now;
+        let is_first_packet = self.account_packet_at(
+            packet.header.sequence_number,
+            packet.header.timestamp,
+            packet.size(),
+            now,
+        );
 
-        let seq = packet.header.sequence_number;
-        let timestamp = packet.header.timestamp;
+        // Preserve the existing first-packet behavior even when a jitter
+        // buffer is enabled.
+        if is_first_packet {
+            return Some(packet);
+        }
+
+        // If using jitter buffer, add to buffer and return ordered packets
+        if let Some(buffer) = &self.jitter_buffer {
+            self.add_to_jitter_buffer(packet, buffer.clone());
+            self.get_next_from_jitter_buffer(buffer.clone())
+        } else {
+            // No jitter buffer, return packet immediately
+            Some(packet)
+        }
+    }
+
+    /// Sequence, loss, duplicate, reorder and jitter accounting for one
+    /// received packet, without taking the packet. Returns whether this was
+    /// the stream's first packet. [`Self::process_packet`] is exactly this
+    /// followed by the (optional) legacy jitter buffer; the executor v2
+    /// inline path calls it directly because session streams never enable
+    /// that buffer (see [`Self::has_jitter_buffer`]).
+    pub(crate) fn account_packet_at(
+        &mut self,
+        seq: RtpSequenceNumber,
+        timestamp: u32,
+        wire_size: usize,
+        now: Instant,
+    ) -> bool {
+        self.last_packet_time = now;
 
         // Update basic stats
         self.packets_received += 1;
-        self.bytes_received += packet.size() as u64;
+        self.bytes_received += wire_size as u64;
 
         let loss_result = self.loss_tracker.process(seq);
         let is_first_packet = matches!(loss_result, PacketLossResult::FirstPacket { .. });
@@ -187,21 +220,20 @@ impl RtpStream {
             .jitter_estimator
             .update_with_sequence(seq, timestamp, now);
         self.initialized = true;
+        is_first_packet
+    }
 
-        // Preserve the existing first-packet behavior even when a jitter
-        // buffer is enabled.
-        if is_first_packet {
-            return Some(packet);
-        }
+    /// Hot call state: stop maintaining the loss tracker's write-only
+    /// history (a heap line and a shift per packet); every statistic is
+    /// unchanged.
+    pub(crate) fn disable_loss_history(&mut self) {
+        self.loss_tracker.disable_history();
+    }
 
-        // If using jitter buffer, add to buffer and return ordered packets
-        if let Some(buffer) = &self.jitter_buffer {
-            self.add_to_jitter_buffer(packet, buffer.clone());
-            self.get_next_from_jitter_buffer(buffer.clone())
-        } else {
-            // No jitter buffer, return packet immediately
-            Some(packet)
-        }
+    /// Whether the legacy per-stream jitter buffer is enabled. Session-owned
+    /// streams are always unbuffered.
+    pub(crate) fn has_jitter_buffer(&self) -> bool {
+        self.jitter_buffer.is_some()
     }
 
     /// Initialize sequence tracking

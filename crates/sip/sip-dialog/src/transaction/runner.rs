@@ -467,7 +467,13 @@ pub async fn run_transaction_loop<D, TH, L>(
                                 )
                                 .await
                             {
-                                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), "Error in on_enter_state for state {:?}", requested_new_state);
+                                static RESPONSE_ENTER_FAILURES: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
+                                if let Some(occurrences) =
+                                    crate::diagnostics::thin_log(&RESPONSE_ENTER_FAILURES)
+                                {
+                                    error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error), occurrences, "Error in on_enter_state for state {:?}", requested_new_state);
+                                }
                                 state_entry_error = Some(format!(
                                     "Error entering state {:?}: {}",
                                     requested_new_state, error
@@ -543,7 +549,12 @@ pub async fn run_transaction_loop<D, TH, L>(
                             )
                             .await
                         {
-                            error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), "Error in on_enter_state for state {:?}", requested_new_state);
+                            static ENTER_FAILURES: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(0);
+                            if let Some(occurrences) = crate::diagnostics::thin_log(&ENTER_FAILURES)
+                            {
+                                error!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&tx_id_clone), error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&e), occurrences, "Error in on_enter_state for state {:?}", requested_new_state);
+                            }
 
                             fence_internal_error(
                                 &data,

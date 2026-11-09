@@ -125,6 +125,75 @@ mod tests {
         }
     }
 
+    /// Sends with an explicit payload type go through the handle captured
+    /// with the wrapper and complete while the RTP session mutex is held.
+    /// Default-payload sends still resolve the session's current payload
+    /// type, and removing the session stops typed sends.
+    #[tokio::test]
+    async fn typed_rtp_sends_skip_the_session_mutex_and_default_sends_stay_fresh() {
+        async fn next_rtp(peer: &tokio::net::UdpSocket) -> RtpPacket {
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut buffer = [0u8; 2048];
+                loop {
+                    let (size, _) = peer.recv_from(&mut buffer).await.unwrap();
+                    // Skip RTCP (packet types 192-223) sharing the RTP port.
+                    if size >= 2 && !(192..=223).contains(&buffer[1]) {
+                        return RtpPacket::parse(&buffer[..size]).unwrap();
+                    }
+                }
+            })
+            .await
+            .expect("no RTP packet reached the peer")
+        }
+
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("typed-send");
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = loopback_config();
+        config.remote_addr = Some(peer.local_addr().unwrap());
+        config.preferred_codec = Some("PCMU".to_string());
+        controller
+            .start_media(dialog.clone(), config)
+            .await
+            .unwrap();
+        let session = controller.get_rtp_session(&dialog).await.unwrap();
+
+        {
+            let _held = session.lock().await;
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                controller.send_rtp_packet_with_payload_type(&dialog, vec![0x11; 160], 160, 0),
+            )
+            .await
+            .expect("a typed send must not wait for the RTP session mutex")
+            .unwrap();
+        }
+        let typed = next_rtp(&peer).await;
+        assert_eq!(typed.header.payload_type, 0);
+        assert_eq!(typed.header.timestamp, 160);
+        assert_eq!(typed.payload.as_ref(), &[0x11; 160]);
+
+        // The captured handle's default payload type is a construction-time
+        // snapshot; the default path must follow a later change instead.
+        session.lock().await.set_payload_type(8);
+        controller
+            .send_rtp_packet(&dialog, vec![0x22; 4], 320)
+            .await
+            .unwrap();
+        let untyped = next_rtp(&peer).await;
+        assert_eq!(untyped.header.payload_type, 8);
+        assert_eq!(
+            untyped.header.sequence_number,
+            typed.header.sequence_number.wrapping_add(1)
+        );
+
+        controller.stop_media(&dialog).await.unwrap();
+        assert!(controller
+            .send_rtp_packet_with_payload_type(&dialog, vec![0x33; 160], 480, 0)
+            .await
+            .is_err());
+    }
+
     #[tokio::test]
     async fn separate_rtcp_ports_are_paired_released_and_never_collide() {
         // An odd range start: pairs still begin on an even port.
@@ -190,6 +259,102 @@ mod tests {
             controller.stop_media(dialog).await.unwrap();
         }
         assert_eq!(controller.allocated_port_count().await, 0, "ports leaked");
+    }
+
+    #[tokio::test]
+    async fn session_port_slots_track_exhaustion_and_recover_after_stop() {
+        let controller = MediaSessionController::with_port_range(24_400, 24_401);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert_eq!(controller.configured_session_port_slots(false), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+
+        for dialog in ["slot-a", "slot-b"] {
+            controller
+                .start_media(DialogId::new(dialog), loopback_config())
+                .await
+                .expect("media start within the range");
+        }
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(0));
+        let exhausted = controller
+            .start_media(DialogId::new("slot-c"), loopback_config())
+            .await
+            .expect_err("a full range must fail media start");
+        assert!(
+            exhausted.to_string().contains("port_pool_exhausted"),
+            "{exhausted}"
+        );
+
+        controller
+            .stop_media(&DialogId::new("slot-a"))
+            .await
+            .expect("stop releases its port");
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(1));
+        controller
+            .start_media(DialogId::new("slot-c"), loopback_config())
+            .await
+            .expect("a released port serves the next call");
+        for dialog in ["slot-b", "slot-c"] {
+            controller
+                .stop_media(&DialogId::new(dialog))
+                .await
+                .expect("stop media");
+        }
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+        // A controller without a range-backed allocator counts nothing.
+        assert_eq!(
+            MediaSessionController::new().available_session_port_slots(ip, false),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn separate_rtcp_session_port_slots_count_pairs_and_follow_rtcp_release() {
+        // Four ports: four multiplexed sessions or two RTP/RTCP pairs.
+        let controller = MediaSessionController::with_port_range(24_410, 24_413);
+        let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        assert_eq!(controller.configured_session_port_slots(false), Some(4));
+        assert_eq!(controller.configured_session_port_slots(true), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(2));
+
+        // Non-mux: the session reserves RTP and RTP + 1.
+        let paired = DialogId::new("slots-paired");
+        controller
+            .start_media(
+                paired.clone(),
+                loopback_config().with_rtcp_separate_port(true),
+            )
+            .await
+            .expect("pair start");
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(1));
+
+        // Mux accepted: the RTCP port is a free port again, but no pair.
+        assert!(controller.release_rtcp_port(&paired).await.unwrap());
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(3));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(1));
+
+        // A multiplexed session splits the last pair: one free port per side
+        // of it, so free ports / 2 would still admit a doomed pair start.
+        let single = DialogId::new("slots-single");
+        controller
+            .start_media(single.clone(), loopback_config())
+            .await
+            .expect("single start");
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(2));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(0));
+        controller
+            .start_media(
+                DialogId::new("slots-no-pair"),
+                loopback_config().with_rtcp_separate_port(true),
+            )
+            .await
+            .expect_err("no free pair is left");
+
+        for dialog in [&paired, &single] {
+            controller.stop_media(dialog).await.unwrap();
+        }
+        assert_eq!(controller.available_session_port_slots(ip, false), Some(4));
+        assert_eq!(controller.available_session_port_slots(ip, true), Some(2));
     }
 
     #[tokio::test]
@@ -424,6 +589,87 @@ mod tests {
         );
         assert_eq!(controller.get_session_id(&new_media), Some(session_id));
         assert_eq!(controller.get_session_id(&old_media), None);
+    }
+
+    #[tokio::test]
+    async fn cleanup_removes_all_exact_media_aliases_and_preserves_rebound_alias() {
+        let controller = MediaSessionController::new();
+        let old = DialogId::new("alias-old");
+        let new = DialogId::new("alias-new");
+        let unrelated = DialogId::new("alias-unrelated");
+        for name in ["first", "second", "rebound"] {
+            controller.store_session_mapping(name.into(), MediaSessionId::from_dialog(&old));
+        }
+        controller.store_session_mapping("rebound".into(), MediaSessionId::from_dialog(&new));
+        controller.store_session_mapping("other".into(), MediaSessionId::from_dialog(&unrelated));
+        // Cleanup is idempotent.
+        controller.cleanup_per_dialog_side_state(&old);
+        controller.cleanup_per_dialog_side_state(&old);
+        assert_eq!(controller.get_media_id("first"), None);
+        assert_eq!(controller.get_media_id("second"), None);
+        assert_eq!(
+            controller.get_media_id("rebound"),
+            Some(MediaSessionId::from_dialog(&new))
+        );
+        assert_eq!(
+            controller.get_media_id("other"),
+            Some(MediaSessionId::from_dialog(&unrelated))
+        );
+        assert_eq!(
+            controller.get_session_id(&MediaSessionId::from_dialog(&old)),
+            None
+        );
+        assert!(!controller
+            .session_mapping_owners
+            .lock()
+            .unwrap()
+            .contains_key(&MediaSessionId::from_dialog(&old)));
+    }
+
+    /// Concurrent rebinds of the same aliases between two media ids leave an
+    /// owner entry for every alias, so cleanup of each media removes exactly
+    /// its own aliases and both cleanups together leave nothing behind.
+    #[tokio::test]
+    async fn concurrent_mapping_rebinds_keep_all_cleanup_owners() {
+        let controller = MediaSessionController::new();
+        let old = DialogId::new("concurrent-alias-old");
+        let new = DialogId::new("concurrent-alias-new");
+        std::thread::scope(|scope| {
+            for writer in 0..4 {
+                let controller = &controller;
+                let old = &old;
+                let new = &new;
+                scope.spawn(move || {
+                    for iteration in 0..200 {
+                        controller.store_session_mapping(
+                            format!("alias-{}", iteration % 8),
+                            MediaSessionId::from_dialog(if (iteration + writer) % 2 == 0 {
+                                old
+                            } else {
+                                new
+                            }),
+                        );
+                    }
+                });
+            }
+        });
+        let expected_new: Vec<_> = controller
+            .session_to_media
+            .iter()
+            .filter(|entry| entry.value() == &MediaSessionId::from_dialog(&new))
+            .map(|entry| entry.key().clone())
+            .collect();
+        controller.cleanup_per_dialog_side_state(&old);
+        for alias in expected_new {
+            assert_eq!(
+                controller.get_media_id(&alias),
+                Some(MediaSessionId::from_dialog(&new))
+            );
+        }
+        controller.cleanup_per_dialog_side_state(&new);
+        assert!(controller.session_to_media.is_empty());
+        assert!(controller.media_to_session.is_empty());
+        assert!(controller.session_mapping_owners.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1936,5 +2182,296 @@ mod tests {
 
         controller.stop_media(&sender).await.unwrap();
         controller.stop_media(&receiver).await.unwrap();
+    }
+
+    /// A cached `PreparedG711Sender` puts on the wire what the PCM path
+    /// (`encode_and_send_audio` of the decoded payload) puts there, in the
+    /// same sequence space, and every state change that makes the PCM path
+    /// transform or drop audio (mute, direction, comfort noise, a new codec
+    /// generation, stop/restart) closes its fence.
+    #[tokio::test]
+    async fn cached_g711_sender_matches_the_pcm_path_and_is_fenced_by_every_tx_state_change() {
+        use crate::codec::audio::common::AudioCodec;
+        use crate::codec::audio::g711::G711Codec;
+        use rvoip_rtp_core::RtpFrameNow;
+        use tokio::net::UdpSocket;
+        use tokio::time::{timeout, Duration};
+
+        async fn receive(peer: &UdpSocket) -> RtpPacket {
+            timeout(Duration::from_secs(1), async {
+                let mut buffer = [0_u8; 2048];
+                loop {
+                    let (size, _) = peer.recv_from(&mut buffer).await.unwrap();
+                    // Skip RTCP.
+                    if size >= 2 && (192..=223).contains(&buffer[1]) {
+                        continue;
+                    }
+                    break RtpPacket::parse(&buffer[..size]).unwrap();
+                }
+            })
+            .await
+            .expect("RTP reaches the peer")
+        }
+        fn frame(payload: &[u8], timestamp: u32, payload_type: u8) -> [RtpFrameNow<'_>; 1] {
+            [RtpFrameNow {
+                timestamp,
+                payload,
+                marker: false,
+                payload_type,
+            }]
+        }
+        /// Send `payload` through the sender until the reactor has seen the
+        /// socket writable (until then a synchronous send defers, consuming
+        /// nothing).
+        async fn send_now(sender: &PreparedG711Sender, payload: &[u8], timestamp: u32, pt: u8) {
+            loop {
+                let report = sender
+                    .try_send_now(&frame(payload, timestamp, pt), false)
+                    .unwrap()
+                    .expect("transmission is enabled");
+                if report.sent == 1 {
+                    return;
+                }
+                assert_eq!(report.deferred(1), 1, "a deferred frame consumed nothing");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("cached-g711-sender");
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let initial = MediaConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        }
+        .with_negotiated_audio_codec("PCMU", 0, 8000, 1);
+        controller
+            .start_media(dialog.clone(), initial.clone())
+            .await
+            .unwrap();
+        // Every μ-law code, including the negative zero the PCM path
+        // rewrites.
+        let payload: Vec<u8> = (0..=255u8).collect();
+        let mut mu = G711Codec::mu_law(8000, 1).unwrap();
+        let decoded = mu.decode(&payload).unwrap();
+
+        let cached = controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            controller.media_runtime_handle(&dialog).is_some(),
+            cached.media_runtime_handle().is_some(),
+            "the lane is the RTP sender's"
+        );
+        assert!(cached.is_current(EncodedG711Format::MuLaw, 0));
+        assert!(
+            !cached.is_current(EncodedG711Format::ALaw, 0),
+            "the law is part of the fence"
+        );
+        assert!(
+            !cached.is_current(EncodedG711Format::MuLaw, 8),
+            "the payload type too"
+        );
+        let mut scratch = Vec::new();
+        let canonical = EncodedG711Format::MuLaw
+            .canonical_payload(&payload, &mut scratch)
+            .to_vec();
+        assert_ne!(canonical, payload, "0x7F is rewritten");
+        send_now(&cached, &canonical, 160, 0).await;
+        let sync = receive(&peer).await;
+
+        // The PCM path continues the same stream with the same bytes.
+        controller
+            .encode_and_send_audio(
+                &dialog,
+                AudioFrame::new(decoded.samples.clone(), 8000, 1, 320),
+            )
+            .await
+            .unwrap();
+        let pcm = receive(&peer).await;
+        assert_eq!(sync.payload, pcm.payload, "the same payload either way");
+        assert_eq!(
+            pcm.header.sequence_number,
+            sync.header.sequence_number.wrapping_add(1)
+        );
+        assert_eq!(
+            (sync.header.ssrc, sync.header.payload_type),
+            (pcm.header.ssrc, pcm.header.payload_type)
+        );
+        assert_eq!((sync.header.timestamp, pcm.header.timestamp), (160, 320));
+        assert_eq!(sync.header.marker, pcm.header.marker);
+
+        controller.set_audio_muted(&dialog, true).await.unwrap();
+        assert!(
+            !cached.is_current(EncodedG711Format::MuLaw, 0),
+            "mute moves the fence"
+        );
+        assert!(
+            controller
+                .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+                .unwrap()
+                .is_none(),
+            "muted audio takes the PCM path (silence)"
+        );
+        controller.set_audio_muted(&dialog, false).await.unwrap();
+
+        let cached = controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+            .unwrap()
+            .unwrap();
+        controller.set_comfort_noise_enabled(true);
+        assert!(
+            !cached.is_current(EncodedG711Format::MuLaw, 0),
+            "comfort noise is checked per frame"
+        );
+        assert!(controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+            .unwrap()
+            .is_none());
+        controller.set_comfort_noise_enabled(false);
+        assert!(cached.is_current(EncodedG711Format::MuLaw, 0));
+
+        controller
+            .set_media_direction(&dialog, MediaDirection::RecvOnly)
+            .await
+            .unwrap();
+        assert!(
+            !cached.is_current(EncodedG711Format::MuLaw, 0),
+            "direction moves the fence"
+        );
+        let recv_only = controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+            .unwrap()
+            .unwrap();
+        assert!(
+            recv_only
+                .try_send_now(&frame(&canonical, 480, 0), false)
+                .unwrap()
+                .is_none(),
+            "dropped, as the PCM path drops it"
+        );
+        controller
+            .encode_and_send_audio(
+                &dialog,
+                AudioFrame::new(decoded.samples.clone(), 8000, 1, 480),
+            )
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(30), receive(&peer))
+                .await
+                .is_err(),
+            "nothing left"
+        );
+        controller
+            .set_media_direction(&dialog, MediaDirection::SendRecv)
+            .await
+            .unwrap();
+
+        let old_codec = controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+            .unwrap()
+            .unwrap();
+        controller
+            .update_media(
+                dialog.clone(),
+                initial
+                    .clone()
+                    .with_negotiated_audio_codec("PCMA", 8, 8000, 1),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !old_codec.is_current(EncodedG711Format::MuLaw, 0),
+            "a new codec generation retires it"
+        );
+        assert!(
+            old_codec
+                .try_send_now(&frame(&canonical, 640, 0), false)
+                .is_err(),
+            "the retired generation fails before anything is consumed"
+        );
+        let alaw = controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::ALaw, 8)
+            .unwrap()
+            .unwrap();
+        assert!(
+            controller
+                .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+                .unwrap()
+                .is_none(),
+            "the old law no longer resolves"
+        );
+
+        controller.stop_media(&dialog).await.unwrap();
+        assert!(
+            !alaw.is_current(EncodedG711Format::ALaw, 8),
+            "stop retires the dialog's gate"
+        );
+        assert!(controller
+            .prepare_g711_sender(&dialog, EncodedG711Format::ALaw, 8)
+            .is_err());
+        controller
+            .start_media(dialog.clone(), initial)
+            .await
+            .unwrap();
+        assert!(
+            !alaw.is_current(EncodedG711Format::ALaw, 8),
+            "a restart under the same id cannot revive it"
+        );
+        controller.stop_media(&dialog).await.unwrap();
+    }
+
+    /// The canonical payload is exactly what decoding and re-encoding gives,
+    /// for every code of both laws.
+    #[test]
+    fn canonical_g711_payloads_equal_a_decode_and_encode_round_trip() {
+        use crate::codec::audio::common::AudioCodec;
+        use crate::codec::audio::g711::G711Codec;
+        let payload: Vec<u8> = (0..=255u8).collect();
+        for (format, mut codec) in [
+            (
+                EncodedG711Format::MuLaw,
+                G711Codec::mu_law(8000, 1).unwrap(),
+            ),
+            (EncodedG711Format::ALaw, G711Codec::a_law(8000, 1).unwrap()),
+        ] {
+            let decoded = codec.decode(&payload).unwrap();
+            let round_trip = codec.encode(&decoded).unwrap();
+            let mut scratch = Vec::new();
+            assert_eq!(
+                format.canonical_payload(&payload, &mut scratch),
+                round_trip.as_slice()
+            );
+            let changed: Vec<u8> = payload
+                .iter()
+                .zip(&round_trip)
+                .filter(|(a, b)| a != b)
+                .map(|(a, _)| *a)
+                .collect();
+            match format {
+                EncodedG711Format::MuLaw => assert_eq!(changed, vec![0x7F]),
+                _ => assert!(changed.is_empty(), "A-law round-trips every code"),
+            }
+            // A canonical payload is borrowed, not copied.
+            let canonical = round_trip.clone();
+            let mut scratch = Vec::new();
+            assert!(std::ptr::eq(
+                format.canonical_payload(&canonical, &mut scratch).as_ptr(),
+                canonical.as_ptr()
+            ));
+        }
+        assert_eq!(
+            EncodedG711Format::from_codec_name("pcmu"),
+            Some(EncodedG711Format::MuLaw)
+        );
+        assert_eq!(
+            EncodedG711Format::from_codec_name("G711-A"),
+            Some(EncodedG711Format::ALaw)
+        );
+        assert_eq!(EncodedG711Format::from_codec_name("opus"), None);
     }
 }

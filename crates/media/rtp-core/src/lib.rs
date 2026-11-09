@@ -71,10 +71,22 @@
 mod error;
 
 // Main modules
+pub mod executor;
+pub mod hot_state;
+pub(crate) mod lane_clock;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) mod lane_epoll;
+pub(crate) mod lane_poller;
+pub mod lane_table;
+pub mod lane_tick;
+pub mod media_clock;
 pub mod packet;
 pub mod session;
 pub mod srtp;
+pub(crate) mod ssrc_hash;
 pub mod stats;
+#[cfg(target_os = "linux")]
+mod sys_mmsg;
 pub mod time;
 pub mod traits;
 pub mod transport;
@@ -87,6 +99,7 @@ pub mod dtls;
 pub mod dtls_srtp;
 pub mod events;
 pub mod feedback;
+pub mod host_plan;
 pub mod network;
 pub mod rtcp;
 pub mod security;
@@ -132,8 +145,9 @@ pub use packet::rtp::RtpPacket;
 
 // Re-export session types
 pub use session::{
-    PeerReceptionReport, PeerRtcpBye, RtpSendHandle, RtpSession, RtpSessionBufferConfig,
-    RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream, RtpStreamStats,
+    PeerReceptionReport, PeerRtcpBye, RtpFrameNow, RtpSendHandle, RtpSendNowReport, RtpSession,
+    RtpSessionBufferConfig, RtpSessionConfig, RtpSessionEvent, RtpSessionStats, RtpStream,
+    RtpStreamStats,
 };
 
 // Re-export transport types

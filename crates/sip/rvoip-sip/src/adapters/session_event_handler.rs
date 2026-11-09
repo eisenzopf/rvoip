@@ -163,8 +163,10 @@ fn exact_final_response_retires_routes(outcome: ExactFinalResponseOutcome) -> bo
 
 /// Translate a state-machine response failure into the causal ingress ACK.
 /// Only transaction-core's terminal dispositions may be acknowledged as
-/// handled: `ZeroWireRetryable` and unclassified lifecycle/action failures
-/// must reach dialog-core so it can select its one safe local fallback.
+/// handled. `ZeroWireRetryable` and unclassified lifecycle/action failures
+/// are not: the IncomingCall handler releases upper resources and then
+/// authors the one 503 itself, because dialog-core never authors a fallback
+/// after a handler error.
 fn exact_response_failure_processing_ack(
     operation: &'static str,
     disposition: Option<rvoip_sip_dialog::FinalResponseCompletionDisposition>,
@@ -230,8 +232,8 @@ where
 
 /// Retain upper failed-inbound cleanup independently from the causal ACK
 /// waiter. The future deliberately excludes lower dialog-core cleanup so the
-/// original server INVITE remains available to the caller's classified 503
-/// fallback until this waiter resolves with a negative ACK.
+/// original server INVITE remains available to the handler's classified 503,
+/// which runs after this waiter resolves.
 fn spawn_retained_failed_inbound_cleanup<F>(
     retained_tasks: &Arc<RetainedTasks>,
     future: F,
@@ -266,8 +268,7 @@ fn remove_quiesced_failed_inbound_store_lifetime(
 
 /// Quiesce and retire only session-core-owned resources. Dialog-core's dialog
 /// and exact server transaction are intentionally absent from this function;
-/// the negative processing ACK hands them back to the lower classified 503
-/// fallback, which retires them only after Written/WireUnknown.
+/// the handler's classified 503 retires them only after Written/WireUnknown.
 async fn release_failed_inbound_upper_resources_once(
     store: Arc<crate::session_store::SessionStore>,
     helpers: Arc<StateMachineHelpers>,
@@ -423,9 +424,17 @@ fn committed_bye_termination(
     let (failed, cancelled, terminated) = terminal_template_counts(result);
     let dialog_cleanup = executed_action_count(result, &crate::state_table::Action::CleanupDialog);
     let media_cleanup = executed_action_count(result, &crate::state_table::Action::CleanupMedia);
+    // A crossed BYE can arrive while our own SendBYE still owns an exact
+    // operation. As with local BYE completion, the retained terminal release
+    // quiesces that operation before it cleans dialog and media, so the
+    // Terminating row must not clean up inline.
+    let cleanup_committed = if result.old_state == CallState::Terminating {
+        result.actions_executed.is_empty()
+    } else {
+        dialog_cleanup == 1 && media_cleanup == 1
+    };
     if (failed, cancelled, terminated, result.next_state) == (0, 0, 1, Some(CallState::Terminated))
-        && dialog_cleanup == 1
-        && media_cleanup == 1
+        && cleanup_committed
     {
         return Ok(());
     }
@@ -682,6 +691,42 @@ impl InboundInviteInitialState {
         session.incoming_invite_received_at = Some(self.received_at);
         session.pending_inbound_invite_transaction_id = Some(self.transaction);
         session.remote_sdp = self.remote_sdp;
+    }
+}
+
+/// The inbound INVITE as observers see it (`InboundInviteObservation`, the
+/// pending bundle). The server transaction already holds the transport's
+/// parse of `raw_request`, so that shared request is used as-is; the bytes
+/// are parsed again only when the transaction has already retired. Failure
+/// to parse is never fatal: observers then fall back to the headers-only
+/// path.
+fn observed_inbound_invite(
+    session_id: &SessionId,
+    transaction_request: Option<Arc<rvoip_sip_core::Request>>,
+    raw_request: Option<&bytes::Bytes>,
+) -> Option<Arc<rvoip_sip_core::Request>> {
+    let bytes = raw_request?;
+    if transaction_request.is_some() {
+        return transaction_request;
+    }
+    match rvoip_sip_core::parse_message(bytes.as_ref()) {
+        Ok(rvoip_sip_core::Message::Request(request)) => Some(Arc::new(request)),
+        Ok(_) => {
+            warn!(
+                session_id = %session_id,
+                "IncomingCall raw_request was not a SIP request"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(
+                session_id = %session_id,
+                error = %e,
+                "Failed to re-parse inbound INVITE bytes; \
+                 IncomingCall.raw_request() will be None"
+            );
+            None
+        }
     }
 }
 
@@ -1247,8 +1292,13 @@ fn project_committed_response_events(
 }
 
 enum QueuedDialogPayload {
-    Dialog(DialogToSessionEvent),
-    Deferred(DeferredReplayDelivery),
+    /// The envelope the router was handed (always a
+    /// `RvoipCrossCrateEvent::DialogToSession`), shared instead of a deep
+    /// copy of the dialog event inside it.
+    Dialog(Arc<dyn CrossCrateEvent>),
+    /// Boxed: deferred replays are rare, and the hot `Dialog` variant is one
+    /// pointer.
+    Deferred(Box<DeferredReplayDelivery>),
 }
 
 struct DeferredReplayDelivery {
@@ -1338,6 +1388,11 @@ struct DialogToSessionDirectRouter {
     registration_adapter: Arc<OnceLock<Arc<RegistrationAdapter>>>,
     registration_response_owner: Option<Arc<DialogAdapter>>,
     store: Arc<crate::session_store::SessionStore>,
+    /// Runs `IncomingCall` on the publishing dialog worker instead of a shard
+    /// (`Config::session_inline_incoming_call_dispatch`). Weak so the router,
+    /// which the coordinator and the causal ingress slot own, never keeps the
+    /// handler alive; the shard tasks hold the strong references.
+    inline_incoming_calls: Option<std::sync::Weak<SessionCrossCrateEventHandler>>,
 }
 
 fn capture_dialog_ingress_handle(
@@ -1455,12 +1510,19 @@ async fn dispatch_queued_dialog_payload(
     exact_handle: Option<&SessionRegistryHandle>,
 ) -> Result<()> {
     match payload {
-        QueuedDialogPayload::Dialog(event) => {
+        QueuedDialogPayload::Dialog(envelope) => {
+            let Some(RvoipCrossCrateEvent::DialogToSession(event)) =
+                envelope.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+            else {
+                return Err(anyhow::anyhow!(
+                    "typed dialog ingress queued a non-dialog event"
+                ));
+            };
             handler
-                .handle_dialog_to_session_event(&event, exact_handle)
+                .handle_dialog_to_session_event(event, exact_handle)
                 .await
         }
-        QueuedDialogPayload::Deferred(delivery) => match delivery.begin() {
+        QueuedDialogPayload::Deferred(delivery) => match (*delivery).begin() {
             Some(started) => {
                 let event = started.event().clone();
                 let result = handler.handle_deferred_tracked_request(event).await;
@@ -1576,12 +1638,19 @@ impl DialogToSessionDirectRouter {
         let store = Arc::clone(&handler.state_machine.store);
         let per_shard_capacity = (queue_capacity / worker_count.max(1)).max(1);
         let mut shard_senders = Vec::with_capacity(worker_count);
+        let inline_handler = handler
+            .inline_incoming_call_dispatch
+            .then(|| Arc::new(handler.clone()));
 
         for shard in 0..worker_count {
             let (tx, mut rx) = mpsc::channel::<QueuedDialogToSessionEvent>(per_shard_capacity);
             let handler_for_shard = handler.clone();
+            let inline_handler_keepalive = inline_handler.clone();
             let mut shutdown = shutdown_rx.clone();
             if !retained_tasks.spawn(async move {
+                // The inline handler lives exactly as long as a shard can
+                // still accept work.
+                let _inline_handler_keepalive = inline_handler_keepalive;
                 let mut draining = false;
                 loop {
                     tokio::select! {
@@ -1696,6 +1765,7 @@ impl DialogToSessionDirectRouter {
             registration_adapter,
             registration_response_owner,
             store,
+            inline_incoming_calls: inline_handler.as_ref().map(Arc::downgrade),
         })
     }
 
@@ -1704,6 +1774,25 @@ impl DialogToSessionDirectRouter {
             Some(session_id) => session_dispatch_shard(session_id, self.shard_senders.len()),
             None => self.fallback_shard.fetch_add(1, Ordering::Relaxed) % self.shard_senders.len(),
         }
+    }
+
+    /// The handler that runs `event` inline, or `None` to queue it. Only
+    /// `IncomingCall` qualifies, and only while inline dispatch is configured
+    /// and the shards still run. While the target shard drains at shutdown
+    /// the event takes the queued path, which rejects it as before.
+    fn inline_incoming_call_handler(
+        &self,
+        event: &DialogToSessionEvent,
+        route_key: Option<&str>,
+    ) -> Option<Arc<SessionCrossCrateEventHandler>> {
+        if !matches!(event, DialogToSessionEvent::IncomingCall { .. }) {
+            return None;
+        }
+        let handler = self.inline_incoming_calls.as_ref()?.upgrade()?;
+        // IncomingCall always carries its new session id as the route key, so
+        // this is a pure hash and advances no fallback counter.
+        let shard = self.shard_for(route_key);
+        (!self.shard_senders[shard].is_closed()).then_some(handler)
     }
 
     async fn enqueue(&self, queued: QueuedDialogToSessionEvent) -> Result<()> {
@@ -1754,10 +1843,10 @@ impl DialogToSessionDirectRouter {
             DeferredTrackedRequestEvent::Completed { .. } => "deferred_request_completed",
         };
         self.enqueue(QueuedDialogToSessionEvent {
-            payload: QueuedDialogPayload::Deferred(DeferredReplayDelivery::new(
+            payload: QueuedDialogPayload::Deferred(Box::new(DeferredReplayDelivery::new(
                 self.deferred_tracker.clone(),
                 event,
-            )),
+            ))),
             queued_at: Instant::now(),
             kind,
             route_key,
@@ -1823,6 +1912,10 @@ impl CrossCrateEventHandler for DialogToSessionDirectRouter {
                     return Ok(());
                 }
             };
+        if let Some(handler) = self.inline_incoming_call_handler(typed, route_key.as_deref()) {
+            return dispatch_incoming_call_inline(&handler, typed, kind, route_key.as_deref())
+                .await;
+        }
         let authoritative = dialog_event_requires_processing_ack(typed);
         let (authoritative_completion, acknowledgement) = if authoritative {
             let (completion, acknowledgement) = oneshot::channel();
@@ -1831,7 +1924,7 @@ impl CrossCrateEventHandler for DialogToSessionDirectRouter {
             (None, None)
         };
         let queued = QueuedDialogToSessionEvent {
-            payload: QueuedDialogPayload::Dialog(typed.clone()),
+            payload: QueuedDialogPayload::Dialog(Arc::clone(&event)),
             queued_at: Instant::now(),
             kind,
             route_key,
@@ -1852,6 +1945,35 @@ impl CrossCrateEventHandler for DialogToSessionDirectRouter {
             Err(_) => Err(anyhow::anyhow!(
                 "authoritative dialog-to-session shard closed before acknowledgment"
             )),
+        }
+    }
+}
+
+/// Process one `IncomingCall` on the calling dialog worker exactly as a
+/// session shard processes it (dispatch, diagnostics, error log) and return
+/// what the shard would have acknowledged, error text included. An initial
+/// INVITE has no exact lifetime to recheck: it creates its session. The
+/// handler future is boxed so its state stays off the dialog worker's stack.
+async fn dispatch_incoming_call_inline(
+    handler: &SessionCrossCrateEventHandler,
+    event: &DialogToSessionEvent,
+    kind: &'static str,
+    route_key: Option<&str>,
+) -> Result<()> {
+    let dispatch_guard = cleanup_diag::stage_guard(
+        CleanupStage::SessionEventDispatch,
+        route_key.unwrap_or(kind),
+    );
+    let result = Box::pin(handler.handle_dialog_to_session_event(event, None)).await;
+    match result {
+        Ok(()) => {
+            dispatch_guard.finish_success();
+            Ok(())
+        }
+        Err(e) => {
+            error!(kind, "Error handling inline dialog-to-session event: {}", e);
+            dispatch_guard.finish_failure();
+            Err(anyhow::anyhow!(e.to_string()))
         }
     }
 }
@@ -1939,6 +2061,18 @@ pub struct SessionCrossCrateEventHandler {
     /// Serializes admission check/reserve so the hard limit is meaningful with
     /// multiple dialog-to-session workers.
     server_call_admission_lock: Arc<Mutex<()>>,
+
+    /// Reserve-then-decide with one atomic instead of
+    /// `server_call_admission_lock` (`Config::server_call_admission_lock_free`).
+    server_call_admission_lock_free: bool,
+
+    /// Whether inbound UAS sessions record per-transition history
+    /// (`Config::inbound_session_history`).
+    inbound_session_history: bool,
+
+    /// Run `IncomingCall` on the publishing dialog worker
+    /// (`Config::session_inline_incoming_call_dispatch`).
+    inline_incoming_call_dispatch: bool,
 
     /// Total capacity for the direct dialog-to-session dispatcher queues.
     dialog_event_dispatch_queue_capacity: usize,
@@ -3068,6 +3202,9 @@ impl SessionCrossCrateEventHandler {
             server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
             server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
             server_call_admission_lock: Arc::new(Mutex::new(())),
+            server_call_admission_lock_free: false,
+            inbound_session_history: true,
+            inline_incoming_call_dispatch: false,
             dialog_event_dispatch_queue_capacity: 1024,
             causal_dialog_ingress: None,
             state_machine_event_rx: None,
@@ -3109,6 +3246,9 @@ impl SessionCrossCrateEventHandler {
             server_call_admission_overloaded: Arc::new(AtomicBool::new(false)),
             server_call_admission_pending: Arc::new(AtomicUsize::new(0)),
             server_call_admission_lock: Arc::new(Mutex::new(())),
+            server_call_admission_lock_free: false,
+            inbound_session_history: true,
+            inline_incoming_call_dispatch: false,
             dialog_event_dispatch_queue_capacity: 1024,
             causal_dialog_ingress: None,
             state_machine_event_rx: None,
@@ -3183,6 +3323,21 @@ impl SessionCrossCrateEventHandler {
         self.server_call_admission_soft_limit = soft_limit;
         self.server_call_admission_pacing_delay_ms = pacing_delay_ms;
         self.server_overload_retry_after_secs = retry_after_secs;
+        self
+    }
+
+    pub(crate) fn with_server_call_admission_lock_free(mut self, enabled: bool) -> Self {
+        self.server_call_admission_lock_free = enabled;
+        self
+    }
+
+    pub(crate) fn with_inbound_session_history(mut self, enabled: bool) -> Self {
+        self.inbound_session_history = enabled;
+        self
+    }
+
+    pub(crate) fn with_inline_incoming_call_dispatch(mut self, enabled: bool) -> Self {
+        self.inline_incoming_call_dispatch = enabled;
         self
     }
 
@@ -3723,6 +3878,11 @@ impl SessionCrossCrateEventHandler {
         let pacing_delay = self
             .server_call_admission_pacing_delay_ms
             .map(Duration::from_millis);
+        if self.server_call_admission_lock_free {
+            return self
+                .acquire_server_call_admission_lock_free(hard_limit, soft_limit, pacing_delay)
+                .await;
+        }
         let mut paced_once = false;
 
         loop {
@@ -3812,6 +3972,53 @@ impl SessionCrossCrateEventHandler {
         }
     }
 
+    /// The decision of [`Self::acquire_server_call_admission`] without the
+    /// admission mutex (see `server_admission`): it may reject, but never
+    /// over-admit, when concurrent attempts race exactly at the hard limit.
+    /// The perf-tests admission diagnostics past the attempt and limits are
+    /// recorded only on the serialized path.
+    async fn acquire_server_call_admission_lock_free(
+        &self,
+        hard_limit: usize,
+        soft_limit: usize,
+        pacing_delay: Option<Duration>,
+    ) -> ServerCallAdmissionDecision {
+        use super::server_admission::{reserve_and_decide, AdmissionLimits, AdmissionStep};
+        let limits = AdmissionLimits {
+            hard: hard_limit,
+            soft: soft_limit,
+            pacing_threshold: pacing_delay.and(self.server_call_admission_soft_limit),
+        };
+        let mut paced_once = false;
+        loop {
+            match reserve_and_decide(
+                self.state_machine.store.sessions.len(),
+                &self.server_call_admission_pending,
+                &self.server_call_admission_overloaded,
+                limits,
+                paced_once,
+            ) {
+                AdmissionStep::Admit { .. } => {
+                    return ServerCallAdmissionDecision::Admit(Some(ServerCallAdmissionGuard {
+                        pending: self.server_call_admission_pending.clone(),
+                    }));
+                }
+                AdmissionStep::Reject { observed_sessions } => {
+                    return ServerCallAdmissionDecision::Reject {
+                        observed_sessions,
+                        hard_limit,
+                    };
+                }
+                AdmissionStep::Pace { .. } => {
+                    if let Some(delay) = pacing_delay {
+                        tokio::time::sleep(delay).await;
+                    }
+                    paced_once = true;
+                }
+            }
+        }
+    }
+
     async fn cleanup_rejected_incoming_call_routes(
         &self,
         incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
@@ -3852,6 +4059,99 @@ impl SessionCrossCrateEventHandler {
         observed_sessions: usize,
         configured_admission_limit: Option<usize>,
     ) -> Result<()> {
+        let outcome = self
+            .author_incoming_call_503(transaction_id, incoming_dialog_id, dialog_id_str)
+            .await?;
+        exact_final_response_result("server overload 503 response", outcome)?;
+        warn!(
+            observed_sessions,
+            configured_admission_limit,
+            soft_limit = ?self.server_call_admission_soft_limit,
+            retry_after_secs = ?self.server_overload_retry_after_secs,
+            ?outcome,
+            "Rejected inbound INVITE with 503 because server admission capacity was reached"
+        );
+        Ok(())
+    }
+
+    /// Shed an initial INVITE with 503 because the RTP range has no free port
+    /// slot for its reservation. Runs before any session state exists, so a
+    /// full range costs one stateful final response, not a doomed setup.
+    async fn reject_incoming_call_for_media_ports(
+        &self,
+        transaction_id: &str,
+        incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
+        dialog_id_str: &str,
+        remote_offer: Option<&str>,
+    ) -> Result<()> {
+        let occurrences = cleanup_diag::record_media_port_admission_reject();
+        let outcome = self
+            .author_incoming_call_503(transaction_id, incoming_dialog_id, dialog_id_str)
+            .await?;
+        exact_final_response_result("media port 503 response", outcome)?;
+        if let Some(rejected) = occurrences {
+            warn!(
+                rejected,
+                configured_port_slots = ?self.media_adapter.configured_media_port_slots(),
+                available_port_slots = ?self.media_adapter.available_media_port_slots(remote_offer),
+                retry_after_secs = ?self.server_overload_retry_after_secs,
+                "Rejected inbound INVITEs with 503 because no RTP port slot was free"
+            );
+        }
+        Ok(())
+    }
+
+    /// Answer an initial INVITE whose setup failed before any final response
+    /// (session creation, the dialog commit, media allocation or another
+    /// setup action) with 503. Dialog-core deliberately authors no fallback
+    /// after a handler error, so without this the caller got no final
+    /// response and the server transaction and dialog stayed allocated.
+    /// Transaction-core supervises exactly one final response per server
+    /// transaction, so this can never duplicate one already written. `Ok`
+    /// means the 503 reached a terminal wire disposition.
+    async fn reject_incoming_call_after_setup_failure(
+        &self,
+        transaction_id: &str,
+        incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
+        dialog_id_str: &str,
+        failure: &str,
+    ) -> Result<()> {
+        let outcome = self
+            .author_incoming_call_503(transaction_id, incoming_dialog_id, dialog_id_str)
+            .await?;
+        if let Err(error) = exact_final_response_result("setup failure 503 response", outcome) {
+            if let Some(unanswered) = cleanup_diag::record_setup_failure_unanswered() {
+                warn!(
+                    unanswered,
+                    failure,
+                    "Inbound INVITE setup failed and its 503 stopped before any transport write"
+                );
+            }
+            return Err(error);
+        }
+        if let Some(rejected) = cleanup_diag::record_setup_failure_reject() {
+            warn!(
+                rejected,
+                last_failure = failure,
+                retry_after_secs = ?self.server_overload_retry_after_secs,
+                ?outcome,
+                "Answered inbound INVITEs with 503 after their setup failed"
+            );
+        }
+        Ok(())
+    }
+
+    /// Author one 503, with the configured overload `Retry-After`, on the
+    /// exact inbound INVITE server transaction and, once it is terminal
+    /// (written or wire-unknown), retire the dialog and transaction routes.
+    /// A zero-wire outcome keeps both routes so the negative processing ACK
+    /// still owns the one safe retry.
+    async fn author_incoming_call_503(
+        &self,
+        transaction_id: &str,
+        incoming_dialog_id: Option<&rvoip_sip_dialog::DialogId>,
+        dialog_id_str: &str,
+    ) -> Result<ExactFinalResponseOutcome> {
         let transaction_id = transaction_id
             .parse::<rvoip_sip_dialog::transaction::TransactionKey>()
             .map_err(|_| anyhow::anyhow!("server admission transaction id is invalid"))?;
@@ -3893,19 +4193,9 @@ impl SessionCrossCrateEventHandler {
                 }
                 outcome
             })?;
-        let outcome = completion.await.map_err(|_| {
-            anyhow::anyhow!("server overload response child ended without completion")
-        })?;
-        exact_final_response_result("server overload 503 response", outcome)?;
-        warn!(
-            observed_sessions,
-            configured_admission_limit,
-            soft_limit = ?self.server_call_admission_soft_limit,
-            retry_after_secs = ?self.server_overload_retry_after_secs,
-            ?outcome,
-            "Rejected inbound INVITE with 503 because server admission capacity was reached"
-        );
-        Ok(())
+        completion
+            .await
+            .map_err(|_| anyhow::anyhow!("server overload response child ended without completion"))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4001,7 +4291,39 @@ impl SessionCrossCrateEventHandler {
                 return Ok(());
             }
         };
+        // The session limit alone does not bound media. Ports stay leased
+        // while ended calls finish cleanup and while bind collisions sit in
+        // quarantine, so shed here, before any state exists, when the range
+        // has no slot left for this call's reservation (one port, or an
+        // RTP/RTCP pair for a non-mux offer with `rtcp_non_mux`). Concurrent
+        // setups can still race for the last ports; a media failure below
+        // then gets the same 503.
+        let free_port_slots = self
+            .media_adapter
+            .available_media_port_slots(sdp.as_deref());
+        if free_port_slots == Some(0) {
+            drop(admission_guard);
+            self.reject_incoming_call_for_media_ports(
+                transaction_id,
+                incoming_dialog_id.as_ref(),
+                &dialog_id_str,
+                sdp.as_deref(),
+            )
+            .await?;
+            setup_guard.finish_success();
+            return Ok(());
+        }
 
+        // The transport already parsed these exact bytes into the server
+        // transaction's shared request; observers below take that request.
+        let transaction_request = raw_request.as_ref().and_then(|_| {
+            self.dialog_adapter
+                .dialog_api
+                .dialog_manager()
+                .core()
+                .transaction_manager()
+                .server_transaction_request(&pending_transaction)
+        });
         let initial_state = InboundInviteInitialState {
             local_uri: to.clone(),
             remote_uri: from.clone(),
@@ -4012,9 +4334,14 @@ impl SessionCrossCrateEventHandler {
         let create_result = self
             .state_machine
             .store
-            .create_session_initialized(session_id.clone(), Role::UAS, true, move |session| {
-                initial_state.apply(session);
-            })
+            .create_session_initialized(
+                session_id.clone(),
+                Role::UAS,
+                self.inbound_session_history,
+                move |session| {
+                    initial_state.apply(session);
+                },
+            )
             .await;
         drop(admission_guard);
         let created_session = match create_result {
@@ -4038,10 +4365,24 @@ impl SessionCrossCrateEventHandler {
                     setup_guard.finish_success();
                     return Ok(());
                 }
-                return Err(SessionError::InternalError(format!(
-                    "Failed to create session: {error}"
-                ))
-                .into());
+                // No session exists, so there is nothing upper to release;
+                // the caller still needs exactly one final response.
+                let failure = format!("Failed to create session: {error}");
+                let reject_result = self
+                    .reject_incoming_call_after_setup_failure(
+                        transaction_id,
+                        incoming_dialog_id.as_ref(),
+                        &dialog_id_str,
+                        &failure,
+                    )
+                    .await;
+                setup_guard.finish_failure();
+                if let Err(reject_error) = reject_result {
+                    return Err(
+                        SessionError::InternalError(format!("{failure}; {reject_error}")).into(),
+                    );
+                }
+                return Ok(());
             }
         };
         let session_remote_sdp = created_session.remote_sdp.clone();
@@ -4062,7 +4403,11 @@ impl SessionCrossCrateEventHandler {
             dialog_id: our_dialog_id,
             p_asserted_identity: p_asserted_identity.clone(),
         };
-        self.commit_exact_inbound_dialog(&lifecycle, our_dialog_id, incoming_info.clone())?;
+        // A registry commit failure takes the same exact upper cleanup and 503
+        // as a failed setup action below, instead of leaving the session,
+        // dialog and server transaction without a final response.
+        let commit_result =
+            self.commit_exact_inbound_dialog(&lifecycle, our_dialog_id, incoming_info.clone());
 
         let event_type = if self.fast_auto_accept_incoming_calls {
             EventType::IncomingCallAutoAccept {
@@ -4076,13 +4421,18 @@ impl SessionCrossCrateEventHandler {
             }
         };
 
-        let process_result = process_inbound_response_event_exact_on_fresh_task(
-            Arc::clone(&self.state_machine),
-            lifecycle.clone(),
-            event_type,
-            inbound_response,
-        )
-        .await;
+        let process_result = match commit_result {
+            Ok(()) => {
+                process_inbound_response_event_exact_on_fresh_task(
+                    Arc::clone(&self.state_machine),
+                    lifecycle.clone(),
+                    event_type,
+                    inbound_response,
+                )
+                .await
+            }
+            Err(error) => Err(error.into()),
+        };
         if let Err(error) = process_result {
             let disposition = crate::state_machine::actions::exact_sip_response_failure_disposition(
                 error.as_ref(),
@@ -4113,15 +4463,33 @@ impl SessionCrossCrateEventHandler {
                 let cleanup_result = completion.await.map_err(|_| {
                     anyhow::anyhow!("failed inbound INVITE upper cleanup ended without completion")
                 });
+                // Upper resources, media ports included, are released: answer
+                // the caller on the exact server transaction. Dialog-core
+                // authors no fallback after a handler error, so this 503 is
+                // the only final response the INVITE can get. It is sent even
+                // when upper cleanup stayed incomplete: that is a local leak
+                // to report, never a reason to leave the caller hanging.
+                let reject_result = self
+                    .reject_incoming_call_after_setup_failure(
+                        transaction_id,
+                        incoming_dialog_id.as_ref(),
+                        &dialog_id_str,
+                        &detail,
+                    )
+                    .await;
                 setup_guard.finish_failure();
-                match cleanup_result {
-                    Ok(Ok(())) => return Err(processing_error),
-                    Ok(Err(cleanup_error)) => {
+                match (cleanup_result, reject_result) {
+                    (Ok(Ok(())), Ok(())) => return Ok(()),
+                    (Ok(Ok(())), Err(reject_error)) => {
+                        debug!(%reject_error, "setup failure 503 stayed zero-wire");
+                        return Err(processing_error);
+                    }
+                    (Ok(Err(cleanup_error)), _) => {
                         return Err(anyhow::anyhow!(
                             "{processing_error}; exact upper cleanup remained incomplete: {cleanup_error}"
                         ));
                     }
-                    Err(cleanup_error) => {
+                    (Err(cleanup_error), _) => {
                         return Err(anyhow::anyhow!("{processing_error}; {cleanup_error}"));
                     }
                 }
@@ -4142,33 +4510,11 @@ impl SessionCrossCrateEventHandler {
                     .await;
             }
 
-            // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
-            // after the fast 200 OK path has completed, but before app
-            // observation events are published. Failure to parse is never
-            // fatal — we fall back to the legacy headers-only path.
-            let mut observed_request = None;
-            if let Some(bytes) = raw_request.as_ref() {
-                match rvoip_sip_core::parse_message(bytes.as_ref()) {
-                    Ok(rvoip_sip_core::Message::Request(req)) => {
-                        let req = Arc::new(req);
-                        observed_request = Some(req);
-                    }
-                    Ok(_) => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            "IncomingCall raw_request was not a SIP request"
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            error = %e,
-                            "Failed to re-parse inbound INVITE bytes; \
-                             IncomingCall.raw_request() will be None"
-                        );
-                    }
-                }
-            }
+            // SIP_API_DESIGN_2 Phase A: hand observers the parsed inbound
+            // INVITE after the fast 200 OK path has completed, but before app
+            // observation events are published.
+            let observed_request =
+                observed_inbound_invite(&session_id, transaction_request, raw_request.as_ref());
             if let Some(coordinator) = self.coordinator.get().and_then(|weak| weak.upgrade()) {
                 coordinator.notify_inbound_invite_observers(
                     crate::api::unified::InboundInviteObservation {
@@ -5855,6 +6201,16 @@ impl SessionCrossCrateEventHandler {
         };
 
         let state_event = match status_code {
+            // 100 matters to the table only while the initial INVITE can
+            // still be cancelled; elsewhere it stays a projection.
+            100 if committed.role == Role::UAC
+                && matches!(
+                    committed.call_state,
+                    CallState::Initiating | CallState::CancelPending
+                ) =>
+            {
+                Some(EventType::Dialog100Trying)
+            }
             183 if sdp.is_some() => Some(EventType::Dialog183SessionProgress),
             101..=199 => Some(EventType::Dialog180Ringing),
             _ => None,
@@ -5872,7 +6228,9 @@ impl SessionCrossCrateEventHandler {
                     return Ok(());
                 }
             };
-            if result.transition.is_none() {
+            // A 100 was always projected; only ringing/early-media
+            // projections are suppressed without a committed transition.
+            if result.transition.is_none() && status_code != 100 {
                 debug!(
                     session = %sid,
                     status_code,
@@ -7334,6 +7692,7 @@ mod tests {
             registration_adapter: Arc::new(std::sync::OnceLock::new()),
             registration_response_owner: None,
             store: Arc::clone(&store),
+            inline_incoming_calls: None,
         };
 
         let incoming_router = router.clone();
@@ -7600,6 +7959,141 @@ mod tests {
             "re-INVITE/UPDATE failure classification was not propagated through its processing ACK"
         );
         assert!(handler.contains("get_session_snapshot_exact(handle)\n            .map_err"));
+    }
+
+    #[test]
+    fn observed_inbound_invite_takes_the_transaction_request_without_parsing() {
+        let session_id = SessionId("observed-inbound-invite".to_string());
+        let invite = "INVITE sip:bob@127.0.0.1 SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-observed\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1>;tag=alice\r\n\
+To: <sip:bob@127.0.0.1>\r\n\
+Call-ID: observed-inbound-invite@example.test\r\n\
+CSeq: 1 INVITE\r\n\
+Content-Length: 0\r\n\r\n";
+        let Ok(rvoip_sip_core::Message::Request(parsed)) =
+            rvoip_sip_core::parse_message(invite.as_bytes())
+        else {
+            panic!("fixture INVITE parses");
+        };
+        let transaction_request = Arc::new(parsed.clone());
+
+        // With the transaction's request at hand the bytes are not parsed:
+        // these could not be.
+        let unparsable = bytes::Bytes::from_static(b"not a SIP message");
+        let observed = super::observed_inbound_invite(
+            &session_id,
+            Some(Arc::clone(&transaction_request)),
+            Some(&unparsable),
+        )
+        .expect("transaction request");
+        assert!(Arc::ptr_eq(&observed, &transaction_request));
+
+        // A retired transaction falls back to parsing the bytes.
+        let bytes = bytes::Bytes::from_static(invite.as_bytes());
+        let reparsed =
+            super::observed_inbound_invite(&session_id, None, Some(&bytes)).expect("parsed bytes");
+        assert!(*reparsed == parsed);
+        assert!(super::observed_inbound_invite(&session_id, None, Some(&unparsable)).is_none());
+
+        // Without bytes observers keep the headers-only path.
+        assert!(
+            super::observed_inbound_invite(&session_id, Some(transaction_request), None).is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inbound_invite_observers_get_the_server_transactions_request() {
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
+        let uas_port = reservation
+            .local_addr()
+            .expect("reserved UAS address")
+            .port();
+        drop(reservation);
+        let client = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("bind raw SIP client");
+        let client_port = client.local_addr().expect("raw client address").port();
+
+        let mut config = crate::api::unified::Config::local("invite-handoff-uas", uas_port)
+            .with_auto_180_ringing(false);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
+            .await
+            .expect("start UAS");
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let sink = Arc::clone(&observed);
+        coordinator
+            .add_inbound_invite_observer(Arc::new(
+                move |observation: crate::api::unified::InboundInviteObservation| {
+                    *sink.lock().unwrap() = observation.request;
+                },
+            ))
+            .expect("register observer");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        const BRANCH: &str = "z9hG4bK-invite-handoff";
+        let sdp = "v=0\r\n\
+o=alice 901 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 24002 RTP/AVP 0\r\n\
+a=rtpmap:0 PCMU/8000\r\n";
+        let invite = format!(
+            "INVITE sip:bob@127.0.0.1:{uas_port} SIP/2.0\r\n\
+Via: SIP/2.0/UDP 127.0.0.1:{client_port};branch={BRANCH};rport\r\n\
+Max-Forwards: 70\r\n\
+From: <sip:alice@127.0.0.1:{client_port}>;tag=alice-handoff\r\n\
+To: <sip:bob@127.0.0.1:{uas_port}>\r\n\
+Call-ID: invite-handoff@example.test\r\n\
+CSeq: 1 INVITE\r\n\
+Contact: <sip:alice@127.0.0.1:{client_port}>\r\n\
+Content-Type: application/sdp\r\n\
+Content-Length: {}\r\n\r\n\
+{sdp}",
+            sdp.len()
+        );
+        client
+            .send_to(invite.as_bytes(), format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("send INVITE");
+
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = observed.lock().unwrap().clone() {
+                    return request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("inbound INVITE observed");
+
+        // Nobody answers, so the server INVITE transaction is still
+        // proceeding: the observer holds that transaction's own request, not
+        // a second parse of the same bytes.
+        let key = rvoip_sip_dialog::transaction::TransactionKey::new(
+            BRANCH.to_string(),
+            rvoip_sip_core::Method::Invite,
+            true,
+        );
+        let transaction_request = coordinator
+            .dialog_adapter()
+            .dialog_api
+            .dialog_manager()
+            .core()
+            .transaction_manager()
+            .server_transaction_request(&key)
+            .expect("active server INVITE transaction");
+        assert!(Arc::ptr_eq(&request, &transaction_request));
+        assert_eq!(request.body(), sdp.as_bytes());
+
+        coordinator
+            .shutdown_gracefully(Some(std::time::Duration::from_secs(2)))
+            .await
+            .expect("shutdown UAS");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7884,6 +8378,74 @@ Content-Length: {}\r\n\r\n\
         assert!(!handler.contains("release_exact_local_resources("));
         assert!(handler.contains("return Err(processing_error)"));
         assert!(handler.contains("Fast auto-accepted inbound call"));
+    }
+
+    #[test]
+    fn failed_inbound_setup_always_ends_with_one_503() {
+        let source = include_str!("session_event_handler.rs");
+        let handler = source
+            .split("    async fn handle_incoming_call_parts(")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("    async fn handle_call_established_parts(")
+                    .next()
+            })
+            .expect("incoming INVITE handler source");
+
+        // Port admission sheds before any session state exists, sized for the
+        // reservation this INVITE's offer makes.
+        let port_check = handler
+            .find("available_media_port_slots(sdp.as_deref());")
+            .expect("media port admission check");
+        assert!(handler.contains("if free_port_slots == Some(0) {"));
+        let create = handler
+            .find("create_session_initialized(")
+            .expect("session creation");
+        assert!(port_check < create);
+        assert!(handler.contains("reject_incoming_call_for_media_ports("));
+
+        // Session-creation, registry-commit and setup-action failures all
+        // reach the 503; the action-failure 503 follows upper cleanup.
+        assert_eq!(
+            handler
+                .matches("reject_incoming_call_after_setup_failure(")
+                .count(),
+            2
+        );
+        assert!(handler.contains("let process_result = match commit_result"));
+        let cleanup = handler
+            .find("spawn_retained_failed_inbound_cleanup(")
+            .expect("upper cleanup");
+        let reject = handler
+            .rfind("reject_incoming_call_after_setup_failure(")
+            .expect("setup failure 503");
+        assert!(cleanup < reject, "503 must follow upper resource release");
+        assert!(!handler.contains(
+            "self.commit_exact_inbound_dialog(&lifecycle, our_dialog_id, incoming_info.clone())?"
+        ));
+
+        // Every resource-shedding 503 carries the configured Retry-After and
+        // retires its routes only after a terminal wire outcome.
+        let author = source
+            .split("    async fn author_incoming_call_503(")
+            .nth(1)
+            .and_then(|tail| tail.split("\n    }\n").next())
+            .expect("503 author source");
+        assert!(author.contains("server_overload_retry_after_secs"));
+        assert!(author.contains("TypedHeader::RetryAfter"));
+        assert!(author.contains("exact_final_response_retires_routes(outcome)"));
+        for shed in [
+            "    async fn reject_and_cleanup_incoming_call_for_overload(",
+            "    async fn reject_incoming_call_for_media_ports(",
+            "    async fn reject_incoming_call_after_setup_failure(",
+        ] {
+            let body = source
+                .split(shed)
+                .nth(1)
+                .and_then(|tail| tail.split("\n    }\n").next())
+                .expect("shedding source");
+            assert!(body.contains(".author_incoming_call_503("), "{shed}");
+        }
     }
 
     #[tokio::test]
@@ -8301,7 +8863,9 @@ Content-Length: {}\r\n\r\n\
         assert_eq!(captured.as_ref(), Some(&generation_a));
 
         let queued = QueuedDialogToSessionEvent {
-            payload: QueuedDialogPayload::Dialog(event),
+            payload: QueuedDialogPayload::Dialog(Arc::new(RvoipCrossCrateEvent::DialogToSession(
+                event,
+            ))),
             queued_at: std::time::Instant::now(),
             kind: "call_cancelled",
             route_key: Some(session_id.0.clone()),
@@ -8370,6 +8934,7 @@ Content-Length: {}\r\n\r\n\
             registration_adapter: Arc::new(std::sync::OnceLock::new()),
             registration_response_owner: None,
             store: Arc::new(crate::session_store::SessionStore::new()),
+            inline_incoming_calls: None,
         };
         let late_id = "already-retired".to_string();
 
@@ -9271,6 +9836,41 @@ Content-Length: {}\r\n\r\n\
             cleanup,
         );
         assert!(committed_bye_termination(&session_id, &duplicate).is_err());
+    }
+
+    #[test]
+    fn crossed_bye_requires_committed_terminal_with_retained_cleanup() {
+        let session_id = SessionId::from("crossed-bye-terminal");
+        assert!(
+            committed_bye_termination(&session_id, &missing_result(CallState::Terminating))
+                .is_err()
+        );
+        // A local SendBYE may still own an exact operation; the retained
+        // terminal release quiesces it before cleaning dialog and media.
+        let valid = committed_result(
+            CallState::Terminating,
+            CallState::Terminated,
+            vec![crate::state_table::EventTemplate::CallTerminated],
+        );
+        assert!(committed_bye_termination(&session_id, &valid).is_ok());
+        let inline_cleanup = committed_result_with_actions(
+            CallState::Terminating,
+            CallState::Terminated,
+            vec![crate::state_table::EventTemplate::CallTerminated],
+            vec![
+                crate::state_table::Action::CleanupDialog,
+                crate::state_table::Action::CleanupMedia,
+            ],
+        );
+        assert!(committed_bye_termination(&session_id, &inline_cleanup).is_err());
+        let no_terminal = committed_result(CallState::Terminating, CallState::Terminated, vec![]);
+        assert!(committed_bye_termination(&session_id, &no_terminal).is_err());
+        let active_without_cleanup = committed_result(
+            CallState::Active,
+            CallState::Terminated,
+            vec![crate::state_table::EventTemplate::CallTerminated],
+        );
+        assert!(committed_bye_termination(&session_id, &active_without_cleanup).is_err());
     }
 
     #[test]

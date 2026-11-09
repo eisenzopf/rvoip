@@ -8,7 +8,8 @@ use crate::codec::audio::common::{AudioCodec, CodecInfo};
 use crate::error::{Error, Result};
 use crate::types::AudioFrame;
 use codec_core::codecs::g711::{G711Codec as CodecCoreG711, G711Variant};
-use codec_core::types::{AudioCodec as CodecCoreAudioCodec, AudioCodecExt};
+use codec_core::types::AudioCodecExt;
+use codec_core::utils::tables::{decode_alaw_table, decode_mulaw_table};
 
 /// G.711 codec implementation using codec-core
 pub struct G711Codec {
@@ -53,6 +54,74 @@ impl G711Codec {
         })
     }
 
+    /// [`AudioCodec::decode`] without `&mut self`, into a PCM buffer from the
+    /// per-thread pool ([`crate::pcm_pool`]; a fresh one when the pool is off
+    /// or empty). G.711 is stateless, so this is the same computation with
+    /// the same samples, format and errors; the timestamp is left to the
+    /// caller, as `decode` leaves it.
+    pub(crate) fn decode_pooled(&self, encoded_data: &[u8]) -> Result<AudioFrame> {
+        if encoded_data.is_empty() {
+            return Err(self.empty_decode_error());
+        }
+        let mut samples = crate::pcm_pool::take_pcm_buffer(encoded_data.len());
+        // The decode tables `CodecCoreG711::expand` uses, so the samples are
+        // those of `decode`.
+        match self.variant {
+            G711Variant::MuLaw => {
+                samples.extend(encoded_data.iter().map(|&byte| decode_mulaw_table(byte)))
+            }
+            G711Variant::ALaw => {
+                samples.extend(encoded_data.iter().map(|&byte| decode_alaw_table(byte)))
+            }
+        }
+        Ok(AudioFrame::new(
+            samples,
+            self.sample_rate,
+            self.channels as u8,
+            0, // timestamp will be set by caller
+        ))
+    }
+
+    /// [`AudioCodec::encode`] without `&mut self`, into `output` (cleared
+    /// first), so a caller can reuse one buffer per stream. G.711 is
+    /// stateless: the same bytes, for every input including an empty one.
+    pub fn encode_into(&self, audio_frame: &AudioFrame, output: &mut Vec<u8>) -> Result<()> {
+        output.clear();
+        match self.variant {
+            G711Variant::MuLaw => output.extend(
+                audio_frame
+                    .samples
+                    .iter()
+                    .map(|sample| codec_core::codecs::g711::ulaw_compress(*sample)),
+            ),
+            G711Variant::ALaw => output.extend(
+                audio_frame
+                    .samples
+                    .iter()
+                    .map(|sample| codec_core::codecs::g711::alaw_compress(*sample)),
+            ),
+        }
+        Ok(())
+    }
+
+    /// The length [`AudioCodec::encode`] would return for `audio_frame`
+    /// (one byte per sample), and the same success, without encoding.
+    pub fn encoded_len(&self, audio_frame: &AudioFrame) -> Result<usize> {
+        Ok(audio_frame.samples.len())
+    }
+
+    fn empty_decode_error(&self) -> Error {
+        Error::Codec(crate::error::CodecError::DecodingFailed {
+            reason: format!(
+                "G.711 {} decoding failed: empty buffer",
+                match self.variant {
+                    G711Variant::MuLaw => "μ-law",
+                    G711Variant::ALaw => "A-law",
+                }
+            ),
+        })
+    }
+
     /// Zero-copy decode directly to output buffer
     pub fn decode_to_buffer(&mut self, data: &[u8], output: &mut [i16]) -> Result<usize> {
         self.inner.decode_to_buffer(data, output).map_err(|e| {
@@ -70,9 +139,11 @@ impl G711Codec {
     }
 }
 
-impl AudioCodec for G711Codec {
-    fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
-        self.inner.encode(&audio_frame.samples).map_err(|e| {
+impl G711Codec {
+    /// [`AudioCodec::encode`] through a shared reference. G.711 keeps no
+    /// state between frames, so callers can encode without exclusive access.
+    pub(crate) fn encode_read_only(&self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
+        self.inner.compress(&audio_frame.samples).map_err(|e| {
             Error::Codec(crate::error::CodecError::EncodingFailed {
                 reason: format!(
                     "G.711 {} encoding failed: {}",
@@ -86,20 +157,13 @@ impl AudioCodec for G711Codec {
         })
     }
 
-    fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame> {
+    /// [`AudioCodec::decode`] through a shared reference.
+    pub(crate) fn decode_read_only(&self, encoded_data: &[u8]) -> Result<AudioFrame> {
         if encoded_data.is_empty() {
-            return Err(Error::Codec(crate::error::CodecError::DecodingFailed {
-                reason: format!(
-                    "G.711 {} decoding failed: empty buffer",
-                    match self.variant {
-                        G711Variant::MuLaw => "μ-law",
-                        G711Variant::ALaw => "A-law",
-                    }
-                ),
-            }));
+            return Err(self.empty_decode_error());
         }
 
-        let samples = self.inner.decode(encoded_data).map_err(|e| {
+        let samples = self.inner.expand(encoded_data).map_err(|e| {
             Error::Codec(crate::error::CodecError::DecodingFailed {
                 reason: format!(
                     "G.711 {} decoding failed: {}",
@@ -118,6 +182,16 @@ impl AudioCodec for G711Codec {
             self.channels as u8,
             0, // timestamp will be set by caller
         ))
+    }
+}
+
+impl AudioCodec for G711Codec {
+    fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>> {
+        self.encode_read_only(audio_frame)
+    }
+
+    fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame> {
+        self.decode_read_only(encoded_data)
     }
 
     fn get_info(&self) -> CodecInfo {
@@ -219,6 +293,57 @@ mod tests {
         let mut decoded = vec![0i16; 160];
         let decoded_len = codec.decode_to_buffer(&encoded, &mut decoded).unwrap();
         assert_eq!(decoded_len, 160);
+    }
+
+    /// The pooled decode gives exactly the samples, format and errors of
+    /// `decode`, for every wire byte and both laws, with and without the PCM
+    /// pool, including a pooled buffer that still held other samples.
+    #[test]
+    fn encode_into_and_encoded_len_match_encode_for_every_sample_and_both_laws() {
+        for variant in [G711Variant::MuLaw, G711Variant::ALaw] {
+            let mut codec = G711Codec::new(variant, 8000, 1).unwrap();
+            let samples: Vec<i16> = (i16::MIN..=i16::MAX).step_by(7).chain([i16::MAX]).collect();
+            for frame in [
+                AudioFrame::new(samples.clone(), 8000, 1, 0),
+                AudioFrame::new(Vec::new(), 8000, 1, 0),
+            ] {
+                let expected = codec.encode(&frame).unwrap();
+                let mut output = vec![0xAA; 5];
+                codec.encode_into(&frame, &mut output).unwrap();
+                assert_eq!(output, expected, "{variant:?}");
+                assert_eq!(codec.encoded_len(&frame).unwrap(), expected.len());
+            }
+        }
+    }
+
+    #[test]
+    fn pooled_decode_matches_decode_for_every_byte_and_both_laws() {
+        use rvoip_rtp_core::executor::{
+            override_media_executor_config_on_this_thread, MediaExecutorConfig,
+        };
+        for config in [MediaExecutorConfig::v1(), MediaExecutorConfig::v2()] {
+            let _config = override_media_executor_config_on_this_thread(config);
+            for mut codec in [
+                G711Codec::mu_law(8000, 1).unwrap(),
+                G711Codec::a_law(8000, 1).unwrap(),
+            ] {
+                let wire: Vec<u8> = (0..=u8::MAX).chain(0..=u8::MAX).collect();
+                let expected = codec.decode(&wire).unwrap();
+                crate::pcm_pool::recycle_pcm_buffer(vec![i16::MAX; 700]);
+                let pooled = codec.decode_pooled(&wire).unwrap();
+                assert_eq!(pooled.samples, expected.samples);
+                assert_eq!(pooled.sample_rate, expected.sample_rate);
+                assert_eq!(pooled.channels, expected.channels);
+                assert_eq!(pooled.duration, expected.duration);
+                assert_eq!(pooled.timestamp, expected.timestamp);
+                assert_eq!(
+                    codec.decode_pooled(&[]).unwrap_err().to_string(),
+                    codec.decode(&[]).unwrap_err().to_string(),
+                    "empty input keeps its error"
+                );
+                crate::pcm_pool::recycle_pcm_buffer(pooled.samples);
+            }
+        }
     }
 
     #[test]

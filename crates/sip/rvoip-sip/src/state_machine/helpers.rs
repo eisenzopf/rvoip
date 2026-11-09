@@ -450,10 +450,23 @@ impl StateMachineHelpers {
 
     /// Hang up only the exact session lifetime captured by the caller.
     pub(crate) async fn hangup_exact(&self, handle: &SessionRegistryHandle) -> Result<()> {
-        self.state_machine
+        self.hangup_exact_transitioned(handle).await.map(|_| ())
+    }
+
+    /// Dispatch `HangupCall` on the exact lifetime and report whether the
+    /// session took a transition for it. `Ok(false)` means the state the
+    /// event met under the session lane has no hangup transition (a peer BYE
+    /// or another terminal won the lane first), so this call sent no BYE or
+    /// CANCEL and there is no wire completion of its own to join.
+    pub(crate) async fn hangup_exact_transitioned(
+        &self,
+        handle: &SessionRegistryHandle,
+    ) -> Result<bool> {
+        let result = self
+            .state_machine
             .process_event_exact(handle, EventType::HangupCall)
             .await?;
-        Ok(())
+        Ok(result.transition.is_some())
     }
 
     /// Create a conference from an active call
@@ -547,36 +560,13 @@ impl StateMachineHelpers {
             .call_state)
     }
 
-    /// Return the codec negotiated for one exact live session.
+    /// Return the codec negotiated for one exact live session lifetime.
     ///
     /// Media adapters use this retained session-state value instead of
     /// guessing PCMU before SDP negotiation has completed. A session whose
     /// SDP was supplied by the application without an anchored media
     /// negotiation cannot back a [`SipMediaStream`](crate::media_stream::SipMediaStream),
     /// so fail that case instead of leaving stream binding pending forever.
-    pub(crate) async fn negotiated_media_config(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
-        let (negotiated_config, payload_type, sdp_negotiated) = self
-            .state_machine
-            .store
-            .with_session(session_id, |session| {
-                (
-                    session.negotiated_config.clone(),
-                    session.negotiated_payload_type(),
-                    session.sdp_negotiated,
-                )
-            })?;
-        match negotiated_config.zip(payload_type) {
-            Some(config) => Ok(Some(config)),
-            None if sdp_negotiated => Err(crate::errors::SessionError::MediaError(
-                "SDP was supplied without an anchored negotiated media configuration".to_string(),
-            )),
-            None => Ok(None),
-        }
-    }
-
     pub(crate) async fn negotiated_media_config_exact(
         &self,
         handle: &crate::session_registry::SessionRegistryHandle,

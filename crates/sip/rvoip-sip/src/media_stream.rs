@@ -16,21 +16,22 @@
 //! its own outbound RTP packet at the network boundary.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use std::sync::Mutex;
 use tokio::sync::{mpsc, watch, Mutex as AsyncMutex};
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 use rvoip_core::capability::CodecInfo;
 use rvoip_core::connection::Direction;
 use rvoip_core::error::{Result as RvoipResult, RvoipError};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{
-    MediaFrame, MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
+    EncodedG711Writer, EncodedSendNow, InboundFrameSink, MediaFrame, MediaLanePlacement,
+    MediaReceiverReservation, MediaStream, QualitySnapshot, StreamKind,
 };
 use rvoip_core_traits::peer_media::PeerMediaFrame;
 
@@ -380,6 +381,10 @@ pub(crate) fn codec_descriptor(
 /// `crates/webrtc/rvoip-webrtc/src/media/pump.rs::FRAME_CHANNEL_CAP`).
 const FRAME_CHANNEL_CAP: usize = 64;
 
+/// Inbound pump outcome when the SIP audio source closes: the ordinary end
+/// of a call's media after a remote hangup, so it is logged at debug.
+const AUDIO_SOURCE_CLOSED: &str = "sip-audio-source-closed";
+
 /// Epoch-normalized clock for PCM handed to the negotiated SIP media runtime.
 ///
 /// The media graph has already translated `MediaFrame::timestamp_rtp` into the
@@ -387,7 +392,7 @@ const FRAME_CHANNEL_CAP: usize = 64;
 /// advance by emitted samples plus any forward gap in that input timeline.
 /// This avoids copying a remote random epoch while preserving Annex-B DTX or
 /// packet-loss intervals that must remain visible to the RTP packetizer.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct OutboundRtpClock {
     next_output_timestamp: u32,
     expected_input_timestamp: Option<u32>,
@@ -426,7 +431,10 @@ struct SipMediaStreamInner {
     peer_out_tx: mpsc::Sender<PeerMediaFrame>,
     peer_out_rx: Mutex<Option<mpsc::Receiver<PeerMediaFrame>>>,
     bind_target: Mutex<Option<SipMediaBindTarget>>,
-    driver_abort: Mutex<Option<AbortHandle>>,
+    /// The media driver task. `close` awaits it and `Drop` aborts it. The
+    /// slot is cleared only once the driver has completed, because a
+    /// `JoinHandle` must not be polled after that.
+    driver: Mutex<Option<JoinHandle<()>>>,
     lifecycle_gate: AsyncMutex<()>,
     lifecycle: Arc<SipMediaLifecycleState>,
     outbound_writes_activated: AtomicBool,
@@ -443,6 +451,38 @@ struct SipMediaStreamInner {
     /// `None` until the first report, so a caller can tell "no measurement
     /// yet" from "measured, and it is fine".
     last_quality: Mutex<Option<QualitySnapshot>>,
+    /// Media executor v2 state shared with the media driver.
+    executor: Arc<SipStreamExecutorState>,
+}
+
+/// Media executor v2 state a stream shares with its media driver.
+struct SipStreamExecutorState {
+    /// A direct inbound sink offered by the consumer, adopted by the fused
+    /// pump on the RTP socket owner.
+    inbound_sink: Arc<fused::InboundSinkSlot>,
+    /// The RTP socket's lane, published before `Bound` when the stream hosts
+    /// media graphs there (`ai_tx` / `ai_rx`).
+    media_lane: OnceLock<MediaLanePlacement>,
+    /// The exact session lifetime the stream is bound to, for its encoded
+    /// writer.
+    exact_media_owner: OnceLock<crate::session_registry::SessionRegistryHandle>,
+    /// Serializes producer admission (`try_frames_out`,
+    /// `try_peer_frames_out`, `try_take_encoded_g711_writer`).
+    writer_admission: Mutex<()>,
+    /// The encoded writer was handed out: no other producer is admitted.
+    direct_writer_claimed: AtomicBool,
+}
+
+impl SipStreamExecutorState {
+    fn new() -> Self {
+        Self {
+            inbound_sink: Arc::new(fused::InboundSinkSlot::new()),
+            media_lane: OnceLock::new(),
+            exact_media_owner: OnceLock::new(),
+            writer_admission: Mutex::new(()),
+            direct_writer_claimed: AtomicBool::new(false),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -631,11 +671,12 @@ impl SipMediaStream {
                 peer_out_tx,
                 peer_out_rx: Mutex::new(Some(peer_out_rx)),
                 bind_target: Mutex::new(None),
-                driver_abort: Mutex::new(None),
+                driver: Mutex::new(None),
                 lifecycle_gate: AsyncMutex::new(()),
                 lifecycle: Arc::new(SipMediaLifecycleState::new()),
                 outbound_writes_activated: AtomicBool::new(outbound_writes_activated),
                 last_quality: Mutex::new(None),
+                executor: Arc::new(SipStreamExecutorState::new()),
                 cancel,
                 codec_updates,
             }),
@@ -778,14 +819,13 @@ impl SipMediaStream {
                         frames_in_tx,
                         frames_out_rx,
                         peer_out_rx,
+                        Arc::clone(&self.inner.executor),
                     ));
                     *self
                         .inner
-                        .driver_abort
+                        .driver
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(driver.abort_handle());
-                    drop(driver);
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
                 }
                 SipMediaLifecycle::Binding | SipMediaLifecycle::Bound => {}
                 SipMediaLifecycle::Failed => {
@@ -896,38 +936,60 @@ impl SipMediaStream {
         }
         self.request_close();
 
-        let driver_abort = self
-            .inner
-            .driver_abort
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        if let Some(abort) = driver_abort {
-            if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                while !abort.is_finished() {
-                    tokio::task::yield_now().await;
-                }
-            })
+        if !self
+            .wait_for_driver(std::time::Duration::from_secs(1))
             .await
-            .is_err()
+        {
+            if let Some(driver) = self
+                .inner
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
             {
-                abort.abort();
-                if tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    while !abort.is_finished() {
-                        tokio::task::yield_now().await;
-                    }
-                })
+                driver.abort();
+            }
+            if !self
+                .wait_for_driver(std::time::Duration::from_secs(1))
                 .await
-                .is_err()
-                {
-                    return Err(RvoipError::Adapter(
-                        "SIP media driver did not terminate after abort".to_string(),
-                    ));
-                }
+            {
+                return Err(RvoipError::Adapter(
+                    "SIP media driver did not terminate after abort".to_string(),
+                ));
             }
         }
         self.inner.lifecycle.mark_closed();
         Ok(())
+    }
+
+    /// Wait up to `limit` for the media driver to end; `true` once it has
+    /// (or none was started).
+    ///
+    /// The driver usually runs on another runtime, so this awaits its
+    /// `JoinHandle` rather than polling `is_finished`, which kept a signaling
+    /// worker spinning for as long as that runtime took to run the driver's
+    /// cancellation. The handle is polled in place: a wait that times out or
+    /// is cancelled leaves it in its slot, where `Drop` can still abort it.
+    /// Callers hold `lifecycle_gate`, so the handle has a single waiter.
+    async fn wait_for_driver(&self, limit: std::time::Duration) -> bool {
+        let driver_ended = std::future::poll_fn(|cx| {
+            let mut slot = self
+                .inner
+                .driver
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(driver) = slot.as_mut() else {
+                return std::task::Poll::Ready(());
+            };
+            match std::future::Future::poll(std::pin::Pin::new(driver), cx) {
+                std::task::Poll::Ready(_) => {
+                    *slot = None;
+                    std::task::Poll::Ready(())
+                }
+                std::task::Poll::Pending => std::task::Poll::Pending,
+            }
+        });
+        tokio::time::timeout(limit, driver_ended).await.is_ok()
     }
 }
 
@@ -957,7 +1019,7 @@ impl Drop for SipMediaStream {
             .take();
         if let Some(driver) = self
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
@@ -965,14 +1027,6 @@ impl Drop for SipMediaStream {
             driver.abort();
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MediaOwnerProbe {
-    Ready,
-    Pending,
-    Terminal,
-    Missing,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -984,37 +1038,42 @@ enum MediaOwnerWaitResult {
     TimedOut,
 }
 
-async fn wait_for_media_owner<Probe, ProbeFuture>(
-    mut probe: Probe,
+type MediaReadinessReceiver =
+    watch::Receiver<Option<crate::session_store::state::MediaReadinessSignal>>;
+
+/// Wait until `ready` holds for the exact lifetime's committed readiness,
+/// the call ends, the route is cancelled, or the deadline passes.
+///
+/// Wakes only on committed readiness changes, cancellation and one retained
+/// deadline timer; nothing polls the session map while the wait is pending.
+async fn wait_for_media_readiness(
+    updates: &mut MediaReadinessReceiver,
+    ready: impl Fn(crate::session_store::state::MediaReadinessSignal) -> bool,
     cancel_tx: &watch::Sender<bool>,
     cancel_rx: &mut watch::Receiver<bool>,
     deadline: tokio::time::Instant,
-) -> MediaOwnerWaitResult
-where
-    Probe: FnMut() -> ProbeFuture,
-    ProbeFuture: std::future::Future<Output = MediaOwnerProbe>,
-{
-    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-
+) -> MediaOwnerWaitResult {
+    let deadline_wait = tokio::time::sleep_until(deadline);
+    tokio::pin!(deadline_wait);
     loop {
         if *cancel_tx.borrow() {
             return MediaOwnerWaitResult::Cancelled;
         }
-        match probe().await {
-            MediaOwnerProbe::Ready => return MediaOwnerWaitResult::Ready,
-            MediaOwnerProbe::Terminal => return MediaOwnerWaitResult::Terminal,
-            MediaOwnerProbe::Missing => return MediaOwnerWaitResult::Missing,
-            MediaOwnerProbe::Pending => {}
-        }
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return MediaOwnerWaitResult::TimedOut;
+        match *updates.borrow_and_update() {
+            None => return MediaOwnerWaitResult::Missing,
+            Some(signal) if signal.terminal => return MediaOwnerWaitResult::Terminal,
+            Some(signal) if ready(signal) => return MediaOwnerWaitResult::Ready,
+            Some(_) => {}
         }
         tokio::select! {
-            _ = wait_for_media_cancel(cancel_rx) => {
-                return MediaOwnerWaitResult::Cancelled;
+            biased;
+            _ = wait_for_media_cancel(cancel_rx) => return MediaOwnerWaitResult::Cancelled,
+            changed = updates.changed() => {
+                if changed.is_err() {
+                    return MediaOwnerWaitResult::Missing;
+                }
             }
-            _ = tokio::time::sleep_until((now + POLL_INTERVAL).min(deadline)) => {}
+            () = &mut deadline_wait => return MediaOwnerWaitResult::TimedOut,
         }
     }
 }
@@ -1022,16 +1081,71 @@ where
 use rvoip_media_core::processing::audio::playout::{PlayoutBuffer, PlayoutConfig};
 use rvoip_media_core::types::AudioFrame;
 
+mod fused;
+
 enum InboundPumpEvent {
     CodecChanged,
     Audio(Option<AudioFrame>),
     PlayoutTick,
+    /// The fused pump on the socket owner stopped with this reason (`None`:
+    /// it was detached without failing).
+    FusedStopped(Option<&'static str>),
 }
 
-async fn wait_for_playout(deadline: Option<std::time::Instant>) {
-    match deadline {
-        Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
-        None => std::future::pending::<()>().await,
+/// Same depth as the adapter's decoded-audio channel, which the fused pump's
+/// backlog stands in for while `frames_in` is full.
+const FUSED_BACKLOG_FRAMES: usize = 128;
+
+/// Fuse this stream's inbound pump onto the RTP socket owner
+/// ([`MediaExecutorConfig::fused_inbound_pump`]). Frames already queued in
+/// the subscriber's channel move into the fused pump first. On refusal (v1,
+/// the switch off, a non-G.711 dialog, a dialog no longer inline) the
+/// regular inbound pump task does all the work.
+///
+/// [`MediaExecutorConfig::fused_inbound_pump`]: rvoip_rtp_core::executor::MediaExecutorConfig::fused_inbound_pump
+#[allow(clippy::too_many_arguments)]
+fn fuse_inbound_pump(
+    coordinator: &UnifiedCoordinator,
+    session_id: &SessionId,
+    runtime: &SipMediaCodecRuntime,
+    codec_updates: &watch::Sender<Option<SipMediaCodecRuntime>>,
+    stream_id: &StreamId,
+    frames_in_tx: &mpsc::Sender<MediaFrame>,
+    playout: Option<PlayoutConfig>,
+    subscriber: &mut crate::types::AudioFrameSubscriber,
+    inbound_sink: &Arc<fused::InboundSinkSlot>,
+) -> Option<(
+    rvoip_media_core::relay::controller::InlineAudioConsumerGuard,
+    tokio::sync::oneshot::Receiver<&'static str>,
+)> {
+    if !rvoip_rtp_core::executor::fused_inbound_pump_enabled() {
+        return None;
+    }
+    let (pump, stopped) = fused::FusedInboundPump::new(
+        runtime.clone(),
+        codec_updates.subscribe(),
+        stream_id.clone(),
+        frames_in_tx.clone(),
+        playout,
+        FUSED_BACKLOG_FRAMES,
+        Arc::clone(inbound_sink),
+    )
+    .ok()?;
+    let receiver = &mut subscriber.receiver;
+    let mut backlog = || receiver.try_recv().ok();
+    match coordinator.install_inline_audio_consumer(session_id, Box::new(pump), &mut backlog) {
+        Ok(guard) => Some((guard, stopped)),
+        Err(_refused) => None,
+    }
+}
+
+/// Resolve when the fused pump reports, never while there is none.
+async fn fused_pump_stopped(
+    stopped: &mut Option<tokio::sync::oneshot::Receiver<&'static str>>,
+) -> Option<&'static str> {
+    match stopped.as_mut() {
+        Some(receiver) => receiver.await.ok(),
+        None => std::future::pending().await,
     }
 }
 
@@ -1048,6 +1162,7 @@ async fn run_media_driver(
     frames_in_tx: mpsc::Sender<MediaFrame>,
     frames_out_rx: mpsc::Receiver<MediaFrame>,
     peer_out_rx: mpsc::Receiver<PeerMediaFrame>,
+    executor: Arc<SipStreamExecutorState>,
 ) {
     let playout = coordinator.playout_policy();
     let setup_deadline =
@@ -1058,26 +1173,15 @@ async fn run_media_driver(
     // missing/terminal session and bounding the wait by the shared setup
     // deadline. This preserves eager stream publication without retiring a
     // valid inbound route before the application can answer it.
-    let owner_coordinator = Arc::clone(&coordinator);
-    let owner_session_id = session_id.clone();
-    let owner = wait_for_media_owner(
-        move || {
-            let coordinator = Arc::clone(&owner_coordinator);
-            let session_id = owner_session_id.clone();
-            async move {
-                match coordinator.session_state(&session_id).await {
-                    Err(_) => MediaOwnerProbe::Missing,
-                    Ok(session)
-                        if session.call_state.is_final()
-                            || session.call_state == crate::types::CallState::Terminating =>
-                    {
-                        MediaOwnerProbe::Terminal
-                    }
-                    Ok(session) if session.media_session_id.is_some() => MediaOwnerProbe::Ready,
-                    Ok(_) => MediaOwnerProbe::Pending,
-                }
-            }
-        },
+    let Some((exact_handle, mut readiness)) = coordinator.subscribe_media_readiness(&session_id)
+    else {
+        tracing::warn!(target: "rvoip_sip", "SipMediaStream session disappeared before media ownership");
+        lifecycle.mark_failed();
+        return;
+    };
+    let owner = wait_for_media_readiness(
+        &mut readiness,
+        |signal| signal.owner_ready,
         &cancel_tx,
         &mut cancel_rx,
         setup_deadline,
@@ -1107,36 +1211,56 @@ async fn run_media_driver(
     // been negotiated. Waiting for that exact negotiated configuration first
     // keeps the retained driver dormant across the INVITE/answer gap instead
     // of treating a normal pre-answer subscription miss as terminal failure.
-    let negotiation_deadline = setup_deadline;
-    let (negotiated, payload_type) = loop {
-        if *cancel_tx.borrow() {
+    match wait_for_media_readiness(
+        &mut readiness,
+        |signal| signal.negotiation_decided,
+        &cancel_tx,
+        &mut cancel_rx,
+        setup_deadline,
+    )
+    .await
+    {
+        MediaOwnerWaitResult::Ready => {}
+        MediaOwnerWaitResult::Cancelled => return,
+        MediaOwnerWaitResult::TimedOut => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                "SipMediaStream SDP negotiation timed out"
+            );
+            lifecycle.mark_failed();
             return;
         }
-        match coordinator.negotiated_media_config(&session_id).await {
-            Ok(Some(config)) => break config,
-            Ok(None) => {
-                tokio::select! {
-                    _ = wait_for_media_cancel(&mut cancel_rx) => return,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
-                    _ = tokio::time::sleep_until(negotiation_deadline) => {
-                        tracing::warn!(
-                            target: "rvoip_sip",
-                            "SipMediaStream SDP negotiation timed out"
-                        );
-                        lifecycle.mark_failed();
-                        return;
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "rvoip_sip",
-                    error = %error,
-                    "SipMediaStream negotiated media lookup failed"
-                );
-                lifecycle.mark_failed();
-                return;
-            }
+        outcome => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                ?outcome,
+                "SipMediaStream session ended before SDP negotiation"
+            );
+            lifecycle.mark_failed();
+            return;
+        }
+    }
+    let (negotiated, payload_type) = match coordinator
+        .negotiated_media_config_exact(&exact_handle)
+        .await
+    {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                "SipMediaStream negotiated media was not retained"
+            );
+            lifecycle.mark_failed();
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "rvoip_sip",
+                error = %error,
+                "SipMediaStream negotiated media lookup failed"
+            );
+            lifecycle.mark_failed();
+            return;
         }
     };
     let (resolved_descriptor, payload_type) = match codec_descriptor(&negotiated, payload_type) {
@@ -1159,54 +1283,133 @@ async fn run_media_driver(
         payload_type,
     };
     codec_updates.send_replace(Some(runtime.clone()));
-    let subscription = coordinator.subscribe_to_audio(&session_id);
-    tokio::pin!(subscription);
-    let subscriber = tokio::select! {
-        _ = wait_for_media_cancel(&mut cancel_rx) => return,
-        result = &mut subscription => match result {
-            Ok(subscriber) => subscriber,
-            Err(error) => {
-                tracing::warn!(
-                    target: "rvoip_sip",
-                    error = %error,
-                    "SipMediaStream audio subscription failed"
-                );
-                lifecycle.mark_failed();
-                return;
+    // The subscription future borrows the coordinator; scope it so the pumps
+    // below can take ownership.
+    let mut subscriber = {
+        let subscription = coordinator.subscribe_to_audio(&session_id);
+        tokio::pin!(subscription);
+        tokio::select! {
+            _ = wait_for_media_cancel(&mut cancel_rx) => return,
+            result = &mut subscription => match result {
+                Ok(subscriber) => subscriber,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "rvoip_sip",
+                        error = %error,
+                        "SipMediaStream audio subscription failed"
+                    );
+                    lifecycle.mark_failed();
+                    return;
+                }
             }
         }
     };
+    let fused = fuse_inbound_pump(
+        &coordinator,
+        &session_id,
+        &runtime,
+        &codec_updates,
+        &stream_id,
+        &frames_in_tx,
+        playout,
+        &mut subscriber,
+        &executor.inbound_sink,
+    );
+    let (fused_guard, fused_stopped) = match fused {
+        Some((guard, stopped)) => (Some(guard), Some(stopped)),
+        None => (None, None),
+    };
+    // The RTP socket's lane (its sender's runtime). Media graphs that read
+    // from or write to this stream may run there (published before `Bound`,
+    // so a bridge built on a bound stream sees it); with `ai_tx` or
+    // `session_owner_placement` the pumps run there, so synchronous sends
+    // leave from the lane that owns the socket.
+    let ai_tx = rvoip_rtp_core::executor::ai_tx_enabled();
+    let ai_rx = rvoip_rtp_core::executor::ai_rx_enabled();
+    let owner_placement = rvoip_rtp_core::executor::session_owner_placement_enabled();
+    let socket_lane = if ai_tx || ai_rx || owner_placement {
+        coordinator.media_runtime_handle(&session_id)
+    } else {
+        None
+    };
+    if let Some(lane) = socket_lane.as_ref().filter(|_| ai_tx || ai_rx) {
+        let _ = executor.media_lane.set(
+            MediaLanePlacement::new(lane.clone())
+                .with_reader_graphs(ai_rx)
+                .with_writer_graphs(ai_tx),
+        );
+    }
+    let pump_runtime = if ai_tx || owner_placement {
+        if ai_tx && socket_lane.is_some() {
+            rvoip_rtp_core::executor::record_ai_tx_pump_on_lane();
+        }
+        socket_lane
+    } else {
+        None
+    };
+    if let Some(handle) = coordinator.media_lifecycle_handle(&session_id) {
+        let _ = executor.exact_media_owner.set(handle);
+    }
     if !lifecycle.mark_bound() {
         return;
     }
 
-    let inbound = run_inbound_pump(
-        subscriber,
-        runtime.clone(),
-        codec_updates.subscribe(),
-        stream_id,
-        frames_in_tx,
-        playout,
-    );
-    let outbound = run_outbound_pump(
-        Arc::clone(&coordinator),
-        session_id.clone(),
-        runtime,
-        codec_updates.subscribe(),
-        frames_out_rx,
-        peer_out_rx,
-    );
-    tokio::pin!(inbound, outbound);
-    let failed_pump = tokio::select! {
-        _ = wait_for_media_cancel(&mut cancel_rx) => None,
-        failure = &mut inbound => Some(failure),
-        failure = &mut outbound => Some(failure),
-    };
-    if let Some(failure) = failed_pump {
-        tracing::warn!(target: "rvoip_sip", failure, "SipMediaStream pump stopped unexpectedly");
-        if lifecycle.mark_failed() {
-            cancel_tx.send_replace(true);
+    let pumps = async move {
+        // The fused pump lives exactly as long as these pumps: when they end
+        // (failure, cancellation, abort) the guard detaches it from the owner,
+        // dropping its `frames_in` sender with the inbound pump's own.
+        let _fused_guard = fused_guard;
+        let inbound = run_inbound_pump(
+            subscriber,
+            runtime.clone(),
+            codec_updates.subscribe(),
+            stream_id,
+            frames_in_tx,
+            playout,
+            fused_stopped,
+        );
+        let outbound = run_outbound_pump(
+            Arc::clone(&coordinator),
+            session_id.clone(),
+            runtime,
+            codec_updates.subscribe(),
+            frames_out_rx,
+            peer_out_rx,
+        );
+        tokio::pin!(inbound, outbound);
+        let failed_pump = tokio::select! {
+            _ = wait_for_media_cancel(&mut cancel_rx) => None,
+            failure = &mut inbound => Some(failure),
+            failure = &mut outbound => Some(failure),
+        };
+        if let Some(failure) = failed_pump {
+            if failure == AUDIO_SOURCE_CLOSED {
+                // The inbound audio source closing is how a call's media ends
+                // after a remote hangup; only the other pump failures are
+                // unexpected.
+                tracing::debug!(target: "rvoip_sip", failure, "SipMediaStream pump stopped: audio source closed");
+            } else {
+                tracing::warn!(target: "rvoip_sip", failure, "SipMediaStream pump stopped unexpectedly");
+            }
+            if lifecycle.mark_failed() {
+                cancel_tx.send_replace(true);
+            }
         }
+    };
+    match pump_runtime {
+        Some(lane) => {
+            // Aborting the driver (stream dropped) aborts the pumps on the
+            // lane too.
+            struct AbortOnDrop(tokio::task::JoinHandle<()>);
+            impl Drop for AbortOnDrop {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let mut pumps = AbortOnDrop(lane.spawn(pumps));
+            let _ = (&mut pumps.0).await;
+        }
+        None => pumps.await,
     }
 }
 
@@ -1240,6 +1443,12 @@ impl InboundPcmFramer {
             timestamp: 0,
             expected_input: None,
         }
+    }
+
+    /// Whether [`Self::push`] returns every frame unchanged (every codec but
+    /// Opus).
+    fn is_pass_through(&self) -> bool {
+        self.samples_per_frame.is_none()
     }
 
     fn push(&mut self, frame: AudioFrame) -> Vec<AudioFrame> {
@@ -1289,6 +1498,13 @@ impl InboundPcmFramer {
     }
 }
 
+/// The SIP inbound pump task.
+///
+/// With `fused_stopped` the same work runs on the RTP socket owner
+/// (`fused::FusedInboundPump`) and this task idles: it returns the fused
+/// pump's failure reason as its own, keeps watching codec changes, and builds
+/// its playout buffer only if frames ever reach its channel (after a
+/// demotion or a callback change).
 async fn run_inbound_pump(
     mut subscriber: crate::types::AudioFrameSubscriber,
     mut runtime: SipMediaCodecRuntime,
@@ -1296,13 +1512,19 @@ async fn run_inbound_pump(
     stream_id: StreamId,
     frames_in_tx: mpsc::Sender<MediaFrame>,
     playout: Option<PlayoutConfig>,
+    mut fused_stopped: Option<tokio::sync::oneshot::Receiver<&'static str>>,
 ) -> &'static str {
     // Without a playout buffer this pump forwards whatever arrives, in
     // arrival order, with a gap wherever a packet was lost — the behaviour
     // every release before this had. With one, frames are reordered onto the
     // media clock and losses are concealed rather than heard as clicks.
     let playout_policy = playout;
-    let mut playout = playout_policy.map(PlayoutBuffer::new);
+    let mut playout_deferred = fused_stopped.is_some() && playout_policy.is_some();
+    let mut playout = if playout_deferred {
+        None
+    } else {
+        playout_policy.map(PlayoutBuffer::new)
+    };
     let mut framer = InboundPcmFramer::new(&runtime.negotiated);
     let mut encoder =
         match SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type) {
@@ -1310,26 +1532,46 @@ async fn run_inbound_pump(
             Err(_) => return "sip-codec-reconfigure-failed",
         };
     let mut reported = std::time::Instant::now();
+    // Packet waiters live as long as what they wait for, not one packet. The
+    // codec-change waiter spans a codec epoch and the playout timer is
+    // re-armed only when its deadline moves, so a packet or timer wakeup
+    // never cancels and re-registers either of them.
+    let mut codec_changed = Box::pin(codec_updates.changed());
+    let playout_timer = tokio::time::sleep_until(tokio::time::Instant::now());
+    tokio::pin!(playout_timer);
+    let mut armed_deadline = None;
 
     loop {
+        let deadline = playout.as_ref().and_then(PlayoutBuffer::next_deadline);
+        if deadline != armed_deadline {
+            if let Some(deadline) = deadline {
+                playout_timer.as_mut().reset(deadline.into());
+            }
+            armed_deadline = deadline;
+        }
         let event = tokio::select! {
             biased;
-            changed = codec_updates.changed() => {
+            changed = &mut codec_changed => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
                 InboundPumpEvent::CodecChanged
             }
             frame = subscriber.receiver.recv() => InboundPumpEvent::Audio(frame),
-            () = wait_for_playout(playout.as_ref().and_then(PlayoutBuffer::next_deadline)) => {
-                InboundPumpEvent::PlayoutTick
+            () = &mut playout_timer, if deadline.is_some() => InboundPumpEvent::PlayoutTick,
+            stopped = fused_pump_stopped(&mut fused_stopped), if fused_stopped.is_some() => {
+                InboundPumpEvent::FusedStopped(stopped)
             }
         };
 
         let mut ready = Vec::new();
         match event {
             InboundPumpEvent::CodecChanged => {
-                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                // The completed waiter is replaced for the next codec epoch.
+                drop(codec_changed);
+                let updated = codec_updates.borrow_and_update().clone();
+                codec_changed = Box::pin(codec_updates.changed());
+                let Some(updated) = updated else {
                     continue;
                 };
                 encoder = match SipPayloadCodec::from_negotiated(
@@ -1340,16 +1582,30 @@ async fn run_inbound_pump(
                     Err(_) => return "sip-codec-reconfigure-failed",
                 };
                 runtime = updated;
-                playout = playout_policy.map(PlayoutBuffer::new);
+                if !playout_deferred {
+                    playout = playout_policy.map(PlayoutBuffer::new);
+                }
                 framer = InboundPcmFramer::new(&runtime.negotiated);
                 continue;
             }
-            InboundPumpEvent::Audio(Some(audio_frame)) => match playout.as_mut() {
-                Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
-                None => ready.push(audio_frame),
-            },
-            InboundPumpEvent::Audio(None) => return "sip-audio-source-closed",
+            InboundPumpEvent::Audio(Some(audio_frame)) => {
+                if playout_deferred {
+                    playout_deferred = false;
+                    playout = playout_policy.map(PlayoutBuffer::new);
+                }
+                match playout.as_mut() {
+                    Some(buffer) => buffer.push(audio_frame, std::time::Instant::now()),
+                    None => ready.push(audio_frame),
+                }
+            }
+            InboundPumpEvent::Audio(None) => return AUDIO_SOURCE_CLOSED,
             InboundPumpEvent::PlayoutTick => {}
+            InboundPumpEvent::FusedStopped(Some(reason)) => return reason,
+            InboundPumpEvent::FusedStopped(None) => {
+                // Detached without failing: this task carries on.
+                fused_stopped = None;
+                continue;
+            }
         }
 
         if let Some(buffer) = playout.as_mut() {
@@ -1427,13 +1683,23 @@ async fn run_outbound_pump(
     let mut channels = runtime.negotiated.channels.max(1);
     let mut outbound_clock = OutboundRtpClock::default();
     let mut telephone_events = TelephoneEventTracker::default();
+    // Synchronous TX of encoded G.711 through the cached path (`ai_tx`),
+    // decided once per stream; the law is decided per codec generation.
+    let mut sync_tx = OutboundSyncTx::new_if_enabled();
+    let mut g711_format = sync_g711_format(&runtime);
+    // One codec-change waiter per codec epoch, not one per outbound frame.
+    let mut codec_changed = Box::pin(codec_updates.changed());
     loop {
         let (media_frame, mut delivery_guard) = tokio::select! {
-            changed = codec_updates.changed() => {
+            changed = &mut codec_changed => {
                 if changed.is_err() {
                     return "sip-codec-update-channel-closed";
                 }
-                let Some(updated) = codec_updates.borrow_and_update().clone() else {
+                // The completed waiter is replaced for the next codec epoch.
+                drop(codec_changed);
+                let updated = codec_updates.borrow_and_update().clone();
+                codec_changed = Box::pin(codec_updates.changed());
+                let Some(updated) = updated else {
                     continue;
                 };
                 decoder = match SipPayloadCodec::from_negotiated(
@@ -1445,6 +1711,7 @@ async fn run_outbound_pump(
                 };
                 channels = updated.negotiated.channels.max(1);
                 runtime = updated;
+                g711_format = sync_g711_format(&runtime);
                 continue;
             }
             frame = frames_out_rx.recv() => match frame {
@@ -1508,6 +1775,32 @@ async fn run_outbound_pump(
             );
             continue;
         }
+        if let (Some(sync), Some(format)) = (sync_tx.as_mut(), g711_format) {
+            if !media_frame.payload.is_empty() {
+                // Mono 8 kHz G.711 decodes to one sample per byte: the clock
+                // advances exactly as below.
+                let timestamp = advance_outbound_timestamp(
+                    &mut outbound_clock,
+                    media_frame.payload.len(),
+                    media_frame.timestamp_rtp,
+                );
+                let mut tx = CoordinatorG711Tx {
+                    coordinator: &coordinator,
+                    session_id: &session_id,
+                    format,
+                    payload_type: runtime.payload_type,
+                    decoder: &mut decoder,
+                    sync,
+                };
+                if send_encoded_g711_frame(&mut tx, &media_frame.payload, timestamp)
+                    .await
+                    .is_err()
+                {
+                    return "sip-audio-send-failed";
+                }
+                continue;
+            }
+        }
         let mut audio_frame = match decoder.decode(&media_frame.payload) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1534,6 +1827,483 @@ async fn run_outbound_pump(
             return "sip-audio-send-failed";
         }
     }
+}
+
+/// The law of a codec generation the synchronous TX path can send (mono
+/// 8 kHz G.711), if any.
+fn sync_g711_format(
+    runtime: &SipMediaCodecRuntime,
+) -> Option<rvoip_media_core::relay::controller::EncodedG711Format> {
+    if runtime.negotiated.sample_rate != G711_SAMPLE_RATE || runtime.negotiated.channels != 1 {
+        return None;
+    }
+    rvoip_media_core::relay::controller::EncodedG711Format::from_codec_name(
+        &runtime.negotiated.codec,
+    )
+}
+
+/// What the synchronous TX path did with one outbound frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncTxOutcome {
+    /// Sent, or dropped where the PCM path drops it (transmission
+    /// disabled): the PCM path's `Ok`.
+    Handled,
+    /// The frame consumed its RTP sequence number and failed, or the media
+    /// lifetime changed while it was dispatched: the PCM path's `Err`.
+    Failed,
+    /// Nothing consumed: the frame takes the PCM path, which decides it
+    /// exactly as before (same sequence number, same SRTP index).
+    Deferred,
+}
+
+/// The outbound pump's two ways to send one encoded G.711 frame whose RTP
+/// timestamp is already taken from the outbound clock.
+trait G711FrameTx {
+    /// The synchronous cached path; `None` when it is off.
+    fn try_now(&mut self, payload: &Bytes, timestamp: u32) -> Option<SyncTxOutcome>;
+    /// The PCM path: decode, then `send_audio`. `Err` ends the pump.
+    fn send_later<'b>(
+        &'b mut self,
+        payload: &'b Bytes,
+        timestamp: u32,
+    ) -> impl std::future::Future<Output = std::result::Result<(), ()>> + Send + 'b;
+}
+
+/// Send one encoded G.711 frame. The synchronous path goes first; whatever
+/// it does not handle goes to the PCM path with the same timestamp (and,
+/// since nothing was consumed, the same RTP sequence number and SRTP index),
+/// so the wire is the PCM path's whichever way a frame leaves.
+async fn send_encoded_g711_frame<T: G711FrameTx>(
+    tx: &mut T,
+    payload: &Bytes,
+    timestamp: u32,
+) -> std::result::Result<(), ()> {
+    match tx.try_now(payload, timestamp) {
+        Some(SyncTxOutcome::Handled) => return Ok(()),
+        Some(SyncTxOutcome::Failed) => return Err(()),
+        Some(SyncTxOutcome::Deferred) | None => {}
+    }
+    tx.send_later(payload, timestamp).await
+}
+
+/// The pump's [`G711FrameTx`]: the coordinator's PCM send, with the cached
+/// synchronous path in front.
+struct CoordinatorG711Tx<'a> {
+    coordinator: &'a UnifiedCoordinator,
+    session_id: &'a SessionId,
+    format: rvoip_media_core::relay::controller::EncodedG711Format,
+    payload_type: u8,
+    decoder: &'a mut SipPayloadCodec,
+    sync: &'a mut OutboundSyncTx,
+}
+
+impl G711FrameTx for CoordinatorG711Tx<'_> {
+    fn try_now(&mut self, payload: &Bytes, timestamp: u32) -> Option<SyncTxOutcome> {
+        Some(self.sync.try_send(
+            self.coordinator,
+            self.session_id,
+            self.format,
+            self.payload_type,
+            payload,
+            timestamp,
+        ))
+    }
+
+    async fn send_later(&mut self, payload: &Bytes, timestamp: u32) -> std::result::Result<(), ()> {
+        let mut audio_frame = match self.decoder.decode(payload) {
+            Ok(frame) => frame,
+            // Unreachable for a non-empty G.711 payload; dropped as the
+            // PCM path drops an undecodable frame.
+            Err(_) => return Ok(()),
+        };
+        audio_frame.timestamp = timestamp;
+        self.coordinator
+            .send_audio(self.session_id, audio_frame)
+            .await
+            .map_err(|_| ())
+    }
+}
+
+/// Map one synchronous send of a single frame to its outcome.
+/// `exact_still_current` is the PCM path's post-dispatch exactness check,
+/// asked only when the frame was handled.
+fn classify_sync_send<E>(
+    result: std::result::Result<rvoip_media_core::relay::controller::G711SendNow, E>,
+    exact_still_current: impl FnOnce() -> bool,
+) -> SyncTxOutcome {
+    match result {
+        // A retired codec generation, a closed sender or no destination,
+        // before anything was consumed: the PCM path answers.
+        Err(_) => SyncTxOutcome::Deferred,
+        // Transmission disabled: dropped, as the PCM path drops it.
+        Ok(None) => {
+            if exact_still_current() {
+                SyncTxOutcome::Handled
+            } else {
+                SyncTxOutcome::Failed
+            }
+        }
+        Ok(Some(report)) => {
+            if report.sent > 0 {
+                if exact_still_current() {
+                    SyncTxOutcome::Handled
+                } else {
+                    SyncTxOutcome::Failed
+                }
+            } else if report.error.is_some() {
+                SyncTxOutcome::Failed
+            } else {
+                // Writer busy or socket full: not consumed.
+                SyncTxOutcome::Deferred
+            }
+        }
+    }
+}
+
+/// Frames (one second) between resolution attempts after one failed.
+const RESOLVE_BACKOFF_FRAMES: u32 = 50;
+
+/// Most frames one synchronous writer call handles.
+const MAX_FRAMES_NOW: usize = 16;
+
+/// The outbound pump's encoded G.711 TX path (`ai_tx`), resolved once for
+/// the session's current media lifetime and re-checked per frame by the
+/// generation fences (`ExactG711Tx::is_current`: atomic loads instead of
+/// `send_audio`'s String-keyed lookups), sending synchronously instead of
+/// through the async send chain. Every frame it does not handle takes the
+/// PCM path unchanged.
+struct OutboundSyncTx {
+    fast: Option<crate::adapters::media_adapter::ExactG711Tx>,
+    /// Frames to hand straight to the PCM path after a failed resolution
+    /// (muted, comfort noise, closed sender) before trying again.
+    /// Performance only.
+    resolve_backoff: u32,
+    /// The canonical payload, when a frame holds a code the PCM path
+    /// rewrites.
+    scratch: Vec<u8>,
+    counters: rvoip_rtp_core::executor::AiTxCounters,
+}
+
+impl OutboundSyncTx {
+    fn new_if_enabled() -> Option<Self> {
+        rvoip_rtp_core::executor::ai_tx_enabled().then(|| Self {
+            fast: None,
+            resolve_backoff: 0,
+            scratch: Vec::new(),
+            counters: rvoip_rtp_core::executor::AiTxCounters::new(),
+        })
+    }
+
+    /// Frames are counted as `send_audio` counts them: a handled or failed
+    /// frame here; a deferred one by the PCM path itself.
+    fn try_send(
+        &mut self,
+        coordinator: &UnifiedCoordinator,
+        session_id: &SessionId,
+        format: rvoip_media_core::relay::controller::EncodedG711Format,
+        payload_type: u8,
+        payload: &Bytes,
+        timestamp: u32,
+    ) -> SyncTxOutcome {
+        if self
+            .fast
+            .as_ref()
+            .is_some_and(|tx| tx.is_current(format, payload_type))
+        {
+            self.counters.tx().cache_hit();
+        } else {
+            self.fast = None;
+            if self.resolve_backoff > 0 {
+                self.resolve_backoff -= 1;
+                self.counters.fallback();
+                return SyncTxOutcome::Deferred;
+            }
+            self.counters.resolve();
+            self.counters.tx().cache_miss();
+            self.fast = coordinator.resolve_current_g711_tx(session_id, format, payload_type);
+            if self.fast.is_none() {
+                self.resolve_backoff = RESOLVE_BACKOFF_FRAMES;
+                self.counters.fallback();
+                return SyncTxOutcome::Deferred;
+            }
+        }
+        let Some(tx) = self.fast.as_ref() else {
+            return SyncTxOutcome::Deferred;
+        };
+        let frame = [rvoip_rtp_core::RtpFrameNow {
+            timestamp,
+            payload: format.canonical_payload(payload, &mut self.scratch),
+            marker: false,
+            payload_type,
+        }];
+        let result = tx.try_send_now(&frame, false);
+        let pre_consumption_error = result.is_err();
+        let outcome = classify_sync_send(result, || tx.exact_is_current());
+        match outcome {
+            SyncTxOutcome::Handled => {
+                tx.record_sent(payload.len());
+                self.counters.tx().sync_sent(1);
+            }
+            SyncTxOutcome::Failed => {
+                tx.record_sent(payload.len());
+                self.fast = None;
+            }
+            SyncTxOutcome::Deferred => {
+                self.counters.fallback();
+                self.counters.tx().deferred();
+                if pre_consumption_error {
+                    // Resolving again would most likely find the same
+                    // sender; let the PCM path answer for a while.
+                    self.fast = None;
+                    self.resolve_backoff = RESOLVE_BACKOFF_FRAMES;
+                }
+            }
+        }
+        outcome
+    }
+}
+
+/// The stream's encoded G.711 writer (`direct_encoded_writer`): the sole
+/// producer's frames skip the outbound `MediaFrame`, its channel and the
+/// pump's wakeup. Each frame is handled as the outbound pump would handle
+/// the same payload written to `frames_out` (own outbound clock, PCM path
+/// through the exact media lifetime), with the cached synchronous path in
+/// front when `tx_handle_cache` is on.
+struct SipEncodedWriter {
+    inner: Arc<SipMediaStreamInner>,
+    coordinator: Arc<UnifiedCoordinator>,
+    exact: crate::session_registry::SessionRegistryHandle,
+    runtime: SipMediaCodecRuntime,
+    updates: watch::Receiver<Option<SipMediaCodecRuntime>>,
+    decoder: SipPayloadCodec,
+    clock: OutboundRtpClock,
+    /// The TX path resolved once and re-checked per frame by its generation
+    /// fences (`None` before the first frame and after a fence closed).
+    fast: Option<crate::adapters::media_adapter::ExactG711Tx>,
+    /// Switches, read once when the writer was built.
+    fast_enabled: bool,
+    batch_enabled: bool,
+    counters: rvoip_rtp_core::executor::TxPathCounters,
+    /// Frames to hand straight to the PCM path after a failed resolution.
+    resolve_backoff: u32,
+    /// Canonical payloads for frames that hold a code the PCM path rewrites.
+    scratch: Vec<Vec<u8>>,
+}
+
+impl SipEncodedWriter {
+    fn closed() -> RvoipError {
+        RvoipError::InvalidState("SIP encoded writer is closed")
+    }
+
+    fn mismatched() -> RvoipError {
+        RvoipError::InvalidState("SIP encoded payload no longer matches the negotiated codec")
+    }
+}
+
+#[async_trait]
+impl EncodedG711Writer for SipEncodedWriter {
+    async fn send_encoded(
+        &mut self,
+        payload: &Bytes,
+        timestamp: u32,
+        payload_type: u8,
+    ) -> RvoipResult<()> {
+        let report = self.try_send_encoded_now(&[(payload, timestamp)], payload_type, false);
+        if report.handled() == 1 {
+            return report.failure.map_or(Ok(()), Err);
+        }
+        if self.inner.lifecycle.current() != SipMediaLifecycle::Bound || *self.inner.cancel.borrow()
+        {
+            return Err(Self::closed());
+        }
+        if self
+            .updates
+            .has_changed()
+            .map_err(|_| RvoipError::InvalidState("SIP codec owner closed"))?
+        {
+            let runtime = self
+                .updates
+                .borrow_and_update()
+                .clone()
+                .ok_or(RvoipError::InvalidState("SIP codec missing"))?;
+            self.decoder =
+                SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type)
+                    .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+            self.runtime = runtime;
+            self.fast = None;
+        }
+        if payload_type != self.runtime.payload_type || payload.is_empty() {
+            return Err(Self::mismatched());
+        }
+        let mut frame = self
+            .decoder
+            .decode(payload)
+            .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        let samples = frame.samples.len() / usize::from(self.runtime.negotiated.channels.max(1));
+        frame.timestamp = advance_outbound_timestamp(&mut self.clock, samples, timestamp);
+        self.coordinator
+            .send_audio_exact(&self.exact, frame)
+            .await
+            .map_err(|error| RvoipError::Adapter(error.to_string()))
+    }
+
+    /// The same per-frame decisions as `send_encoded`, taken synchronously
+    /// against the TX path resolved once (see `ExactG711Tx`).
+    ///
+    /// Hands back (handles nothing) wherever `send_encoded` would do
+    /// something this path does not: a pending codec generation, no cached
+    /// path that passes its fences and none resolvable (muted, comfort
+    /// noise, another codec, errors), a busy writer or a socket that would
+    /// block. Shared state (lifecycle, codec generation) is checked once per
+    /// call; per-frame conditions (empty payload) per frame.
+    fn try_send_encoded_now(
+        &mut self,
+        frames: &[(&Bytes, u32)],
+        payload_type: u8,
+        batch: bool,
+    ) -> EncodedSendNow {
+        let mut report = EncodedSendNow::default();
+        if !self.fast_enabled || frames.is_empty() {
+            return report;
+        }
+        if self.inner.lifecycle.current() != SipMediaLifecycle::Bound || *self.inner.cancel.borrow()
+        {
+            report.failure = Some(Self::closed());
+            return report;
+        }
+        if !matches!(self.updates.has_changed(), Ok(false)) {
+            // `send_encoded` applies (or fails on) the codec update.
+            return report;
+        }
+        if payload_type != self.runtime.payload_type || frames[0].0.is_empty() {
+            report.failure = Some(Self::mismatched());
+            return report;
+        }
+        let Some(format) = sync_g711_format(&self.runtime) else {
+            return report;
+        };
+        if self
+            .fast
+            .as_ref()
+            .is_some_and(|tx| tx.is_current(format, payload_type))
+        {
+            self.counters.cache_hit();
+        } else {
+            self.fast = None;
+            if self.resolve_backoff > 0 {
+                self.resolve_backoff -= 1;
+                return report;
+            }
+            self.counters.cache_miss();
+            self.fast = self
+                .coordinator
+                .resolve_exact_g711_tx(&self.exact, format, payload_type);
+            if self.fast.is_none() {
+                self.resolve_backoff = RESOLVE_BACKOFF_FRAMES;
+                self.counters.deferred();
+                return report;
+            }
+        }
+        // Frames up to the first empty payload (that one fails as in
+        // `send_encoded`, after the frames before it).
+        let count = frames.len().min(MAX_FRAMES_NOW);
+        let usable = frames[..count]
+            .iter()
+            .position(|(payload, _)| payload.is_empty())
+            .unwrap_or(count);
+        if self.scratch.len() < MAX_FRAMES_NOW {
+            self.scratch.resize_with(MAX_FRAMES_NOW, Vec::new);
+        }
+        let mut clocks = [self.clock; MAX_FRAMES_NOW];
+        let mut clock = self.clock;
+        let tx = self.fast.as_ref().expect("resolved above");
+        let outcome = {
+            let mut rtp = [rvoip_rtp_core::RtpFrameNow {
+                timestamp: 0,
+                payload: &[],
+                marker: false,
+                payload_type,
+            }; MAX_FRAMES_NOW];
+            for (index, ((payload, timestamp), scratch)) in frames[..usable]
+                .iter()
+                .zip(self.scratch.iter_mut())
+                .enumerate()
+            {
+                rtp[index].timestamp =
+                    advance_outbound_timestamp(&mut clock, payload.len(), *timestamp);
+                rtp[index].payload = format.canonical_payload(payload, scratch);
+                clocks[index] = clock;
+            }
+            tx.try_send_now(&rtp[..usable], batch && self.batch_enabled)
+        };
+        let (sent, failure) = match outcome {
+            // Before anything was consumed: the PCM path answers.
+            Err(_) => {
+                self.fast = None;
+                self.resolve_backoff = RESOLVE_BACKOFF_FRAMES;
+                self.counters.deferred();
+                return report;
+            }
+            // Transmission disabled: dropped and `Ok`, as `send_encoded`.
+            Ok(None) => (usable, None),
+            Ok(Some(rtp_report)) => {
+                self.counters.sync_sent(rtp_report.sent as u64);
+                if rtp_report.sendmmsg_calls > 0 {
+                    self.counters.batch(u64::from(rtp_report.sendmmsg_packets));
+                }
+                if rtp_report.fallback {
+                    self.counters.batch_fallback();
+                }
+                if rtp_report.deferred(usable) > 0 {
+                    self.counters.deferred();
+                }
+                let failure = rtp_report.error.as_ref().map(|error| {
+                    RvoipError::Adapter(
+                        crate::adapters::media_adapter::ExactG711Tx::send_error(
+                            rvoip_media_core::relay::controller::PreparedG711Sender::rtp_send_error(
+                                error,
+                            ),
+                        )
+                        .to_string(),
+                    )
+                });
+                (rtp_report.sent, failure)
+            }
+        };
+        let tx = self.fast.as_ref().expect("resolved above");
+        for (payload, _) in &frames[..sent] {
+            tx.record_sent(payload.len());
+        }
+        let failure = match failure {
+            Some(failure) => {
+                // The failed frame consumed its number and was counted.
+                tx.record_sent(frames[sent].0.len());
+                self.fast = None;
+                Some(failure)
+            }
+            // An empty payload fails before `send_encoded` advances its
+            // clock or counts it.
+            None if sent == usable && usable < count => Some(Self::mismatched()),
+            None => None,
+        };
+        let advanced = if failure.is_some() && sent == usable && usable < count {
+            sent
+        } else {
+            sent + usize::from(failure.is_some())
+        };
+        if advanced > 0 {
+            self.clock = clocks[advanced - 1];
+        }
+        report.sent = sent;
+        report.failure = failure;
+        report
+    }
+}
+
+fn writer_is_available(inner: &SipMediaStreamInner) -> bool {
+    !inner.executor.direct_writer_claimed.load(Ordering::Acquire)
+        && inner.frames_out_tx.strong_count() == 1
+        && inner.peer_out_tx.strong_count() == 1
 }
 
 async fn wait_for_media_cancel(cancel: &mut watch::Receiver<bool>) {
@@ -1609,6 +2379,22 @@ impl MediaStream for SipMediaStream {
     }
 
     fn try_frames_out(&self) -> RvoipResult<mpsc::Sender<MediaFrame>> {
+        let _admission = self
+            .inner
+            .executor
+            .writer_admission
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("SIP writer admission poisoned"))?;
+        if self
+            .inner
+            .executor
+            .direct_writer_claimed
+            .load(Ordering::Acquire)
+        {
+            return Err(RvoipError::InvalidState(
+                "SIP encoded writer already owns the output",
+            ));
+        }
         match self.inner.lifecycle.current() {
             SipMediaLifecycle::Bound
                 if self.inner.outbound_writes_activated.load(Ordering::Acquire) =>
@@ -1630,6 +2416,97 @@ impl MediaStream for SipMediaStream {
     fn try_peer_frames_out(&self) -> RvoipResult<mpsc::Sender<PeerMediaFrame>> {
         self.try_frames_out()?; // Same activation/lifecycle admission as legacy writes.
         Ok(self.inner.peer_out_tx.clone())
+    }
+
+    /// The RTP socket's lane, once the stream is bound, under executor v2
+    /// with `ai_tx` or `ai_rx` on.
+    fn media_lane(&self) -> Option<MediaLanePlacement> {
+        self.inner.executor.media_lane.get().cloned()
+    }
+
+    /// The stream's encoded G.711 writer
+    /// ([`MediaExecutorConfig::direct_encoded_writer`]), for a bound,
+    /// writable, mono 8 kHz G.711 stream with no other producer. Once taken,
+    /// `try_frames_out` and `try_peer_frames_out` refuse for good.
+    ///
+    /// [`MediaExecutorConfig::direct_encoded_writer`]: rvoip_rtp_core::executor::MediaExecutorConfig::direct_encoded_writer
+    fn try_take_encoded_g711_writer(&self) -> RvoipResult<Option<Box<dyn EncodedG711Writer>>> {
+        if !rvoip_rtp_core::executor::direct_encoded_writer_enabled() {
+            return Ok(None);
+        }
+        let executor = &self.inner.executor;
+        let _admission = executor
+            .writer_admission
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("SIP writer admission poisoned"))?;
+        if self.inner.lifecycle.current() != SipMediaLifecycle::Bound
+            || !self.inner.outbound_writes_activated.load(Ordering::Acquire)
+            || !writer_is_available(&self.inner)
+        {
+            return Ok(None);
+        }
+        let updates = self.inner.codec_updates.subscribe();
+        let runtime = updates
+            .borrow()
+            .clone()
+            .ok_or(RvoipError::InvalidState("SIP codec unavailable"))?;
+        if sync_g711_format(&runtime).is_none() {
+            return Ok(None);
+        }
+        let decoder = SipPayloadCodec::from_negotiated(&runtime.negotiated, runtime.payload_type)
+            .map_err(|error| RvoipError::Adapter(error.to_string()))?;
+        let coordinator = self
+            .inner
+            .bind_target
+            .lock()
+            .map_err(|_| RvoipError::InvalidState("SIP binding poisoned"))?
+            .as_ref()
+            .ok_or(RvoipError::InvalidState("SIP binding unavailable"))?
+            .coordinator
+            .upgrade()
+            .ok_or(RvoipError::InvalidState("SIP owner closed"))?;
+        let exact = executor
+            .exact_media_owner
+            .get()
+            .cloned()
+            .ok_or(RvoipError::InvalidState(
+                "SIP exact media owner unavailable",
+            ))?;
+        executor
+            .direct_writer_claimed
+            .store(true, Ordering::Release);
+        rvoip_rtp_core::executor::record_direct_encoded_writer();
+        Ok(Some(Box::new(SipEncodedWriter {
+            inner: Arc::clone(&self.inner),
+            coordinator,
+            exact,
+            runtime,
+            updates,
+            decoder,
+            clock: OutboundRtpClock::default(),
+            fast: None,
+            fast_enabled: rvoip_rtp_core::executor::tx_handle_cache_enabled(),
+            batch_enabled: rvoip_rtp_core::executor::tx_batch_enabled(),
+            counters: rvoip_rtp_core::executor::TxPathCounters::new(),
+            resolve_backoff: 0,
+            scratch: Vec::new(),
+        })))
+    }
+
+    /// Offered sinks are adopted by the fused inbound pump on the RTP socket
+    /// owner ([`MediaExecutorConfig::direct_inbound_sink`]). Refused when
+    /// the switch is off and on a second offer. A stream whose pump is not
+    /// fused never adopts it and keeps using `frames_in`.
+    ///
+    /// [`MediaExecutorConfig::direct_inbound_sink`]: rvoip_rtp_core::executor::MediaExecutorConfig::direct_inbound_sink
+    fn offer_inbound_frame_sink(
+        &self,
+        sink: Box<dyn InboundFrameSink>,
+    ) -> std::result::Result<(), Box<dyn InboundFrameSink>> {
+        if !rvoip_rtp_core::executor::direct_inbound_sink_enabled() {
+            return Err(sink);
+        }
+        self.inner.executor.inbound_sink.offer(sink)
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot {
@@ -1668,78 +2545,123 @@ impl MediaStream for SipMediaStream {
 #[cfg(test)]
 mod media_owner_wait_tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::session_store::state::MediaReadinessSignal;
+
+    fn pending() -> MediaReadinessSignal {
+        MediaReadinessSignal {
+            owner_ready: false,
+            negotiation_decided: false,
+            terminal: false,
+        }
+    }
 
     #[tokio::test]
     async fn inbound_publication_waits_for_delayed_media_owner_commit() {
-        let owner_ready = Arc::new(AtomicBool::new(false));
-        let delayed_owner = Arc::clone(&owner_ready);
+        let (updates, mut readiness) = watch::channel(Some(pending()));
         let commit = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            delayed_owner.store(true, Ordering::Release);
+            updates.send_replace(Some(MediaReadinessSignal {
+                owner_ready: true,
+                ..pending()
+            }));
+            updates
         });
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
-
-        let result = wait_for_media_owner(
-            move || {
-                let ready = owner_ready.load(Ordering::Acquire);
-                std::future::ready(if ready {
-                    MediaOwnerProbe::Ready
-                } else {
-                    MediaOwnerProbe::Pending
-                })
-            },
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.owner_ready,
             &cancel_tx,
             &mut cancel_rx,
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
-
-        commit.await.expect("delayed media-owner commit task");
+        let _retained = commit.await.expect("delayed media-owner commit task");
         assert_eq!(result, MediaOwnerWaitResult::Ready);
     }
 
     #[tokio::test]
-    async fn terminal_and_missing_sessions_fail_without_waiting_for_setup_deadline() {
-        for (probe, expected) in [
-            (MediaOwnerProbe::Terminal, MediaOwnerWaitResult::Terminal),
-            (MediaOwnerProbe::Missing, MediaOwnerWaitResult::Missing),
+    async fn early_commit_is_retained_and_terminal_or_missing_fails_promptly() {
+        for (signal, expected) in [
+            (
+                Some(MediaReadinessSignal {
+                    owner_ready: true,
+                    ..pending()
+                }),
+                MediaOwnerWaitResult::Ready,
+            ),
+            (
+                Some(MediaReadinessSignal {
+                    terminal: true,
+                    ..pending()
+                }),
+                MediaOwnerWaitResult::Terminal,
+            ),
+            (None, MediaOwnerWaitResult::Missing),
         ] {
+            let (_updates, mut readiness) = watch::channel(signal);
             let (cancel_tx, mut cancel_rx) = watch::channel(false);
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(100),
-                wait_for_media_owner(
-                    || std::future::ready(probe),
+                wait_for_media_readiness(
+                    &mut readiness,
+                    |signal| signal.owner_ready,
                     &cancel_tx,
                     &mut cancel_rx,
                     tokio::time::Instant::now() + std::time::Duration::from_secs(5),
                 ),
             )
             .await
-            .expect("terminal ownership probe returned promptly");
+            .expect("readiness wait returned promptly");
             assert_eq!(result, expected);
         }
     }
 
     #[tokio::test]
-    async fn pending_media_owner_wait_observes_route_cancellation() {
+    async fn pending_media_wait_observes_route_cancellation() {
+        let (_updates, mut readiness) = watch::channel(Some(pending()));
         let (cancel_tx, mut cancel_rx) = watch::channel(false);
         let cancelling = cancel_tx.clone();
         let cancel = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             cancelling.send_replace(true);
         });
-
-        let result = wait_for_media_owner(
-            || std::future::ready(MediaOwnerProbe::Pending),
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.owner_ready,
             &cancel_tx,
             &mut cancel_rx,
             tokio::time::Instant::now() + std::time::Duration::from_secs(1),
         )
         .await;
-
         cancel.await.expect("media-owner cancellation task");
         assert_eq!(result, MediaOwnerWaitResult::Cancelled);
+    }
+
+    /// A pending wait ends at its one deadline, and a closed lifetime
+    /// (dropped sender) ends a later wait at once as Missing.
+    #[tokio::test(start_paused = true)]
+    async fn pending_media_wait_has_one_bounded_deadline_and_closed_lifetime_wakes() {
+        let (updates, mut readiness) = watch::channel(Some(pending()));
+        let (cancel_tx, mut cancel_rx) = watch::channel(false);
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.negotiation_decided,
+            &cancel_tx,
+            &mut cancel_rx,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(result, MediaOwnerWaitResult::TimedOut);
+        drop(updates);
+        let result = wait_for_media_readiness(
+            &mut readiness,
+            |signal| signal.negotiation_decided,
+            &cancel_tx,
+            &mut cancel_rx,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .await;
+        assert_eq!(result, MediaOwnerWaitResult::Missing);
     }
 }
 
@@ -1878,6 +2800,7 @@ mod negotiated_codec_tests {
             StreamId::new(),
             frames_tx,
             None,
+            None,
         ));
 
         audio_tx
@@ -1901,6 +2824,77 @@ mod negotiated_codec_tests {
     }
 
     #[tokio::test]
+    async fn inbound_pump_rearms_its_codec_waiter_for_every_codec_epoch() {
+        let session_id = SessionId::new();
+        let (audio_tx, audio_rx) = mpsc::channel(4);
+        let subscriber = crate::types::AudioFrameSubscriber::new(session_id, audio_rx);
+        let (frames_tx, mut frames_rx) = mpsc::channel(4);
+        let runtime = |codec: &str, payload_type| SipMediaCodecRuntime {
+            negotiated: negotiated(codec, 8_000, 1),
+            payload_type,
+        };
+        let (codec_tx, codec_rx) = watch::channel(Some(runtime("PCMU", 0)));
+        let pump = tokio::spawn(run_inbound_pump(
+            subscriber,
+            runtime("PCMU", 0),
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            None,
+            None,
+        ));
+        let mut timestamp = 0;
+        async fn next_payload_type(
+            audio_tx: &mpsc::Sender<AudioFrame>,
+            frames_rx: &mut mpsc::Receiver<MediaFrame>,
+            timestamp: &mut u32,
+        ) -> Option<u8> {
+            audio_tx
+                .send(AudioFrame::new(vec![1_000; 160], 8_000, 1, *timestamp))
+                .await
+                .expect("source frame");
+            *timestamp += 160;
+            frames_rx.recv().await.expect("graph frame").payload_type
+        }
+
+        // Many frames within one epoch, then each change applies to the very
+        // next frame: the waiter outlives frames and is renewed per epoch.
+        for _ in 0..32 {
+            assert_eq!(
+                next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+                Some(0)
+            );
+        }
+        codec_tx.send_replace(Some(runtime("PCMA", 8)));
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        // An update without a codec keeps the current one...
+        codec_tx.send_replace(None);
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(8)
+        );
+        // ...and the waiter is still armed for the next real change.
+        codec_tx.send_replace(Some(runtime("PCMU", 0)));
+        assert_eq!(
+            next_payload_type(&audio_tx, &mut frames_rx, &mut timestamp).await,
+            Some(0)
+        );
+
+        drop(codec_tx);
+        assert_eq!(
+            pump.await.expect("pump task"),
+            "sip-codec-update-channel-closed"
+        );
+    }
+
+    #[tokio::test]
     async fn inbound_pump_uses_a_clocked_playout_deadline_and_plc() {
         let session_id = SessionId::new();
         let (audio_tx, audio_rx) = mpsc::channel(4);
@@ -1921,6 +2915,7 @@ mod negotiated_codec_tests {
                 adaptive: false,
                 ..PlayoutConfig::default()
             }),
+            None,
         ));
 
         audio_tx
@@ -2052,6 +3047,7 @@ mod negotiated_codec_tests {
                     adaptive: false,
                     ..PlayoutConfig::default()
                 }),
+                None,
             ));
             // Clocked playout needs at least two input packets to prime.
             let count = (960 / packet_samples).max(1) * 2;
@@ -2470,9 +3466,362 @@ mod outbound_timestamp_tests {
 }
 
 #[cfg(test)]
+mod ai_tx_tests {
+    //! The outbound pump's per-frame G.711 send with the synchronous path on
+    //! (`ai_tx`) and off (v1). The RTP sender is a stand-in whose sequence
+    //! cursor only a consumed packet advances; the per-frame function, the
+    //! outcome mapping and the outbound clock are the pump's own. That the
+    //! synchronous sender puts the PCM path's bytes on the wire for the same
+    //! sequence number is covered in media-core
+    //! (`cached_g711_sender_matches_the_pcm_path_and_is_fenced_by_every_tx_state_change`)
+    //! and rtp-core (`session::sync_tx_tests`).
+    use super::{
+        advance_outbound_timestamp, classify_sync_send, send_encoded_g711_frame, G711FrameTx,
+        OutboundRtpClock, OutboundSyncTx, SyncTxOutcome,
+    };
+    use bytes::Bytes;
+    use rvoip_rtp_core::executor::{
+        override_media_executor_config_on_this_thread, MediaExecutorConfig,
+    };
+    use rvoip_rtp_core::RtpSendNowReport;
+
+    fn report(sent: usize, error: Option<rvoip_rtp_core::Error>) -> RtpSendNowReport {
+        let mut report = RtpSendNowReport::default();
+        report.sent = sent;
+        report.error = error;
+        report
+    }
+
+    /// What the network and the media layer do to one frame, the same for
+    /// both paths.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Condition {
+        /// The socket takes it.
+        Sends,
+        /// The socket would block (the PCM path awaits writability; the
+        /// synchronous path defers).
+        SocketFull,
+        /// The codec generation was retired (renegotiation): nothing
+        /// consumed; the PCM path sends with the new generation.
+        Renegotiated,
+        /// Transmission disabled (a=recvonly): dropped, `Ok`.
+        TransmissionDisabled,
+        /// The send consumed its sequence number and failed.
+        SendError,
+        /// Sent, but the media lifetime retired during dispatch.
+        LifetimeRetired,
+    }
+
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Wire {
+        next_sequence: u16,
+        packets: Vec<(u16, u32, Vec<u8>)>,
+    }
+
+    impl Wire {
+        fn send(&mut self, timestamp: u32, payload: &[u8]) {
+            self.packets
+                .push((self.next_sequence, timestamp, payload.to_vec()));
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+        }
+        fn consume_without_sending(&mut self) {
+            self.next_sequence = self.next_sequence.wrapping_add(1);
+        }
+    }
+
+    struct SimTx {
+        sync_enabled: bool,
+        condition: Condition,
+        wire: Wire,
+        sync_handled: usize,
+        pcm_calls: usize,
+    }
+
+    impl G711FrameTx for SimTx {
+        fn try_now(&mut self, payload: &Bytes, timestamp: u32) -> Option<SyncTxOutcome> {
+            if !self.sync_enabled {
+                return None;
+            }
+            let sent_one = report(1, None);
+            let result: Result<Option<RtpSendNowReport>, ()> = match self.condition {
+                Condition::Sends | Condition::LifetimeRetired => {
+                    self.wire.send(timestamp, payload);
+                    Ok(Some(sent_one))
+                }
+                Condition::SocketFull => Ok(Some(RtpSendNowReport::default())),
+                Condition::Renegotiated => Err(()),
+                Condition::TransmissionDisabled => Ok(None),
+                Condition::SendError => {
+                    self.wire.consume_without_sending();
+                    Ok(Some(report(
+                        0,
+                        Some(rvoip_rtp_core::Error::IoError("refused".into())),
+                    )))
+                }
+            };
+            let retired = self.condition == Condition::LifetimeRetired;
+            let outcome = classify_sync_send(result, || !retired);
+            if outcome == SyncTxOutcome::Handled {
+                self.sync_handled += 1;
+            }
+            Some(outcome)
+        }
+
+        async fn send_later(&mut self, payload: &Bytes, timestamp: u32) -> Result<(), ()> {
+            self.pcm_calls += 1;
+            tokio::task::yield_now().await;
+            match self.condition {
+                Condition::Sends | Condition::SocketFull | Condition::Renegotiated => {
+                    self.wire.send(timestamp, payload);
+                    Ok(())
+                }
+                Condition::TransmissionDisabled => Ok(()),
+                Condition::SendError => {
+                    self.wire.consume_without_sending();
+                    Err(())
+                }
+                Condition::LifetimeRetired => {
+                    self.wire.send(timestamp, payload);
+                    Err(())
+                }
+            }
+        }
+    }
+
+    /// The pump's G.711 branch for a run of frames: the clock first, then
+    /// the per-frame send; the pump stops at the first failure.
+    async fn pump(
+        sync_enabled: bool,
+        frames: &[(Bytes, u32, Condition)],
+    ) -> (Wire, Vec<Result<(), ()>>, usize, usize) {
+        let mut tx = SimTx {
+            sync_enabled,
+            condition: Condition::Sends,
+            wire: Wire::default(),
+            sync_handled: 0,
+            pcm_calls: 0,
+        };
+        let mut clock = OutboundRtpClock::default();
+        let mut outcomes = Vec::new();
+        for (payload, upstream_timestamp, condition) in frames {
+            tx.condition = *condition;
+            let timestamp =
+                advance_outbound_timestamp(&mut clock, payload.len(), *upstream_timestamp);
+            let outcome = send_encoded_g711_frame(&mut tx, payload, timestamp).await;
+            outcomes.push(outcome);
+            if outcome.is_err() {
+                break;
+            }
+        }
+        (tx.wire, outcomes, tx.sync_handled, tx.pcm_calls)
+    }
+
+    fn frame(index: u32) -> Bytes {
+        Bytes::from(
+            (0..160u32)
+                .map(|byte| (index * 31 + byte) as u8)
+                .collect::<Vec<u8>>(),
+        )
+    }
+
+    /// An AI turn: an utterance, a barge-in (the graph flushes what was
+    /// queued, so upstream time jumps), then a new utterance whose clip
+    /// restarts its own timestamps at zero.
+    fn interrupted_turn(conditions: &[(usize, Condition)]) -> Vec<(Bytes, u32, Condition)> {
+        let mut frames = Vec::new();
+        for index in 0..10u32 {
+            frames.push((frame(index), index * 160, Condition::Sends));
+        }
+        for index in 0..4u32 {
+            // Seven queued frames were flushed at the barge-in.
+            frames.push((frame(100 + index), (17 + index) * 160, Condition::Sends));
+        }
+        for index in 0..12u32 {
+            frames.push((frame(200 + index), index * 160, Condition::Sends));
+        }
+        for (position, condition) in conditions {
+            frames[*position].2 = *condition;
+        }
+        frames
+    }
+
+    #[test]
+    fn sync_send_outcomes_map_to_the_pcm_path_answers() {
+        let sent = || Ok::<_, ()>(Some(report(1, None)));
+        assert_eq!(classify_sync_send(sent(), || true), SyncTxOutcome::Handled);
+        assert_eq!(
+            classify_sync_send(sent(), || false),
+            SyncTxOutcome::Failed,
+            "the lifetime changed while the frame was dispatched"
+        );
+        assert_eq!(
+            classify_sync_send(Ok::<_, ()>(Some(RtpSendNowReport::default())), || true),
+            SyncTxOutcome::Deferred,
+            "would block: nothing consumed"
+        );
+        let consumed_failure = Ok::<_, ()>(Some(report(
+            0,
+            Some(rvoip_rtp_core::Error::IoError("refused".into())),
+        )));
+        assert_eq!(
+            classify_sync_send(consumed_failure, || panic!("not asked after a failure")),
+            SyncTxOutcome::Failed
+        );
+        assert_eq!(
+            classify_sync_send(Ok::<_, ()>(None), || true),
+            SyncTxOutcome::Handled
+        );
+        assert_eq!(
+            classify_sync_send(Ok::<_, ()>(None), || false),
+            SyncTxOutcome::Failed
+        );
+        assert_eq!(
+            classify_sync_send(
+                Err::<Option<RtpSendNowReport>, _>("retired generation"),
+                || { panic!("not asked before anything was consumed") }
+            ),
+            SyncTxOutcome::Deferred
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_tx_puts_the_v1_wire_through_an_interruption_and_every_fallback() {
+        let frames = interrupted_turn(&[
+            (3, Condition::SocketFull),
+            (4, Condition::SocketFull),
+            (11, Condition::Renegotiated),
+            (12, Condition::TransmissionDisabled),
+            (15, Condition::SocketFull),
+        ]);
+        let (v1_wire, v1_outcomes, v1_sync, v1_pcm) = pump(false, &frames).await;
+        let (v2_wire, v2_outcomes, v2_sync, v2_pcm) = pump(true, &frames).await;
+        assert_eq!(
+            v2_wire, v1_wire,
+            "same packets, sequence numbers and timestamps"
+        );
+        assert_eq!(v2_outcomes, v1_outcomes, "same per-frame answers");
+        assert_eq!(v1_outcomes.len(), frames.len());
+        assert_eq!(v1_sync, 0);
+        assert_eq!(v1_pcm, frames.len());
+        // v2: every frame but the deferred ones left synchronously.
+        assert_eq!(
+            v2_pcm, 4,
+            "two full sockets, one renegotiation, one more full socket"
+        );
+        assert_eq!(v2_sync, frames.len() - 4);
+        // The barge-in gap and the new clip's restarted timestamps reach the
+        // wire as the outbound clock maps them: contiguous sequence, one
+        // forward jump for the flushed frames, a fresh cadence afterwards.
+        // Frame 12 (dropped) puts nothing on the wire.
+        let timestamps: Vec<u32> = v1_wire.packets.iter().map(|packet| packet.1).collect();
+        assert_eq!(timestamps.len(), frames.len() - 1);
+        assert_eq!(
+            timestamps[9] + 160 * 8,
+            timestamps[10],
+            "flushed frames leave a gap"
+        );
+        assert_eq!(
+            timestamps[13] + 160,
+            timestamps[14],
+            "a restarted clip continues the cadence"
+        );
+        let sequences: Vec<u16> = v1_wire.packets.iter().map(|packet| packet.0).collect();
+        assert!(sequences
+            .windows(2)
+            .all(|pair| pair[1] == pair[0].wrapping_add(1)));
+    }
+
+    #[tokio::test]
+    async fn ai_tx_fails_where_v1_fails_with_the_same_sequence_consumed() {
+        for failure in [Condition::SendError, Condition::LifetimeRetired] {
+            let frames = interrupted_turn(&[(2, Condition::SocketFull), (6, failure)]);
+            let (v1_wire, v1_outcomes, _, _) = pump(false, &frames).await;
+            let (v2_wire, v2_outcomes, _, _) = pump(true, &frames).await;
+            assert_eq!(v2_wire, v1_wire, "{failure:?}");
+            assert_eq!(v2_outcomes, v1_outcomes, "{failure:?}");
+            assert_eq!(v1_outcomes.len(), 7, "the pump stops at the failed frame");
+            assert_eq!(v1_outcomes.last(), Some(&Err(())));
+            assert_eq!(
+                v1_wire.next_sequence, 7,
+                "the failed frame consumed its number"
+            );
+        }
+    }
+
+    #[test]
+    fn the_sync_path_exists_only_with_ai_tx() {
+        for config in [
+            MediaExecutorConfig::v1(),
+            MediaExecutorConfig::v2().with_ai_tx(false),
+            MediaExecutorConfig::v2()
+                .with_tx_handle_cache(false)
+                .with_tx_batch(false),
+        ] {
+            let _config = override_media_executor_config_on_this_thread(config);
+            assert!(OutboundSyncTx::new_if_enabled().is_none());
+        }
+        let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+        let sync = OutboundSyncTx::new_if_enabled().expect("on in v2");
+        assert!(
+            sync.fast.is_none(),
+            "resolved on the first frame, not before"
+        );
+    }
+}
+
+#[cfg(test)]
 mod receiver_ownership_tests {
     use super::*;
     use crate::api::unified::Config as ApiConfig;
+
+    #[test]
+    fn an_encoded_writer_excludes_other_producers_and_never_reopens() {
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(writer_is_available(&stream.inner));
+        let legacy = stream.inner.frames_out_tx.clone();
+        assert!(!writer_is_available(&stream.inner));
+        drop(legacy);
+        let peer = stream.inner.peer_out_tx.clone();
+        assert!(!writer_is_available(&stream.inner));
+        drop(peer);
+        assert!(writer_is_available(&stream.inner));
+        stream
+            .inner
+            .executor
+            .direct_writer_claimed
+            .store(true, Ordering::Release);
+        assert!(!writer_is_available(&stream.inner));
+        assert!(stream.inner.lifecycle.begin_binding());
+        assert!(stream.inner.lifecycle.mark_bound());
+        stream.activate_outbound_writes();
+        assert!(stream.try_frames_out().is_err());
+        assert!(stream.try_peer_frames_out().is_err());
+    }
+
+    #[test]
+    fn executor_seams_stay_closed_under_v1() {
+        let _v1 = rvoip_rtp_core::executor::override_media_executor_config_on_this_thread(
+            rvoip_rtp_core::executor::MediaExecutorConfig::v1(),
+        );
+        struct Sink;
+        impl InboundFrameSink for Sink {
+            fn on_frame(
+                &mut self,
+                _frame: rvoip_core::stream::InboundFrameView<'_>,
+            ) -> rvoip_core::stream::InboundFrameDelivery {
+                rvoip_core::stream::InboundFrameDelivery::Accepted
+            }
+        }
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.offer_inbound_frame_sink(Box::new(Sink)).is_err());
+        assert!(stream.try_take_encoded_g711_writer().unwrap().is_none());
+        assert!(stream.media_lane().is_none());
+        assert!(!stream
+            .inner
+            .executor
+            .direct_writer_claimed
+            .load(Ordering::Acquire));
+    }
 
     #[test]
     fn second_receiver_acquisition_is_a_typed_error() {
@@ -2497,7 +3846,7 @@ mod receiver_ownership_tests {
         assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Dormant);
         assert!(stream
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none());
@@ -2530,7 +3879,7 @@ mod receiver_ownership_tests {
         );
         assert!(stream
             .inner
-            .driver_abort
+            .driver
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none());
@@ -2578,10 +3927,9 @@ mod receiver_ownership_tests {
             let abort = driver.abort_handle();
             *stream
                 .inner
-                .driver_abort
+                .driver
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
-            drop(driver);
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
 
             drop(stream);
             tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -2675,6 +4023,83 @@ mod receiver_ownership_tests {
         }
     }
 
+    /// `close` awaits the driver's end instead of polling `is_finished` in a
+    /// yield loop. The driver here, a stand-in for one on another runtime,
+    /// ends 50 ms after cancellation; the close future is polled a handful of
+    /// times in that window, not thousands.
+    #[tokio::test]
+    async fn close_awaits_the_driver_without_spinning() {
+        use std::future::Future as _;
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.inner.lifecycle.begin_binding());
+        let mut cancelled = stream.inner.cancel.subscribe();
+        let driver = tokio::spawn(async move {
+            wait_for_media_cancel(&mut cancelled).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+        *stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        let started = tokio::time::Instant::now();
+        let mut close = Box::pin(Arc::clone(&stream).close());
+        let mut polls = 0u32;
+        std::future::poll_fn(|cx| {
+            polls += 1;
+            close.as_mut().poll(cx)
+        })
+        .await
+        .expect("stream close");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(50),
+            "close waited for the driver"
+        );
+        assert!(
+            polls <= 8,
+            "close was polled {polls} times: it must await, not spin"
+        );
+        assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+        assert!(stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_none());
+    }
+
+    /// A cancelled `close` leaves the driver in the stream's slot, where
+    /// `Drop` can still abort it and a later `close` still awaits it.
+    #[tokio::test]
+    async fn cancelled_close_keeps_the_driver_owned() {
+        let stream = SipMediaStream::dormant(Direction::Outbound);
+        assert!(stream.inner.lifecycle.begin_binding());
+        let driver = tokio::spawn(std::future::pending::<()>());
+        let abort = driver.abort_handle();
+        *stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            Arc::clone(&stream).close()
+        )
+        .await
+        .is_err());
+        assert!(!abort.is_finished());
+        assert!(stream
+            .inner
+            .driver
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some());
+        abort.abort();
+        Arc::clone(&stream).close().await.expect("stream close");
+        assert!(abort.is_finished());
+        assert_eq!(stream.inner.lifecycle.current(), SipMediaLifecycle::Closed);
+    }
+
     #[tokio::test]
     async fn closed_is_published_only_after_driver_termination() {
         let stream = SipMediaStream::dormant(Direction::Outbound);
@@ -2683,10 +4108,9 @@ mod receiver_ownership_tests {
         let abort = driver.abort_handle();
         *stream
             .inner
-            .driver_abort
+            .driver
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(abort.clone());
-        drop(driver);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(driver);
 
         let closing_stream = Arc::clone(&stream);
         let close = tokio::spawn(async move { closing_stream.close().await });

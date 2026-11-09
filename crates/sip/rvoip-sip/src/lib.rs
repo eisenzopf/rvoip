@@ -501,6 +501,7 @@ pub mod auth;
 pub mod call_setup_diag;
 #[doc(hidden)]
 pub mod cleanup_diag;
+mod orphan_sweep;
 mod retained_tasks;
 #[doc(hidden)]
 pub mod session_lifecycle;
@@ -622,9 +623,10 @@ pub use api::lifecycle::{
 
 // Configuration & registration
 pub use api::unified::{
-    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig, Registration, RelUsage,
-    RtpSessionBufferConfig, RtpTransportBufferConfig, SipNatConfig, SipRuntimeConfig,
-    SymmetricRtpPolicy,
+    AudioSource, BridgeError, BridgeHandle, MediaExecutorConfig, MediaExecutorMode, MediaLanes,
+    MediaRuntimeConfig, MediaSessionControllerConfig, Registration, RelUsage,
+    RtpSessionBufferConfig, RtpTransportBufferConfig, SessionCleanupConfig, SipNatConfig,
+    SipRuntimeConfig, SymmetricRtpPolicy,
 };
 pub use api::{
     Config, DtlsSetupRole, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus,

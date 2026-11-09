@@ -771,7 +771,16 @@ pub enum RejectReason {
     Forbidden,
     NotAcceptable,
     ServerError,
-    Custom { code: u16, phrase: String },
+    Custom {
+        code: u16,
+        phrase: String,
+    },
+    /// The server is temporarily unable to take new calls (SIP `503 Service
+    /// Unavailable`, RFC 3261 §21.5.4), with an optional `Retry-After` in
+    /// seconds (§20.33). Transports without such a header ignore it.
+    ServiceUnavailable {
+        retry_after_secs: Option<u32>,
+    },
 }
 
 impl fmt::Debug for RejectReason {
@@ -788,6 +797,10 @@ impl fmt::Debug for RejectReason {
                 .field("code", code)
                 .field("phrase_present", &!phrase.is_empty())
                 .field("phrase_bytes", &phrase.len())
+                .finish(),
+            Self::ServiceUnavailable { retry_after_secs } => formatter
+                .debug_struct("ServiceUnavailable")
+                .field("retry_after_secs", retry_after_secs)
                 .finish(),
         }
     }
@@ -1482,6 +1495,28 @@ mod tests {
         assert!(rendered.contains("503"));
         assert!(rendered.contains("[redacted]"));
         assert!(rendered.contains("attempt_id_present"));
+    }
+
+    #[test]
+    fn service_unavailable_rejection_renders_its_retry_after() {
+        assert_eq!(
+            format!(
+                "{:?}",
+                RejectReason::ServiceUnavailable {
+                    retry_after_secs: Some(17)
+                }
+            ),
+            "ServiceUnavailable { retry_after_secs: Some(17) }"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                RejectReason::ServiceUnavailable {
+                    retry_after_secs: None
+                }
+            ),
+            "ServiceUnavailable { retry_after_secs: None }"
+        );
     }
 
     #[test]

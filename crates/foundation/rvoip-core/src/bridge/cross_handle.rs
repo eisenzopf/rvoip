@@ -1,10 +1,11 @@
 //! `CrossBridgeHandle` — the cross-transport sibling of the SIP-fast-path
 //! `BridgeHandle` re-exported in `super`.
 //!
-//! Owns the abort handles for the two frame-pump tasks that copy media
+//! Owns the join handles for the two frame-pump tasks that copy media
 //! between the bridged Connections. `Drop` aborts both pumps so an
 //! `unbridge_connections` call (or the Orchestrator going away) tears
-//! the bridge down promptly.
+//! the bridge down promptly; [`CrossBridgeHandle::stop`] aborts them and
+//! awaits their exit.
 //!
 //! Gap plan §4.2 v1 punch list — also holds the per-direction swap
 //! channels used by `Self::swap_transcoders` to hot-swap the pump
@@ -14,7 +15,7 @@
 
 use chrono::{DateTime, Utc};
 use tokio::sync::mpsc;
-use tokio::task::AbortHandle;
+use tokio::task::JoinHandle;
 
 use super::frame_pump::TranscoderSwap;
 use super::resolve_payload_type;
@@ -29,8 +30,10 @@ use rvoip_media_core::codec::transcoding::Transcoder;
 
 enum CrossBridgeBackend {
     Pumps {
-        a_to_b: AbortHandle,
-        b_to_a: AbortHandle,
+        /// `None` once the pump's exit was awaited: a `JoinHandle` must not
+        /// be polled again after it completed.
+        a_to_b: Option<JoinHandle<()>>,
+        b_to_a: Option<JoinHandle<()>>,
         swap_a_to_b: Option<mpsc::Sender<TranscoderSwap>>,
         swap_b_to_a: Option<mpsc::Sender<TranscoderSwap>>,
     },
@@ -139,6 +142,15 @@ impl CrossBridgeSwapController {
     }
 }
 
+/// Await one aborted pump's exit, clearing its slot only once it completed
+/// so a cancelled wait can be resumed.
+async fn join_pump(slot: &mut Option<JoinHandle<()>>) {
+    if let Some(pump) = slot.as_mut() {
+        let _ = pump.await;
+        *slot = None;
+    }
+}
+
 fn transcoder_swap(from_pt: u8, to_pt: u8) -> TranscoderSwap {
     TranscoderSwap {
         new_transcoder: (from_pt != to_pt).then(Transcoder::new),
@@ -165,12 +177,14 @@ impl CrossBridgeHandle {
         self.peer_ticket.clone()
     }
 
+    /// Build a bridge over two frame pumps, taking ownership of the
+    /// `JoinHandle`s [`super::frame_pump::spawn_pump`] returns.
     pub fn new(
         id: BridgeId,
         a: ConnectionId,
         b: ConnectionId,
-        a_to_b: AbortHandle,
-        b_to_a: AbortHandle,
+        a_to_b: JoinHandle<()>,
+        b_to_a: JoinHandle<()>,
     ) -> Self {
         Self {
             id,
@@ -180,8 +194,8 @@ impl CrossBridgeHandle {
             peer_ticket: None,
             peer_transport_fenced: false,
             backend: CrossBridgeBackend::Pumps {
-                a_to_b,
-                b_to_a,
+                a_to_b: Some(a_to_b),
+                b_to_a: Some(b_to_a),
                 swap_a_to_b: None,
                 swap_b_to_a: None,
             },
@@ -195,8 +209,8 @@ impl CrossBridgeHandle {
         id: BridgeId,
         a: ConnectionId,
         b: ConnectionId,
-        a_to_b: AbortHandle,
-        b_to_a: AbortHandle,
+        a_to_b: JoinHandle<()>,
+        b_to_a: JoinHandle<()>,
         swap_a_to_b: mpsc::Sender<TranscoderSwap>,
         swap_b_to_a: mpsc::Sender<TranscoderSwap>,
     ) -> Self {
@@ -208,8 +222,8 @@ impl CrossBridgeHandle {
             peer_ticket: None,
             peer_transport_fenced: false,
             backend: CrossBridgeBackend::Pumps {
-                a_to_b,
-                b_to_a,
+                a_to_b: Some(a_to_b),
+                b_to_a: Some(b_to_a),
                 swap_a_to_b: Some(swap_a_to_b),
                 swap_b_to_a: Some(swap_b_to_a),
             },
@@ -436,12 +450,14 @@ impl CrossBridgeHandle {
         }
         match &mut self.backend {
             CrossBridgeBackend::Pumps { a_to_b, b_to_a, .. } => {
-                a_to_b.abort();
-                b_to_a.abort();
+                for pump in [&*a_to_b, &*b_to_a].into_iter().flatten() {
+                    pump.abort();
+                }
+                // Await both exits instead of spinning on `is_finished`; a
+                // slot is cleared only after its pump's exit was observed.
                 tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    while !a_to_b.is_finished() || !b_to_a.is_finished() {
-                        tokio::task::yield_now().await;
-                    }
+                    join_pump(a_to_b).await;
+                    join_pump(b_to_a).await;
                 })
                 .await
                 .map_err(|_| RvoipError::InvalidState("bridge pump shutdown timed out"))?;
@@ -539,8 +555,9 @@ impl Drop for CrossBridgeHandle {
         }
         match &mut self.backend {
             CrossBridgeBackend::Pumps { a_to_b, b_to_a, .. } => {
-                a_to_b.abort();
-                b_to_a.abort();
+                for pump in [&*a_to_b, &*b_to_a].into_iter().flatten() {
+                    pump.abort();
+                }
             }
             CrossBridgeBackend::ManagedMediaGraphs { a_to_b, b_to_a, .. } => {
                 a_to_b.take();
@@ -661,5 +678,72 @@ mod tests {
             assert_eq!(snapshot.sinks.len(), 1);
             assert_eq!(snapshot.sinks[0].target_payload_type, expected_target_pt);
         }
+    }
+}
+
+#[cfg(test)]
+mod pump_join_tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    /// Counts how often the wrapped future is polled.
+    struct Polls<F> {
+        inner: Pin<Box<F>>,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl<F: Future> Future for Polls<F> {
+        type Output = F::Output;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+            self.polls.fetch_add(1, Ordering::Relaxed);
+            self.inner.as_mut().poll(cx)
+        }
+    }
+
+    /// `stop` awaits the pumps' exit instead of spinning: with the pumps'
+    /// runtime blocked for 60 ms, it is polled a handful of times (its first
+    /// poll and the wake-ups when a pump exits), where a `yield_now` loop is
+    /// polled thousands of times. A second `stop` is a no-op.
+    #[tokio::test]
+    async fn pump_bridge_stop_awaits_pump_exit_without_spinning() {
+        let pump_runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("pump runtime");
+        let a_to_b = pump_runtime.spawn(std::future::pending::<()>());
+        let b_to_a = pump_runtime.spawn(std::future::pending::<()>());
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        pump_runtime.spawn(async move {
+            blocked_tx.send(()).expect("signal");
+            std::thread::sleep(std::time::Duration::from_millis(60));
+        });
+        blocked_rx.recv().expect("pump runtime is blocked");
+        let mut handle = CrossBridgeHandle::new(
+            BridgeId::new(),
+            ConnectionId::new(),
+            ConnectionId::new(),
+            a_to_b,
+            b_to_a,
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let stop = Polls {
+            inner: Box::pin(handle.stop()),
+            polls: Arc::clone(&polls),
+        };
+        stop.await.expect("pumps stop");
+        let polls = polls.load(Ordering::Relaxed);
+        assert!(
+            polls <= 16,
+            "stop was polled {polls} times while the pumps' runtime was busy"
+        );
+        handle.stop().await.expect("a second stop is a no-op");
+        drop(handle);
+        pump_runtime.shutdown_background();
     }
 }

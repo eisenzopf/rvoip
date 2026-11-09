@@ -759,6 +759,11 @@ impl DerefMut for AdmissionIndex {
 #[derive(Debug)]
 struct CellState {
     phase: SessionPhase,
+    /// Set (never cleared) the first time `phase` leaves `Active`. A lifetime
+    /// never returns to `Active`, so a TX path cached for this lifetime can
+    /// check "still current" with one atomic load instead of a `cells`
+    /// lookup and this cell's mutex (see [`AuthorityLiveness`]).
+    left_active: Arc<AtomicBool>,
     active_permit: Option<OwnedSemaphorePermit>,
     next_operation: u64,
     next_commit_revision: u64,
@@ -768,6 +773,34 @@ struct CellState {
     sticky_failure: Option<QuarantineReason>,
     teardown: Option<Arc<TeardownControl>>,
     teardown_driver_complete: bool,
+}
+
+impl CellState {
+    /// Every phase transition goes through here so `left_active` follows.
+    fn set_phase(&mut self, phase: SessionPhase) {
+        if !matches!(phase, SessionPhase::Active) {
+            self.left_active.store(true, Ordering::Release);
+        }
+        self.phase = phase;
+    }
+}
+
+/// A cheap, generation-exact "is this lifetime still current" check for a
+/// handle resolved once (media executor v2's cached TX paths). `is_current`
+/// answers what `SessionLeaseAuthority::is_current` answered for the same
+/// key while the lifetime stays `Active` and the authority healthy; it turns
+/// false, for good, once either changes.
+#[derive(Clone)]
+pub(crate) struct AuthorityLiveness {
+    authority: Arc<SessionLeaseAuthority>,
+    left_active: Arc<AtomicBool>,
+}
+
+impl AuthorityLiveness {
+    #[inline]
+    pub(crate) fn is_current(&self) -> bool {
+        !self.left_active.load(Ordering::Acquire) && self.authority.fatal_reason().is_none()
+    }
 }
 
 #[derive(Debug)]
@@ -789,6 +822,7 @@ impl SessionCell {
         Self {
             state: StdMutex::new(CellState {
                 phase: SessionPhase::Active,
+                left_active: Arc::new(AtomicBool::new(false)),
                 active_permit: Some(active_permit),
                 next_operation: 1,
                 next_commit_revision: 1,
@@ -2293,6 +2327,22 @@ impl SessionLeaseAuthority {
         true
     }
 
+    /// Resolve [`AuthorityLiveness`] for `key` once, while it is current
+    /// (`None` otherwise). Control-plane rate (once per TX path resolution).
+    pub(crate) fn liveness(self: &Arc<Self>, key: &SessionKey) -> Option<AuthorityLiveness> {
+        let cell = self.cells.get(key).map(|cell| Arc::clone(cell.value()))?;
+        let state = self.lock_cell(&cell).ok()?;
+        if !matches!(state.phase, SessionPhase::Active) {
+            return None;
+        }
+        let liveness = AuthorityLiveness {
+            authority: Arc::clone(self),
+            left_active: Arc::clone(&state.left_active),
+        };
+        drop(state);
+        liveness.is_current().then_some(liveness)
+    }
+
     pub(crate) fn is_current(&self, key: &SessionKey) -> bool {
         let Some(cell) = self.cells.get(key).map(|cell| Arc::clone(cell.value())) else {
             return false;
@@ -2379,7 +2429,7 @@ impl SessionLeaseAuthority {
         {
             return Err(SessionAdmissionError::StaleGeneration);
         }
-        state.phase = SessionPhase::Retired { retired_at: now };
+        state.set_phase(SessionPhase::Retired { retired_at: now });
         state.active_permit.take();
         drop(state);
         self.current
@@ -2656,7 +2706,7 @@ impl SessionLeaseAuthority {
                 state.sticky_failure,
                 QuarantineReason::ResourceDescriptorMismatch,
             ));
-            state.phase = SessionPhase::Quarantined { since: now };
+            state.set_phase(SessionPhase::Quarantined { since: now });
             self.block_non_reusable_locked(&mut index, key);
             drop(state);
             drop(index);
@@ -2753,7 +2803,7 @@ impl SessionLeaseAuthority {
             QuarantineReason::ResourceInstallOrphaned,
         );
         state.sticky_failure = Some(reason);
-        state.phase = SessionPhase::Quarantined { since: now };
+        state.set_phase(SessionPhase::Quarantined { since: now });
         self.block_non_reusable_locked(&mut index, key);
         if let Some(control) = state.teardown.as_ref() {
             control
@@ -3355,7 +3405,7 @@ impl SessionLeaseAuthority {
         };
         let reason = merge_quarantine_reason(state.sticky_failure, reason);
         state.sticky_failure = Some(reason);
-        state.phase = SessionPhase::Quarantined { since: now };
+        state.set_phase(SessionPhase::Quarantined { since: now });
         self.block_non_reusable_locked(&mut index, key);
         if let Some(control) = state.teardown.as_ref() {
             control
@@ -3409,7 +3459,7 @@ impl SessionLeaseAuthority {
         }
         let reason = merge_quarantine_reason(state.sticky_failure, reason);
         state.sticky_failure = Some(reason);
-        state.phase = SessionPhase::Quarantined { since: now };
+        state.set_phase(SessionPhase::Quarantined { since: now });
         self.block_non_reusable_locked(&mut index, key);
         if let Some(control) = state.teardown.as_ref() {
             control
@@ -3815,7 +3865,7 @@ impl SessionLeaseAuthority {
             return false;
         }
         state.sticky_failure = Some(reason);
-        state.phase = SessionPhase::Quarantined { since: now };
+        state.set_phase(SessionPhase::Quarantined { since: now });
         self.block_non_reusable_locked(&mut index, key);
         if let Some(control) = state.teardown.as_ref() {
             control
@@ -3855,7 +3905,7 @@ impl SessionLeaseAuthority {
         }
         let reason = merge_quarantine_reason(state.sticky_failure, proposed);
         state.sticky_failure = Some(reason);
-        state.phase = SessionPhase::Quarantined { since: now };
+        state.set_phase(SessionPhase::Quarantined { since: now });
         state.teardown_driver_complete = true;
         self.block_non_reusable_locked(&mut index, key);
         if let Some(control) = state.teardown.as_ref() {
@@ -3939,7 +3989,7 @@ impl SessionLeaseAuthority {
         state.teardown = Some(Arc::clone(&control));
         let drive = match state.phase {
             SessionPhase::Active => {
-                state.phase = SessionPhase::Quiescing { deadline };
+                state.set_phase(SessionPhase::Quiescing { deadline });
                 self.block_non_reusable_locked(&mut index, key);
                 true
             }
@@ -4056,7 +4106,7 @@ impl SessionLeaseAuthority {
                     }
                 }
                 if state.operations.is_empty() {
-                    state.phase = SessionPhase::Releasing;
+                    state.set_phase(SessionPhase::Releasing);
                     break;
                 }
             }
@@ -4125,7 +4175,7 @@ impl SessionLeaseAuthority {
             self.latch_fatal(AuthorityFatalReason::InvariantViolation);
             return;
         }
-        state.phase = SessionPhase::Retired { retired_at };
+        state.set_phase(SessionPhase::Retired { retired_at });
         state.active_permit.take();
         state.teardown_driver_complete = true;
         self.current
@@ -4553,6 +4603,37 @@ mod tests {
     fn take_reuse_deadline_inspections(authority: &SessionLeaseAuthority) -> u64 {
         let mut index = authority.lock_index().expect("admission index");
         std::mem::take(&mut index.reuse_deadline_inspections)
+    }
+
+    /// `AuthorityLiveness` answers `is_current` for its key with atomic
+    /// loads, and closes for good when the lifetime leaves `Active` or the
+    /// authority latches fatal.
+    #[tokio::test]
+    async fn authority_liveness_tracks_is_current_and_never_reopens() {
+        let authority = SessionLeaseAuthority::new();
+        let lease = authority
+            .admit(SessionId::from("liveness"))
+            .expect("admission");
+        let key = lease.key().clone();
+        let liveness = authority
+            .liveness(&key)
+            .expect("an active lifetime is live");
+        assert!(liveness.is_current() && authority.is_current(&key));
+        authority.retire(&key).expect("retirement");
+        assert!(!authority.is_current(&key));
+        assert!(!liveness.is_current(), "leaving Active closes the fence");
+        assert!(authority.liveness(&key).is_none());
+
+        let other = SessionLeaseAuthority::new();
+        let lease = other.admit(SessionId::from("fatal")).expect("admission");
+        let key = lease.key().clone();
+        let liveness = other.liveness(&key).expect("live");
+        let _ = other.latch_fatal(AuthorityFatalReason::InvariantViolation);
+        assert!(!other.is_current(&key));
+        assert!(
+            !liveness.is_current(),
+            "a fatal authority closes every fence"
+        );
     }
 
     #[test]
