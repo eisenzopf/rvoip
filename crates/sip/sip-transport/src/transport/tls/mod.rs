@@ -3222,8 +3222,17 @@ mod auth_boundary_tests {
             tokio::join!(client.connect(destination), client.connect(destination));
         assert!(first.is_ok(), "first dial failed: {first:?}");
         assert!(second.is_ok(), "second dial failed: {second:?}");
-        tokio::task::yield_now().await;
         assert_eq!(client.connections.lock().await.len(), 1);
+        // The client's handshake can finish before the server's accept task
+        // records the connection; wait for it rather than for one yield.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while server.connections.lock().await.is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "server never recorded the accepted connection"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert_eq!(server.connections.lock().await.len(), 1);
 
         client.close().await.unwrap();
