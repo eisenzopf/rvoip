@@ -130,6 +130,7 @@ impl SimplifiedTransactionCore {
                             }
                         }
                     }
+                    TransportEvent::MalformedRequest { .. } => {}
                     TransportEvent::Error { error } => {
                         // Convert to a transaction event
                         let tx_event = TransactionEvent::Error { error };

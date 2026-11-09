@@ -13,7 +13,7 @@ use super::common_params::unquote_string; // Import helper
 use super::quoted::quoted_string;
 use super::separators::{laquot, raquot}; // Use the proper RFC-defined LAQUOT and RAQUOT
 use super::token::token;
-use super::uri::parse_uri; // Removed parse_absolute_uri for now
+use super::uri::sip_or_absolute_uri;
 use super::whitespace::lws;
 use super::ParseResult;
 
@@ -35,17 +35,14 @@ fn display_name(input: &[u8]) -> ParseResult<'_, String> {
     ))(input)
 }
 
-// addr-spec = SIP-URI / SIPS-URI / absoluteURI
-// Modified: For headers like From/To/Contact, only parse SIP/SIPS URIs for now.
-// Returns Uri struct directly.
+/// addr-spec = SIP-URI / SIPS-URI / absoluteURI (RFC 3261 §25.1), all of
+/// `input`.
 pub fn addr_spec(input: &[u8]) -> ParseResult<'_, Uri> {
-    parse_uri(input)
-    // If absoluteURI support is needed later, this needs adjustment, perhaps returning an enum.
+    sip_or_absolute_uri(input)
 }
 
-/// Parse name-addr format (SIP RFC 3261 section 25.1)
-/// name-addr = [ display-name ] LAQUOT addr-spec RAQUOT
-/// where LAQUOT = SWS "<" SWS and RAQUOT = SWS ">" SWS
+/// name-addr = [ display-name ] LAQUOT addr-spec RAQUOT, with
+/// LAQUOT = SWS "<" and RAQUOT = ">" SWS: no whitespace inside the brackets.
 pub fn name_addr(input: &[u8]) -> ParseResult<'_, Address> {
     // Parse display name followed by optional whitespace
     let (input, display_opt) = opt(terminated(display_name, opt(lws)))(input)?;
@@ -58,12 +55,10 @@ pub fn name_addr(input: &[u8]) -> ParseResult<'_, Address> {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
     })?;
 
-    // Extract just the URI part (without the closing bracket)
+    // Everything between the brackets is the addr-spec.
     let uri_part = &input[..closing_bracket_pos];
     let input_after_uri = &input[closing_bracket_pos..];
-
-    // Parse the URI
-    let (_, uri) = parse_uri(uri_part)?;
+    let (_, uri) = addr_spec(uri_part)?;
 
     // Parse the closing angle bracket
     let (input, _) = raquot(input_after_uri)?;
@@ -78,13 +73,34 @@ pub fn name_addr(input: &[u8]) -> ParseResult<'_, Address> {
     ))
 }
 
-// Helper to parse either name-addr or addr-spec, used by From/To/etc.
-// Returns Address struct (params added by caller)
+/// An addr-spec used without angle brackets in a header field value.
+///
+/// RFC 3261 §20: in that form, semicolon-delimited parameters are header
+/// parameters, not URI parameters, and a URI containing a comma, question
+/// mark or semicolon must be in name-addr form. So the URI ends at the first
+/// `;`, `,` or whitespace, and a URI with headers (`?`) is rejected.
+fn header_addr_spec(input: &[u8]) -> ParseResult<'_, Uri> {
+    let end = input
+        .iter()
+        .position(|&b| matches!(b, b';' | b',' | b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(input.len());
+    let (uri_part, rest) = input.split_at(end);
+    let (_, uri) = addr_spec(uri_part)?;
+    if !uri.headers.is_empty() {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            uri_part,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+    Ok((rest, uri))
+}
+
+/// name-addr / addr-spec as used by From, To, Contact and similar header
+/// fields. The caller parses the header parameters that follow.
 pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<'_, Address> {
     alt((
-        name_addr, // Try name-addr first (<> required)
-        // If just addr-spec (URI directly), map it into an Address struct
-        map(addr_spec, |uri| Address {
+        name_addr,
+        map(header_addr_spec, |uri| Address {
             display_name: None,
             uri,
             params: Vec::new(),
@@ -95,6 +111,7 @@ pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<'_, Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::uri::parse_uri;
 
     use crate::types::param::Param;
     use crate::types::uri::Host;
@@ -290,15 +307,13 @@ mod tests {
         assert_eq!(addr1.display_name, None);
         assert_eq!(addr1.uri.scheme, Scheme::Sip);
 
-        // 2. addr-spec with parameters
+        // 2. addr-spec followed by parameters: without angle brackets they are
+        // header parameters (RFC 3261 §20), left for the header's parser.
         let (rem2, addr2) = name_addr_or_addr_spec(b"sip:bob@biloxi.com;transport=udp").unwrap();
-        assert!(rem2.is_empty());
+        assert_eq!(rem2, b";transport=udp");
         assert_eq!(addr2.display_name, None);
         assert_eq!(addr2.uri.scheme, Scheme::Sip);
-        assert!(addr2
-            .uri
-            .parameters
-            .contains(&Param::Transport("udp".to_string())));
+        assert!(addr2.uri.parameters.is_empty());
 
         // 3. name-addr (with angle brackets, no display name)
         let (rem3, addr3) = name_addr_or_addr_spec(b"<sip:carol@chicago.com>").unwrap();

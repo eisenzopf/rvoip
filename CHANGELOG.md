@@ -802,6 +802,14 @@ outcome unchanged, and add no configuration.
   RUSTSEC-2026-0387 (`crypto-bigint` 0.5, transitive via the RustCrypto
   elliptic-curve 0.13 stack) is accepted in `deny.toml` until the
   elliptic-curve 0.14 upgrade, since its fix ships only in 0.7.6.
+- RUSTSEC-2026-0459 (SQLite before 3.54 can return uninitialized page-cache
+  memory for a crafted database and `-wal` pair) is accepted in `deny.toml`
+  and the beta gate's `cargo audit`. It reaches rvoip through
+  `libsqlite3-sys` 0.30, bundled by `sqlx-sqlite` in `rvoip-users-core`. The
+  fixed `libsqlite3-sys` 0.39 is outside every sqlx release's range (0.9.0
+  caps it below 0.38 and needs Rust 1.94), and exposure needs an
+  attacker-written database file plus `-wal`; users-core opens only its own
+  configured database. Revisit when sqlx allows the fixed line.
 - `rvoip-rtp-core` now requires tokio 1.41 or later
   (`RuntimeMetrics::global_queue_depth`, #356).
 - The orphan-sweep TTL test and the shared setup-teardown scheduler test no

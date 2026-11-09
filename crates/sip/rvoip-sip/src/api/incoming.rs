@@ -319,6 +319,44 @@ impl IncomingCall {
         self
     }
 
+    /// Construct the `IncomingCall` for an [`Event::IncomingCall`] received on
+    /// the exact control stream. Retains the parsed inbound INVITE and its
+    /// transport context from the coordinator's pending bundle, so
+    /// [`Self::raw_request`] and header lookups see the wire request. Falls
+    /// back to the bare shape when no bundle exists (synthesized calls).
+    pub(crate) fn from_event_captured(
+        call_id: CallId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        coordinator: Arc<UnifiedCoordinator>,
+        lifecycle_handle: Option<SessionRegistryHandle>,
+    ) -> Self {
+        let pending = lifecycle_handle
+            .as_ref()
+            .and_then(|handle| coordinator.pending_incoming_bundle_for_handle_exact(handle));
+        let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+        let transport = pending.and_then(|bundle| bundle.transport);
+        match parsed {
+            Some(req) => Self::with_request_captured(
+                call_id,
+                from,
+                to,
+                sdp,
+                coordinator,
+                req,
+                lifecycle_handle,
+            ),
+            None => Self::new_captured(call_id, from, to, sdp, coordinator, lifecycle_handle),
+        }
+        .with_transport_context(
+            transport
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+        )
+    }
+
     /// Transport context used by auth policy decisions.
     pub fn transport_security_context(&self) -> &crate::auth::SipTransportSecurityContext {
         &self.transport

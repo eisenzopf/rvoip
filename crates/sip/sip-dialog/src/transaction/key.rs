@@ -94,6 +94,75 @@ pub struct TransactionKey {
     pub is_server: bool,
 }
 
+/// The magic cookie that starts every RFC 3261 branch (RFC 3261 §8.1.1.7).
+pub const RFC3261_BRANCH_MAGIC_COOKIE: &str = "z9hG4bK";
+
+/// Prefix of the identifier of an RFC 2543 server transaction. It contains
+/// ':', which a branch (a token) cannot, so it never equals a received branch.
+const RFC2543_TRANSACTION_PREFIX: &str = "rfc2543:";
+
+/// The identifier of the server transaction a request belongs to (RFC 3261
+/// §17.2.3).
+///
+/// A request whose top Via branch starts with the magic cookie is identified
+/// by that branch. Any other request comes from an RFC 2543 client: it matches
+/// a transaction when its Request-URI, To tag, From tag, Call-ID, CSeq number
+/// and top Via match, which this identifier encodes (the CSeq method is the
+/// transaction key's own method, so CANCEL and ACK find the INVITE through
+/// `with_method`). `None` without a top Via.
+pub fn server_transaction_branch(request: &Request) -> Option<String> {
+    let via = request.first_via()?;
+    let top = via.0.first()?;
+    match top.branch() {
+        Some(branch) if branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE) => Some(branch.to_string()),
+        _ => Some(rfc2543_transaction_identifier(
+            request,
+            top,
+            to_tag(request),
+        )),
+    }
+}
+
+/// For an ACK from an RFC 2543 client: the identifier of the INVITE it
+/// acknowledges when that INVITE carried no To tag. The ACK of a non-2xx final
+/// response carries the To tag of the response, which the initial INVITE did
+/// not have (RFC 3261 §17.2.3). `None` for an RFC 3261 ACK or an ACK without a
+/// To tag.
+pub fn rfc2543_ack_invite_branch_without_to_tag(request: &Request) -> Option<String> {
+    let via = request.first_via()?;
+    let top = via.0.first()?;
+    if top
+        .branch()
+        .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE))
+    {
+        return None;
+    }
+    to_tag(request)?;
+    Some(rfc2543_transaction_identifier(request, top, None))
+}
+
+fn to_tag(request: &Request) -> Option<&str> {
+    request.to().and_then(|to| to.tag())
+}
+
+fn rfc2543_transaction_identifier(
+    request: &Request,
+    top_via: &rvoip_sip_core::types::via::ViaHeader,
+    to_tag: Option<&str>,
+) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    request.uri().to_string().hash(&mut hasher);
+    to_tag.hash(&mut hasher);
+    request.from().and_then(|from| from.tag()).hash(&mut hasher);
+    request
+        .call_id()
+        .map(|call_id| call_id.value())
+        .hash(&mut hasher);
+    request.cseq().map(|cseq| cseq.sequence()).hash(&mut hasher);
+    top_via.to_string().hash(&mut hasher);
+    format!("{RFC2543_TRANSACTION_PREFIX}{:016x}", hasher.finish())
+}
+
 impl TransactionKey {
     /// Creates a new `TransactionKey`.
     ///
@@ -124,19 +193,8 @@ impl TransactionKey {
     /// `Some(TransactionKey)` if the top Via header and its branch parameter are present.
     /// `None` otherwise (e.g., malformed request, no Via, or Via without a branch).
     pub fn from_request(request: &Request) -> Option<Self> {
-        if let Some(via_header) = request.typed_header::<Via>() {
-            if let Some(first_via_value) = via_header.0.first() {
-                if let Some(branch_param) = first_via_value.branch() {
-                    // Ensure branch is not empty, as per some interpretations of RFC for keying.
-                    if branch_param.is_empty() {
-                        return None;
-                    }
-                    let method = request.method();
-                    return Some(Self::new(branch_param.to_string(), method.clone(), true));
-                }
-            }
-        }
-        None
+        let branch = server_transaction_branch(request)?;
+        Some(Self::new(branch, request.method(), true))
     }
 
     /// Attempts to create a `TransactionKey` for a client transaction from an outgoing response.
@@ -297,18 +355,19 @@ impl FromStr for TransactionKey {
                 parts_str
             };
 
-        // Split by colons
-        let parts: Vec<&str> = parts_str.split(':').collect();
-        if parts.len() != 3 {
+        // Split the method and side off the end: neither contains ':', but
+        // the identifier of an RFC 2543 transaction does.
+        let parts: Vec<&str> = parts_str.rsplitn(3, ':').collect();
+        if parts.len() != 3 || parts[2].is_empty() {
             return Err("invalid transaction key format".to_string());
         }
 
-        let branch = parts[0].to_string();
+        let branch = parts[2].to_string();
         let method = match Method::from_str(parts[1]) {
             Ok(m) => m,
             Err(_) => return Err("invalid transaction key method".to_string()),
         };
-        let is_server = match parts[2] {
+        let is_server = match parts[0] {
             "server" => true,
             "client" => false,
             _ => return Err("invalid transaction key side".to_string()),
@@ -410,9 +469,9 @@ mod tests {
 
     #[test]
     fn test_from_request_success() {
-        let req = create_test_request_custom(Method::Invite, Some("branch2"), true);
+        let req = create_test_request_custom(Method::Invite, Some("z9hG4bKbranch2"), true);
         let key = TransactionKey::from_request(&req).unwrap();
-        assert_eq!(key.branch(), "branch2");
+        assert_eq!(key.branch(), "z9hG4bKbranch2");
         assert_eq!(*key.method(), Method::Invite);
         assert!(key.is_server());
     }
@@ -423,16 +482,33 @@ mod tests {
         assert!(TransactionKey::from_request(&req).is_none());
     }
 
+    /// A request without the magic cookie comes from an RFC 2543 client and
+    /// is matched with the RFC 2543 rules (RFC 3261 §17.2.3).
     #[test]
-    fn test_from_request_via_no_branch() {
-        let req = create_test_request_custom(Method::Invite, Some(""), true);
-        assert!(TransactionKey::from_request(&req).is_none());
-    }
+    fn test_from_request_rfc2543_branch() {
+        let no_branch = create_test_request_custom(Method::Invite, None, true);
+        let empty_branch = create_test_request_custom(Method::Invite, Some(""), true);
+        let old_branch = create_test_request_custom(Method::Invite, Some("branch2"), true);
+        for req in [&no_branch, &empty_branch, &old_branch] {
+            let key = TransactionKey::from_request(req).unwrap();
+            assert!(key.branch().starts_with(RFC2543_TRANSACTION_PREFIX));
+            assert_eq!(*key.method(), Method::Invite);
+            assert!(key.is_server());
+        }
+        // Same Request-URI, tags, Call-ID, CSeq and top Via: same transaction.
+        assert_eq!(
+            TransactionKey::from_request(&no_branch),
+            TransactionKey::from_request(&empty_branch)
+        );
+        // A different top Via is a different transaction.
+        assert_ne!(
+            TransactionKey::from_request(&no_branch),
+            TransactionKey::from_request(&old_branch)
+        );
 
-    #[test]
-    fn test_from_request_via_empty_branch() {
-        let req = create_test_request_custom(Method::Invite, Some(""), true);
-        assert!(TransactionKey::from_request(&req).is_none());
+        // The identifier round-trips through the string form.
+        let key = TransactionKey::from_request(&no_branch).unwrap();
+        assert_eq!(key.to_string().parse::<TransactionKey>(), Ok(key));
     }
 
     #[test]

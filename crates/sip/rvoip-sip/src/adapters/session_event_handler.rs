@@ -9054,7 +9054,22 @@ Content-Length: {}\r\n\r\n\
               CSeq: 3 UPDATE\r\n\
               Content-Length: 0\r\n\r\n",
         );
-        assert!(derive_inbound_response_state_input("UPDATE", Some(&no_branch)).is_err());
+        // Without the magic cookie the request is from an RFC 2543 client;
+        // its server transaction is the one RFC 2543 matching identifies
+        // (RFC 3261 §17.2.3).
+        let rfc2543 = match rvoip_sip_core::parse_message(no_branch.as_ref()) {
+            Ok(rvoip_sip_core::Message::Request(request)) => request,
+            other => panic!("not a request: {other:?}"),
+        };
+        let rfc2543_key = rvoip_sip_dialog::transaction::TransactionKey::from_request(&rfc2543)
+            .expect("RFC 2543 transaction");
+        assert_eq!(
+            derive_inbound_response_state_input("UPDATE", Some(&no_branch))
+                .expect("derive RFC 2543 UPDATE response authority")
+                .transaction_id()
+                .expect("unconsumed authority"),
+            &rfc2543_key
+        );
     }
 
     #[test]

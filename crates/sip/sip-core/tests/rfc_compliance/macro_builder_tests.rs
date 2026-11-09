@@ -12,12 +12,27 @@ use rvoip_sip_core::{
     sip_request, sip_response,
     types::{header::HeaderName, Method, StatusCode},
 };
-use std::env;
-use std::fs;
-use std::path::Path;
 
-// Import the normalize_sip_message and is_excluded_wellformed_test functions
-use super::torture_test::{is_excluded_wellformed_test, normalize_sip_message};
+use super::torture_test::torture_fixture_text;
+
+/// Torture messages (bit-exact, `torture/<dir>/<id>.dat`) that the macro
+/// builders can represent. RFC 5118 messages are used in their normalized
+/// (CRLF) form.
+const BUILDER_ROUNDTRIP_FIXTURES: &[(&str, &str)] = &[
+    ("rfc4475", "transports"),
+    ("rfc4475", "unreason"),
+    ("rfc4475", "noreason"),
+    ("rfc4475", "bcast"),
+    ("rfc4475", "zeromf"),
+    ("rfc4475", "regescrt"),
+    ("rfc4475", "unkscm"),
+    ("rfc4475", "novelsc"),
+    ("rfc4475", "regaut01"),
+    ("rfc5118", "port-ambiguous"),
+    ("rfc5118", "port-unambiguous"),
+    ("rfc5118", "via-received-param-with-delim"),
+    ("rfc5118", "via-received-param-no-delim"),
+];
 
 /// Structure for tracking build and parse results
 struct BuildParseResult {
@@ -49,42 +64,6 @@ impl BuildParseResult {
             && self.built_message.is_some()
             && self.parsed_message.is_some()
     }
-}
-
-/// Additional files to skip for macro builder tests because they use features
-/// not easily representable with our current macro implementation
-fn is_excluded_from_builder_test(filename: &str) -> bool {
-    let excluded_tests = [
-        // Long requests with complex headers and characters
-        "3.1.1.7_longreq.sip",
-        // Messages with nonstandard headers and structures
-        "3.1.1.11_mpart01.sip",
-        // Complex IPv6 address or IP mapping tests
-        "4.1_ipv6-good.sip",
-        "4.6_ipv6-in-sdp.sip",
-        "4.7_mult-ip-in-header.sip",
-        "4.8_mult-ip-in-sdp.sip",
-        "4.9_ipv4-mapped-ipv6.sip",
-        "4.10_ipv6-correct-abnf-2-colons.sip",
-        // Messages with unusual escaping
-        "3.1.1.3_esc01.sip",
-        "3.1.1.4_escnull.sip",
-        "3.1.1.5_esc02.sip",
-        // Messages with unusual whitespace formatting
-        "3.1.1.6_lwsdisp.sip",
-        // Double requests
-        "3.1.1.8_dblreq.sip",
-        // Complex URIs
-        "3.1.1.9_semiuri.sip",
-        // Special character test cases
-        "3.3.12_cparam01.sip",
-        "3.3.13_cparam02.sip",
-        "3.4.1_inv2543.sip",
-        // Other difficult cases
-        "3.1.1.1_wsinv.sip", // Has unusual whitespace in headers
-    ];
-
-    is_excluded_wellformed_test(filename) || excluded_tests.contains(&filename)
 }
 
 /// Extracts key information from a SIP message to build it with macros
@@ -805,41 +784,15 @@ fn message_to_string(message: &Message) -> String {
 
 #[test]
 fn test_macro_builder_roundtrip() {
-    let cargo_manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
-    let wellformed_dir = Path::new(&cargo_manifest_dir).join("tests/rfc_compliance/wellformed");
-
-    if !wellformed_dir.exists() {
-        panic!("Wellformed directory not found: {:?}", wellformed_dir);
-    }
-
     let mut results = Vec::new();
-    let mut skipped = Vec::new();
+    let skipped: Vec<String> = Vec::new();
     let mut processed = Vec::new();
 
-    for entry in fs::read_dir(&wellformed_dir).expect("Failed to read wellformed directory") {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "sip") {
-            let filename = path
-                .file_name()
-                .unwrap_or_default()
-                .to_str()
-                .unwrap_or_default()
-                .to_string();
-
-            // Skip excluded tests
-            if is_excluded_from_builder_test(&filename) {
-                skipped.push(filename);
-                continue;
-            }
-
+    for &(dir, id) in BUILDER_ROUNDTRIP_FIXTURES {
+        let filename = format!("{dir}/{id}.dat");
+        {
             let mut result = BuildParseResult::new(filename.clone());
-
-            // Read and normalize the SIP message
-            let content =
-                fs::read_to_string(&path).expect(&format!("Failed to read file: {:?}", path));
-            let normalized_content = normalize_sip_message(&content);
+            let normalized_content = torture_fixture_text(dir, id);
 
             // Step 1: Parse the original message
             match parse_message(normalized_content.as_bytes()) {

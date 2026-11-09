@@ -4,7 +4,7 @@ use crate::types::{Message, Request, Response};
 
 // Update imports to use available modules
 // use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser, headers_parser as nom_headers_parser};
-use crate::parser::request::parse_request_line;
+use crate::parser::request::parse_request_line_with_mode;
 // use crate::parser::utils::crlf;
 use crate::error::{Error, Result};
 use crate::framing::{inspect_sip_frame_with_policy, SipFrameStatus, SipFramingPolicy};
@@ -32,9 +32,26 @@ pub const MAX_HEADER_COUNT: usize = crate::framing::MAX_SIP_HEADER_COUNT;
 /// Maximum size of a SIP message body
 pub const MAX_BODY_SIZE: usize = crate::framing::MAX_SIP_BODY_BYTES;
 
-/// Mode for parsing SIP messages
-/// - Strict: Rejects messages that don't conform to RFC 3261 strictly
-/// - Lenient: Attempts to recover from common errors like mismatched Content-Length
+/// Mode for parsing SIP messages.
+///
+/// - `Strict` accepts only the RFC 3261 grammar (with the RFC 5954 and RFC
+///   8217 updates) and never infers or repairs anything. It also rejects
+///   octets after the message, as one WebSocket message carries exactly one
+///   SIP message (RFC 7118 §5).
+/// - `Lenient` is the datagram and stream path. It discards octets after the
+///   message (RFC 3261 §18.3), and additionally accepts only the deviations
+///   RFC 4475 and RFC 5118 allow a liberal element to accept, removing them
+///   from the parsed message so they are never forwarded: bare-LF line
+///   endings and a missing empty line after the headers (`lenient_line_endings`),
+///   the extra colon of RFC 3261's IPv6 ABNF (`lenient_ipv6_extra_colon`),
+///   start-line deviations (`parse_request_line_with_mode`), and header
+///   repairs (`recover_header`). Where those RFCs say a message must be
+///   rejected, Lenient rejects it too.
+///
+/// In both modes, a header field that transaction processing depends on
+/// (`is_essential`) must parse, while any other header field whose value does
+/// not match its grammar is kept as received: an element need not reject a
+/// request over a field it does not use (RFC 4475 §3.1.2.12).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ParseMode {
     Strict,
@@ -147,14 +164,15 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
 
 fn full_message_parser_with_content_length(
     input: &[u8],
-    _mode: ParseMode,
+    mode: ParseMode,
     content_length: usize,
 ) -> IResult<&[u8], Message> {
     // 1. Parse Start Line
     let (rest, start_line_data) = alt((
-        map(parse_request_line, |(m, u, v)| {
-            (true, Some(m), Some(u), Some(v), None, None)
-        }),
+        map(
+            |i| parse_request_line_with_mode(i, &mode),
+            |(m, u, v)| (true, Some(m), Some(u), Some(v), None, None),
+        ),
         map(parse_status_line, |(v, s, r)| {
             // Always include the reason phrase, even if it's empty
             let reason_opt = str::from_utf8(r)
@@ -165,7 +183,20 @@ fn full_message_parser_with_content_length(
         }),
     ))(input)?;
 
-    let (is_request, method, uri, version, status_code, reason_phrase_opt) = start_line_data;
+    let (is_request, method, mut uri, version, status_code, reason_phrase_opt) = start_line_data;
+
+    // The headers component of a SIP URI is not allowed in a Request-URI
+    // (RFC 3261 §19.1.1). Strict rejects it; Lenient ignores the escaped
+    // headers, which then never appear in a forwarded Request-URI (RFC 4475
+    // §3.1.2.11).
+    if let Some(request_uri) = uri.as_mut() {
+        if !request_uri.headers.is_empty() {
+            if mode == ParseMode::Strict {
+                return Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify)));
+            }
+            request_uri.headers.clear();
+        }
+    }
 
     // 2. Parse Raw Headers block
     let (rest, raw_headers) = parse_header_block(rest)?;
@@ -181,17 +212,25 @@ fn full_message_parser_with_content_length(
         // that scales linearly with header count.
         match TypedHeader::try_from(&header) {
             Ok(typed) => typed_headers.push(typed),
-            Err(_) => {
-                let header_value_len = match &header.value {
-                    HeaderValue::Raw(value) => value.len(),
-                    _ => 0,
-                };
-                tracing::debug!(
-                    header_value_len,
-                    "SIP header conversion failed; retaining unparsed header"
-                );
-                typed_headers.push(TypedHeader::Other(header.name, header.value));
-            }
+            Err(_) => match recover_header(&header, &mode) {
+                Recovered::Typed(typed) => typed_headers.push(typed),
+                Recovered::Absent => {}
+                Recovered::AsReceived => {
+                    let header_value_len = match &header.value {
+                        HeaderValue::Raw(value) => value.len(),
+                        _ => 0,
+                    };
+                    tracing::debug!(
+                        header_value_len,
+                        "SIP header does not match its grammar; kept as received"
+                    );
+                    typed_headers.push(TypedHeader::Other(header.name, header.value));
+                }
+                Recovered::Reject => {
+                    tracing::debug!("SIP header required for processing does not parse");
+                    return Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify)));
+                }
+            },
         }
     }
 
@@ -238,6 +277,22 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
     eprintln!("Input as hex: {:02x?}", input);
     eprintln!("===========================");*/
 
+    let normalized;
+    let input = match &mode {
+        ParseMode::Lenient => {
+            let line_endings = lenient_line_endings(input);
+            let source = line_endings.as_deref().unwrap_or(input);
+            match (lenient_ipv6_extra_colon(source), line_endings) {
+                (Some(rewritten), _) | (None, Some(rewritten)) => {
+                    normalized = rewritten;
+                    normalized.as_slice()
+                }
+                (None, None) => input,
+            }
+        }
+        ParseMode::Strict => input,
+    };
+
     let frame = match inspect_sip_frame_with_policy(input, SipFramingPolicy::CompleteMessage) {
         Ok(SipFrameStatus::Complete(frame)) => frame,
         Ok(SipFrameStatus::Incomplete { .. }) => {
@@ -253,30 +308,16 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
     };
     let framed_input = &input[..frame.total_bytes];
 
-    // Strict mode additionally rejects bytes after the one authoritative frame.
-    // Lenient mode preserves the legacy ability to parse the first message from
-    // a larger buffer, but never guesses or repairs its Content-Length.
-    let parser_result = if mode == ParseMode::Strict {
-        if input.len() != frame.total_bytes {
-            Err(nom::Err::Error(nom::error::Error::new(
-                &input[frame.total_bytes..],
-                nom::error::ErrorKind::Eof,
-            )))
-        } else {
-            match full_message_parser_with_content_length(framed_input, mode, frame.body_bytes) {
-                Ok((remaining, message)) => {
-                    if remaining.is_empty() {
-                        Ok((remaining, message))
-                    } else {
-                        Err(nom::Err::Error(nom::error::Error::new(
-                            remaining,
-                            nom::error::ErrorKind::Eof,
-                        )))
-                    }
-                }
-                Err(e) => Err(e),
-            }
-        }
+    // Octets after the body that Content-Length delimits: Lenient (the
+    // datagram path) discards them (RFC 3261 §18.3, RFC 4475 §3.1.1.8);
+    // Strict rejects them, since a WebSocket message must not carry more than
+    // one SIP message (RFC 7118 §5). The framing scanner never guesses or
+    // repairs Content-Length.
+    let parser_result = if mode == ParseMode::Strict && input.len() != frame.total_bytes {
+        Err(nom::Err::Error(nom::error::Error::new(
+            &input[frame.total_bytes..],
+            nom::error::ErrorKind::Eof,
+        )))
     } else {
         full_message_parser_with_content_length(framed_input, mode, frame.body_bytes)
     };
@@ -352,6 +393,252 @@ fn message_header(input: &[u8]) -> ParseResult<'_, Header> {
                 })
         },
     )(input)
+}
+
+/// How a header field whose value did not parse is handled.
+enum Recovered {
+    /// A repaired value that parses.
+    Typed(TypedHeader),
+    /// Processed as if the header field were absent.
+    Absent,
+    /// Kept as received, as an unparsed header field.
+    AsReceived,
+    /// The message is rejected.
+    Reject,
+}
+
+/// Header fields that transaction and dialog processing depend on. If one of
+/// these does not parse, the message cannot be processed correctly, so it is
+/// rejected (RFC 4475 §3.1.2.1, §3.1.2.4, §3.1.2.6).
+fn is_essential(name: &HeaderName) -> bool {
+    matches!(
+        name,
+        HeaderName::Via
+            | HeaderName::From
+            | HeaderName::To
+            | HeaderName::CallId
+            | HeaderName::CSeq
+            | HeaderName::ContentLength
+            | HeaderName::MaxForwards
+            | HeaderName::Contact
+            | HeaderName::Route
+            | HeaderName::RecordRoute
+    )
+}
+
+/// Handle a header field whose value did not match its grammar.
+///
+/// Strict never repairs. Lenient applies only the repairs RFC 4475 allows,
+/// each of which yields a value that parses (so it is forwarded corrected):
+///
+/// - name-addr fields: infer the angle brackets around an addr-spec with
+///   headers (§3.1.2.13), ignore spaces inside the brackets (§3.1.2.14), and
+///   infer the quotes around a display name with non-token characters
+///   (§3.1.2.15);
+/// - Date: interpret a non-GMT date and adjust it to GMT (§3.1.2.12);
+/// - Max-Forwards above 255: process as if absent (§3.1.2.4);
+/// - Expires above 2**32-1: use the default 3600 (§3.1.2.4).
+fn recover_header(header: &Header, mode: &ParseMode) -> Recovered {
+    let fallback = if is_essential(&header.name) {
+        Recovered::Reject
+    } else {
+        Recovered::AsReceived
+    };
+    if *mode == ParseMode::Strict {
+        return fallback;
+    }
+    let HeaderValue::Raw(raw) = &header.value else {
+        return fallback;
+    };
+    let Ok(text) = str::from_utf8(raw) else {
+        return fallback;
+    };
+    let text = text.trim();
+    let reparse = |value: String| {
+        TypedHeader::try_from(&Header::new(
+            header.name.clone(),
+            HeaderValue::Raw(value.into_bytes()),
+        ))
+        .ok()
+    };
+    let all_digits = !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit());
+
+    match &header.name {
+        HeaderName::From
+        | HeaderName::To
+        | HeaderName::Contact
+        | HeaderName::ReplyTo
+        | HeaderName::Route
+        | HeaderName::RecordRoute => {
+            for candidate in name_addr_repairs(text) {
+                if let Some(typed) = reparse(candidate) {
+                    return Recovered::Typed(typed);
+                }
+            }
+        }
+        HeaderName::Date => {
+            if let Some(typed) = date_in_gmt(text).and_then(reparse) {
+                return Recovered::Typed(typed);
+            }
+        }
+        HeaderName::MaxForwards if all_digits => return Recovered::Absent,
+        HeaderName::Expires if all_digits => {
+            return Recovered::Typed(TypedHeader::Expires(crate::types::expires::Expires::new(
+                3600,
+            )));
+        }
+        _ => {}
+    }
+    fallback
+}
+
+/// Candidate repairs of a name-addr / addr-spec header value, one deviation
+/// each (RFC 4475 §3.1.2.13, §3.1.2.14, §3.1.2.15).
+fn name_addr_repairs(value: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    match (value.find('<'), value.find('>')) {
+        (Some(open), Some(close)) if open < close => {
+            // Spaces inside the brackets.
+            let inner = value[open + 1..close].trim();
+            if inner.len() != close - open - 1 {
+                candidates.push(format!(
+                    "{}<{inner}>{}",
+                    &value[..open],
+                    &value[close + 1..]
+                ));
+            }
+            // Unquoted display name with characters outside `token`.
+            let display = value[..open].trim();
+            if !display.is_empty() && !display.contains('"') {
+                let quoted = display.replace('\\', "\\\\").replace('"', "\\\"");
+                candidates.push(format!("\"{quoted}\" {}", &value[open..]));
+            }
+        }
+        (None, None) => {
+            // An addr-spec with URI headers must be a name-addr.
+            let end = value
+                .find(|c: char| c == ';' || c == ',' || c.is_whitespace())
+                .unwrap_or(value.len());
+            if value[..end].contains('?') {
+                candidates.push(format!("<{}>{}", &value[..end], &value[end..]));
+            }
+        }
+        _ => {}
+    }
+    candidates
+}
+
+/// A date with a time zone other than GMT, as RFC 1123 `SIP-date` in GMT.
+fn date_in_gmt(value: &str) -> Option<String> {
+    let parsed = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some(
+        parsed
+            .with_timezone(&chrono::Utc)
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string(),
+    )
+}
+
+/// Lenient handling of the extra colon RFC 3261's IPv6 ABNF allowed before
+/// an embedded IPv4 address (`[2001:db8:::192.0.2.1]`): RFC 5954 §4.1 makes
+/// it invalid, and RFC 5118 §4.10 asks implementations to tolerate it. Inside
+/// the header section, each IPv6 reference of that form loses the extra
+/// colon, so the address is parsed and later sent in its correct form.
+fn lenient_ipv6_extra_colon(input: &[u8]) -> Option<Vec<u8>> {
+    let header_end = input
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(input.len(), |at| at + 4);
+    let (head, body) = input.split_at(header_end);
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
+    let mut changed = false;
+    let mut position = 0;
+    while let Some(open) = head[position..].iter().position(|&b| b == b'[') {
+        let open = position + open;
+        let Some(close) = head[open..].iter().position(|&b| b == b']') else {
+            break;
+        };
+        let close = open + close;
+        out.extend_from_slice(&head[position..=open]);
+        let inner = &head[open + 1..close];
+        match std::str::from_utf8(inner)
+            .ok()
+            .and_then(ipv6_without_extra_colon)
+        {
+            Some(fixed) => {
+                out.extend_from_slice(fixed.as_bytes());
+                changed = true;
+            }
+            None => out.extend_from_slice(inner),
+        }
+        position = close;
+    }
+    if !changed {
+        return None;
+    }
+    out.extend_from_slice(&head[position..]);
+    out.extend_from_slice(body);
+    Some(out)
+}
+
+/// `h16 *(":" h16) ":::" IPv4address` as the RFC 3986 form with "::".
+fn ipv6_without_extra_colon(text: &str) -> Option<String> {
+    let at = text.rfind(":::")?;
+    let ipv4 = &text[at + 3..];
+    ipv4.parse::<std::net::Ipv4Addr>().ok()?;
+    let fixed = format!("{}::{}", &text[..at], ipv4);
+    fixed.parse::<std::net::Ipv6Addr>().ok()?;
+    Some(fixed)
+}
+
+/// Lenient handling of line endings, for a message whose header section is
+/// not CRLF-terminated (RFC 5118's archived messages use bare LF, and two of
+/// them end without the empty line after the headers): returns the message
+/// with a CRLF header section and the body unchanged, or `None` if the header
+/// section is already CRLF-terminated.
+fn lenient_line_endings(input: &[u8]) -> Option<Vec<u8>> {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut position = 0;
+    let mut bare_lf = false;
+    let mut body_start = None;
+    while position < input.len() {
+        let Some(offset) = input[position..].iter().position(|&b| b == b'\n') else {
+            // A last line without a line ending: the datagram ends here.
+            lines.push(&input[position..]);
+            position = input.len();
+            bare_lf = true;
+            break;
+        };
+        let end = position + offset;
+        let line = match input[position..end].strip_suffix(b"\r") {
+            Some(line) => line,
+            None => {
+                bare_lf = true;
+                &input[position..end]
+            }
+        };
+        position = end + 1;
+        if line.is_empty() {
+            body_start = Some(position);
+            break;
+        }
+        lines.push(line);
+    }
+    if body_start.is_none() {
+        // No empty line ends the header section.
+        bare_lf = true;
+    }
+    if !bare_lf || lines.is_empty() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() + lines.len() + 2);
+    for line in lines {
+        out.extend_from_slice(line);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(&input[body_start.unwrap_or(position).min(input.len())..]);
+    Some(out)
 }
 
 #[cfg(test)]

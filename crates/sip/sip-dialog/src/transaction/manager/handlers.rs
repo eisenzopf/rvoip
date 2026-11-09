@@ -677,6 +677,33 @@ impl TransactionManager {
 
     async fn handle_transport_event_inner(&self, event: TransportEvent) -> Result<()> {
         match event {
+            TransportEvent::MalformedRequest {
+                request,
+                source,
+                destination,
+                transport_type,
+                flow_id,
+            } => {
+                // A request that does not parse, but whose Via, From, To,
+                // Call-ID and CSeq do: answer it statelessly with 400 and
+                // never process it (RFC 3261 §8.2.6, RFC 4475 §3.1.2).
+                let mut ingress =
+                    SipRequestIngressContext::new(source, destination, transport_type);
+                if let Some(flow_id) = flow_id {
+                    ingress = ingress.with_flow_id(flow_id);
+                }
+                let response = crate::transaction::utils::response_builders::create_response(
+                    &request,
+                    StatusCode::BadRequest,
+                );
+                let route = ingress.response_route_for_request(&request);
+                self.transport
+                    .send_message_via(Message::Response(response), route)
+                    .await
+                    .map_err(|error| {
+                        Error::transport_error(error, "Failed to send 400 to a malformed request")
+                    })
+            }
             TransportEvent::MessageReceived {
                 message,
                 source,
@@ -881,6 +908,17 @@ impl TransactionManager {
     ) -> Result<()> {
         match message {
             Message::Request(request) => {
+                // A request without the Via, From, To, Call-ID or CSeq that
+                // every response copies cannot be answered or matched to a
+                // transaction: discard it (RFC 3261 §8.2.6.2, RFC 4475 §3.3.1).
+                if !rvoip_sip_core::validation::is_answerable(&request) {
+                    debug!(
+                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+                        "Discarding request without the header fields a response copies"
+                    );
+                    return Ok(());
+                }
+
                 // Special handling for ACK to 2xx responses
                 if request.method() == Method::Ack {
                     // ACK requests matching a 2xx response are end-to-end and don't have a transaction
@@ -894,6 +932,42 @@ impl TransactionManager {
             }
             Message::Response(response) => self.handle_response(response, source).await,
         }
+    }
+
+    /// Answer an inbound request with the response a validation
+    /// [`Rejection`](rvoip_sip_core::validation::Rejection) calls for.
+    async fn reject_inbound_request(
+        &self,
+        transaction: &Arc<dyn ServerTransaction>,
+        request: &Request,
+        rejection: rvoip_sip_core::validation::Rejection,
+    ) -> Result<()> {
+        let generation = transaction
+            .data()
+            .transaction_admission_owner()
+            .map(|owner| owner.generation());
+        let mut response = match generation {
+            Some(generation) => {
+                crate::transaction::utils::response_builders::create_response_for_transaction_generation(
+                    request,
+                    rejection.status,
+                    transaction.id(),
+                    generation,
+                )
+            }
+            None => crate::transaction::utils::response_builders::create_response(
+                request,
+                rejection.status,
+            ),
+        };
+        response.headers.extend(rejection.headers);
+        debug!(
+            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+            status = rejection.status.as_u16(),
+            reason = rejection.reason,
+            "inbound request rejected before processing"
+        );
+        self.send_response(transaction.id(), response).await
     }
 
     async fn enforce_ingress_authorization(
@@ -1342,6 +1416,24 @@ impl TransactionManager {
             return Ok(());
         }
 
+        // Requests every element answers with an error instead of processing
+        // them (RFC 3261 §8.2, §16.3; RFC 4475): unsupported SIP-Version,
+        // repeated single-valued header fields, a CSeq method that
+        // differs from the request method, an empty RFC 3261 branch. The
+        // response goes out on the server transaction, which absorbs
+        // retransmissions. An ACK is never answered (RFC 3261 §17).
+        let validation = if request.method() == Method::Ack {
+            Ok(())
+        } else {
+            rvoip_sip_core::validation::validate_request(&request)
+        };
+        if let Err(rejection) = validation {
+            self.reject_inbound_request(&transaction, &request, rejection)
+                .await?;
+            publication.commit();
+            return Ok(());
+        }
+
         // Notify the transaction user about the new transaction
         let publication_result = match transaction.kind() {
             TransactionKind::InviteServer => {
@@ -1679,12 +1771,30 @@ impl TransactionManager {
         // arbitrary same-branch ACK as transaction-owned can consume a 2xx
         // ACK before the retained dialog index gets a chance to classify it.
         if let Some(key) = crate::transaction::utils::transaction_key_from_request(&request) {
-            let invite_key = key.with_method(Method::Invite);
+            let mut invite_key = key.with_method(Method::Invite);
 
-            let invite_tx = self
+            let mut invite_tx = self
                 .server_transactions
                 .get(&invite_key)
                 .map(|r| r.value().clone());
+            if invite_tx.is_none() {
+                // An RFC 2543 ACK of a non-2xx response carries that
+                // response's To tag; the INVITE it acknowledges had none
+                // (RFC 3261 §17.2.3).
+                if let Some(branch) =
+                    crate::transaction::key::rfc2543_ack_invite_branch_without_to_tag(&request)
+                {
+                    let alternative = TransactionKey::new(branch, Method::Invite, true);
+                    if let Some(transaction) = self
+                        .server_transactions
+                        .get(&alternative)
+                        .map(|r| r.value().clone())
+                    {
+                        invite_key = alternative;
+                        invite_tx = Some(transaction);
+                    }
+                }
+            }
             if let Some(transaction) = invite_tx {
                 let state = transaction.state();
                 let response_crossed_wire_before_state_transition = state

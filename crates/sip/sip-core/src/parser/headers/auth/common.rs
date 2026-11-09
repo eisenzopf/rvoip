@@ -78,8 +78,12 @@ fn auth_param_name(input: &[u8]) -> ParseResult<'_, &[u8]> {
 }
 
 // auth-value = token / quoted-string
-fn auth_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((token, quoted_string))(input)
+/// auth-value = token / quoted-string; `true` for a quoted-string.
+fn auth_value(input: &[u8]) -> ParseResult<'_, (&[u8], bool)> {
+    alt((
+        nom::combinator::map(token, |value| (value, false)),
+        nom::combinator::map(quoted_string, |value| (value, true)),
+    ))(input)
 }
 
 // auth-param = auth-param-name EQUAL auth-value
@@ -87,7 +91,7 @@ fn auth_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
 pub fn auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
     map_res(
         separated_pair(auth_param_name, equal, auth_value),
-        |(name_bytes, value_bytes)| {
+        |(name_bytes, (value_bytes, quoted))| {
             // Specify error type for map_res
             let name = str::from_utf8(name_bytes)
                 .map_err(|_| NomError::new(name_bytes, ErrorKind::Char))?
@@ -99,7 +103,11 @@ pub fn auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
             // RFC 3261 is strict about realm for Digest scheme, but we need to be lenient
             // for other schemes where the requirement might not be enforced
 
-            Ok::<_, NomError<&[u8]>>(AuthParam { name, value }) // Explicit Ok type needed by map_res
+            Ok::<_, NomError<&[u8]>>(AuthParam {
+                name,
+                value,
+                quoted,
+            })
         },
     )(input)
 }
@@ -170,50 +178,24 @@ pub fn stale(input: &[u8]) -> ParseResult<'_, bool> {
     )(input)
 }
 
-// algorithm_tag = "MD5" / "MD5-sess" / token ; RFC uses just `token` but specifies known values
-// algorithm = "algorithm" EQUAL algorithm_tag
-// Returns Algorithm enum
+// algorithm = "algorithm" EQUAL ( "MD5" / "MD5-sess" / "SHA-256" /
+//             "SHA-256-sess" / "SHA-512-256" / "SHA-512-256-sess" / token )
+// (RFC 3261 §25.1 as updated by RFC 8760 §2.6). A quoted value, which some
+// peers send, is accepted too. Unknown tokens keep their spelling.
 pub fn algorithm(input: &[u8]) -> ParseResult<'_, Algorithm> {
     let (input, _) = tag_no_case(b"algorithm")(input)?;
-    let (input, _) = tag(b"=")(input)?;
-
-    // Check if value is quoted
-    if !input.is_empty() && input[0] == b'"' {
-        // Parse quoted algorithm value
-        let (input, quoted_value) =
-            delimited(tag(b"\""), take_while(|c| c != b'"'), tag(b"\""))(input)?;
-
-        // Convert to uppercase for comparison
-        let value = quoted_value.to_ascii_uppercase();
-
-        let algorithm = match value.as_slice() {
-            b"MD5" => Algorithm::Md5,
-            b"MD5-SESS" => Algorithm::Md5Sess,
-            b"SHA-256" => Algorithm::Sha256,
-            _ => Algorithm::Other(String::from_utf8_lossy(quoted_value).to_string()),
-        };
-
-        Ok((input, algorithm))
+    let (input, _) = equal(input)?;
+    let (input, value) = if input.first() == Some(&b'"') {
+        delimited(tag(b"\""), take_while(|c| c != b'"'), tag(b"\""))(input)?
     } else {
-        // Parse unquoted algorithm value
-        let (input, value) = take_while(is_token_char)(input)?;
-
-        if value.is_empty() {
-            return Err(Err::Error(make_error(input, ErrorKind::TakeWhile1)));
-        }
-
-        // Convert to uppercase for comparison
-        let value = value.to_ascii_uppercase();
-
-        let algorithm = match value.as_slice() {
-            b"MD5" => Algorithm::Md5,
-            b"MD5-SESS" => Algorithm::Md5Sess,
-            b"SHA-256" => Algorithm::Sha256,
-            _ => Algorithm::Other(String::from_utf8_lossy(&value).to_string()),
-        };
-
-        Ok((input, algorithm))
-    }
+        take_while(is_token_char)(input)?
+    };
+    let value =
+        std::str::from_utf8(value).map_err(|_| Err::Error(make_error(input, ErrorKind::Char)))?;
+    let algorithm = value
+        .parse::<Algorithm>()
+        .map_err(|_| Err::Error(make_error(input, ErrorKind::TakeWhile1)))?;
+    Ok((input, algorithm))
 }
 
 // qop-value = "auth" / "auth-int" / token
@@ -786,7 +768,8 @@ mod tests {
             param,
             DigestParam::Param(AuthParam {
                 name: "custom".to_string(),
-                value: "value".to_string()
+                value: "value".to_string(),
+                quoted: true,
             })
         );
 

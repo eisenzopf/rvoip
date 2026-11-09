@@ -98,11 +98,11 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
 | 3841 | Caller preferences | Not supported | No `Accept-Contact` type in `crates/sip/sip-core/src/types`; mentioned only in `builder/builder.md` |
 | 3312 | Preconditions | Parsed only | Option tag only (`crates/sip/sip-core/src/builder/headers/proxy_require.rs`) |
 | 4412 | Resource-Priority | Parsed only | `crates/sip/sip-core/src/builder/headers/priority.rs` |
-| 4475 | SIP torture messages | Tested | `crates/sip/sip-core/tests/rfc_compliance/torture_test.rs::test_wellformed_messages`, `::test_malformed_messages`. Three well-formed fixtures excluded (see matrix row `SIP-4475-TORTURE`). |
-| 5118 | Torture messages for IPv6 | Tested | IPv6 fixtures in `crates/sip/sip-core/tests/rfc_compliance/wellformed/` (`4.1_ipv6-good.sip`, `4.6_ipv6-in-sdp.sip`, ...). Parser only; COMPATIBILITY_MATRIX: network-stack IPv6 "Not audited". |
+| 4475 | SIP torture messages | Tested (parser) | `crates/sip/sip-core/tests/rfc_compliance/torture_test.rs::rfc4475_torture_messages`, on the bit-exact Appendix A messages, no exclusions (matrix row `SIP-4475-TORTURE`). |
+| 5118 | Torture messages for IPv6 | Tested (parser) | `crates/sip/sip-core/tests/rfc_compliance/torture_test.rs::rfc5118_ipv6_torture_messages`, on the bit-exact Appendix A messages. Parser only; COMPATIBILITY_MATRIX: network-stack IPv6 "Not audited". |
 | 3986, 2396 | URI generic syntax | Tested | `crates/sip/sip-core/tests/parser/uri_parser_test.rs`; robustness: `security.fuzz-uri` |
 | 3966 | tel URI | Tested | `crates/sip/sip-core/tests/parser/uri_parser_test.rs::test_parse_tel_uri` |
-| 2045, 2046, 2183, 5621 | MIME bodies, multipart, Content-Disposition | Tested | Multipart fixture `3.1.1.11_mpart01.sip` under `torture_test.rs::test_wellformed_messages`; `crates/sip/sip-core/src/parser/multipart.rs` |
+| 2045, 2046, 2183, 5621 | MIME bodies, multipart, Content-Disposition | Tested | Multipart fixture `rfc4475/mpart01.dat` under `torture_test.rs::rfc4475_torture_messages`; `crates/sip/sip-core/src/parser/multipart.rs` |
 | 3204 | ISUP/QSIG MIME types | Parsed only | `crates/sip/rvoip-sip/src/api/bodies.rs` |
 | 5646, 3066, 1766 | Language tags | Parsed only | `crates/sip/sip-core/src/parser/headers/content_language.rs` |
 | 2822 | Date header format | Parsed only | `crates/sip/sip-core/src/types/date.rs` |

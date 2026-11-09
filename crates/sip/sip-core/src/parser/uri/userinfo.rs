@@ -110,6 +110,36 @@ pub fn userinfo(input: &[u8]) -> ParseResult<'_, (String, Option<String>)> {
     )(input)
 }
 
+/// Userinfo with each component's decoded value and its exact wire text:
+/// `((user, user_wire), Option<(password, password_wire)>)`.
+pub type UserInfoWithWire = ((String, String), Option<(String, String)>);
+
+/// Like [`userinfo`], but also returns each component exactly as it appeared
+/// on the wire, which RFC 3261 §19.1.4 needs to keep a URI's identity (an
+/// escaped `reserved` character is not equivalent to the literal one).
+pub fn userinfo_with_wire(input: &[u8]) -> ParseResult<'_, UserInfoWithWire> {
+    let (rem, (user, password)) = userinfo(input)?;
+    // `userinfo` only succeeds on grammar-valid ASCII ending in `@`.
+    let consumed = &input[..input.len() - rem.len() - 1];
+    let consumed = std::str::from_utf8(consumed).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
+    let (user_wire, password_wire) = match password {
+        Some(_) => match consumed.rsplit_once(':') {
+            Some((user_wire, password_wire)) => (user_wire, Some(password_wire)),
+            None => (consumed, None),
+        },
+        None => (consumed, None),
+    };
+    Ok((
+        rem,
+        (
+            (user, user_wire.to_string()),
+            password.map(|password| (password, password_wire.unwrap_or("").to_string())),
+        ),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

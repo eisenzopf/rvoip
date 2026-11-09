@@ -101,7 +101,9 @@ mod tests {
         let (rem, val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(val.code, 307);
-        assert!(matches!(val.agent, WarnAgent::Pseudonym(d) if d == "isi.edu"));
+        // warn-agent = hostport / pseudonym; "isi.edu" is a hostport (RFC 3261
+        // §20.43 uses this very example for the host).
+        assert!(matches!(val.agent, WarnAgent::HostPort(Host::Domain(d), None) if d == "isi.edu"));
         assert_eq!(val.text, b"Session parameter 'foo' not understood".to_vec());
         // Compare Vec<u8>
     }
@@ -114,7 +116,9 @@ mod tests {
         let (rem, val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(val.code, 399);
-        assert!(matches!(val.agent, WarnAgent::Pseudonym(d) if d == "p1.example.net"));
+        assert!(
+            matches!(val.agent, WarnAgent::HostPort(Host::Domain(d), None) if d == "p1.example.net")
+        );
         assert_eq!(val.text, b"Response too large".to_vec()); // Compare Vec<u8>
     }
 

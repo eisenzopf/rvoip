@@ -132,10 +132,10 @@ impl InviteBuilder {
         let to_uri_string = to_uri.into();
         Self {
             from_uri: Some(from_uri.into()),
-            from_display_name: None, // Will use default "User"
+            from_display_name: None, // No display name: `<uri>` only
             from_tag: Some(from_tag.into()),
             to_uri: Some(to_uri_string.clone()),
-            to_display_name: None, // Will use default "User"
+            to_display_name: None, // No display name: `<uri>` only
             to_tag: Some(to_tag.into()),
             request_uri: Some(to_uri_string), // Default to To URI for re-INVITE
             call_id: Some(call_id.into()),
@@ -349,14 +349,14 @@ impl InviteBuilder {
 
         // Add From header
         builder = builder.from(
-            self.from_display_name.as_deref().unwrap_or("User"),
+            self.from_display_name.as_deref().unwrap_or(""),
             &from_uri,
             Some(&from_tag),
         );
 
         // Add To header
         builder = builder.to(
-            self.to_display_name.as_deref().unwrap_or("User"),
+            self.to_display_name.as_deref().unwrap_or(""),
             &to_uri,
             self.to_tag.as_deref(),
         );
@@ -772,8 +772,8 @@ impl ByeBuilder {
             .map_err(|e| Error::Other(format!("Failed to create request builder: {}", e)))?;
 
         builder = builder
-            .from("User", &from_uri, Some(&from_tag))
-            .to("User", &to_uri, Some(&to_tag))
+            .from("", &from_uri, Some(&from_tag))
+            .to("", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
             .via(&local_addr.to_string(), &via_transport, Some(&branch))
@@ -959,7 +959,7 @@ impl RegisterBuilder {
 
         builder = builder
             .from(
-                self.from_display_name.as_deref().unwrap_or("User"),
+                self.from_display_name.as_deref().unwrap_or(""),
                 &from_uri,
                 Some(&from_tag),
             )
@@ -1291,8 +1291,8 @@ impl InDialogRequestBuilder {
             .map_err(|e| Error::Other(format!("Failed to create request builder: {}", e)))?;
 
         builder = builder
-            .from("User", &from_uri, Some(&from_tag))
-            .to("User", &to_uri, Some(&to_tag))
+            .from("", &from_uri, Some(&from_tag))
+            .to("", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
             .via(&local_addr.to_string(), &via_transport, Some(&branch))
@@ -1635,11 +1635,11 @@ pub mod quick {
 
         let request = SimpleRequestBuilder::new(Method::Options, target_uri)?
             .from(
-                "User",
+                "",
                 from_uri,
                 Some(&format!("tag-{}", Uuid::new_v4().simple())),
             )
-            .to("User", target_uri, None)
+            .to("", target_uri, None)
             .call_id(&format!("options-{}", Uuid::new_v4()))
             .cseq(1)
             .via(
@@ -1671,11 +1671,11 @@ pub mod quick {
 
         let request = SimpleRequestBuilder::new(Method::Message, target_uri)?
             .from(
-                "User",
+                "",
                 from_uri,
                 Some(&format!("tag-{}", Uuid::new_v4().simple())),
             )
-            .to("User", target_uri, None)
+            .to("", target_uri, None)
             .call_id(&format!("message-{}", Uuid::new_v4()))
             .cseq(1)
             .via(

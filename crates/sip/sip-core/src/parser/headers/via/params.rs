@@ -57,36 +57,43 @@ fn via_maddr(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(pair(tag_no_case(b"maddr"), equal), host),
         |h: UriHost| {
-            // Convert the host to a string representation for the Param
-            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Maddr(h.to_string()))
+            // maddr = host: an IPv6 address keeps its IPv6reference form.
+            let host = match h {
+                UriHost::Address(std::net::IpAddr::V6(address)) => format!("[{address}]"),
+                other => other.to_string(),
+            };
+            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Maddr(host))
         },
     )(input)
 }
 
-/// Parser for the received parameter of a Via header (RFC 3261 Section 20.42)
-/// received is an IPv4address or IPv6address
-/// Example: received=192.0.2.1
+/// Parser for the received parameter of a Via header.
+///
+/// via-received = "received" EQUAL (IPv4address / IPv6address) (RFC 3261
+/// §20.42): an IPv6 address without "[" "]". RFC 5118 §4.5 requires
+/// accepting it with or without the delimiters; it is always sent without.
 fn via_received(input: &[u8]) -> ParseResult<'_, Param> {
-    map_res(
-        preceded(pair(tag_no_case(b"received"), equal), host), // host parser handles IPs
-        |h: UriHost| {
-            match h {
-                UriHost::Address(ip) => Ok(Param::Received(ip)),
-                UriHost::Domain(domain) => {
-                    // Try to convert domain to IP if possible
-                    if let Ok(ip) = domain.parse::<std::net::IpAddr>() {
-                        Ok(Param::Received(ip))
-                    } else {
-                        // Invalid received parameter - must be an IP address
-                        Err(nom::Err::Failure(NomError::from_error_kind(
-                            input,
-                            ErrorKind::Tag,
-                        )))
-                    }
-                }
-            }
-        },
-    )(input)
+    let (rest, _) = pair(tag_no_case(b"received"), equal)(input)?;
+    let (address, rest) = match rest.strip_prefix(b"[") {
+        Some(inner) => {
+            let close = inner.iter().position(|&c| c == b']').ok_or_else(|| {
+                nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Char))
+            })?;
+            (&inner[..close], &inner[close + 1..])
+        }
+        None => {
+            let length = rest
+                .iter()
+                .take_while(|&&c| c.is_ascii_hexdigit() || c == b':' || c == b'.')
+                .count();
+            (&rest[..length], &rest[length..])
+        }
+    };
+    let ip = str::from_utf8(address)
+        .ok()
+        .and_then(|text| text.parse::<std::net::IpAddr>().ok())
+        .ok_or_else(|| nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)))?;
+    Ok((rest, Param::Received(ip)))
 }
 
 /// Parser for the branch parameter of a Via header (RFC 3261 Section 20.42)

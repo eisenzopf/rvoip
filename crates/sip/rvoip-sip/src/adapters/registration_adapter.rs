@@ -236,6 +236,35 @@ impl RegistrationAdapter {
         );
 
         let aor = Self::extract_aor(&from_uri)?;
+        // RFC 3261 §10.3: the address-of-record is the To URI (step 3), and
+        // the authenticated registering party must be authorized to modify
+        // its bindings (step 6). There is no third-party registration policy,
+        // so a REGISTER whose To and From name different AORs is refused.
+        if let Some(to) = request.and_then(|request| request.to()) {
+            let rejection = match Self::extract_aor(&to.uri().to_string()) {
+                Ok(to_aor) if to_aor == aor => None,
+                Ok(_) => Some((403, "Forbidden")),
+                Err(_) => Some((400, "Bad Request")),
+            };
+            if let Some((status_code, reason)) = rejection {
+                info!(status_code, "REGISTER refused for its address-of-record");
+                let response =
+                    crate::api::respond::register_response::RegisterResponseEventFields {
+                        transaction_id,
+                        status_code,
+                        reason: reason.to_string(),
+                        www_authenticate: None,
+                        contact: None,
+                        expires: None,
+                        min_expires: None,
+                        service_route: Vec::new(),
+                        path_echo: false,
+                        associated_uri: Vec::new(),
+                        extra_headers: Vec::new(),
+                    };
+                return self.send_register_response(&response).await;
+            }
+        }
         let username = aor.user().to_string();
         debug!(
             username_present = !username.is_empty(),
@@ -444,13 +473,12 @@ impl RegistrationAdapter {
 
         // Digest authentication is bound to the exact Request-URI from the
         // wire. Synthetic compatibility events have no raw request, so retain
-        // the historical From-URI fallback for those events only.
+        // the historical From-URI fallback for those events only. The bytes
+        // are parsed the way the transport accepted them (Lenient), so every
+        // REGISTER that reached here keeps its Request-URI.
         let parsed_request = raw_request
             .as_ref()
-            .and_then(|bytes| {
-                rvoip_sip_core::parse_message_with_mode(bytes, rvoip_sip_core::ParseMode::Strict)
-                    .ok()
-            })
+            .and_then(|bytes| rvoip_sip_core::parse_message(bytes).ok())
             .and_then(|message| match message {
                 rvoip_sip_core::Message::Request(request) => Some(request),
                 rvoip_sip_core::Message::Response(_) => None,
