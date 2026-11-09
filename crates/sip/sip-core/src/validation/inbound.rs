@@ -135,12 +135,15 @@ impl UasCapabilities {
         ))
     }
 
-    /// `Accept` listing [`Self::session_body_types`].
+    /// `Accept` listing [`Self::session_body_types`] and the multipart types
+    /// that carry them (RFC 5621 §3.1, [`crate::body::MULTIPART_TYPES`]).
     pub fn accept_header(&self) -> TypedHeader {
         TypedHeader::Accept(crate::types::Accept::from_media_types(
             self.session_body_types
                 .iter()
-                .filter_map(|media_type| accept_value(media_type)),
+                .map(String::as_str)
+                .chain(crate::body::MULTIPART_TYPES)
+                .filter_map(accept_value),
         ))
     }
 }
@@ -229,9 +232,11 @@ pub fn validate_request(request: &Request) -> Result<(), Rejection> {
 /// 2. Request-URI (§8.2.2.1): an unsupported scheme gets 416.
 /// 3. Require (§8.2.2.3): unsupported option tags get 420 with an Unsupported
 ///    header field listing them. Not applied to ACK or CANCEL.
-/// 4. Content (§8.2.3, RFC 5621): an INVITE or UPDATE body of a type the UAS
-///    does not process, whose disposition handling is "required" (the
-///    default, RFC 3261 erratum 4567), gets 415 with an Accept header field.
+/// 4. Content (§8.2.3, RFC 5621 §3): an INVITE or UPDATE body the UAS does
+///    not understand, whose handling is "required" (the default, RFC 3261
+///    erratum 4567), gets 415 with an Accept header field. In a multipart
+///    body every required part must be understood; see
+///    [`crate::body::BodyPart::understood`].
 /// 5. An INVITE whose Accept header field excludes every session body type
 ///    gets 406 (RFC 4475 §3.3.15).
 pub fn validate_request_for_uas(
@@ -284,31 +289,23 @@ pub fn validate_request_for_uas(
         }
     }
 
+    // RFC 3261 §8.2.3, RFC 5621 §3: the UAS must understand the body, and in
+    // a multipart body every part whose handling is required; otherwise 415
+    // listing what it accepts. A body whose handling is optional is ignored.
     if matches!(method, Method::Invite | Method::Update) && !request.body().is_empty() {
-        let required = !headers.iter().any(|h| match h {
-            TypedHeader::ContentDisposition(disposition) => disposition
-                .to_string()
-                .to_ascii_lowercase()
-                .replace(' ', "")
-                .contains("handling=optional"),
-            _ => false,
-        });
-        let content_type = headers.iter().find_map(|h| match h {
-            TypedHeader::ContentType(content_type) => Some(format!(
-                "{}/{}",
-                content_type.0.m_type, content_type.0.m_subtype
-            )),
-            _ => None,
-        });
-        let understood = content_type.as_deref().is_some_and(|media_type| {
-            media_type.eq_ignore_ascii_case("multipart/mixed")
-                || media_type.eq_ignore_ascii_case("multipart/alternative")
-                || capabilities
-                    .session_body_types
-                    .iter()
-                    .any(|accepted| accepted.eq_ignore_ascii_case(media_type))
-        });
-        if required && !understood {
+        let understands = |media_type: &str| {
+            capabilities
+                .session_body_types
+                .iter()
+                .any(|accepted| accepted.eq_ignore_ascii_case(media_type))
+        };
+        let understood = match crate::body::BodyPart::of_request(request) {
+            Ok(Some(body)) => !body.handling_required() || body.understood(&understands),
+            Ok(None) => true,
+            // A multipart body that does not follow RFC 2046 is not understood.
+            Err(_) => false,
+        };
+        if !understood {
             return Err(Rejection::new(
                 StatusCode::UnsupportedMediaType,
                 "message body type not supported",
@@ -486,6 +483,59 @@ mod tests {
         assert!(supported.contains("100rel") && !supported.contains("replaces"));
         let accept = capabilities.accept_header().to_string();
         assert!(accept.starts_with("Accept:") && accept.contains("application/sdp"));
+    }
+
+    fn invite_with_body(content_type: &str, body: &[u8]) -> Request {
+        let head = format!(
+            "INVITE sip:uas@example.com SIP/2.0\r\n\
+             Via: SIP/2.0/UDP client.example.com;branch=z9hG4bK-body\r\n\
+             Max-Forwards: 70\r\n\
+             From: <sip:uac@example.com>;tag=1\r\n\
+             To: <sip:uas@example.com>\r\n\
+             Call-ID: body@example.com\r\n\
+             CSeq: 1 INVITE\r\n\
+             Content-Type: {content_type}\r\n\
+             Content-Length: {}\r\n\r\n",
+            body.len()
+        );
+        match parse_message_with_mode(&[head.as_bytes(), body].concat(), ParseMode::Strict).unwrap()
+        {
+            Message::Request(request) => request,
+            _ => unreachable!(),
+        }
+    }
+
+    /// RFC 5621 §3: a multipart INVITE is accepted when every part whose
+    /// handling is required is understood; an ISUP part must be marked
+    /// optional by a sender that does not require the UAS to process it.
+    #[test]
+    fn multipart_invite_bodies_follow_part_handling() {
+        let body = |isup_disposition: &str| {
+            format!(
+                "--b1\r\nContent-Type: application/sdp\r\n\r\nv=0\r\n\
+                 --b1\r\nContent-Type: application/isup\r\n{isup_disposition}\r\n\
+                 \x01\x02\r\n--b1--\r\n"
+            )
+        };
+        let capabilities = UasCapabilities::default();
+        let optional = invite_with_body(
+            "multipart/mixed;boundary=b1",
+            body("Content-Disposition: signal;handling=optional\r\n").as_bytes(),
+        );
+        assert!(validate_request_for_uas(&optional, &capabilities).is_ok());
+
+        let required = invite_with_body(
+            "multipart/mixed;boundary=b1",
+            body("Content-Disposition: signal\r\n").as_bytes(),
+        );
+        let rejection = validate_request_for_uas(&required, &capabilities).unwrap_err();
+        assert_eq!(rejection.status, StatusCode::UnsupportedMediaType);
+        let accept = rejection.headers[0].to_string();
+        assert!(accept.contains("application/sdp") && accept.contains("multipart/mixed"));
+
+        // A body that is not RFC 2046 multipart is not understood.
+        let broken = invite_with_body("multipart/mixed;boundary=b1", b"--b1\r\n\r\nv=0\r\n");
+        assert!(validate_request_for_uas(&broken, &capabilities).is_err());
     }
 
     /// RFC 3891 call replacement is not implemented, so a request that
