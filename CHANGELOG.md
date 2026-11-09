@@ -2,7 +2,121 @@
 
 ## Unreleased
 
+### Highlights
+
+0.5.0 is a breaking minor release about carrier-scale throughput and overload
+behaviour. A new opt-in media executor, `MediaExecutorConfig::v2()`, runs
+media on dedicated, CPU-pinned lanes sized by a host plan. Receive loops and
+paced sends run inside one poller per lane; inbound SRTP is authenticated,
+decoded and delivered inline on the socket owner and RTP is sent
+synchronously; lanes wake on a 2 ms tick and keep their deadlines in a timing
+wheel; SRTP, RTCP and receive statistics stay with the socket owner; per-call
+hot state is packed into a few cache lines; per-call sends and receives are
+fired from a per-lane call table; and the SIP inbound pump runs fused on the
+socket owner with zero-copy playout. `MediaExecutorConfig::v1()`, the per-call
+task graph, remains the default: nothing changes unless an application
+installs v2. SIP is hardened for overload and call lifecycle: TLS flows apply
+back-pressure instead of dropping responses or closing, transaction/TU
+deadlocks are fixed, new dialog-forming INVITEs can be shed with a stateless
+503 before any state exists, hangup and crossed-BYE races end calls cleanly,
+ownerless sessions are swept, and overload rejections carry `503` with
+`Retry-After`. Signaling and media hot paths copy, lock and scan less per
+call, and media graphs that bridge a SIP leg to an in-process AI run on that
+leg's media lane. The executor v2 CPU-per-call figures below were measured on
+Xeon 6 SMT in production; load qualification of executor v2 is part of the
+0.5.0 release run.
+
+### Breaking changes
+
+Each item has a one-line migration.
+
+- **`RejectReason` gains `ServiceUnavailable { retry_after_secs }`** (#355).
+  `rvoip-core-traits`' `RejectReason` is not `#[non_exhaustive]`. rvoip-sip
+  answers it with `503 Service Unavailable` and `Retry-After`; QUIC,
+  WebTransport and WebSocket map it to 503. Migration: add an arm (or a
+  wildcard) to exhaustive `match`es on `RejectReason`.
+- **`rvoip_sip::state_table::EventType` gains `Dialog100Trying` and
+  `CancelAfterTrying`** (#348). The enum is not `#[non_exhaustive]`.
+  Migration: add the two arms to exhaustive `match`es; custom state tables
+  without the new rows keep their behaviour, and `CancelAfterTrying` is
+  derived by the executor and cannot be submitted as an event.
+- **`rvoip_sip_dialog::transaction::transport::TransportManagerConfig` gains
+  the public fields `tls_flow` (#338) and `new_call_admission` (#350).**
+  Migration: add them to struct literals, or end the literal with
+  `..Default::default()`.
+- **`rvoip_harness::InProcessAiConfig` is `#[non_exhaustive]`** and gains
+  `gated_input` (#349). Code outside the crate can no longer build it with a
+  struct literal, `..Default::default()` included. Migration: start from
+  `InProcessAiConfig::default()` and set fields, or chain `with_codec`,
+  `with_media_queue_capacity`, `with_event_queue_capacity`,
+  `with_lifecycle_ack_timeout`, `with_terminal_history_capacity` and
+  `with_gated_input`.
+- **`CrossBridgeHandle::new` and `CrossBridgeHandle::with_swap_channels` take
+  the pumps' `JoinHandle<()>`s** instead of `AbortHandle`s, so `stop()` can
+  await the pumps' exit (#340). Migration: pass the `JoinHandle`s that
+  `bridge::frame_pump::spawn_pump` returns instead of calling `abort_handle()`
+  on them.
+- **rvoip-sip's inbound `ConnectionAdapter::end` can return an error after the
+  call ended** (#355). Once its hangup join passes the configured bound it
+  fails; `Ended` has already been delivered and the call is reclaimed in the
+  background. On a draining adapter, `end` now fails before it retires the
+  route. Migration: treat that error as "ended, cleanup continuing", and tune
+  the bounds with `Config::with_session_cleanup`.
+- **A call whose media a peer BYE stopped first now ends as
+  `AdapterEvent::Ended { Normal | Cancelled }`** instead of `Failed { "SIP
+  media driver failed" }` (#355). Migration: stop treating that failure as a
+  remote hangup; for a genuine media failure the terminal is now published
+  before the BYE confirmation is joined.
+- **rvoip-core may publish terminal events of different connections in a
+  different order than the adapter reported them** (#345). Per-connection
+  order is unchanged, and `AdapterLifecycleSink::deliver_terminal` now returns
+  once core has retired the connection and owns its teardown, rather than
+  after media cleanup. Migration: do not rely on terminal ordering across
+  connections, or on media cleanup having finished when `deliver_terminal`
+  returns.
+
 ### SIP
+
+#### TLS flow back-pressure (#338)
+
+- A momentarily full TLS writer queue no longer drops SIP responses. Every TLS
+  send used `try_send` on the flow's bounded writer queue (128 messages by
+  default) and failed with `BufferCapacityExceeded` the instant it was full; a
+  single-worker 250 CPS reproduction lost 119 `200 OK` and four `503`
+  responses this way. A send now waits for queue room inside the caller's own
+  future, bounded by the transport's write timeout (the handshake timeout, 10
+  s by default), and fails only when that expires. No retry task is spawned,
+  so a timed-out or cancelled send is never written later. A response pinned
+  to an exact flow stays on that flow; a pooled request flow that closed
+  during the wait still falls back to a fresh dial.
+- A momentarily full transport event queue no longer closes the TLS flow. The
+  reader used to drop the connection as soon as the transaction layer's queue
+  was full, which on a shared carrier trunk stranded every dialog routed over
+  it. It now keeps the message it holds, stops reading (TCP flow control
+  pushes back on the peer) and delivers it in order once there is room.
+  `TlsReceiveBackpressurePolicy` bounds the wait: `Pause` (default) closes the
+  flow only after `TlsFlowConfig::receive_pause_max` (600 s by default);
+  `Close` gives up after `min(write timeout, 1 s)`. The wait still ends at
+  once when the flow's writer stops or its idle or authentication deadline
+  passes.
+- TLS sockets now set `TCP_NODELAY` by default on accepted and dialed flows,
+  so Nagle's algorithm cannot hold a response behind an unacknowledged
+  segment. Turn it off with `TlsFlowConfig::with_tcp_nodelay(false)`.
+- New per-transport `TlsFlowConfig` (`#[non_exhaustive]`, `with_*` builders)
+  carries these settings and an optional `IngressAdmissionHook`, which sees
+  every parsed inbound message with its peer address before it is queued and
+  returns an `IngressVerdict`: `Pass`, `Absorb` (drop it) or `Respond(bytes)`
+  (answer on the same flow without stalling reads), so an application can shed
+  overload statelessly at read rate. `TlsFlowConfig::stats` and
+  `TlsTransport::flow_stats` return a `TlsFlowStats` snapshot of pause, close
+  and hook counters, shared by every transport built from clones of one
+  config. Set it with `rvoip_sip::Config::with_sip_tls_flow` (field
+  `sip_tls_flow`), `TransportManagerConfig::tls_flow`, or the new
+  `TlsTransport::bind_with_role_and_flow_config` and
+  `TlsTransport::client_only_with_flow_config`. Existing `TlsTransport`
+  constructors use `TlsFlowConfig::default()`.
+
+#### Transaction layer (#339, #350)
 
 - The transaction layer no longer deadlocks against a dialog handler under
   load. The dialog manager drains the bounded transaction event queue and
@@ -24,6 +138,620 @@
   transaction key reserved until they are queued. A second, concurrent
   termination of the same transaction now also waits for the runner join
   instead of proceeding as if the runner had already stopped.
+- An explicit transaction termination no longer closes the transaction manager
+  when its terminal events wait on a full transaction-user queue (#350). After
+  one second the manager used to fail closed and latch into draining for good:
+  every later inbound request failed without a response, every local BYE
+  failed, and ended sessions could never release their slots; a cleanup burst
+  at about 3,400 calls/s was enough. The publication now continues in the
+  background, in order and with its exact owners, and stops on shutdown. Only
+  a closed transaction-user channel still fails closed, and that is now logged
+  and counted. `TransactionManager::slot_cleanup_stats` returns a
+  `SlotCleanupStats` snapshot (`#[non_exhaustive]`).
+- A draining transaction manager answers a new INVITE with a stateless `503
+  Service Unavailable` carrying the stateless-overload `Retry-After`, instead
+  of dropping it so the caller retransmits until Timer B (#350). Other
+  requests are unchanged.
+- Repeated transaction failure logs (initial-request send failures,
+  state-entry failures, failed INVITE cancellation) are thinned to the first
+  ten occurrences, then powers of two, then every 10,000th, each carrying an
+  `occurrences` count (#350).
+
+#### Stateless new-call admission (#350)
+
+- New stateless admission for new dialog-forming INVITEs in `rvoip-sip-dialog`
+  (`transaction::overload`). A per-manager `NewCallAdmission` gate
+  (`AdmissionMode::Off` by default, `Observe`, `Enforce`) answers a rejected
+  INVITE with an RFC 3261 §8.2.6 stateless 503 (all Vias, deterministic
+  `rvoip-ovl-` To tag, optional `Retry-After`) before any transaction, dialog
+  or session state exists, gives a retransmission the identical 503, and
+  absorbs the ACK for it. In-dialog requests, retransmissions, ACK and CANCEL
+  are never decided. Applications publish an `AdmissionLevel` (closed, or shed
+  a fraction of Call-IDs) and an optional `NewCallRateLimit` at run time, and
+  read `NewCallAdmissionStats`. Over UDP, TCP and WebSocket the gate runs on
+  the transaction dispatch path; over TLS it runs on the connection reader
+  through the TLS flow ingress hook, unless the application supplied its own
+  hook. Configure it with `TransportManagerConfig::new_call_admission` or
+  `rvoip_sip::Config::with_sip_new_call_admission` (field
+  `sip_new_call_admission`), and reach it with
+  `TransactionManager::new_call_admission` or
+  `UnifiedCoordinator::new_call_admission`. All new types are
+  `#[non_exhaustive]`; there are no process-global statics.
+- New `TransactionManager::set_new_dialog_capacity_guard`
+  (`NewDialogCapacityGuard`): while the transaction user reports its session
+  slots full, a new INVITE gets a stateless 503 with `Retry-After` before any
+  transaction exists. `rvoip_sip::Config::server_call_admission_early_reject`
+  (default `false`) installs it against `server_call_admission_limit`, and
+  `UnifiedCoordinator::sip_slot_cleanup_stats` exposes the counters.
+
+#### Inbound call lifecycle and hangup (#348, #355, #364)
+
+- A rejected inbound call no longer blocks the adapter event translator
+  (#348). Rejecting an incoming call before it is published (connection
+  capacity exhausted, a missing or rejected signaling context, an
+  authenticated principal that is no longer active, a backpressured handoff)
+  sends its final response and can fall back to a hangup and a forced cleanup;
+  the translator ran that inline, so one slow rejection delayed every later
+  event of every call. Rejections now run as retained tasks that shutdown
+  joins, at most 256 at a time; past that the translator rejects inline, so it
+  is backpressured rather than spawning unbounded work. Each rejection owns
+  its exact call lifetime, so it never touches a newer call that reused the
+  session ID.
+- `ConnectionAdapter::accept` reserves the `Connected` event slot before it
+  answers an inbound call (#348). With the adapter event queue full it now
+  rejects the still-unanswered call with `503 Signaling Event Backpressure`
+  and returns `AdmissionRejected`, instead of sending 200 OK and then leaving
+  the answered call without its establishment handoff or media setup.
+- New `Config::sip_adapter_call_capacity: Option<usize>` and
+  `Config::with_sip_adapter_call_capacity()` (#348). The default `None` keeps
+  the 256-event queue and 4096 pending inbound observations; when set, the
+  event queue holds two events per call and the pending-observation store one
+  per call, never fewer than the defaults. Servers that answer more than about
+  128 calls at once should set it to their expected concurrent call count;
+  valid values are 1 to `Config::MAX_SIP_ADAPTER_CALL_CAPACITY` (131072).
+- New `Config::session_cleanup` (`SessionCleanupConfig`,
+  `Config::with_session_cleanup`) bounds the session cleanup the `SipAdapter`
+  owns (#355). All three bounds are on by default:
+  - `inline_hangup_deadline`: 5 s, before a BYE transaction exists;
+  - `inbound_end_backstop`: 10 s;
+  - `pending_hangup_watchdog`: on.
+- New `cleanup_diag::session_cleanup_counters()` returns
+  `SessionCleanupCounters`, always-on counters for the bounded cleanup paths:
+  cancelled reject terminals, inline-deadline and backstop expiries, inbound
+  end reclaims and their outcomes, forced session-slot releases and failures,
+  and pending-hangup watchdogs armed (#355).
+- Every inbound 503 from `ConnectionAdapter::reject` that carries no
+  `Retry-After` of its own now gets
+  `Config::server_overload_retry_after_secs`, including `RejectReason::Custom
+  { code: 503, .. }` (#355).
+- Hangup fixes (#355): a local hangup that loses the session lane to a peer
+  BYE no longer waits the non-INVITE timeout for a BYE it never sent;
+  cancelling a caller of inbound `end` or `reject` no longer loses the call's
+  terminal handoff to the orchestrator; an inbound end whose hangup never
+  completes no longer holds the orchestrator's end and connection forever; an
+  ended inbound call whose hangup failed no longer keeps its session-store
+  slot (bounded reclaim and exact-release retries end in a counted forced slot
+  release); and a UAS that hangs up after its 200 OK and never gets the ACK
+  now ends the call through the accepted-call watchdog instead of leaking the
+  session and its media port.
+- Counting live setup/teardown deadlines is now O(1); it used to sum over
+  every live call under the scheduler lock on each lifetime close (#355).
+- A local hangup whose BYE is crossed by the peer's own BYE no longer fails
+  when the peer's BYE releases the call before the local BYE is answered
+  (#364). The confirmation wait reported "SIP BYE confirmation ended during
+  exact local cleanup", so the inbound `end` returned an adapter error and
+  started a needless reclaim for a call that had ended normally. A
+  confirmation that exact cleanup interrupts now counts as success only when
+  the lifetime already carries a normal (`Ended`) terminal fact; any other
+  terminal, or none, still fails.
+
+#### Orphan sweep and RTP port admission (#360)
+
+- New `SessionCleanupConfig::orphan_session_ttl` (default 60 s, 5 s to 1 h,
+  `None` turns it off) and `with_orphan_session_ttl`. A `SipAdapter` reclaims
+  call sessions that have had no owner (no adapter route, pending inbound
+  context, in-flight rejection or reclaim) and no new RTP for the TTL,
+  together with their media ports; established calls get a BYE first. Call
+  sessions abandoned without an owner no longer keep their session slot and
+  media port forever. `SipAdapter::orphan_sessions_by_state()` reports the
+  last sweep's ownerless sessions by state.
+- An inbound INVITE is answered `503 Service Unavailable` with
+  `Config::server_overload_retry_after_secs` before any session state exists
+  when the RTP range has no free slot for the call's reservation: one port, or
+  an RTP/RTCP pair for a non-mux offer with `Config::rtcp_non_mux`. The
+  coordinator warns at startup when `server_call_admission_limit` exceeds the
+  calls its RTP range holds.
+- An inbound INVITE whose setup fails after the dialog exists (session
+  creation, the dialog commit, media allocation or another setup action) now
+  gets one `503` with `Retry-After` after its upper resources are released. It
+  used to get no final response, leaving the caller to time out and the server
+  transaction and dialog allocated.
+- `SessionCleanupCounters` gains `orphan_session_reclaims` and its outcomes
+  (`already_released`, `graceful`, `forced`, `timed_out`), plus
+  `media_port_admission_rejects`, `setup_failure_rejects` and
+  `setup_failure_unanswered`. rtp-core gains `SessionPortReservation` and
+  `PortAllocator::{ports_per_session, configured_session_slots,
+  available_port_count, available_session_slots}` (pair slots count free
+  aligned even/odd pairs); media-core gains
+  `MediaSessionController::{available_session_port_slots,
+  configured_session_port_slots}`.
+
+#### State table (#348)
+
+- A UAC hangup or cancel after a `100 Trying`, with no other provisional
+  response, now sends CANCEL at once, as RFC 3261 §9.1 allows. Before, the
+  call waited in `CancelPending` for a 180 or 183 that a peer may never send,
+  so the INVITE ran on until the peer answered or Timer B fired. A 100 to the
+  initial INVITE now records progress (`Dialog100Trying`) without publishing
+  ringing, and a 100 that reaches `CancelPending` sends the pending CANCEL.
+  `CallProgress` events for 100 are unchanged.
+- A peer BYE that crosses our own in-flight BYE (`Terminating` + `DialogBYE`)
+  now commits `Terminated` and publishes `CallTerminated`. There was no row
+  for it, so the peer BYE was answered but the session stayed in `Terminating`
+  until our BYE completed or timed out. Like the `Terminating` +
+  `DialogTerminated` row, the new row runs no cleanup actions: the retained
+  exact terminal release quiesces the local BYE before it cleans the dialog
+  and media once.
+
+#### SIP media streams (#340, #342, #343)
+
+- Closing a `SipMediaStream` awaits the media driver's `JoinHandle` instead of
+  spinning on `is_finished` for up to two seconds (#340). A cancelled close
+  leaves the driver owned by the stream, so dropping the stream still aborts
+  it.
+- The inbound and outbound media pumps hold one codec-change waiter per codec
+  epoch, and the inbound playout timer is re-armed only when its deadline
+  moves, instead of re-registering both for every packet (#343).
+- A media pump that stops because the inbound audio source closed (the
+  ordinary end of every call's media after a remote hangup) logs
+  `SipMediaStream pump stopped: audio source closed` at `debug` instead of a
+  per-call `warn` (#342). Other pump failures still warn.
+
+### Signaling performance
+
+Wire output, published events and STIR/SHAKEN behaviour are unchanged unless a
+bullet says otherwise.
+
+- `rvoip-sip-dialog` no longer deep-copies SIP requests and responses where it
+  only reads them (#346). Removed: a copy of every inbound request, ACK and
+  response made only to compute its transaction key (the new
+  `transaction_key_from_request` and `transaction_key_from_response` take the
+  message by reference and return the same key as
+  `transaction_key_from_message`); a second copy of the request in every
+  client and server transaction constructor; two copies of each inbound INVITE
+  published as `IncomingCall` (the whole event is now copied only while a
+  STIR/SHAKEN verifier is installed); and a copy of the original request for
+  every response sent through the dialog layer and every `200 OK` a server
+  transaction sends. The new `TransactionManager::server_transaction_request`
+  returns the transaction's shared `Arc<Request>` while it is active.
+- `rvoip-sip` no longer parses each inbound INVITE a second time (#352).
+  Inbound INVITE observers and the pending call bundle
+  (`IncomingCall::raw_request()`) get the server transaction's own shared
+  request; the bytes are parsed again only when the transaction has already
+  retired.
+- Less copying per published call event (#352): dialog events reach the
+  session shards as the shared envelope instead of a deep copy, each
+  application event moves into the control owner's channel instead of being
+  cloned (the public observation is still a separate sanitized copy), and the
+  lifecycle index checks for transfer outcomes without cloning and
+  Debug-formatting every event.
+- `UnifiedCoordinator::events_with_control` no longer subscribes to the public
+  observation bus, whose copies the control owner dropped anyway; its stream
+  now ends when the control channel closes (#352). `SipAdapter` Debug-formats
+  unmapped API events into `AdapterEvent::Native` only while the
+  orchestrator's debug log (target `rvoip_core::orchestrator`), their only
+  consumer, is enabled; direct `subscribe_events` /
+  `try_subscribe_atomic_events` consumers still receive them.
+- New opt-in `Config` fields for inbound servers; the defaults keep current
+  behaviour (#352):
+  - `server_call_admission_lock_free`
+    (`with_server_call_admission_lock_free`): decide server call admission
+    with one atomic reservation instead of a mutex. It never admits past
+    `server_call_admission_limit`, but may reject (503) one INVITE of a
+    concurrent race exactly at the limit;
+  - `inbound_session_history` (`with_inbound_session_history`, default
+    `true`): `false` creates inbound sessions without the diagnostic
+    transition history, as outbound sessions already are;
+  - `session_inline_incoming_call_dispatch`
+    (`with_inline_incoming_call_dispatch`): process each initial INVITE on the
+    dialog worker that delivered it instead of on a session event shard.
+- Per-call registry lookups no longer scan every live call (#342). The UAS
+  reliable-provisional (RFC 3262) registry indexes its retransmit tasks and
+  closed-transaction fences by dialog, so PRACK, the exact final-response
+  close and dialog cleanup each read one entry instead of iterating every
+  shard; rvoip-sip's exact-response registry indexes pending INFO / REGISTER
+  obligations by session lifetime, so exact call teardown reads one index
+  entry instead of walking every pending obligation. Together these scans cost
+  5.8% of worker CPU at 4,500 calls per second in a CPS-scaling profile,
+  growing with the number of live calls.
+- Call setup no longer polls (#354). An inbound `ConnectionAdapter::accept`
+  waits for the ACK on the call's committed state instead of polling the
+  session map every 10 ms, and a call whose session is removed during the wait
+  fails with `ConnectionNotFound` at once instead of at the setup timeout. A
+  SIP media stream waits for its media owner and its SDP negotiation the same
+  way.
+- The per-frame exact media lookup no longer takes the global session registry
+  mutex, and resolving a trace's owner by SIP Call-ID no longer scans every
+  registered call (#354). An inbound INVITE scans pending inbound observations
+  for expired entries only when one can have expired. Negotiation parses each
+  SDP body once and checks for an existing media session without sampling RTP
+  statistics; `MediaSessionController` gains `has_media_session` and
+  `get_session_config`, which read the published session without locking the
+  RTP session.
+
+### Media executor
+
+Everything in this section is opt-in. The default media runtime is still one
+shared lane, and `MediaExecutorConfig::v1()` (the per-call task graph) is
+still the default executor; `MediaExecutorConfig::v2()` turns on every switch
+below. CPU-per-call figures are each switch's measured effect in the
+production v2 profile, measured on Xeon 6 SMT.
+
+#### Media lanes and host plan (#343, #347)
+
+- **The media executor can be split into independent lanes** (#343).
+  `rvoip_rtp_core::task_runtime::MediaRuntimeConfig` (`#[non_exhaustive]`)
+  selects `MediaLanes::Shared { worker_threads, lanes }`: up to 8
+  multi-threaded runtimes, each with its own scheduler, timer driver and I/O
+  reactor, splitting one worker-thread budget. Install it once with
+  `install_media_runtime_config`, or set `rvoip_sip::Config::media_runtime` /
+  `Config::with_media_runtime`, which `UnifiedCoordinator::new` installs
+  before any media starts; a conflicting second layout is a `ConfigError`.
+  `media_runtime_snapshot` reports each lane's workers and placements.
+- **Each UDP media transport lives on one media lane** (#343). Its RTP and
+  separate RTCP sockets are re-registered on that lane's reactor (same
+  descriptor, address and options; no rebind) and its receive tasks run there,
+  so media readiness no longer wakes the signaling runtime that created the
+  transport, and the transport keeps receiving if that runtime stops.
+  Transports are placed round robin.
+- **Lanes can be dedicated threads pinned to CPUs** (#347).
+  `MediaLanes::Dedicated { cpus }` (also `MediaLanes::dedicated(n)` and
+  `MediaLanes::pinned(cpus)`) runs one current-thread Tokio runtime per lane
+  on its own thread, pinned to `cpus[i]` when set (Linux); a CPU the kernel
+  refuses, or a platform without thread affinity, leaves that lane unpinned
+  with a warning. `MediaLaneSnapshot::pinned_cpu` reports the CPU each lane
+  got; `start_media_runtime`, `current_media_lane` and a public
+  `pin_current_thread` are new.
+- **`rvoip_rtp_core::host_plan` sizes the media lanes and the signaling
+  runtime from the host** (#347). `ExecutorPlan::probe(&HostPlanConfig)` reads
+  the usable CPUs (affinity and cgroup v2 cpuset), SMT sibling topology,
+  `cpu.max` quota, memory limits, `pids.max`, `RLIMIT_NOFILE` and NUMA nodes
+  from `/proc` and `/sys`, and plans one media lane per usable core, pinned to
+  the core's first SMT sibling, with signaling threads floating over the
+  second siblings. Without SMT the cores are split by a signaling share; under
+  a CPU quota the plan uses `⌊quota⌋` threads and pins nothing.
+  `ExecutorPlan::media_runtime_config()` and `signaling_runtime_builder()`
+  return the matching lane layout and Tokio builder. `HostPlanConfig`
+  (`#[non_exhaustive]`, validated) holds the signaling shares (`sigma`,
+  default 0.40, and `sigma_smt`), the housekeeping-core threshold, the SMT
+  policy, an explicit signaling thread count and an optional
+  `SignalingBalance` of per-call CPU costs;
+  `HostPlanConfig::sibling_signaling()` gives one signaling thread per media
+  core (23 media lanes and 23 signaling threads instead of 10 on a 24-core SMT
+  host). Nothing reads the environment, and nothing changes unless the
+  application applies the plan.
+
+#### Executor v2 switches
+
+- **`rvoip_rtp_core::executor::MediaExecutorConfig`** (#351): a typed,
+  process-wide configuration (`#[non_exhaustive]`; `v1()`, `v2()`, and a
+  `with_*` builder and `*_active` accessor per switch), installed once with
+  `install_media_executor_config` or through
+  `rvoip_sip::Config::media_executor` / `Config::with_media_executor`, which
+  `UnifiedCoordinator::new` installs; an equal configuration is shared, a
+  conflicting one is a `ConfigError`. `MediaExecutorConfig::validate` rejects
+  `tx_batch` without `tx_handle_cache` under v2
+  (`MediaExecutorConfigError::Requires`, #361) and lane tick quanta other than
+  1, 2, 4 or 5 ms (`MediaExecutorConfigError::InvalidLaneTickQuantum`, #356).
+  `executor::inline_executor_counters()` returns process totals for the
+  application to export.
+- **Inline receive, lane pollers and synchronous send** (#351). An
+  authenticated inbound RTP packet is decrypted in place in the receive buffer
+  and accounted run to completion on the socket owner
+  (`RtpSession::install_inline_media_sink`, the `InlineMediaSink` trait), with
+  one owner timer per socket and a receive drain budget; without a sink the
+  session publishes `PacketReceived` as in v1. `lane_poller` runs receive
+  loops inside one poller task per lane worker, `lane_timer` puts lane-hosted
+  futures on the poller's lane clock (`rvoip_rtp_core::media_clock`), and
+  `lane_tx` hosts paced send tasks on the poller
+  (`executor::spawn_on_media_lane`). `RtpSendHandle::try_send_now` sends a
+  frame synchronously with SRTP protected into a reused buffer, identical on
+  the wire to `send_packet_with_pt`; with `tx_batch`, co-due frames leave in
+  one `sendmmsg` on Linux. SSRC-keyed maps on the packet path use a keyed
+  SplitMix64 hasher (`fast_ssrc_hash`).
+- **Owner SRTP, RTCP and receive statistics** (#357). With `owner_srtp` a
+  receive loop checks its transport's inbound SRTP/SRTCP context out and
+  authenticates without the context lock (not on a transport with a separate
+  RTCP socket); with `owner_rtcp`, RTCP multiplexed on the RTP socket is
+  handled on the socket owner with the session's own RTCP handling, and
+  periodic reports leave with a synchronous send byte-identical to
+  `send_rtcp_bytes`; with `owner_receive_stats` the socket owner publishes
+  per-packet receive statistics through a single-writer seqlock instead of the
+  statistics mutex.
+- **Inline decode and a PCM buffer pool** (#353). With `inline_decode`, each
+  G.711 dialog's reorder window, source timeline, concealment, decode, pacing
+  and delivery run on the socket owner instead of the dialog's receive task,
+  with identical frames, timestamps and concealment. Other codecs, and dialogs
+  a bridge attaches to, stay on (or are demoted to) the v1 handler, which
+  keeps serving DTMF; such dialogs no longer publish `PacketReceived` unless
+  demoted, and the in-tree bridge demotes both legs itself. New
+  `MediaSessionController::install_inline_audio_consumer`
+  (`InlineAudioConsumer`) and
+  `MediaSessionController::request_inline_demotion`. With `pcm_pool`, decoded
+  and concealed PCM uses a bounded per-thread pool
+  (`rvoip_media_core::pcm_pool`).
+- **Fused SIP media pump, cached send handles and AI-call send** (#361).
+  `fused_inbound_pump` runs a G.711 SIP stream's inbound pump on the RTP
+  socket owner as media-core's inline audio consumer; `direct_inbound_sink`
+  (with `count_only_sink`) feeds an offered `InboundFrameSink` directly;
+  `ai_tx` sends encoded G.711 synchronously through a cached,
+  generation-fenced path on the socket's lane
+  (`MediaSessionController::prepare_g711_sender`, `PreparedG711Sender`);
+  `ai_tx`/`session_owner_placement` place the stream's pumps on that lane and
+  `ai_tx`/`ai_rx` publish it via `MediaStream::media_lane`;
+  `direct_encoded_writer` makes `SipMediaStream::try_take_encoded_g711_writer`
+  return a writer. `rvoip-core-traits`' `MediaStream` gains the defaulted
+  hooks `offer_inbound_frame_sink`, `try_take_encoded_g711_writer` and
+  `media_lane`; streams that do not implement them are unchanged. No
+  `rvoip_sip::Config` or `Event` change.
+- **Lane tick** (#356). `MediaExecutorConfig::lane_tick: Option<LaneTick>`
+  (`LaneTick { quantum, grid_timers }`): a lane poller on a dedicated lane
+  parks to the next boundary of a 1, 2, 4 or 5 ms grid after each pass and
+  serves every socket and lane-clock deadline that became ready meanwhile in
+  one pass; with `grid_timers` lane-clock deadlines are filed on the same
+  grid. Deadlines are never served early and at most one quantum late,
+  saturated passes skip the sleep, and cross-thread work ends the sleep at
+  once or within 500 µs; decoded pacing paces from the served deadline, so the
+  quantum never accumulates. `v2()` includes a 2 ms tick with grid timers
+  (−22% CPU per call). Diagnostics:
+  `rvoip_rtp_core::lane_tick::lane_tick_counters()`.
+- **Lane timing wheel and one clock read per pass** (#358). With
+  `lane_timer_wheel` a lane clock keeps its deadlines in a 256-bucket
+  single-level wheel (far deadlines in an overflow heap): O(1) file, cancel
+  and re-arm with no allocation, and exactly the heap's firing order and
+  times. With `lane_pass_clock` a poller pass reads the clock once and the
+  futures it polls read that value through `media_clock::now` / `now_std`;
+  deadlines are never served early. Both in `v2()` (−4.6% CPU per call).
+  Diagnostics: `executor::lane_wheel_counters()`.
+- **Per-call hot state** (#362). With `hot_state` the socket owner packs what
+  it touches per packet: an SRTP context packs each RTP direction into three
+  cache lines, with an HMAC-SHA1 state keyed once per context; the receive
+  loop reads one doorbell line per datagram and re-reads control-plane state
+  only after a writer rang it; the synchronous send path caches the remote
+  address and latch state until the doorbell rings; lane clocks prefetch the
+  state of futures a round is about to wake. Wire output and what consumers
+  observe are unchanged. In `v2()` (−2.5% CPU per call). Diagnostics:
+  `rvoip_rtp_core::hot_state::hot_state_counters()`.
+- **PCM pool sizing and lane-batched counters** (#359). With
+  `counter_pool_cleanup` the per-thread PCM pool keeps up to
+  `PCM_POOL_CLEANUP_CAPACITY` (1024) buffers of at most
+  `PCM_POOL_CLEANUP_MAX_SAMPLES` (1024) samples, so a lane pass no longer
+  allocates and frees buffers beyond 32, and per-event process counters added
+  during a lane pass (`executor::add_lane_deferred`) are published every 64
+  passes, on idle passes and at stop instead of one shared atomic add per
+  event. Totals are unchanged; `pcm_pool_counters().misses` and the owner RTCP
+  counters may trail by up to a batch, and a thread's pool may hold about 2
+  MiB of small buffers.
+- **Callback send from a per-lane call table** (#371). New
+  `rvoip_rtp_core::lane_table` and `callback_send`: an application implements
+  the synchronous `LaneTxSource` trait (`on_due(now) -> LaneNext::{At, Done,
+  Escalate}`) for a paced per-call sender, and a supervisor hosted on the
+  call's lane installs it with `lane_table::install_tx`; the poller then calls
+  `on_due` straight from the lane's timing wheel, with no waker, hosted-future
+  poll or `select!` per frame. `LaneTxHandle::retire` and
+  `LaneTxHandle::finished` keep the supervisor in control; entries fire never
+  early, on the tick grid, within per-pass and per-entry budgets; a panicking
+  handler poisons only its entry; slots are generation-fenced. Where there is
+  no table, `install_tx` gives the source back to be driven as a paced future.
+  In `v2()` (−8% CPU per call with a recording sender as the source).
+  Diagnostics: `lane_table::callback_lane_counters()`.
+- **Receive loops served from the lane table** (#372). With
+  `callback_rx_kernel` a v2 receive loop on a dedicated lane moves into the
+  lane's table once it owns its call state and is called from the table's
+  ready list when its socket is readable and from the wheel when its owner
+  deadline is due, running the same per-packet step (`RxCore::on_datagram`) as
+  the async loop. With `lane_rx_readiness` (Linux) the lane keeps one
+  level-triggered epoll for those sockets and reads each reported socket once
+  per report (empty `recvfrom` calls went from 1.55 per received datagram to
+  0). `callback_rx_kernel` needs `callback_send` and `lane_rx_readiness` needs
+  `callback_rx_kernel`. Both in `v2()` (−2.8% CPU per call against v2 without
+  them). Diagnostics: the `rx_*` fields of `CallbackLaneCounters`.
+- **Zero-copy playout in the fused inbound pump** (#373). With
+  `playout_zero_copy` (needs `fused_inbound_pump`) a fused pump's playout
+  buffer keeps pending frames in a few unordered slots instead of a `BTreeMap`
+  and lends each due frame to the pump, then keeps it as its concealment
+  template, instead of copying it. Frames, order, timestamps, payloads,
+  concealment, late drops and playout statistics are identical. media-core
+  adds `PlayoutBuffer::with_slot_storage` and `PlayoutBuffer::pop_due_with`;
+  `PlayoutBuffer::new` and `pop_due` behave as before. In `v2()`.
+
+### RTP/RTCP and media quality
+
+#### Receive and send robustness (#337)
+
+- A concealment frame can no longer ask for gigabytes of memory. A gap
+  confirmed before the receive path had learned the stream's timestamp step
+  was sized from the successor's timestamp without a half-range check, so a
+  same-SSRC clock reset (for example seq 100 at ts 16000, then seq 102 at ts
+  0) asked for about 2^32 samples, an 8.6 GiB zeroed allocation that aborts
+  the process. A backward step now resumes at the received packet and relearns
+  the cadence, and every concealment frame is bounded to one second of audio;
+  a larger request is refused and the media behind it still plays. The first
+  gap of a stream is also sized correctly.
+- One lost inbound packet no longer delays or silences the rest of a call. An
+  N-packet loss is concealed after one reorder hold instead of N holds (five
+  lost packets used to hold the stream for 225 ms). The decoded playout queue
+  drains a batch the reorder window released together instead of keeping it as
+  standing latency. `PlayoutBuffer` follows a stream that fell behind its
+  clock: after half a second of late frames arriving one frame apart while
+  every slot is concealed, it delays its playout clock (at most
+  `max_depth_frames` per step) instead of dropping every later frame and
+  fading to silence; bursts and reorder holds do not move the clock. New
+  `PlayoutBuffer::clock_delays()` counts the delays.
+- The media-core RTP receive loop arms its timer at the next reorder or
+  playout deadline instead of waking every 5 ms, so an idle or silent session
+  no longer wakes 200 times per second.
+- rtp-core treats an RTP datagram the local network stack refuses as a packet
+  lost on the wire rather than a failed send: `EPERM`/`EACCES` (a netfilter
+  DROP rule in OUTPUT, a full conntrack table), `ENOBUFS`, `ENOMEM`, and ICMP
+  errors reported on a later send. The SIP outbound media pump used to end the
+  call's outbound audio at the first refusal; now the far end sees a
+  one-packet gap. Errors that mean the socket is unusable still fail the send.
+  New `UdpRtpTransport::refused_rtp_datagrams()` counts them.
+- Before symmetric RTP latches, outbound RTP and RTCP sends store the SDP
+  destination only when it changed, instead of allocating an `Arc` and taking
+  `arc_swap`'s writer path for every packet.
+
+#### Hot path (#354, #357, #373)
+
+These changes keep wire output, statistics, RTCP content and every error
+outcome unchanged, and add no configuration.
+
+- G.711 encodes and decodes through lookup tables. `rvoip-codec-core` gains
+  `MULAW_ENCODE_TABLE` (16 KiB) and `ALAW_ENCODE_TABLE` (4 KiB) in
+  `utils::tables`, built at compile time from the reference encoder, and every
+  `G711Codec` entry point uses them and the existing decode tables;
+  `encode_mulaw_table` and `encode_alaw_table` now really use a table.
+  Measured on the Xeon 6 build host, a 20 ms frame encodes about 11 times
+  faster (PCMU 567 ns to 50 ns) and decodes about 2 to 3 times faster. The
+  free `ulaw_compress`/`alaw_compress` reference functions are unchanged
+  (#354).
+- PCMU and PCMA frames no longer take a codec mutex: a dialog's G.711 codec
+  generation encodes and decodes through a shared stateless codec (#354).
+- Encoded audio sends no longer lock the RTP session, and RTP send totals no
+  longer take the session statistics mutex: the packet writer publishes its
+  counters through a lock-free single-writer record that RTCP and
+  `RtpSession::get_stats()` read (#354).
+- SRTP keys its HMAC once per key derivation and clones the keyed HMAC-SHA1
+  state per packet instead of running the key schedule and copying the packet;
+  `SrtpAuthenticator` implements `Clone` and a `Debug` that omits key material
+  (#354). Every SRTP and SRTCP HMAC-SHA1 tag, and the once-per-context keying
+  (`hmac_sha1_core`), is computed by an `#[inline(never)]` function, and a
+  test checks that every SHA-1 computation in the SRTP, hot-state and owner
+  receive code runs in one of them, so the legacy-SSE SHA-NI code cannot be
+  inlined into AVX packet paths under fat LTO or PGO; `calculate_auth_tag` no
+  longer copies the packet to append the ROC (#357, #373).
+- `PacketLossTracker` keeps its 2,048-packet duplicate window in a
+  direct-address ring instead of a `HashSet` pruned on every advance (#354).
+- The maps an RTP session owns use 16 shards instead of DashMap's default of
+  four per CPU (1,024 on a 192-thread host), which reduces per-call memory and
+  RTCP report work (#354).
+- The UDP RTP and RTCP receive loops reuse one receive buffer instead of
+  allocating and zeroing one per datagram; `PlayoutBuffer` reuses its
+  concealment template's sample buffer instead of cloning every emitted frame;
+  and stopping a media session removes only that session's aliases instead of
+  scanning every active call's mapping (#354).
+
+### Core and media graph
+
+- Connection admission no longer sweeps the lifecycle table when bounded
+  lifecycle retention is enabled (#345). Inbound admission swept every
+  retained row every 64 admissions, and outbound admission on every claim,
+  taking each live connection's lifecycle lock under the registry lock. Rows
+  are now reclaimed by exact identity when their cleanup completes or their
+  adapter cleanup quarantine resolves, so admission cost no longer grows with
+  the number of live calls. `end_session` likewise removes only the ending
+  session's own connection-to-session bindings.
+- Authoritative operational publication no longer yields while it holds the
+  publication-order lock and the stream has capacity (#345). `reserve().await`
+  can return `Pending` on Tokio's cooperative budget even with free capacity,
+  which parked every other connection's lifecycle publication behind one busy
+  task; core now waits only when the stream is full.
+- A slow connection teardown no longer stalls an adapter's event consumer
+  (#345). For an `Ended`/`Failed` event core awaited bridge and media-graph
+  teardown while holding the publication-order lock, delaying every other
+  connection's events on that transport. Terminal events now retire the
+  connection synchronously, in adapter order, release the lock, and hand
+  teardown and the terminal publication to the bounded lifecycle supervisor
+  (inline when it is saturated or draining). Rejections caused by a saturated
+  inbound admission gate likewise run their adapter cleanup off the consumer.
+  Cancelling a caller of `AdapterLifecycleSink::deliver_terminal` or of a core
+  connection-failure publication no longer degrades the operational event
+  stream.
+- Media teardown no longer spins a runtime worker while it waits for media
+  tasks on another runtime (#340). `MediaGraphHandle::shutdown_and_wait` and
+  `wait_closed` await the graph actor's `JoinHandle`, the graph's terminal
+  cleanup awaits the aborted sink delivery tasks, and
+  `CrossBridgeHandle::stop` awaits both frame pumps, instead of polling
+  `is_finished` in `yield_now` loops (up to 1–5 s each). Recording drains, on
+  `ManagedMediaRoute::drain` and at source EOF, wake when the route's delivery
+  task ends instead of polling every millisecond.
+- Media graphs run on the media lane their streams publish
+  (`MediaStream::media_lane`, #363). A graph whose source hosts reader graphs
+  runs on the source's lane; a graph whose source has no lane (an in-process
+  AI, for example) runs on the target's lane when the target hosts writer
+  graphs; otherwise it runs on the caller's runtime as before. This covers
+  directional bridge graphs and the per-connection graph used by listeners,
+  broadcast and recording. Streams publish no lane by default (rvoip-sip
+  publishes one under `MediaExecutorConfig::v2()`), so nothing moves unless a
+  stream asks. New `start_media_graph_on(source, codec, policy, runtime)`
+  starts a graph whose actor and route delivery tasks run on a given runtime.
+- New `rvoip_core::Config::lane_inline_graph_delivery` (default `false`,
+  `with_lane_inline_graph_delivery`, #363). For a bridge where exactly one
+  side publishes a media lane, such as a SIP leg bridged to an in-process AI,
+  graphs on that lane hand each frame to its target from the graph actor while
+  the route's queue is idle, instead of waking the route's delivery task;
+  targets receive the same frames in the same order, under the same
+  peer-switch, cutover and gate fences. Per-graph totals are published at
+  graph stop as `rvoip_media_graph_inline_deliveries_total` and
+  `rvoip_media_graph_inline_fallbacks_total`.
+- `rvoip-core-traits`: `MediaStream::try_gated_frames_out()` (default `None`)
+  lets a stream offer a `GatedFrameInput`, its consumer channel plus the gate
+  in front of it (`GatedFrameAdmission::{Open, Discard, Closed}`); a media
+  graph routing into such a stream applies the gate itself and writes each
+  frame straight into the consumer's channel, under the same peer-switch and
+  cutover fences as any other route (#349). `PeerRouteTicket::forward_with`
+  (`PeerForwarded`, #349) and `PeerRouteTicket::try_reserve`
+  (`PeerTryReserve`, `PeerForwardPermit`, #363) are the matching peer-switch
+  primitives for a producer that commits through its own gate and for a
+  non-waiting forward.
+- Media graph transcodes that change only the sample rate (for example G.711
+  at 8 kHz to and from the in-process AI's 16 kHz PCM) resample directly
+  instead of going through `FormatConverter`, which copied each frame twice;
+  the output is bit-identical (#349).
+- The media graph resolves its per-frame counters
+  (`rvoip_media_graph_source_frames_total`, `rvoip_media_graph_frames_total`
+  and the labelled `rvoip_media_graph_transcodes_total`) once per graph and
+  codec group instead of looking each one up for every frame (#349). Names,
+  labels and counts are unchanged; a metrics recorder installed after a graph
+  started is not seen by that graph's counters.
+
+### AI harness
+
+- New `InProcessAiConfig::gated_input` (default `false`, #349). When set, each
+  AI stream offers its caller-audio input as a gated input, so the bridge's
+  media graph applies the hold/stop gate and writes caller audio into the AI
+  session's input channel directly instead of through the route's input pump
+  task for every frame. The session receives the same frames in the same
+  order, and hold, resume and end behave the same. Combined with
+  `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
+  AI session from the SIP leg's lane without any task hop (#363).
+
+### Release process, CI and dependencies
+
+- Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,
+  `rustls-webpki` 0.103.16, `tokio` 1.54.1, and `webpki-roots` /
+  `webpki-root-certs` 1.0.11, in the workspace and examples lockfiles.
+  RUSTSEC-2026-0387 (`crypto-bigint` 0.5, transitive via the RustCrypto
+  elliptic-curve 0.13 stack) is accepted in `deny.toml` until the
+  elliptic-curve 0.14 upgrade, since its fix ships only in 0.7.6.
+- RUSTSEC-2026-0459 (SQLite before 3.54 can return uninitialized page-cache
+  memory for a crafted database and `-wal` pair) is accepted in `deny.toml`
+  and the beta gate's `cargo audit`. It reaches rvoip through
+  `libsqlite3-sys` 0.30, bundled by `sqlx-sqlite` in `rvoip-users-core`. The
+  fixed `libsqlite3-sys` 0.39 is outside every sqlx release's range (0.9.0
+  caps it below 0.38 and needs Rust 1.94), and exposure needs an
+  attacker-written database file plus `-wal`; users-core opens only its own
+  configured database. Revisit when sqlx allows the fixed line.
+- `rvoip-rtp-core` now requires tokio 1.41 or later
+  (`RuntimeMetrics::global_queue_depth`, #356).
+- The orphan-sweep TTL test and the shared setup-teardown scheduler test no
+  longer fail on starved CI runners: they wait for the reclaim or scheduler
+  pass they assert on instead of checking it as soon as an earlier signal
+  fires (#364).
+- Several PRs in this release changed the `rvoip-sip` public API, so the
+  baseline (`public-api/rvoip-sip.txt`) must be regenerated in the 0.5.0
+  release commit.
 
 ## 0.4.0 — 2026-10-11
 

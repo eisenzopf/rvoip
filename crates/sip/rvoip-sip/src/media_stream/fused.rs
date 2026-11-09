@@ -47,9 +47,18 @@
 //! over, their order, timestamps and payload type are exactly those of the
 //! encoding path.
 //!
+//! With [`MediaExecutorConfig::playout_zero_copy`], the playout buffer keeps
+//! its pending frames in a few unordered slots, and each due frame is lent
+//! to the pump as it is popped and then stays in the buffer as its
+//! concealment template, instead of its PCM being copied into the template
+//! and the frame handed out (and its PCM returned to the pool once
+//! encoded). The frames, their order, timestamps and payloads, concealment
+//! and the eight-frame bound are unchanged.
+//!
 //! [`MediaExecutorConfig::fused_inbound_pump`]: rvoip_rtp_core::executor::MediaExecutorConfig::fused_inbound_pump
 //! [`MediaExecutorConfig::direct_inbound_sink`]: rvoip_rtp_core::executor::MediaExecutorConfig::direct_inbound_sink
 //! [`MediaExecutorConfig::count_only_sink`]: rvoip_rtp_core::executor::MediaExecutorConfig::count_only_sink
+//! [`MediaExecutorConfig::playout_zero_copy`]: rvoip_rtp_core::executor::MediaExecutorConfig::playout_zero_copy
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -170,6 +179,10 @@ pub(super) struct FusedInboundPump {
     /// The adopted sink reads no payloads: G.711 frames reach it without
     /// being encoded.
     sink_count_only: bool,
+    /// The playout buffer keeps pending frames in slots and lends each due
+    /// frame to [`Self::deliver`], then keeps it as its concealment template
+    /// (no PCM copy per frame). Read when the pump is built.
+    zero_copy: bool,
 }
 
 impl FusedInboundPump {
@@ -213,6 +226,7 @@ impl FusedInboundPump {
                 direct_frames: DirectSinkCounters::new(),
                 sink_scratch: Vec::new(),
                 sink_count_only: false,
+                zero_copy: rvoip_rtp_core::executor::playout_zero_copy_enabled(),
             },
             failure_rx,
         ))
@@ -249,7 +263,7 @@ impl FusedInboundPump {
         self.encoder = SipPayloadCodec::from_negotiated(&updated.negotiated, updated.payload_type)
             .map_err(|_| "sip-codec-reconfigure-failed")?;
         self.runtime = updated;
-        self.playout = self.playout_policy.map(PlayoutBuffer::new);
+        self.playout = self.build_playout();
         self.framer = InboundPcmFramer::new(&self.runtime.negotiated);
         Ok(())
     }
@@ -279,6 +293,27 @@ impl FusedInboundPump {
                 None => self.ready.push(frame),
             }
         }
+        if self.zero_copy && self.framer.is_pass_through() {
+            if let Some(mut buffer) = self.playout.take() {
+                // Each due frame is lent to `deliver` as it is popped and
+                // stays in the buffer as its concealment template. The
+                // frames, their order and the eight-frame bound are
+                // `pop_due`'s; delivering a frame never touches the playout
+                // buffer, so delivering it before the next pop changes
+                // nothing.
+                let mut popped = 0;
+                while popped < READY_BURST
+                    && buffer
+                        .pop_due_with(now, |frame| self.deliver(frame))
+                        .is_some()
+                {
+                    popped += 1;
+                }
+                self.playout = Some(buffer);
+                self.report_quality();
+                return;
+            }
+        }
         if let Some(buffer) = self.playout.as_mut() {
             while let Some(frame) = buffer.pop_due(now) {
                 self.ready.push(frame);
@@ -301,12 +336,22 @@ impl FusedInboundPump {
         self.ready = ready;
     }
 
-    /// Encode one framed frame into the outbox or the sink.
+    /// Encode one framed frame into the outbox or the sink, then return its
+    /// PCM to the pool (an encode error drops it, as the task did).
     fn emit(&mut self, mut frame: AudioFrame) {
+        if self.deliver(&frame) {
+            recycle_pcm_buffer(std::mem::take(&mut frame.samples));
+        }
+    }
+
+    /// Encode one frame into the outbox or the sink. Returns whether the
+    /// frame's PCM is spent (dropped after a closed sink, lent to the sink,
+    /// or encoded); `false` after an encode error on the encoding path,
+    /// where the task let the frame drop.
+    fn deliver(&mut self, frame: &AudioFrame) -> bool {
         if self.sink_closed {
             // The task returned at the failed send; later frames are dropped.
-            recycle_pcm_buffer(std::mem::take(&mut frame.samples));
-            return;
+            return true;
         }
         // A G.711 frame bound for the direct sink is encoded into the reused
         // scratch buffer (the bytes `encode_graph_frames` produces: one
@@ -317,10 +362,10 @@ impl FusedInboundPump {
                 // A count-only sink gets the frame without the encode;
                 // `encoded_len` keeps the encoder's answer.
                 let encoded = if self.sink_count_only {
-                    codec.encoded_len(&frame).map(|_| NO_PAYLOAD)
+                    codec.encoded_len(frame).map(|_| NO_PAYLOAD)
                 } else {
                     codec
-                        .encode_into(&frame, &mut self.sink_scratch)
+                        .encode_into(frame, &mut self.sink_scratch)
                         .map(|()| &self.sink_scratch[..])
                 };
                 match encoded {
@@ -343,18 +388,16 @@ impl FusedInboundPump {
                         tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
                     }
                 }
-                recycle_pcm_buffer(std::mem::take(&mut frame.samples));
-                return;
+                return true;
             }
         }
-        let encoded_frames = match self.encoder.encode_graph_frames(&frame) {
+        let encoded_frames = match self.encoder.encode_graph_frames(frame) {
             Ok(frames) => frames,
             Err(error) => {
                 tracing::trace!(target: "rvoip_sip", error = %error, "SipMediaStream: audio encode failed");
-                return;
+                return false;
             }
         };
-        recycle_pcm_buffer(std::mem::take(&mut frame.samples));
         for (encoded, timestamp_rtp) in encoded_frames {
             if self.sink_closed {
                 continue;
@@ -383,6 +426,19 @@ impl FusedInboundPump {
                 payload_type: Some(self.runtime.payload_type),
             });
         }
+        true
+    }
+
+    /// The playout buffer for the current policy: slot storage with zero-copy
+    /// playout.
+    fn build_playout(&self) -> Option<PlayoutBuffer> {
+        self.playout_policy.map(|policy| {
+            if self.zero_copy {
+                PlayoutBuffer::with_slot_storage(policy)
+            } else {
+                PlayoutBuffer::new(policy)
+            }
+        })
     }
 
     fn report_quality(&mut self) {
@@ -481,7 +537,7 @@ impl FusedInboundPump {
 
 impl InlineAudioConsumer for FusedInboundPump {
     fn on_installed(&mut self, now: Instant) {
-        self.playout = self.playout_policy.map(PlayoutBuffer::new);
+        self.playout = self.build_playout();
         self.reported = now;
     }
 
@@ -1277,7 +1333,6 @@ mod tests {
     /// touches the scratch at all.
     #[test]
     fn steady_state_direct_sink_frames_reuse_every_buffer() {
-        let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
         use rvoip_media_core::pcm_pool::{
             pcm_pool_len_on_this_thread, pcm_pool_misses_on_this_thread,
         };
@@ -1285,7 +1340,11 @@ mod tests {
         // One loss in the warm-up (so every first use happens there) and one
         // in the measured stretch.
         const LOST: [u32; 2] = [150, 450];
-        for count_only in [true, false] {
+        for (count_only, zero_copy) in [(true, false), (false, false), (true, true), (false, true)]
+        {
+            let _v2 = override_media_executor_config_on_this_thread(
+                MediaExecutorConfig::v2().with_playout_zero_copy(zero_copy),
+            );
             let (frames_tx, _frames_rx) = mpsc::channel(4);
             let slot = Arc::new(InboundSinkSlot::new());
             let tally = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1308,6 +1367,7 @@ mod tests {
             pump.on_installed(start);
             let now = drive(&mut pump, &mut frames, start, start, 300);
             assert_eq!(pump.sink_count_only, count_only);
+            assert_eq!(pump.zero_copy, zero_copy);
             let concealed = |pump: &FusedInboundPump| {
                 pump.playout
                     .as_ref()
@@ -1360,4 +1420,149 @@ mod tests {
             }
         }
     }
+
+    // ---- Zero-copy playout ----
+
+    /// The fused pump for `codec`, with or without zero-copy playout (read
+    /// from the configuration when the pump is built), through `frames_in`,
+    /// a direct sink or a count-only sink: what was delivered, in order.
+    fn run_fused_variant(
+        codec: &SipMediaCodecRuntime,
+        script: &Script,
+        config: Option<PlayoutConfig>,
+        wanted: usize,
+        zero_copy: bool,
+        sink: Option<bool>,
+    ) -> Output {
+        let _config = override_media_executor_config_on_this_thread(
+            MediaExecutorConfig::v2().with_playout_zero_copy(zero_copy),
+        );
+        let (frames_tx, mut frames_rx) = mpsc::channel(256);
+        let slot = Arc::new(InboundSinkSlot::new());
+        let seen = sink.map(|wants_payload| {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            assert!(slot
+                .offer(Box::new(PayloadSink {
+                    seen: Arc::clone(&seen),
+                    wants_payload,
+                }))
+                .is_ok());
+            seen
+        });
+        let (_codec_tx, codec_rx) = watch::channel(Some(codec.clone()));
+        let (mut pump, _stopped) = FusedInboundPump::new(
+            codec.clone(),
+            codec_rx,
+            StreamId::new(),
+            frames_tx,
+            config,
+            128,
+            slot,
+        )
+        .unwrap();
+        assert_eq!(pump.zero_copy, zero_copy);
+        let mut output = Vec::new();
+        drive_script(&mut pump, script, || {
+            match &seen {
+                Some(seen) => output = seen.lock().unwrap().clone(),
+                None => {
+                    while let Ok(frame) = frames_rx.try_recv() {
+                        output.push(observed(&frame));
+                    }
+                }
+            }
+            output.len() >= wanted
+        });
+        assert_eq!(pump.has_direct_sink(), sink.is_some());
+        assert_eq!(pump.sink_count_only, sink == Some(false));
+        output.truncate(wanted);
+        output
+    }
+
+    /// A direct sink that records each frame it is lent.
+    struct PayloadSink {
+        seen: Arc<Mutex<Output>>,
+        wants_payload: bool,
+    }
+
+    impl InboundFrameSink for PayloadSink {
+        fn on_frame(&mut self, frame: InboundFrameView<'_>) -> InboundFrameDelivery {
+            self.seen.lock().unwrap().push((
+                frame.timestamp_rtp,
+                frame.payload.to_vec(),
+                frame.payload_type,
+            ));
+            InboundFrameDelivery::Accepted
+        }
+
+        fn wants_payload(&self) -> bool {
+            self.wants_payload
+        }
+    }
+
+    /// Zero-copy playout delivers exactly the frames of the copying buffer
+    /// (timestamps, encoded payloads, payload types, order) for PCMU and
+    /// PCMA, to `frames_in`, to a direct sink and to a count-only sink,
+    /// under reorder, loss with concealment into silence, late drop,
+    /// catch-up bursts, a long run and disabled playout.
+    #[test]
+    fn zero_copy_playout_delivers_identical_frames() {
+        // Frames 4..=11 lost: five concealed slots, then silence.
+        let outage: Case = (paced([1, 2, 3, 12, 13, 14]), Some(playout()), 14);
+        let long: Case = (
+            paced((1..=200).filter(|index| index % 7 != 3)),
+            Some(playout()),
+            200,
+        );
+        let mut cases = scripts();
+        cases.push(outage);
+        cases.push(long);
+        for codec in [runtime("PCMU", 0), runtime("PCMA", 8)] {
+            for (script, config, wanted) in &cases {
+                for sink in [None, Some(true), Some(false)] {
+                    let copied = run_fused_variant(&codec, script, *config, *wanted, false, sink);
+                    let lent = run_fused_variant(&codec, script, *config, *wanted, true, sink);
+                    assert_eq!(
+                        copied.len(),
+                        *wanted,
+                        "{} {script:?}",
+                        codec.negotiated.codec
+                    );
+                    assert_eq!(
+                        lent, copied,
+                        "{} sink {sink:?} {script:?}",
+                        codec.negotiated.codec
+                    );
+                    assert!(lent
+                        .iter()
+                        .all(|(_, _, pt)| *pt == Some(codec.payload_type)));
+                }
+            }
+        }
+    }
+
+    /// Off unless configured, and never without the fused pump's playout
+    /// policy: a pump without playout forwards frames as before.
+    #[test]
+    fn zero_copy_playout_follows_its_switch() {
+        for (config, expected) in [
+            (MediaExecutorConfig::v1(), false),
+            (MediaExecutorConfig::v2(), true),
+            (
+                MediaExecutorConfig::v2().with_playout_zero_copy(false),
+                false,
+            ),
+            (
+                MediaExecutorConfig::v2().with_fused_inbound_pump(false),
+                false,
+            ),
+        ] {
+            let _config = override_media_executor_config_on_this_thread(config);
+            let (frames_tx, _frames_rx) = mpsc::channel(4);
+            let (pump, _stopped, _codec) = fused(frames_tx, Some(playout()), 4);
+            assert_eq!(pump.zero_copy, expected);
+        }
+    }
+
+    // ---- End zero-copy playout ----
 }

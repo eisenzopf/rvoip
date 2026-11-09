@@ -56,6 +56,13 @@ ignore = [
     # stack (p256/p384/p521, webauthn-rs crypto-glue). The fix ships only in
     # 0.7.6, which needs elliptic-curve 0.14. Revisit with that upgrade.
     "RUSTSEC-2026-0387",
+    # `libsqlite3-sys` 0.30 (bundled SQLite 3.46) — transitive via
+    # sqlx-sqlite in users-core. The fix is libsqlite3-sys 0.39 (SQLite
+    # 3.54), but every sqlx release caps it below 0.38 (sqlx-sqlite 0.9.0:
+    # `>=0.30.1, <0.38.0`, and Rust 1.94 > our 1.91 MSRV). Exposure needs a
+    # locally attacker-written database plus `-wal` pair; users-core opens
+    # only its own configured database. Revisit when sqlx allows 0.39.
+    "RUSTSEC-2026-0459",
     # `rustls-webpki` — transitive via the rustls stack. Revisit on the fixed line.
     "RUSTSEC-2026-0104",
     "RUSTSEC-2026-0098",

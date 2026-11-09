@@ -103,6 +103,11 @@
 //!   straight from their lane poller's table and timing wheel instead of
 //!   running as paced futures (see [`crate::lane_table`]). Needs the lane
 //!   timing wheel, lane-hosted TX and the cached TX path.
+//! - [`MediaExecutorConfig::playout_zero_copy`]: a fused pump's playout
+//!   buffer keeps its pending frames in a few unordered slots and lends each
+//!   due frame to the pump, then keeps it as its concealment template,
+//!   instead of copying its PCM into the template. Same frames, timestamps
+//!   and statistics. Needs the fused pump.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -318,6 +323,38 @@ pub struct MediaExecutorConfig {
     /// [`MediaLanes::Dedicated`]: crate::task_runtime::MediaLanes::Dedicated
     pub callback_send: bool,
     // ---- End lane table callback send ----
+    // ---- Lane table receive ----
+    /// A v2 receive loop hosted on its lane poller moves into its lane's
+    /// table once it owns its call state (the session's inline ingress was
+    /// adopted): the lane calls it when its socket is readable and when its
+    /// owner deadline is due, from the table's ready list and timing wheel,
+    /// with no hosted-future poll, waker re-registration or `select!` per
+    /// datagram. Every datagram goes through the async loop's own
+    /// per-packet step, in the same order. The loop's future stays as the
+    /// entry's supervisor (close, a receive error, teardown). Needs
+    /// [`Self::callback_send`] (the lane table); without it it reads as off,
+    /// and on a lane without a table the loop stays a hosted future.
+    pub callback_rx_kernel: bool,
+    /// A receive loop in its lane's table reads its socket on the lane's
+    /// readiness reports instead of until the socket is empty: the lane
+    /// keeps one level-triggered epoll for its graduated sockets (registered
+    /// with the lane's reactor as one descriptor) and reads each reported
+    /// socket once per report, so no read finds the socket empty and an
+    /// owner deadline never reads it. Linux only. Needs
+    /// [`Self::callback_rx_kernel`]; without it, or off Linux, it reads as
+    /// off (the entries read as without it).
+    pub lane_rx_readiness: bool,
+    // ---- End lane table receive ----
+    // ---- Zero-copy playout ----
+    /// A fused SIP inbound pump's playout buffer keeps its pending frames in
+    /// a few unordered slots instead of an ordered map, and lends each due
+    /// frame to the pump and then keeps it as its concealment template,
+    /// instead of copying the frame's PCM into the template and handing the
+    /// frame out. The frames, their order, timestamps, concealment and
+    /// playout statistics are identical. Needs
+    /// [`Self::fused_inbound_pump`]; without it it reads as off.
+    pub playout_zero_copy: bool,
+    // ---- End zero-copy playout ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -362,6 +399,11 @@ impl MediaExecutorConfig {
             session_owner_placement: false,
             // Lane table callback send.
             callback_send: false,
+            // Lane table receive.
+            callback_rx_kernel: false,
+            lane_rx_readiness: false,
+            // Zero-copy playout.
+            playout_zero_copy: false,
         }
     }
 
@@ -401,6 +443,11 @@ impl MediaExecutorConfig {
             session_owner_placement: true,
             // Lane table callback send.
             callback_send: true,
+            // Lane table receive.
+            callback_rx_kernel: true,
+            lane_rx_readiness: true,
+            // Zero-copy playout.
+            playout_zero_copy: true,
         }
     }
 
@@ -567,6 +614,21 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane table callback send ----
+    // ---- Lane table receive ----
+
+    /// Set [`Self::callback_rx_kernel`].
+    pub fn with_callback_rx_kernel(mut self, enabled: bool) -> Self {
+        self.callback_rx_kernel = enabled;
+        self
+    }
+
+    /// Set [`Self::lane_rx_readiness`].
+    pub fn with_lane_rx_readiness(mut self, enabled: bool) -> Self {
+        self.lane_rx_readiness = enabled;
+        self
+    }
+
+    // ---- End lane table receive ----
 
     // ---- Hot call state ----
 
@@ -577,6 +639,15 @@ impl MediaExecutorConfig {
     }
 
     // ---- End hot call state ----
+    // ---- Zero-copy playout ----
+
+    /// Set [`Self::playout_zero_copy`].
+    pub fn with_playout_zero_copy(mut self, enabled: bool) -> Self {
+        self.playout_zero_copy = enabled;
+        self
+    }
+
+    // ---- End zero-copy playout ----
 
     /// Check the configuration without installing it.
     ///
@@ -780,6 +851,30 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane table callback send ----
+    // ---- Lane table receive ----
+
+    /// Whether receive loops started now move into their lane's table once
+    /// they own their call state (needs the lane table).
+    pub fn callback_rx_kernel_active(&self) -> bool {
+        self.callback_send_active() && self.callback_rx_kernel
+    }
+
+    /// Whether receive loops in a lane table read on the lane's readiness
+    /// reports (needs [`Self::callback_rx_kernel_active`]; Linux only).
+    pub fn lane_rx_readiness_active(&self) -> bool {
+        cfg!(target_os = "linux") && self.callback_rx_kernel_active() && self.lane_rx_readiness
+    }
+
+    // ---- End lane table receive ----
+    // ---- Zero-copy playout ----
+
+    /// Whether a fused SIP inbound pump lends due frames from slot-stored
+    /// playout instead of copying them (needs the fused pump).
+    pub fn playout_zero_copy_active(&self) -> bool {
+        self.fused_inbound_pump_active() && self.playout_zero_copy
+    }
+
+    // ---- End zero-copy playout ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -1069,6 +1164,24 @@ pub fn callback_send_enabled() -> bool {
 }
 
 // ---- End lane table callback send ----
+// ---- Lane table receive ----
+
+/// Whether a receive loop started now may move into its lane's table
+/// ([`MediaExecutorConfig::callback_rx_kernel_active`]). Read once per
+/// receive loop, when the transport starts receiving.
+pub fn callback_rx_kernel_enabled() -> bool {
+    with_config(MediaExecutorConfig::callback_rx_kernel_active)
+}
+
+/// Whether a receive loop started now reads on its lane's readiness reports
+/// once it is in the lane's table
+/// ([`MediaExecutorConfig::lane_rx_readiness_active`]). Read once per
+/// receive loop, when the transport starts receiving.
+pub fn lane_rx_readiness_enabled() -> bool {
+    with_config(MediaExecutorConfig::lane_rx_readiness_active)
+}
+
+// ---- End lane table receive ----
 
 // ---- Hot call state ----
 
@@ -1081,6 +1194,17 @@ pub fn hot_state_enabled() -> bool {
 }
 
 // ---- End hot call state ----
+
+// ---- Zero-copy playout ----
+
+/// Whether a fused SIP inbound pump built now lends due frames from
+/// slot-stored playout ([`MediaExecutorConfig::playout_zero_copy_active`]).
+/// Read when the pump is built.
+pub fn playout_zero_copy_enabled() -> bool {
+    with_config(MediaExecutorConfig::playout_zero_copy_active)
+}
+
+// ---- End zero-copy playout ----
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -1747,6 +1871,46 @@ impl OwnerTimer {
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {
         self.armed.is_some_and(|deadline| deadline <= now)
+    }
+
+    /// [`Self::arm`]'s bookkeeping (and outcome, for the counters) for an
+    /// owner whose deadline a lane table files on its own wheel: no runtime
+    /// timer is created or moved.
+    pub(crate) fn note(&mut self, deadline: Option<Instant>, now: Instant) -> ArmOutcome {
+        if deadline == self.armed {
+            return ArmOutcome::Unchanged;
+        }
+        self.armed = deadline;
+        let Some(deadline) = deadline else {
+            return ArmOutcome::Cleared;
+        };
+        let extends = self.live.is_some_and(|live| live > now && deadline >= live);
+        self.live = Some(deadline);
+        if extends {
+            ArmOutcome::Extended
+        } else {
+            ArmOutcome::Registered
+        }
+    }
+
+    /// A lane table files this owner's deadline from now on: drop the
+    /// runtime timer (its lane-clock entry goes with it). The bookkeeping
+    /// stays, so [`Self::note`] continues where [`Self::arm`] stopped.
+    pub(crate) fn unback(&mut self) {
+        self.sleep = None;
+    }
+
+    /// The owner's async loop waits on this timer again: register whatever
+    /// is armed with a runtime timer.
+    pub(crate) fn reback(&mut self, now: Instant) -> ArmOutcome {
+        let armed = self.armed.take();
+        self.live = None;
+        self.arm(armed, now)
+    }
+
+    /// The armed deadline (the instant a lane table files).
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.armed
     }
 }
 
@@ -2807,6 +2971,127 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn callback_rx_kernel_is_off_in_v1_on_in_v2_and_reads_as_off_without_the_lane_table() {
+        let v1 = MediaExecutorConfig::v1();
+        assert!(!v1.callback_rx_kernel && !v1.callback_rx_kernel_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.callback_rx_kernel && v2.callback_rx_kernel_active());
+        assert!(v2.validate().is_ok());
+        assert!(
+            !v2.clone()
+                .with_mode(MediaExecutorMode::V1)
+                .callback_rx_kernel_active(),
+            "never under v1"
+        );
+        // Without the lane table (or any of its own prerequisites) it reads
+        // as off and is not an error.
+        for missing in [
+            MediaExecutorConfig::v2().with_callback_send(false),
+            MediaExecutorConfig::v2().with_lane_poller(false),
+            MediaExecutorConfig::v2().with_lane_timer_wheel(false),
+            MediaExecutorConfig::v2().with_lane_tx(false),
+            MediaExecutorConfig::v2()
+                .with_tx_handle_cache(false)
+                .with_tx_batch(false),
+            MediaExecutorConfig::v2().with_callback_rx_kernel(false),
+        ] {
+            assert!(missing.validate().is_ok(), "{missing:?}");
+            assert!(!missing.callback_rx_kernel_active(), "{missing:?}");
+        }
+        // The lane table stays on without it.
+        assert!(MediaExecutorConfig::v2()
+            .with_callback_rx_kernel(false)
+            .callback_send_active());
+        let accessor = |config: MediaExecutorConfig| {
+            let _guard = override_media_executor_config_on_this_thread(config);
+            callback_rx_kernel_enabled()
+        };
+        assert!(!accessor(MediaExecutorConfig::v1()));
+        assert!(accessor(MediaExecutorConfig::v2()));
+        assert!(!accessor(
+            MediaExecutorConfig::v2().with_callback_send(false)
+        ));
+        assert!(!accessor(
+            MediaExecutorConfig::v1().with_callback_rx_kernel(true)
+        ));
+    }
+
+    #[test]
+    fn lane_rx_readiness_is_off_in_v1_on_in_v2_on_linux_and_reads_as_off_without_its_prerequisites()
+    {
+        let linux = cfg!(target_os = "linux");
+        let v1 = MediaExecutorConfig::v1();
+        assert!(!v1.lane_rx_readiness && !v1.lane_rx_readiness_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.lane_rx_readiness);
+        assert_eq!(v2.lane_rx_readiness_active(), linux, "Linux only");
+        assert!(v2.validate().is_ok());
+        for missing in [
+            MediaExecutorConfig::v2().with_mode(MediaExecutorMode::V1),
+            MediaExecutorConfig::v2().with_callback_rx_kernel(false),
+            MediaExecutorConfig::v2().with_callback_send(false),
+            MediaExecutorConfig::v2().with_lane_poller(false),
+            MediaExecutorConfig::v2().with_lane_rx_readiness(false),
+        ] {
+            assert!(missing.validate().is_ok(), "{missing:?}");
+            assert!(!missing.lane_rx_readiness_active(), "{missing:?}");
+        }
+        // Receive entries stay on without it.
+        assert!(MediaExecutorConfig::v2()
+            .with_lane_rx_readiness(false)
+            .callback_rx_kernel_active());
+        let accessor = |config: MediaExecutorConfig| {
+            let _guard = override_media_executor_config_on_this_thread(config);
+            lane_rx_readiness_enabled()
+        };
+        assert!(!accessor(MediaExecutorConfig::v1()));
+        assert_eq!(accessor(MediaExecutorConfig::v2()), linux);
+        assert!(!accessor(
+            MediaExecutorConfig::v2().with_callback_rx_kernel(false)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_owner_timer_filed_by_a_table_keeps_its_bookkeeping_and_comes_back() {
+        let now = Instant::now();
+        let mut timer = OwnerTimer::new();
+        assert_eq!(
+            timer.arm(Some(now + Duration::from_millis(10)), now),
+            ArmOutcome::Registered
+        );
+        assert!(timer.armed_sleep().is_some());
+        // Graduated: no runtime timer; the table files `deadline()`.
+        timer.unback();
+        assert!(timer.armed_sleep().is_none());
+        assert_eq!(timer.deadline(), Some(now + Duration::from_millis(10)));
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(10)), now),
+            ArmOutcome::Unchanged
+        );
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(20)), now),
+            ArmOutcome::Extended,
+            "later while live: extended, as `arm` counts it"
+        );
+        assert!(timer.armed_sleep().is_none(), "still no runtime timer");
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(5)), now),
+            ArmOutcome::Registered
+        );
+        assert_eq!(timer.note(None, now), ArmOutcome::Cleared);
+        assert_eq!(timer.deadline(), None);
+        assert_eq!(
+            timer.note(Some(now + Duration::from_millis(7)), now),
+            ArmOutcome::Extended,
+            "the cleared entry is still live"
+        );
+        // Back in the async loop: the armed deadline gets a runtime timer.
+        assert_eq!(timer.reback(now), ArmOutcome::Registered);
+        assert!(timer.armed_sleep().is_some());
+        assert_eq!(timer.deadline(), Some(now + Duration::from_millis(7)));
+    }
+
     // ---- End lane table callback send ----
 
     #[test]
@@ -3068,6 +3353,48 @@ mod tests {
     }
 
     // ---- End hot call state ----
+
+    // ---- Zero-copy playout ----
+
+    #[test]
+    fn playout_zero_copy_is_off_in_v1_on_in_v2_and_reads_as_off_without_the_fused_pump() {
+        assert!(!MediaExecutorConfig::v1().playout_zero_copy);
+        assert!(!MediaExecutorConfig::v1().playout_zero_copy_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.playout_zero_copy && v2.playout_zero_copy_active());
+        assert!(v2.validate().is_ok());
+        assert!(
+            !MediaExecutorConfig::v1()
+                .with_playout_zero_copy(true)
+                .playout_zero_copy_active(),
+            "never under v1"
+        );
+        let off = MediaExecutorConfig::v2().with_playout_zero_copy(false);
+        assert!(!off.playout_zero_copy_active());
+        assert!(off.fused_inbound_pump_active(), "independent of the pump");
+        for missing in [
+            MediaExecutorConfig::v2().with_fused_inbound_pump(false),
+            MediaExecutorConfig::v2().with_inline_decode(false),
+        ] {
+            assert!(missing.playout_zero_copy);
+            assert!(
+                !missing.playout_zero_copy_active(),
+                "only a fused pump plays out"
+            );
+            assert!(
+                missing.validate().is_ok(),
+                "a missing prerequisite is not an error"
+            );
+        }
+        {
+            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+            assert!(playout_zero_copy_enabled());
+            let _off = override_media_executor_config_on_this_thread(off);
+            assert!(!playout_zero_copy_enabled());
+        }
+    }
+
+    // ---- End zero-copy playout ----
 
     #[test]
     fn mode_names_parse_and_reject_unknown_values() {
