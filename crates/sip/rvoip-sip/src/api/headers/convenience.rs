@@ -186,16 +186,20 @@ pub fn multipart_mixed(parts: Vec<MultipartPart>) -> (TypedHeader, Bytes) {
 /// Parse a `multipart/mixed` body. `content_type` is the full
 /// `Content-Type:` header value (e.g.
 /// `multipart/mixed; boundary=foo`); `body` is the wire payload.
-/// Returns one [`MultipartPart`] per logical part on success.
+/// Returns one [`MultipartPart`] per part on success.
 ///
-/// Part headers are parsed leniently: each `Name: value` line up to the
-/// blank line is preserved as a `TypedHeader::Other`. The body bytes
-/// up to (but not including) the next `--<boundary>` separator are
-/// captured verbatim.
+/// The body is split strictly by RFC 2046 §5.1.1 (see
+/// [`rvoip_sip_core::body`]): the close delimiter is required, and each
+/// part's content is kept byte for byte, so binary parts such as
+/// `application/isup` are not altered. Each part header field is preserved
+/// as a `TypedHeader::Other`.
 pub fn multipart_parse(
     content_type: &str,
     body: &[u8],
 ) -> Result<Vec<MultipartPart>, MultipartParseError> {
+    use rvoip_sip_core::body::{BodyError, BodyPart};
+    use std::str::FromStr;
+
     let boundary_param = content_type
         .split(';')
         .map(str::trim)
@@ -205,41 +209,32 @@ pub fn multipart_parse(
     if boundary_param.is_empty() {
         return Err(MultipartParseError::EmptyBoundary);
     }
-    let marker = format!("--{}", boundary_param);
-    let close = format!("--{}--", boundary_param);
-
-    // Find segments between `--boundary` markers; require the close
-    // marker to appear so unterminated bodies are caught.
-    let body_str = String::from_utf8_lossy(body);
-    if !body_str.contains(&close) {
-        return Err(MultipartParseError::UnterminatedBody);
-    }
-
-    let mut parts = Vec::new();
-    let trimmed = body_str.split(&close).next().unwrap_or("");
-    let segments: Vec<&str> = trimmed.split(&marker).collect();
-    for seg in segments.iter().skip(1) {
-        // Each segment begins with `\r\n` (after the marker) and
-        // contains headers + CRLFCRLF + body + trailing CRLF.
-        let seg = seg.trim_start_matches("\r\n").trim_end_matches("\r\n");
-        if seg.is_empty() {
-            continue;
+    let content_type = rvoip_sip_core::types::content_type::ContentType::from_str(content_type)
+        .map_err(|_| MultipartParseError::MalformedPartHeaders)?;
+    let body = BodyPart::of_message(
+        &[TypedHeader::ContentType(content_type)],
+        &Bytes::copy_from_slice(body),
+    )
+    .map_err(|error| match error {
+        BodyError::MissingBoundary => MultipartParseError::MissingBoundary,
+        BodyError::MalformedMultipart(_) => MultipartParseError::UnterminatedBody,
+        BodyError::MalformedPartHeader(_) | BodyError::TooDeep => {
+            MultipartParseError::MalformedPartHeaders
         }
-        let (headers_blob, body_blob) = seg
-            .split_once("\r\n\r\n")
-            .ok_or(MultipartParseError::MalformedPartHeaders)?;
-        let mut headers = Vec::new();
-        for line in headers_blob.split("\r\n") {
-            if let Some((name, value)) = line.split_once(':') {
-                headers.push(other(name.trim(), value.trim()));
-            }
-        }
-        parts.push(MultipartPart {
-            headers,
-            body: Bytes::copy_from_slice(body_blob.as_bytes()),
-        });
-    }
-    Ok(parts)
+    })?
+    .ok_or(MultipartParseError::UnterminatedBody)?;
+    Ok(body
+        .parts
+        .into_iter()
+        .map(|part| MultipartPart {
+            headers: part
+                .header_fields
+                .iter()
+                .map(|(name, value)| other(name, value.as_str()))
+                .collect(),
+            body: part.content,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -269,6 +264,26 @@ mod multipart_tests {
             .iter()
             .any(|h| h.to_string().contains("application/sdp")));
         assert_eq!(&round[1].body[..], &[0x01, 0x02, 0x03]);
+    }
+
+    /// Binary parts are kept byte for byte, including bytes that are not
+    /// UTF-8 and a trailing CRLF that belongs to the content.
+    #[test]
+    fn binary_part_survives_round_trip() {
+        let isup = vec![0x01, 0xff, 0xfe, 0x00, b'\r', b'\n'];
+        let (ct, body) = multipart_mixed(vec![
+            MultipartPart::new("application/sdp", Some("session"), "v=0\r\n"),
+            MultipartPart::new(
+                "application/isup",
+                Some("signal;handling=optional"),
+                isup.clone(),
+            ),
+        ]);
+        let ct_str = ct.to_string();
+        let value = ct_str.split_once(':').map(|(_, v)| v.trim()).unwrap();
+        let round = multipart_parse(value, &body).expect("parse");
+        assert_eq!(round[1].body.to_vec(), isup);
+        assert_eq!(&round[0].body[..], b"v=0\r\n");
     }
 
     #[test]

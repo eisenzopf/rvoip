@@ -151,6 +151,29 @@ Each item has a one-line migration.
   `Require: 100rel` gets 420 (RFC 3262 §4).
 - sip-dialog: `DialogConfig::uas_capabilities` / `with_uas_capabilities`.
 
+#### Message bodies (RFC 5621)
+
+- `rvoip_sip_core::body` parses message bodies by RFC 2046 §5.1.1: strict
+  delimiters, nested `multipart/*`, and binary parts kept byte for byte.
+  It applies RFC 5621: the default disposition (RFC 3261 §20.11), `handling`
+  (required unless `optional`), and whether a UA understands a body. In
+  `multipart/mixed` every required part must be understood; in
+  `multipart/alternative`, one alternative; in `multipart/related`, the root.
+- An inbound INVITE or UPDATE gets 415 unless the UA understands its body,
+  part by part. The Accept header lists the session body types and
+  `multipart/mixed`, `multipart/alternative` and `multipart/related`.
+  Previously any `multipart/mixed` or `multipart/alternative` body passed
+  unexamined, and the SDP parsers then failed on it.
+- The session description is taken from the body per RFC 5621 for INVITE,
+  re-INVITE/UPDATE, 1xx/2xx and ACK. A carrier INVITE with SDP plus an
+  optional ISUP part, or a `multipart/alternative` offer, now negotiates
+  media; before, the whole multipart body was handed to the SDP parser. A
+  2xx defers its ACK to the session layer only when it carries a session
+  description.
+- `rvoip_sip::bodies::multipart_parse` uses the same strict parser and no
+  longer decodes the body as lossy UTF-8, which corrupted binary parts such
+  as ISUP.
+
 #### TLS flow back-pressure (#338)
 
 - A momentarily full TLS writer queue no longer drops SIP responses. Every TLS
