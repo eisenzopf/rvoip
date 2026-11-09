@@ -72,6 +72,29 @@ impl RegisterHandler for DialogManager {
 
         let transaction_id = server_transaction.id().clone();
 
+        // The To header field holds the address-of-record, which must be a
+        // SIP or SIPS URI (RFC 3261 §10.2, §10.3; RFC 4475 §3.3.4).
+        let to_uri = request.to().map(|to| to.uri().clone());
+        if !to_uri.as_ref().is_some_and(|uri| {
+            matches!(
+                uri.scheme,
+                rvoip_sip_core::types::uri::Scheme::Sip | rvoip_sip_core::types::uri::Scheme::Sips
+            )
+        }) {
+            debug!("REGISTER address-of-record is not a SIP or SIPS URI");
+            self.send_register_response_classified_terminal(
+                &transaction_id,
+                400,
+                "Bad Request",
+                None,
+                None,
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
+        let to_uri = to_uri.unwrap_or_else(|| from_uri.clone());
+
         // A REGISTER 200 response is a registrar commitment: it must represent
         // a binding owned by the session/registrar layer. Dialog-core has no
         // location-service store and therefore cannot fabricate that success.
@@ -116,7 +139,7 @@ impl RegisterHandler for DialogManager {
                 RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {
                     transaction_id: transaction_id.to_string(),
                     from_uri: from_uri.to_string(),
-                    to_uri: from_uri.to_string(), // To same as From for self-registration
+                    to_uri: to_uri.to_string(),
                     contact_uri: contact_uri.to_string(),
                     expires,
                     authorization,

@@ -137,7 +137,9 @@ fn error_info_value(input: &[u8]) -> ParseResult<'_, ErrorInfoValue> {
         Uri {
             scheme: Scheme::Sip,
             user: None,
+            user_wire: None,
             password: None,
+            password_wire: None,
             host,
             port: None,
             parameters: Vec::new(),

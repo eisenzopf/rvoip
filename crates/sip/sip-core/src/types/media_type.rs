@@ -294,7 +294,11 @@ impl fmt::Display for MediaType {
         write!(f, "{}/{}", self.typ, self.subtype)?;
 
         // Add parameters if any exist
-        for (name, value) in &self.parameters {
+        // Parameter order carries no meaning; name order keeps the
+        // rendering deterministic.
+        let mut sorted: Vec<_> = self.parameters.iter().collect();
+        sorted.sort();
+        for (name, value) in sorted {
             write!(f, ";{}={}", name, value)?;
         }
 

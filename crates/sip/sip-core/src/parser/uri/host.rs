@@ -313,15 +313,12 @@ mod tests {
 
     #[test]
     fn test_numeric_hostname() {
-        // Numeric hostnames that are not valid IPv4 addresses
-        let (rem, host_val) = host(b"999.888.777.666").unwrap();
-        assert!(rem.is_empty());
-        assert!(matches!(host_val, Host::Domain(domain) if domain == "999.888.777.666"));
+        // Not an IPv4 address, and not a hostname either: the top label must
+        // start with ALPHA (RFC 3261 §25.1).
+        assert!(host(b"999.888.777.666").is_err());
 
-        // This looks like an IPv4 address but has numbers > 255
-        let (rem, host_val) = host(b"333.444.555.666").unwrap();
-        assert!(rem.is_empty());
-        assert!(matches!(host_val, Host::Domain(domain) if domain == "333.444.555.666"));
+        // Octets above 255: not an IPv4 address, and not a hostname.
+        assert!(host(b"333.444.555.666").is_err());
     }
 
     #[test]

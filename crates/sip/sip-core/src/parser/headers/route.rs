@@ -175,8 +175,9 @@ mod tests {
         // Empty route
         assert!(parse_route(b"").is_err());
 
-        // Invalid URI
-        assert!(parse_route(b"<invalid:uri>").is_err());
+        // A malformed SIP URI (an absoluteURI like <invalid:uri> is valid
+        // addr-spec syntax, RFC 3261 §25.1)
+        assert!(parse_route(b"<sip:>").is_err());
     }
 
     #[test]

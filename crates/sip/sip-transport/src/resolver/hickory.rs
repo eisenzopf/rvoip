@@ -603,12 +603,15 @@ mod tests {
 
     #[tokio::test]
     async fn bare_extension_host_is_invalid() {
-        // `sip:600` parses with host `600` — a misaddressed extension, not a
-        // routable host. The all-numeric check returns InvalidHost *before* any
-        // DNS query (so this passes against the dead-port resolver), turning a
-        // cryptic NAPTR/SRV/A failure into a clear routing error.
+        // A URI with host `600` is a misaddressed extension, not a routable
+        // host. `sip:600` does not parse (a toplabel starts with ALPHA, RFC
+        // 3261 §25.1), but a URI built in code can carry it. The all-numeric
+        // check returns InvalidHost *before* any DNS query (so this passes
+        // against the dead-port resolver), turning a cryptic NAPTR/SRV/A
+        // failure into a clear routing error.
+        assert!(Uri::from_str("sip:600").is_err());
         let resolver = empty_resolver();
-        let uri = Uri::from_str("sip:600").unwrap();
+        let uri = Uri::new(Scheme::Sip, Host::domain("600"));
         let err = resolver.resolve(&uri).await.unwrap_err();
         assert!(matches!(err, ResolverError::InvalidHost(_)));
     }

@@ -49,29 +49,23 @@ pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey>
     }
 }
 
-/// Extract the server transaction key from a borrowed request.
+/// Extract the server transaction key from a borrowed request: the RFC 3261
+/// branch, or the RFC 2543 transaction identifier (RFC 3261 §17.2.3).
 ///
 /// Same result as [`transaction_key_from_message`] for `Message::Request`,
 /// without wrapping (and therefore deep-copying) the request into a
 /// [`Message`] first.
 pub fn transaction_key_from_request(request: &Request) -> Option<TransactionKey> {
-    // Get Via header using TypedHeader
-    if let Some(via) = request.typed_header::<Via>() {
-        if let Some(first_via) = via.0.first() {
-            if let Some(branch) = first_via.branch() {
-                let method = request.method();
-                let key = TransactionKey::new(branch.to_string(), method.clone(), true);
-                debug!(
-                    method=%crate::transaction::safe_diagnostics::SafeMethod::new(&method),
-                    transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key),
-                    "Generated server transaction key from request"
-                );
-                return Some(key);
-            }
-        }
+    let key = TransactionKey::from_request(request);
+    match &key {
+        Some(key) => debug!(
+            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
+            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(key),
+            "Generated server transaction key from request"
+        ),
+        None => debug!("🔍 TX_KEY: Could not generate key from request - missing Via"),
     }
-    debug!("🔍 TX_KEY: Could not generate key from request - missing Via/branch");
-    None
+    key
 }
 
 /// Extract the client transaction key from a borrowed response.

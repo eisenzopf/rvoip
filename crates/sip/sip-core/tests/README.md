@@ -1,109 +1,54 @@
 # SIP Core Test Suite
 
-This directory contains a comprehensive test suite for the `rvoip-sip-core` library, focusing on RFC compliance and edge cases in SIP message parsing and processing.
+Integration tests for `rvoip-sip-core`. `lib.rs` collects the `parser/` and
+`rfc_compliance/` modules; the other top-level files are separate test targets.
 
-## Test Structure
-
-The test suite is organized into several modules:
-
-- `torture_tests.rs`: Main test harness with helper functions for RFC compliance testing
-- `rfc_compliance/`: Directory containing test files based on RFC standards
-  - `wellformed/`: Well-formed SIP messages that should parse successfully
-  - `malformed/`: Malformed SIP messages that should be rejected
-- `debug_parser.rs`: Utilities for debugging parser issues
-- `parser_tests.rs`: Additional parser tests
-
-## Running the Tests
-
-To run the entire test suite:
+## Running
 
 ```bash
-cargo test -p rvoip-sip-core
+cargo test -p rvoip-sip-core --tests
+# RFC 4475 / RFC 5118 torture tests only
+cargo test -p rvoip-sip-core --test lib rfc_compliance::torture_test
 ```
 
-To run specific test modules:
+## Torture tests (`rfc_compliance/torture_test.rs`)
 
-```bash
-# Run RFC compliance tests
-cargo test --test torture_tests --features="lenient_parsing"
+The fixtures in `rfc_compliance/torture/` are the bit-exact messages from the
+Appendix A archives of RFC 4475 (SIP Torture Test Messages) and RFC 5118 (SIP
+Torture Test Messages for IPv6); see `rfc_compliance/torture/README.md`.
+`SHA256SUMS` pins them and a test checks it, so they are never edited. Each
+case records the RFC section its expectation comes from.
 
-# Run specific test case
-cargo test --test torture_tests test_wellformed_messages --features="lenient_parsing"
-cargo test --test torture_tests test_malformed_messages --features="lenient_parsing"
-```
+Every message is parsed in both parse modes:
 
-## Parsing Modes
+- **Strict** accepts only messages that conform to the RFC 3261 grammar (with
+  the RFC 5954 and RFC 8217 updates). It never infers or repairs anything, and
+  rejects octets after the message (one SIP message per WebSocket message,
+  RFC 7118 §5).
+- **Lenient** is the datagram and stream path. It discards octets after the
+  message (RFC 3261 §18.3) and applies only the liberal handling the RFCs
+  explicitly allow for a given message (for example,
+  ignoring `<>` around a Request-URI or extra SP in the start line), and the
+  parsed message no longer contains the error. Where the RFC says a message
+  must be rejected, Lenient rejects it too.
 
-The test suite validates both strict and lenient parsing modes:
+Messages that are syntactically valid but wrong at the transaction or
+application layer (`badvers`, `mismatch01`, `insuf`, `bext01`, ...) parse in
+both modes; the response an element must send is the job of the layers above.
 
-### Strict Mode
+Every accepted message must also re-serialize to bytes that parse in Strict
+mode, and serializing again must produce the same bytes: whatever rvoip sends
+after accepting a torture message is valid SIP.
 
-- Enforces RFC 3261 compliance strictly
-- Rejects messages with Content-Length mismatches
-- Requires all mandatory headers to be present
-- Used primarily for `test_malformed_messages` to ensure that invalid messages are properly rejected
+The RFC 5118 archive uses LF line endings, two messages have no empty line
+after the headers, and two declare a Content-Length longer than their body.
+Each RFC 5118 message is checked as published (RFC 3261 applied to the bytes:
+Strict rejects the LF framing, Lenient tolerates it, and a body shorter than
+Content-Length is an error) and normalized to CRLF with a correct
+Content-Length, which tests what RFC 5118 describes.
 
-### Lenient Mode
+## Adding tests
 
-- More forgiving of minor deviations from the RFC
-- Handles Content-Length mismatches (both too large and too small)
-- Preserves unparseable headers as raw headers instead of failing
-- Used primarily for `test_wellformed_messages` to handle edge cases in real-world SIP traffic
-
-## Test Categories
-
-### RFC 4475 Tests
-
-These tests cover a wide range of valid and invalid SIP messages as defined in RFC 4475:
-
-- Valid but unusual SIP messages, including syntactically-correct edge cases
-- Invalid SIP messages that should be rejected
-- Malformed SIP components (headers, URIs, etc.)
-- Messages designed to test parser robustness
-
-### RFC 5118 Tests
-
-Tests focused on IPv6 support in SIP messages:
-
-- IPv6 addresses in various SIP header fields
-- Zone indices in IPv6 addresses
-- Multicast IPv6 addresses
-- Malformed IPv6 addresses
-
-### Custom Torture Tests
-
-Additional test cases not covered by the RFCs:
-
-- Extremely long header values
-- Unusual HTTP methods
-- Unusual header names
-- Malformed request URIs
-- Exotic status codes
-- Unexpected line endings
-- Multiple headers with the same name
-- And more
-
-## Excluded Tests
-
-Some tests are intentionally excluded from validation:
-
-1. In `is_excluded_wellformed_test()`: Messages that are technically valid according to RFC 4475 but which we explicitly don't support for security or implementation reasons
-
-2. In `skip_content_length_validation()`: Messages with known Content-Length issues that are part of torture testing
-
-## Troubleshooting
-
-If a test is failing, you can use the `debug_parser.rs` utilities to investigate:
-
-```bash
-cargo test --test debug_parser debug_parse_longreq
-```
-
-## Contributing New Tests
-
-When adding new tests:
-
-1. Place well-formed test files in `rfc_compliance/wellformed/`
-2. Place malformed test files in `rfc_compliance/malformed/`
-3. Follow the naming convention: `<section>_<description>.sip`
-4. If needed, add an exclusion entry for special cases 
+Add messages that are not from an RFC archive as ordinary tests next to the
+parser code or in `parser/`; keep `rfc_compliance/torture/` for the RFC
+archives.

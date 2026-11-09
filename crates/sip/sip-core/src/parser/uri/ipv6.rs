@@ -32,12 +32,20 @@ pub fn ipv6_reference(input: &[u8]) -> ParseResult<'_, Host> {
             str::from_utf8(bytes)
                 .map_err(|_| nom::Err::Failure((input, nom::error::ErrorKind::Char)))
                 .and_then(|s| {
-                    s.parse::<IpAddr>()
-                        .map_err(|_| nom::Err::Failure((input, nom::error::ErrorKind::Verify)))
-                }) // Verify ensures valid IPv6 syntax
-                .map(Host::Address)
+                    ipv6_reference_address(s)
+                        .ok_or(nom::Err::Failure((input, nom::error::ErrorKind::Verify)))
+                })
+                .map(|address| Host::Address(IpAddr::V6(address)))
         },
     )(input)
+}
+
+/// The IPv6 address inside an IPv6reference: the RFC 3986 `IPv6address`
+/// production, which RFC 5954 §4.1 mandates in place of RFC 3261's (so the
+/// `2001:db8:::192.0.2.1` form RFC 3261's ABNF allowed is not valid). Lenient
+/// message parsing tolerates that form separately (RFC 5118 §4.10).
+fn ipv6_reference_address(text: &str) -> Option<std::net::Ipv6Addr> {
+    text.parse::<std::net::Ipv6Addr>().ok()
 }
 
 #[cfg(test)]

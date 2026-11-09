@@ -2226,12 +2226,12 @@ impl DialogManager {
 
                             let mut invite_builder = InviteBuilder::new()
                                 .from_detailed(
-                                    Some("User"), // Display name
+                                    None, // No display name
                                     template.local_uri.to_string(),
                                     Some(&local_tag)
                                 )
                                 .to_detailed(
-                                    Some("User"), // Display name
+                                    None, // No display name
                                     template.remote_uri.to_string(),
                                     None // No remote tag for initial INVITE
                                 )
@@ -4956,11 +4956,11 @@ impl DialogManager {
                 self.local_address_for_target_and_routes(&template.target_uri, &planned_routes);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
-                    opts.from_display.as_deref().or(Some("User")),
+                    opts.from_display.as_deref(),
                     template.local_uri.to_string(),
                     Some(&local_tag),
                 )
-                .to_detailed(Some("User"), template.remote_uri.to_string(), None)
+                .to_detailed(None, template.remote_uri.to_string(), None)
                 .call_id(&template.call_id)
                 .cseq(template.cseq_number)
                 .request_uri(template.target_uri.to_string())

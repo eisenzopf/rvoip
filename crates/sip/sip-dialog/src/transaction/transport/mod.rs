@@ -169,6 +169,7 @@ fn transport_event_dispatch_queue_capacity(
 fn transport_event_class(event: &TransportEvent) -> &'static str {
     match event {
         TransportEvent::MessageReceived { .. } => "message_received",
+        TransportEvent::MalformedRequest { .. } => "malformed_request",
         TransportEvent::Error { .. } => "error",
         TransportEvent::Closed => "closed",
         TransportEvent::KeepAlivePongReceived { .. } => "keepalive_pong_received",

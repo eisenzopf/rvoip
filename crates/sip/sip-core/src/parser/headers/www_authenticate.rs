@@ -183,15 +183,18 @@ mod tests {
             // Check for specific AuthParams
             assert!(params.contains(&AuthParam {
                 name: "realm".to_string(),
-                value: "apps.example.com".to_string()
+                value: "apps.example.com".to_string(),
+                quoted: true,
             }));
             assert!(params.contains(&AuthParam {
                 name: "type".to_string(),
-                value: "1".to_string()
-            })); // Values are strings
+                value: "1".to_string(),
+                quoted: false,
+            })); // A token value
             assert!(params.contains(&AuthParam {
                 name: "title".to_string(),
-                value: "Login Required".to_string()
+                value: "Login Required".to_string(),
+                quoted: true,
             }));
         } else {
             panic!("Expected Other challenge");

@@ -631,6 +631,7 @@ where
             params: vec![AuthParam {
                 name: "realm".to_string(),
                 value: realm.to_string(),
+                quoted: true,
             }],
         };
 

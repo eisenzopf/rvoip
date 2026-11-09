@@ -2666,6 +2666,36 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         event: TransactionEvent,
     ) -> DialogResult<()> {
+        // UAS request processing (RFC 3261 §8.2): the method, Request-URI
+        // scheme, Require and body checks come before any dialog processing.
+        if let TransactionEvent::InviteRequest { request, .. }
+        | TransactionEvent::NonInviteRequest { request, .. } = &event
+        {
+            if let Err(rejection) = rvoip_sip_core::validation::validate_request_for_uas(
+                request,
+                &rvoip_sip_core::validation::UasCapabilities::default(),
+            ) {
+                debug!(
+                    method = %method_class(&request.method()),
+                    status = rejection.status.as_u16(),
+                    reason = rejection.reason,
+                    "UAS rejected request before processing"
+                );
+                let mut response = crate::transaction::utils::response_builders::create_response(
+                    request,
+                    rejection.status,
+                );
+                response.headers.extend(rejection.headers);
+                return self
+                    .transaction_manager
+                    .send_response(transaction_id, response)
+                    .await
+                    .map_err(|_error| DialogError::TransactionError {
+                        message: "Failed to send request rejection".to_string(),
+                    });
+            }
+        }
+
         match event {
             TransactionEvent::InviteRequest {
                 request, source, ..
@@ -3216,10 +3246,9 @@ impl DialogManager {
                 Ok(())
             }
             method => {
-                // Demoted from warn — under the test harness this fires
-                // for every method we haven't implemented yet (e.g.
-                // PUBLISH); spurious error-level logs make pass output
-                // noisier than the failure they're supposed to flag.
+                // UAS validation answers every method outside the supported
+                // set with 405 or 501 before dispatch, so this is reached only
+                // through internal callers.
                 debug!("Unsupported SIP method class={}", method_class(&method));
                 Err(DialogError::protocol_error(&format!(
                     "Unsupported method class: {}",

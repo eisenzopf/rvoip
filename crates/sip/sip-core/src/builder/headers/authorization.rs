@@ -476,6 +476,7 @@ where
                     params.push(DigestParam::Param(AuthParam {
                         name: "uri".to_string(),
                         value: uri_value.to_string(),
+                        quoted: true,
                     }));
                 }
             }

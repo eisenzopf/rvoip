@@ -14411,22 +14411,8 @@ impl UnifiedCoordinator {
             return Ok(None);
         };
 
-        let pending = lifecycle_handle
-            .as_ref()
-            .and_then(|handle| self.pending_incoming_bundle_for_handle_exact(handle));
-        let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
-        let transport = pending.and_then(|bundle| bundle.transport);
-        let incoming = match parsed {
-            Some(req) => crate::api::incoming::IncomingCall::with_request_captured(
-                call_id,
-                from,
-                to,
-                sdp,
-                self.clone(),
-                req,
-                lifecycle_handle,
-            ),
-            None => crate::api::incoming::IncomingCall::new_captured(
+        Ok(Some(
+            crate::api::incoming::IncomingCall::from_event_captured(
                 call_id,
                 from,
                 to,
@@ -14434,14 +14420,7 @@ impl UnifiedCoordinator {
                 self.clone(),
                 lifecycle_handle,
             ),
-        }
-        .with_transport_context(
-            transport
-                .as_deref()
-                .cloned()
-                .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
-        );
-        Ok(Some(incoming))
+        ))
     }
 
     pub(crate) fn pending_incoming_bundle_for_handle_exact(

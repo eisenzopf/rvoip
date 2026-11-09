@@ -335,6 +335,25 @@ pub enum TransportEvent {
         connection_metadata: Option<TransportConnectionMetadata>,
     },
 
+    /// A request that does not parse, reduced to the header fields a 400
+    /// (Bad Request) response is built from (see
+    /// `rvoip_sip_core::validation::recover_request_for_rejection`). The
+    /// transaction layer answers it statelessly with 400 and never processes
+    /// it (RFC 4475 §3.1.2).
+    MalformedRequest {
+        /// The request's Via, From, To, Call-ID and CSeq, with a placeholder
+        /// start line.
+        request: rvoip_sip_core::Request,
+        /// The remote address that sent the message.
+        source: SocketAddr,
+        /// The local address that received the message.
+        destination: SocketAddr,
+        /// Transport flavour that received the message.
+        transport_type: TransportType,
+        /// Exact connection-oriented flow that carried the message.
+        flow_id: Option<TransportFlowId>,
+    },
+
     /// Error occurred in the transport
     Error {
         /// Error description
@@ -462,6 +481,15 @@ impl fmt::Debug for TransportEvent {
                     .field("connection_metadata", connection_metadata)
                     .finish()
             }
+            Self::MalformedRequest {
+                transport_type,
+                flow_id,
+                ..
+            } => formatter
+                .debug_struct("MalformedRequest")
+                .field("transport_type", transport_type)
+                .field("flow_present", &flow_id.is_some())
+                .finish_non_exhaustive(),
             Self::Error { error } => formatter
                 .debug_struct("Error")
                 .field("error_present", &!error.is_empty())

@@ -253,11 +253,11 @@ cargo test -p rvoip-sip --test beta_release_docs
 | **3986** | URI: Generic Syntax | Generic URI parsing used by the supported SIP URI profile. | 🟡 **Partial** — no complete RFC 3986 conformance suite is claimed | `sip-core` URI parser tests and URI fuzz target |
 | **3966** | The `tel` URI for Telephone Numbers | `tel:` URIs and `phone-context`. | 🟡 **Partial** — tel URI parse/build | `sip-core` URI types |
 | **2045** | MIME Part 1: Format of Message Bodies | MIME headers / encodings for SIP bodies. | 🔵 **Types only** | `sip-core` content-type / MIME parsing |
-| **2046** | MIME Part 2: Media Types | `multipart/*`, media-type registry. | 🟡 **Partial** — multipart bodies parsed (torture `mpart01`) | `sip-core` multipart parsing, `rfc_compliance/wellformed/3.1.1.11_mpart01.sip` |
+| **2046** | MIME Part 2: Media Types | `multipart/*`, media-type registry. | 🟡 **Partial** — multipart bodies parsed (torture `mpart01`) | `sip-core` multipart parsing, `rfc_compliance/torture/rfc4475/mpart01.dat` |
 | **5621** | Message Body Handling in SIP | Multipart body handling rules for SIP. | 🟡 **Partial** — multipart carry-through | `sip-core` body handling |
 | **5646** | Tags for Identifying Languages (BCP 47) | `Content-Language`/`Accept-Language` tag validation. | 🟡 **Partial** — language-tag parse/validate (incl. grandfathered tags) | `sip-core` language-tag parser tests |
-| **4475** | SIP Torture Test Messages | Included well-formed fixtures parse and included malformed fixtures are rejected. | ✅ **Verified** (bounded to the checked-in corpus; the documented well-formed exclusions remain outside the claim) | `T-4475-U1`, `T-4475-U2` |
-| **5118** | SIP Torture Test Messages for IPv6 | IPv6-specific torture cases. | 🟡 **Partial** — IPv6 cases in corpus | `rfc_compliance` corpus (`4.2_ipv6-bad.sip`, …) |
+| **4475** | SIP Torture Test Messages | Every Appendix A message, bit-exact, meets its RFC expectation in Strict and Lenient parse mode and re-serializes to valid SIP; a running endpoint sends the RFC response to each message over UDP, and every response is valid SIP. | ✅ **Verified** (parser and element) | `T-4475-U0`, `T-4475-U1`, `T-4475-U2`, `T-4475-W1` |
+| **5118** | SIP Torture Test Messages for IPv6 | Every Appendix A message, bit-exact and normalized, meets its RFC expectation in both parse modes and re-serializes to valid SIP. | ✅ **Verified** (parser; network-stack IPv6 not covered) | `T-5118-U1` |
 
 ---
 

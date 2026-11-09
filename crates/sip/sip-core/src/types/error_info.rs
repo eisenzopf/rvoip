@@ -233,7 +233,11 @@ impl fmt::Display for ErrorInfo {
         write!(f, "<{}>", self.uri)?;
 
         // Parameters if any
-        for (name, value) in &self.parameters {
+        // Parameter order carries no meaning; name order keeps the
+        // rendering deterministic.
+        let mut sorted: Vec<_> = self.parameters.iter().collect();
+        sorted.sort();
+        for (name, value) in sorted {
             write!(f, ";{}={}", name, value)?;
         }
 

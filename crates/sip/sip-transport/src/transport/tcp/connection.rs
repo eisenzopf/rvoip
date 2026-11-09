@@ -28,6 +28,10 @@ pub enum ReceivedFrame {
     /// upstream form without re-serializing. See `SIP_API_DESIGN_2.md`
     /// §7.5.
     Message(Message, bytes::Bytes),
+    /// A framed request that does not parse, reduced to what a 400 (Bad
+    /// Request) response needs. The stream stays framed, so the connection
+    /// stays open (RFC 4475 §3.1.2).
+    MalformedRequest(Box<rvoip_sip_core::Request>),
     /// RFC 5626 §3.5.1 keep-alive pong — a single `\r\n` received.
     KeepAlivePong,
     /// RFC 5626 §3.5.1 server-initiated ping — `\r\n\r\n` at offset 0
@@ -43,6 +47,7 @@ impl std::fmt::Debug for ReceivedFrame {
                 .field("parsed", message)
                 .field("wire_bytes", &bytes.len())
                 .finish(),
+            Self::MalformedRequest(_) => formatter.write_str("MalformedRequest"),
             Self::KeepAlivePong => formatter.write_str("KeepAlivePong"),
             Self::KeepAlivePing => formatter.write_str("KeepAlivePing"),
         }
@@ -191,7 +196,9 @@ impl TcpConnection {
         loop {
             match self.receive_frame().await? {
                 Some(ReceivedFrame::Message(m, _bytes)) => return Ok(Some(m)),
-                Some(ReceivedFrame::KeepAlivePong) | Some(ReceivedFrame::KeepAlivePing) => {
+                Some(ReceivedFrame::KeepAlivePong)
+                | Some(ReceivedFrame::KeepAlivePing)
+                | Some(ReceivedFrame::MalformedRequest(_)) => {
                     // Silently skip — legacy callers aren't aware of
                     // RFC 5626 frames. New code should call
                     // `receive_frame` directly.
@@ -243,8 +250,8 @@ impl TcpConnection {
                 recv_buffer.advance(2);
                 return Ok(Some(ReceivedFrame::KeepAlivePong));
             }
-            if let Some((frame, raw_bytes)) = self.try_parse_message(&mut recv_buffer)? {
-                return Ok(Some(ReceivedFrame::Message(frame, raw_bytes)));
+            if let Some(frame) = self.try_parse_frame(&mut recv_buffer)? {
+                return Ok(Some(frame));
             }
 
             // No complete frame, read more data
@@ -297,7 +304,7 @@ impl TcpConnection {
     /// bytes that the parser consumed. The Bytes copy lets downstream
     /// code preserve the upstream byte form (STIR/SHAKEN, SBC
     /// pass-through) without re-serializing.
-    fn try_parse_message(&self, buffer: &mut BytesMut) -> Result<Option<(Message, bytes::Bytes)>> {
+    fn try_parse_frame(&self, buffer: &mut BytesMut) -> Result<Option<ReceivedFrame>> {
         if buffer.is_empty() {
             return Ok(None);
         }
@@ -316,18 +323,43 @@ impl TcpConnection {
         };
         let message_slice = &buffer[..frame.total_bytes];
         let raw_bytes = bytes::Bytes::copy_from_slice(message_slice);
-        let message = parse_message(message_slice).map_err(|error| {
-            self.closed.store(true, Ordering::Relaxed);
-            warn!(
-                error_class = "sip-syntax",
-                "Rejecting malformed SIP TCP message"
-            );
-            Error::ParseError(error.to_string())
-        })?;
+        let message = match parse_message(message_slice) {
+            Ok(message) => message,
+            Err(error) => {
+                // The frame boundary is known, so a request that can still be
+                // answered gets a 400 and the stream continues.
+                if let Some(request) =
+                    rvoip_sip_core::validation::recover_request_for_rejection(message_slice)
+                {
+                    debug!(
+                        error_class = "sip-syntax",
+                        "Answering malformed SIP TCP request with 400"
+                    );
+                    buffer.advance(frame.total_bytes);
+                    return Ok(Some(ReceivedFrame::MalformedRequest(Box::new(request))));
+                }
+                self.closed.store(true, Ordering::Relaxed);
+                warn!(
+                    error_class = "sip-syntax",
+                    "Rejecting malformed SIP TCP message"
+                );
+                return Err(Error::ParseError(error.to_string()));
+            }
+        };
 
         trace!("Parsed complete SIP message ({} bytes)", frame.total_bytes);
         buffer.advance(frame.total_bytes);
-        Ok(Some((message, raw_bytes)))
+        Ok(Some(ReceivedFrame::Message(message, raw_bytes)))
+    }
+
+    /// [`Self::try_parse_frame`] for tests that expect a parsed message.
+    #[cfg(test)]
+    fn try_parse_message(&self, buffer: &mut BytesMut) -> Result<Option<(Message, bytes::Bytes)>> {
+        match self.try_parse_frame(buffer)? {
+            Some(ReceivedFrame::Message(message, raw_bytes)) => Ok(Some((message, raw_bytes))),
+            Some(_) => Err(Error::ParseError("not a parsed SIP message".to_string())),
+            None => Ok(None),
+        }
     }
 
     /// Closes the TCP connection
