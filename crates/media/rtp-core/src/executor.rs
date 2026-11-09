@@ -103,6 +103,11 @@
 //!   straight from their lane poller's table and timing wheel instead of
 //!   running as paced futures (see [`crate::lane_table`]). Needs the lane
 //!   timing wheel, lane-hosted TX and the cached TX path.
+//! - [`MediaExecutorConfig::playout_zero_copy`]: a fused pump's playout
+//!   buffer keeps its pending frames in a few unordered slots and lends each
+//!   due frame to the pump, then keeps it as its concealment template,
+//!   instead of copying its PCM into the template. Same frames, timestamps
+//!   and statistics. Needs the fused pump.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -340,6 +345,16 @@ pub struct MediaExecutorConfig {
     /// off (the entries read as without it).
     pub lane_rx_readiness: bool,
     // ---- End lane table receive ----
+    // ---- Zero-copy playout ----
+    /// A fused SIP inbound pump's playout buffer keeps its pending frames in
+    /// a few unordered slots instead of an ordered map, and lends each due
+    /// frame to the pump and then keeps it as its concealment template,
+    /// instead of copying the frame's PCM into the template and handing the
+    /// frame out. The frames, their order, timestamps, concealment and
+    /// playout statistics are identical. Needs
+    /// [`Self::fused_inbound_pump`]; without it it reads as off.
+    pub playout_zero_copy: bool,
+    // ---- End zero-copy playout ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -387,6 +402,8 @@ impl MediaExecutorConfig {
             // Lane table receive.
             callback_rx_kernel: false,
             lane_rx_readiness: false,
+            // Zero-copy playout.
+            playout_zero_copy: false,
         }
     }
 
@@ -429,6 +446,8 @@ impl MediaExecutorConfig {
             // Lane table receive.
             callback_rx_kernel: true,
             lane_rx_readiness: true,
+            // Zero-copy playout.
+            playout_zero_copy: true,
         }
     }
 
@@ -620,6 +639,15 @@ impl MediaExecutorConfig {
     }
 
     // ---- End hot call state ----
+    // ---- Zero-copy playout ----
+
+    /// Set [`Self::playout_zero_copy`].
+    pub fn with_playout_zero_copy(mut self, enabled: bool) -> Self {
+        self.playout_zero_copy = enabled;
+        self
+    }
+
+    // ---- End zero-copy playout ----
 
     /// Check the configuration without installing it.
     ///
@@ -838,6 +866,15 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane table receive ----
+    // ---- Zero-copy playout ----
+
+    /// Whether a fused SIP inbound pump lends due frames from slot-stored
+    /// playout instead of copying them (needs the fused pump).
+    pub fn playout_zero_copy_active(&self) -> bool {
+        self.fused_inbound_pump_active() && self.playout_zero_copy
+    }
+
+    // ---- End zero-copy playout ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -1157,6 +1194,17 @@ pub fn hot_state_enabled() -> bool {
 }
 
 // ---- End hot call state ----
+
+// ---- Zero-copy playout ----
+
+/// Whether a fused SIP inbound pump built now lends due frames from
+/// slot-stored playout ([`MediaExecutorConfig::playout_zero_copy_active`]).
+/// Read when the pump is built.
+pub fn playout_zero_copy_enabled() -> bool {
+    with_config(MediaExecutorConfig::playout_zero_copy_active)
+}
+
+// ---- End zero-copy playout ----
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -3305,6 +3353,48 @@ mod tests {
     }
 
     // ---- End hot call state ----
+
+    // ---- Zero-copy playout ----
+
+    #[test]
+    fn playout_zero_copy_is_off_in_v1_on_in_v2_and_reads_as_off_without_the_fused_pump() {
+        assert!(!MediaExecutorConfig::v1().playout_zero_copy);
+        assert!(!MediaExecutorConfig::v1().playout_zero_copy_active());
+        let v2 = MediaExecutorConfig::v2();
+        assert!(v2.playout_zero_copy && v2.playout_zero_copy_active());
+        assert!(v2.validate().is_ok());
+        assert!(
+            !MediaExecutorConfig::v1()
+                .with_playout_zero_copy(true)
+                .playout_zero_copy_active(),
+            "never under v1"
+        );
+        let off = MediaExecutorConfig::v2().with_playout_zero_copy(false);
+        assert!(!off.playout_zero_copy_active());
+        assert!(off.fused_inbound_pump_active(), "independent of the pump");
+        for missing in [
+            MediaExecutorConfig::v2().with_fused_inbound_pump(false),
+            MediaExecutorConfig::v2().with_inline_decode(false),
+        ] {
+            assert!(missing.playout_zero_copy);
+            assert!(
+                !missing.playout_zero_copy_active(),
+                "only a fused pump plays out"
+            );
+            assert!(
+                missing.validate().is_ok(),
+                "a missing prerequisite is not an error"
+            );
+        }
+        {
+            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
+            assert!(playout_zero_copy_enabled());
+            let _off = override_media_executor_config_on_this_thread(off);
+            assert!(!playout_zero_copy_enabled());
+        }
+    }
+
+    // ---- End zero-copy playout ----
 
     #[test]
     fn mode_names_parse_and_reject_unknown_values() {
