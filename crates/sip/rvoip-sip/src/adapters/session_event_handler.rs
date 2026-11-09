@@ -920,16 +920,25 @@ fn is_missing_credentials_for_auth_error(
     )
 }
 
+#[cfg(test)]
 fn is_session_lifecycle_capacity_exhaustion(
     error: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> bool {
-    matches!(
-        error.downcast_ref::<SessionAdmissionError>(),
-        Some(
-            SessionAdmissionError::CapacityExhausted
-                | SessionAdmissionError::RetainedCapacityExhausted
-        )
-    )
+    session_lifecycle_capacity_exhaustion_kind(error).is_some()
+}
+
+/// Which lifecycle bound rejected an admission: `"active"` concurrent calls,
+/// or `"retained"` lifetimes (live calls plus anti-reuse fences of ended
+/// calls). Both are answered with a SIP overload, but they have different
+/// remedies, so they are reported separately.
+fn session_lifecycle_capacity_exhaustion_kind(
+    error: &(dyn std::error::Error + Send + Sync + 'static),
+) -> Option<&'static str> {
+    match error.downcast_ref::<SessionAdmissionError>() {
+        Some(SessionAdmissionError::CapacityExhausted) => Some("active"),
+        Some(SessionAdmissionError::RetainedCapacityExhausted) => Some("retained"),
+        _ => None,
+    }
 }
 
 fn safe_auth_method_label(method: &str) -> &'static str {
@@ -4331,10 +4340,13 @@ impl SessionCrossCrateEventHandler {
             transaction: pending_transaction,
             remote_sdp: sdp.clone(),
         };
+        // Dialog-core mints a random UUID session identifier for every new
+        // inbound INVITE and never reuses it, so its anti-reuse fence is
+        // reclaimed when the finished call is removed from the store.
         let create_result = self
             .state_machine
             .store
-            .create_session_initialized(
+            .create_session_initialized_unique(
                 session_id.clone(),
                 Role::UAS,
                 self.inbound_session_history,
@@ -4347,13 +4359,25 @@ impl SessionCrossCrateEventHandler {
         let created_session = match create_result {
             Ok(session) => session,
             Err(error) => {
-                if is_session_lifecycle_capacity_exhaustion(error.as_ref()) {
+                if let Some(exhausted_capacity) =
+                    session_lifecycle_capacity_exhaustion_kind(error.as_ref())
+                {
                     let observed_sessions = self.state_machine.store.sessions.len();
-                    warn!(
-                        observed_sessions,
-                        configured_admission_limit = ?self.server_call_admission_limit,
-                        "Session lifecycle capacity rejected inbound INVITE; returning SIP overload"
-                    );
+                    if exhausted_capacity == "retained" {
+                        warn!(
+                            observed_sessions,
+                            exhausted_capacity,
+                            configured_admission_limit = ?self.server_call_admission_limit,
+                            "Session lifecycle capacity rejected inbound INVITE (retained lifetimes incl. anti-reuse fences); returning SIP overload"
+                        );
+                    } else {
+                        warn!(
+                            observed_sessions,
+                            exhausted_capacity,
+                            configured_admission_limit = ?self.server_call_admission_limit,
+                            "Session lifecycle capacity rejected inbound INVITE; returning SIP overload"
+                        );
+                    }
                     self.reject_and_cleanup_incoming_call_for_overload(
                         transaction_id,
                         incoming_dialog_id.as_ref(),
@@ -7355,6 +7379,7 @@ mod tests {
         dialog_event_requires_processing_ack, exact_final_response_outcome,
         exact_final_response_result, exact_final_response_retires_routes,
         exact_response_failure_processing_ack, is_session_lifecycle_capacity_exhaustion,
+        session_lifecycle_capacity_exhaustion_kind,
         join_state_machine_task, map_sip_trace_session_id, media_observation_api_event,
         media_observation_session_id, parse_sipfrag_status_line, queued_dialog_lifetime_is_current,
         refer_default_is_pending_exact, registry_has_exact_dialog,
@@ -8399,7 +8424,7 @@ Content-Length: {}\r\n\r\n\
             .expect("media port admission check");
         assert!(handler.contains("if free_port_slots == Some(0) {"));
         let create = handler
-            .find("create_session_initialized(")
+            .find("create_session_initialized_unique(")
             .expect("session creation");
         assert!(port_check < create);
         assert!(handler.contains("reject_incoming_call_for_media_ports("));
@@ -9226,7 +9251,7 @@ Content-Length: {}\r\n\r\n\
             .find("let pending_transaction")
             .expect("transaction is parsed before admission and creation");
         let create = handler
-            .find(".create_session_initialized(")
+            .find(".create_session_initialized_unique(")
             .expect("atomic initialized session creation");
         let dialog_commit = handler
             .find(".commit_exact_inbound_dialog(")
@@ -9588,6 +9613,16 @@ Content-Length: {}\r\n\r\n\
         ] {
             assert!(is_session_lifecycle_capacity_exhaustion(&error));
         }
+        assert_eq!(
+            session_lifecycle_capacity_exhaustion_kind(&SessionAdmissionError::CapacityExhausted),
+            Some("active")
+        );
+        assert_eq!(
+            session_lifecycle_capacity_exhaustion_kind(
+                &SessionAdmissionError::RetainedCapacityExhausted
+            ),
+            Some("retained")
+        );
 
         assert!(!is_session_lifecycle_capacity_exhaustion(
             &SessionAdmissionError::AlreadyActive
