@@ -320,11 +320,10 @@ impl DialogEventHub {
                     .map(|t| t.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
 
-                let sdp_offer = if !request.body().is_empty() {
-                    String::from_utf8(request.body().to_vec()).ok()
-                } else {
-                    None
-                };
+                // The session description, which a multipart body carries in
+                // one part (RFC 5621).
+                let sdp_offer =
+                    rvoip_sip_core::body::session_description_text(&request.headers, &request.body);
 
                 // Generate session ID
                 let session_id = format!("session-{}", uuid::Uuid::new_v4());
@@ -554,11 +553,10 @@ impl DialogEventHub {
                                 rvoip_sip_core::Message::Response(response.clone()).to_bytes(),
                             ))
                         });
-                    let response_sdp = if response.body().is_empty() {
-                        None
-                    } else {
-                        String::from_utf8(response.body().to_vec()).ok()
-                    };
+                    let response_sdp = rvoip_sip_core::body::session_description_text(
+                        &response.headers,
+                        &response.body,
+                    );
                     // The transaction key is the locally-owned correlation
                     // authority. A response CSeq is peer input; transaction
                     // matching has already validated it, but it must not
@@ -576,11 +574,10 @@ impl DialogEventHub {
                     match response.status_code() {
                         200 if is_invite_response => {
                             // 200 OK - call established
-                            let sdp_answer = if !response.body().is_empty() {
-                                String::from_utf8(response.body().to_vec()).ok()
-                            } else {
-                                None
-                            };
+                            let sdp_answer = rvoip_sip_core::body::session_description_text(
+                                &response.headers,
+                                &response.body,
+                            );
 
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallEstablished {
@@ -594,11 +591,10 @@ impl DialogEventHub {
                             // Preserve the actual provisional response. Session-core
                             // decides how to map it onto call state while apps can
                             // observe the response code, reason, and early-media SDP.
-                            let sdp = if !response.body().is_empty() {
-                                String::from_utf8(response.body().to_vec()).ok()
-                            } else {
-                                None
-                            };
+                            let sdp = rvoip_sip_core::body::session_description_text(
+                                &response.headers,
+                                &response.body,
+                            );
                             Some(RvoipCrossCrateEvent::DialogToSession(
                                 DialogToSessionEvent::CallProgress {
                                     session_id,
@@ -1092,11 +1088,10 @@ impl DialogEventHub {
                 };
                 match method {
                     Method::Invite | Method::Update => {
-                        let sdp = if !request.body().is_empty() {
-                            String::from_utf8(request.body().to_vec()).ok()
-                        } else {
-                            None
-                        };
+                        let sdp = rvoip_sip_core::body::session_description_text(
+                            &request.headers,
+                            &request.body,
+                        );
                         debug!(
                             "Converting ReInvite ({}) to cross-crate event for session {}",
                             method_class(&method),

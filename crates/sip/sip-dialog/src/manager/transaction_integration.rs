@@ -7153,7 +7153,8 @@ impl DialogManager {
         let deferred_session_ack = session_id_for_diag.is_some()
             && transaction_id.method() == &rvoip_sip_core::Method::Invite
             && response.status().is_success()
-            && !response.body().is_empty();
+            && rvoip_sip_core::body::session_description(&response.headers, &response.body)
+                .is_some();
 
         // Handle specific successful response types
         match response.status_code() {
@@ -7532,9 +7533,12 @@ impl DialogManager {
             183 => {
                 info!("Session progress for dialog {}", dialog_id);
 
-                // Check for early media (SDP in 183)
-                if !response.body().is_empty() {
-                    let sdp = String::from_utf8_lossy(response.body()).to_string();
+                // Check for early media (SDP in 183, possibly one part of a
+                // multipart body, RFC 5621)
+                if let Some(sdp) = rvoip_sip_core::body::session_description_text(
+                    &response.headers,
+                    &response.body,
+                ) {
                     if has_session_owner {
                         self.notify_session_layer(SessionCoordinationEvent::EarlyMedia {
                             dialog_id: dialog_id.clone(),
@@ -7655,14 +7659,13 @@ impl DialogManager {
         info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "ACK received; media may start on UAS side");
 
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
-        let negotiated_sdp = if !request.body().is_empty() {
-            let sdp = String::from_utf8_lossy(request.body()).to_string();
+        let negotiated_sdp =
+            rvoip_sip_core::body::session_description_text(&request.headers, &request.body);
+        if negotiated_sdp.is_some() {
             info!(body_len = request.body().len(), "ACK contains SDP body");
-            Some(sdp)
         } else {
             info!("ACK has no SDP body (normal for 2xx ACK)");
-            None
-        };
+        }
 
         info!(
             "🔔 About to emit AckReceived event for dialog {}",
