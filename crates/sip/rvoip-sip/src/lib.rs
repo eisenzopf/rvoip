@@ -514,6 +514,8 @@ mod sip_data_message;
 pub mod state_machine;
 #[doc(hidden)]
 pub mod state_table;
+#[cfg(test)]
+pub(crate) mod test_ports;
 #[doc(hidden)]
 pub mod types;
 
