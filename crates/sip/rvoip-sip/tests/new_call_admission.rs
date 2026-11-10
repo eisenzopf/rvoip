@@ -5,20 +5,17 @@ use rvoip_sip::api::unified::{Config, SipTlsMode, UnifiedCoordinator};
 use rvoip_sip_dialog::transaction::{
     AdmissionLevel, AdmissionMode, NewCallAdmissionConfig, NewCallRateLimit,
 };
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 const OVERLOAD_TAG: &str = "tag=rvoip-ovl-";
 
-fn port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
+#[path = "support/free_port.rs"]
+mod free_port;
+
+use free_port::{probe_udp_port, retry_address_in_use, start_with_tls_connection};
 
 fn invite(transport: &str, target: SocketAddr, local: SocketAddr, call_id: &str) -> String {
     let scheme = if transport == "TLS" { "sips" } else { "sip" };
@@ -116,10 +113,17 @@ fn new_call_admission_and_early_reject_default_off_and_are_configurable() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn udp_invite_rejected_by_the_gate_gets_a_stateless_503_and_its_ack_is_absorbed() {
-    let sip_port = port();
-    let config = Config::local("appliance", sip_port)
-        .with_sip_new_call_admission(NewCallAdmissionConfig::new(AdmissionMode::Enforce));
-    let coordinator = Box::pin(UnifiedCoordinator::new(config)).await.unwrap();
+    let (coordinator, sip_port) = retry_address_in_use("UDP appliance", || {
+        let sip_port = probe_udp_port();
+        let config = Config::local("appliance", sip_port)
+            .with_sip_new_call_admission(NewCallAdmissionConfig::new(AdmissionMode::Enforce));
+        async move {
+            Box::pin(UnifiedCoordinator::new(config))
+                .await
+                .map(|coordinator| (coordinator, sip_port))
+        }
+    })
+    .await;
     let gate = coordinator.new_call_admission();
     assert_eq!(gate.mode(), AdmissionMode::Enforce);
     gate.set_level(AdmissionLevel::closed(Some(6)));
@@ -163,37 +167,20 @@ async fn tls_invite_is_rejected_on_the_connection_reader() {
     std::fs::write(&cert, identity.cert.pem()).unwrap();
     std::fs::write(&key, identity.signing_key.serialize_pem()).unwrap();
 
-    let tls_port = port();
-    let mut config = Config::local("appliance", port());
-    config.sip_tls_mode = SipTlsMode::ClientAndServer;
-    config.tls_bind_addr = Some(([127, 0, 0, 1], tls_port).into());
-    config.tls_cert_path = Some(cert);
-    config.tls_key_path = Some(key);
-    let config =
-        config.with_sip_new_call_admission(NewCallAdmissionConfig::new(AdmissionMode::Enforce));
-    let coordinator = Box::pin(UnifiedCoordinator::new(config)).await.unwrap();
+    let (coordinator, mut stream, tls_port) =
+        start_with_tls_connection("TLS appliance", identity.cert.der().clone(), |tls_port| {
+            let mut config = Config::local("appliance", probe_udp_port());
+            config.sip_tls_mode = SipTlsMode::ClientAndServer;
+            config.tls_bind_addr = Some(([127, 0, 0, 1], tls_port).into());
+            config.tls_cert_path = Some(cert.clone());
+            config.tls_key_path = Some(key.clone());
+            config.with_sip_new_call_admission(NewCallAdmissionConfig::new(AdmissionMode::Enforce))
+        })
+        .await;
+    let local = stream.get_ref().0.local_addr().unwrap();
     let gate = coordinator.new_call_admission();
     assert!(gate.stats().tls_ingress_attached);
     gate.set_level(AdmissionLevel::closed(Some(8)));
-
-    let mut roots = rustls::RootCertStore::empty();
-    roots.add(identity.cert.der().clone()).unwrap();
-    let client = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let stream = TcpStream::connect(("127.0.0.1", tls_port)).await.unwrap();
-    let local = stream.local_addr().unwrap();
-    let mut stream = tokio_rustls::TlsConnector::from(Arc::new(client))
-        .connect(
-            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
-            stream,
-        )
-        .await
-        .unwrap();
 
     let target: SocketAddr = ([127, 0, 0, 1], tls_port).into();
     let call_id = format!("admission-tls-{tls_port}");
@@ -234,12 +221,19 @@ async fn tls_invite_is_rejected_on_the_connection_reader() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn early_reject_answers_invites_at_the_admission_limit_statelessly() {
-    let sip_port = port();
-    let config = Config::local("appliance", sip_port)
-        .with_server_call_admission_limit(1)
-        .with_server_overload_retry_after_secs(5)
-        .with_server_call_admission_early_reject(true);
-    let coordinator = Box::pin(UnifiedCoordinator::new(config)).await.unwrap();
+    let (coordinator, sip_port) = retry_address_in_use("early-reject appliance", || {
+        let sip_port = probe_udp_port();
+        let config = Config::local("appliance", sip_port)
+            .with_server_call_admission_limit(1)
+            .with_server_overload_retry_after_secs(5)
+            .with_server_call_admission_early_reject(true);
+        async move {
+            Box::pin(UnifiedCoordinator::new(config))
+                .await
+                .map(|coordinator| (coordinator, sip_port))
+        }
+    })
+    .await;
     assert_eq!(
         coordinator.new_call_admission().mode(),
         AdmissionMode::Off,

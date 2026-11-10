@@ -8005,23 +8005,18 @@ Content-Length: 0\r\n\r\n";
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn inbound_invite_observers_get_the_server_transactions_request() {
-        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
-        let uas_port = reservation
-            .local_addr()
-            .expect("reserved UAS address")
-            .port();
-        drop(reservation);
         let client = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind raw SIP client");
         let client_port = client.local_addr().expect("raw client address").port();
 
-        let mut config = crate::api::unified::Config::local("invite-handoff-uas", uas_port)
-            .with_auto_180_ringing(false);
-        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
-            .await
-            .expect("start UAS");
+        let (coordinator, uas_port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
+            let mut config = crate::api::unified::Config::local("invite-handoff-uas", port)
+                .with_auto_180_ringing(false);
+            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+            config
+        })
+        .await;
         let observed = Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&observed);
         coordinator
@@ -8130,28 +8125,23 @@ Content-Length: {}\r\n\r\n\
             .expect("timed out waiting for SIP response")
         }
 
-        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
-        let uas_port = reservation
-            .local_addr()
-            .expect("reserved UAS address")
-            .port();
-        drop(reservation);
         let client = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind raw SIP client");
         let client_port = client.local_addr().expect("raw client address").port();
 
-        let mut config = crate::api::unified::Config::local("sdes-update-uas", uas_port)
-            .with_auto_180_ringing(false)
-            .with_fast_auto_accept_incoming_calls(true);
-        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-        config.offer_srtp = true;
-        config.srtp_required = false;
-        config.srtp_offered_suites =
-            vec![rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80];
-        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
-            .await
-            .expect("start SDES UAS");
+        let (coordinator, uas_port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
+            let mut config = crate::api::unified::Config::local("sdes-update-uas", port)
+                .with_auto_180_ringing(false)
+                .with_fast_auto_accept_incoming_calls(true);
+            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+            config.offer_srtp = true;
+            config.srtp_required = false;
+            config.srtp_offered_suites =
+                vec![rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80];
+            config
+        })
+        .await;
         let mut diagnostics = coordinator.subscribe_diagnostics();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 

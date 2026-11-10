@@ -28,6 +28,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[path = "support/free_port.rs"]
+mod free_port;
+
+use free_port::{probe_udp_port, retry_address_in_use};
+
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
 use rvoip_sip::api::events::{CallId, Event};
 use rvoip_sip::api::incoming::IncomingCall;
@@ -74,13 +79,6 @@ impl Arm {
                 .with_inline_incoming_call_dispatch(true),
         }
     }
-}
-
-fn free_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .and_then(|socket| socket.local_addr())
-        .expect("reserve a SIP port")
-        .port()
 }
 
 fn peer_config(arm: Arm, name: &str, port: u16, media_start: u16) -> Config {
@@ -186,27 +184,35 @@ struct ArmOutcome {
 }
 
 async fn scenario(arm: Arm, media_base: u16) -> ArmOutcome {
-    let (alice_port, bob_port) = (free_port(), free_port());
-    let bob_config = peer_config(arm, "equivalence-bob", bob_port, media_base)
-        .with_auto_180_ringing(true)
-        .with_server_call_admission_limit(1);
-    let bob = CallbackPeer::new(Decider, bob_config)
-        .await
-        .expect("bob CallbackPeer::new");
+    // Bob holds his port before Alice probes, so they never share one.
+    let (bob, bob_port) = retry_address_in_use("bob CallbackPeer::new", || {
+        let bob_port = probe_udp_port();
+        let bob_config = peer_config(arm, "equivalence-bob", bob_port, media_base)
+            .with_auto_180_ringing(true)
+            .with_server_call_admission_limit(1);
+        async move {
+            CallbackPeer::new(Decider, bob_config)
+                .await
+                .map(|bob| (bob, bob_port))
+        }
+    })
+    .await;
     let bob_coordinator = Arc::clone(bob.coordinator());
     let bob_shutdown = bob.shutdown_handle();
     let bob_task = tokio::spawn(async move {
         let _ = bob.run().await;
     });
 
-    let alice = UnifiedCoordinator::new(peer_config(
-        arm,
-        "equivalence-alice",
-        alice_port,
-        media_base + 100,
-    ))
-    .await
-    .expect("alice UnifiedCoordinator::new");
+    let (alice, alice_port) = retry_address_in_use("alice UnifiedCoordinator::new", || {
+        let alice_port = probe_udp_port();
+        let config = peer_config(arm, "equivalence-alice", alice_port, media_base + 100);
+        async move {
+            UnifiedCoordinator::new(config)
+                .await
+                .map(|alice| (alice, alice_port))
+        }
+    })
+    .await;
     let observed = Arc::new(Mutex::new(Observed::default()));
     let mut alice_events = alice.events().await.expect("alice events");
     let sink = Arc::clone(&observed);

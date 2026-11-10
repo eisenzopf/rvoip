@@ -866,6 +866,10 @@ outcome unchanged, and add no configuration.
   longer fail on starved CI runners: they wait for the reclaim or scheduler
   pass they assert on instead of checking it as soon as an earlier signal
   fires (#364).
+- rtp-core and rvoip-sip tests no longer lose a probed "free" port (bind
+  `127.0.0.1:0`, drop, bind again) to a parallel test, and the executor v1/v2
+  RTCP report test sends media right before teardown so both executors close
+  with an SR on a starved runner.
 - Several PRs in this release changed the `rvoip-sip` public API, so the
   baseline (`public-api/rvoip-sip.txt`) must be regenerated in the 0.5.0
   release commit.

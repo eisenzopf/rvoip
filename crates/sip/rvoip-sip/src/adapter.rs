@@ -5829,13 +5829,12 @@ Signal=5\r\nDuration=160\r\n";
     async fn malformed_inbound_invite_accept_sends_488_before_exact_cleanup() {
         use rvoip_sip_core::{parse_message, Message as SipMessage};
 
-        let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
-        let port = probe.local_addr().expect("probe address").port();
-        drop(probe);
-
-        let mut config = ApiConfig::local("adapter-malformed-inbound", port);
-        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-        let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
+        let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
+            let mut config = ApiConfig::local("adapter-malformed-inbound", port);
+            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+            config
+        })
+        .await;
         let adapter = SipAdapter::new(Arc::clone(&coordinator))
             .await
             .expect("adapter");
@@ -6233,14 +6232,14 @@ Signal=5\r\nDuration=160\r\n";
             Self::start_with(name, |config| config).await
         }
 
-        async fn start_with(name: &str, configure: impl FnOnce(ApiConfig) -> ApiConfig) -> Self {
-            let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
-            let port = probe.local_addr().expect("probe address").port();
-            drop(probe);
-
-            let mut config = configure(ApiConfig::local(name, port));
-            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-            let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
+        async fn start_with(name: &str, configure: impl Fn(ApiConfig) -> ApiConfig) -> Self {
+            let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
+                let mut config = configure(ApiConfig::local(name, port));
+                config.media_mode =
+                    crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+                config
+            })
+            .await;
             let adapter = SipAdapter::new(Arc::clone(&coordinator))
                 .await
                 .expect("adapter");
@@ -7934,13 +7933,10 @@ Signal=5\r\nDuration=160\r\n";
 
     #[tokio::test]
     async fn shutdown_releases_listener_even_when_adapter_drain_fails() {
-        let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
-        let port = probe.local_addr().expect("probe address").port();
-        drop(probe);
-
-        let coordinator = UnifiedCoordinator::new(ApiConfig::local("shutdown-release", port))
-            .await
-            .expect("coordinator");
+        let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
+            ApiConfig::local("shutdown-release", port)
+        })
+        .await;
         let adapter = SipAdapter::new(Arc::clone(&coordinator))
             .await
             .expect("adapter");
