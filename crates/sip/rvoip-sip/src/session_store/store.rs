@@ -1,5 +1,7 @@
 use crate::cleanup_diag::{self, CleanupStage};
-use crate::session_lifecycle::{SessionLeaseAuthority, SessionOperationKind, TeardownOutcome};
+use crate::session_lifecycle::{
+    AdmissionIdentity, SessionLeaseAuthority, SessionOperationKind, TeardownOutcome,
+};
 use crate::session_registry::{SessionRegistry, SessionRegistryHandle};
 use crate::state_table::{CallId, DialogId, MediaSessionId, Role, SessionId};
 use crate::types::CallState;
@@ -427,7 +429,54 @@ impl SessionStore {
     where
         F: FnOnce(&mut SessionState),
     {
-        let lease = self.authority.admit(session_id.clone())?;
+        self.create_session_initialized_with_identity(
+            session_id,
+            role,
+            with_history,
+            AdmissionIdentity::Reusable,
+            initialize,
+        )
+        .await
+    }
+
+    /// Like [`Self::create_session_initialized`] for an identifier the stack
+    /// minted itself and never reuses (an inbound INVITE's session). Its
+    /// anti-reuse fence is reclaimed as soon as exact removal completes, so a
+    /// finished call stops counting against retained lifecycle capacity.
+    pub(crate) async fn create_session_initialized_unique<F>(
+        &self,
+        session_id: SessionId,
+        role: Role,
+        with_history: bool,
+        initialize: F,
+    ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: FnOnce(&mut SessionState),
+    {
+        self.create_session_initialized_with_identity(
+            session_id,
+            role,
+            with_history,
+            AdmissionIdentity::Unique,
+            initialize,
+        )
+        .await
+    }
+
+    async fn create_session_initialized_with_identity<F>(
+        &self,
+        session_id: SessionId,
+        role: Role,
+        with_history: bool,
+        identity: AdmissionIdentity,
+        initialize: F,
+    ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>>
+    where
+        F: FnOnce(&mut SessionState),
+    {
+        let lease = self
+            .authority
+            .admit_with_identity(session_id.clone(), identity)?;
         let handle = match self.registry.register_handle_exact(lease.key()) {
             Ok(handle) => handle,
             Err(error) => {
@@ -962,6 +1011,10 @@ impl SessionStore {
             });
         cell.close_call_state_updates();
         self.remove_indexes_for_session(snapshot.state(), handle);
+        // Every store and registry reference to this exact lifetime is gone.
+        // A stack-minted unique identifier no longer needs its anti-reuse
+        // fence; reusable identifiers keep theirs for the full horizon.
+        self.authority.reclaim_unique_retired_fence(handle.key());
         self.removed_total.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "perf-infra-memory-diagnostics")]
         rvoip_infra_common::memory_diagnostics::record_dropped(
@@ -1019,6 +1072,8 @@ impl SessionStore {
                 "active_capacity_in_use": authority.active_capacity_in_use,
                 "retained_capacity": authority.retained_capacity,
                 "retained_total": authority.lifecycle_count,
+            "unique_fences_reclaimed": authority.unique_fences_reclaimed,
+            "reusable_deadlines": authority.reusable_deadlines,
                 "admission_index_capacity": authority.admission_index_capacity,
                 "reusable_deadline_capacity": authority.reusable_deadline_capacity,
                 "retained_identifier_payload_bytes": authority.retained_identifier_payload_bytes,
@@ -1830,5 +1885,63 @@ mod tests {
         assert!(current.pending_auth_transaction_id.is_none());
         assert!(current.auth_challenge_raw.is_none());
         assert!(current.digest_nc.is_empty());
+    }
+
+    fn tight_store() -> SessionStore {
+        // One active call and one retained lifetime: any lingering anti-reuse
+        // fence blocks the next admission.
+        let authority =
+            SessionLeaseAuthority::with_capacities(1, 1).expect("tight lifecycle capacities");
+        let registry = Arc::new(SessionRegistry::with_authority(Arc::clone(&authority)));
+        SessionStore::with_lifecycle(authority, registry, Some(1))
+    }
+
+    #[tokio::test]
+    async fn removing_a_unique_lifetime_frees_retained_capacity_immediately() {
+        let store = tight_store();
+        for round in 0..64 {
+            let id = SessionId::new();
+            let handle = store
+                .create_session_initialized_unique(id.clone(), Role::UAS, false, |_| {})
+                .await
+                .unwrap_or_else(|error| panic!("round {round} admission rejected: {error}"))
+                .lifecycle_handle
+                .expect("exact handle");
+            store
+                .remove_session_exact(&handle)
+                .await
+                .expect("exact removal");
+            assert!(store.get_session_retained_snapshot_exact(&handle).is_err());
+            assert!(store.lifecycle_handle(&id).is_none());
+            let diagnostics = store.authority().diagnostics();
+            assert_eq!(diagnostics.lifecycle_count, 0, "round {round} left a fence");
+            assert_eq!(diagnostics.active_capacity_in_use, 0);
+            // A late removal for the same exact lifetime is a harmless error.
+            assert!(store.remove_session_exact(&handle).await.is_err());
+            assert!(store.remove_quiesced_session_exact(&handle).is_err());
+        }
+        assert_eq!(store.authority().diagnostics().unique_fences_reclaimed, 64);
+    }
+
+    #[tokio::test]
+    async fn removing_a_reusable_lifetime_keeps_its_anti_reuse_fence() {
+        let store = tight_store();
+        let id = SessionId::from_string("application-chosen-id");
+        let handle = store
+            .create_session(id.clone(), Role::UAC, false)
+            .await
+            .expect("admission")
+            .lifecycle_handle
+            .expect("exact handle");
+        store.remove_session_exact(&handle).await.expect("removal");
+        assert_eq!(store.authority().diagnostics().lifecycle_count, 1);
+        let blocked = store
+            .create_session(SessionId::new(), Role::UAC, false)
+            .await
+            .expect_err("the fence still occupies the only retained slot");
+        assert!(matches!(
+            blocked.downcast_ref::<crate::session_lifecycle::SessionAdmissionError>(),
+            Some(crate::session_lifecycle::SessionAdmissionError::RetainedCapacityExhausted)
+        ));
     }
 }
