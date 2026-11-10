@@ -169,7 +169,10 @@ jobs:
     # structs under libclang 19+ (rust-bindgen#2824). ubuntu-latest moved to
     # 26.04 and its newer clang; 24.04's default clang 18 still works.
     runs-on: ${{ matrix.gate == 'rustdoc' && 'ubuntu-24.04' || 'ubuntu-latest' }}
-    timeout-minutes: 45
+    # As main-ci's specialty job. codec-features-sip builds, tests and lints
+    # rvoip-sip with every codec feature and takes 32-45 min cold; a job
+    # cancelled at the limit never saves its cache, so the next run is cold too.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.specialty) }}
