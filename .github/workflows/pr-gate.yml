@@ -164,8 +164,15 @@ jobs:
     name: Specialty ${{ matrix.gate }}
     needs: plan
     if: needs.plan.outputs.specialty_count != '0'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # The rustdoc gate builds rvoip-webrtc's `client-video-vp8` bindings
+    # through env-libvpx-sys, whose bindgen 0.68 emits field-less opaque
+    # structs under libclang 19+ (rust-bindgen#2824). ubuntu-latest moved to
+    # 26.04 and its newer clang; 24.04's default clang 18 still works.
+    runs-on: ${{ matrix.gate == 'rustdoc' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    # As main-ci's specialty job. codec-features-sip builds, tests and lints
+    # rvoip-sip with every codec feature and takes 32-45 min cold; a job
+    # cancelled at the limit never saves its cache, so the next run is cold too.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.specialty) }}
@@ -206,6 +213,12 @@ jobs:
         run: >-
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake lsof
+
+      # `--all-features` documents rvoip-webrtc's `client-video-vp8`, whose
+      # libvpx bindings are generated against the installed headers.
+      - name: Install libvpx for all-features rustdoc
+        if: matrix.gate == 'rustdoc'
+        run: sudo apt-get install -y libvpx-dev
 
       - name: Run selected specialty gate
         run: >-

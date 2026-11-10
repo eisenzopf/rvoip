@@ -187,6 +187,72 @@ COMMAND_OVERRIDES = {
     ],
 }
 
+# Every gate that selects rvoip-sip targets broadly (`--lib`, `--tests`,
+# `--doc`, `--examples`, `--all-targets`) builds with `test-hooks`, matching
+# `SIP_LANE_FEATURES` in scripts/ci/run_checks.py. Since 0.4.0 the RFC 4028
+# session-timer tests and their process fixtures need the feature to shorten
+# intervals below the 90-second floor (`Config::session_timer_allow_short_
+# intervals_for_testing`); without it those targets compile to nothing and the
+# gate passes having run none of them, which is what `test.sip-integration`
+# did in the 0.4.0 qualification. The feature only adds test knobs and never
+# changes production behaviour. Performance gates select explicit targets
+# that do not need it and keep their measured executables unchanged.
+RVOIP_SIP_TEST_HOOKS = "test-hooks"
+COMMAND_OVERRIDES.update(
+    {
+        "build.sip-all-targets": [
+            "cargo",
+            "check",
+            "--locked",
+            "-p",
+            "rvoip-sip",
+            "--all-targets",
+            "--features",
+            f"generated-validation,dev-insecure-tls,{RVOIP_SIP_TEST_HOOKS}",
+        ],
+        "test.sip-unit": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "rvoip-sip",
+            "--lib",
+            "--features",
+            RVOIP_SIP_TEST_HOOKS,
+        ],
+        "test.sip-integration": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "rvoip-sip",
+            "--tests",
+            "--features",
+            f"generated-validation,dev-insecure-tls,{RVOIP_SIP_TEST_HOOKS}",
+        ],
+        "test.sip-doctest": [
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "rvoip-sip",
+            "--doc",
+            "--features",
+            RVOIP_SIP_TEST_HOOKS,
+        ],
+        "build.sip-examples": [
+            "cargo",
+            "build",
+            "--locked",
+            "-p",
+            "rvoip-sip",
+            "--examples",
+            "--features",
+            f"dev-insecure-tls,{RVOIP_SIP_TEST_HOOKS}",
+        ],
+    }
+)
+
 # Gate commands identify their test modules, but some tests also inspect
 # release metadata and preparation tooling. Keep those implicit inputs in the
 # evidence fingerprint so a candidate cannot reuse a receipt across a change

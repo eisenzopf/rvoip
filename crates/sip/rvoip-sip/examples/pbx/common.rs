@@ -31,6 +31,9 @@
 
 #![allow(dead_code)]
 
+#[path = "rtcp_session_timer.rs"]
+mod rtcp_session_timer;
+
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
@@ -386,6 +389,18 @@ pub enum Scenario {
     Dtmf,
     Reject,
     BlindTransfer,
+    /// RTCP multiplexed on the RTP port (RFC 5761) against a PBX endpoint
+    /// that accepts mux; both sides must exchange reports.
+    RtcpMux,
+    /// RTCP on a separate port (`Config::rtcp_non_mux`, RFC 3605 `a=rtcp:`)
+    /// against a PBX endpoint that declines mux.
+    RtcpNonMux,
+    /// The same declining PBX endpoint with `rtcp_non_mux` off: no RTCP may
+    /// flow, and none may be sent to the PBX's RTP port (RFC 5761 §5.1.1).
+    RtcpMuxDeclined,
+    /// RFC 4028 session timers: rvoip refreshes its UAC leg, the PBX
+    /// refreshes the leg toward rvoip, and the call outlives both deadlines.
+    SessionTimer,
 }
 
 impl Scenario {
@@ -424,6 +439,10 @@ impl Scenario {
             "dtmf" => Ok(Self::Dtmf),
             "reject" | "busy" => Ok(Self::Reject),
             "blind_transfer" | "blind_transfer_remote" | "transfer" => Ok(Self::BlindTransfer),
+            "rtcp_mux" | "rtcp" => Ok(Self::RtcpMux),
+            "rtcp_non_mux" | "rtcp_port" => Ok(Self::RtcpNonMux),
+            "rtcp_mux_declined" | "rtcp_declined" => Ok(Self::RtcpMuxDeclined),
+            "session_timer" | "session_timers" | "timer" | "timers" => Ok(Self::SessionTimer),
             other => Err(format!("unknown PBX scenario '{}'", other).into()),
         }
     }
@@ -818,8 +837,17 @@ impl EndpointConfig {
         transport: TransportMode,
         role: Option<Role>,
     ) -> ExampleResult<Self> {
-        let defaults = endpoint_defaults(provider, username, transport);
+        // Scenario users (e.g. Asterisk's 2101 for the RTCP cells) borrow the
+        // ports of the base user they stand in for, including any
+        // ENDPOINT_<base>_* override from the lab env file.
+        let base_user = rtcp_session_timer::base_username(username);
+        let defaults = endpoint_defaults(provider, &base_user, transport);
         let prefix = format!("ENDPOINT_{}", username);
+        let base_prefix = format!("ENDPOINT_{}", base_user);
+        let port_env = |suffix: &str, default: u16| -> ExampleResult<u16> {
+            let fallback = env_u16(&format!("{}_{}", base_prefix, suffix), default)?;
+            env_u16(&format!("{}_{}", prefix, suffix), fallback)
+        };
         let (sip_server, sip_port) = match provider {
             PbxProvider::Asterisk => {
                 let server = env_string("SIP_SERVER", "192.168.1.103");
@@ -893,11 +921,11 @@ impl EndpointConfig {
         };
         let advertised_ip = advertised_ip(provider, local_ip)?;
         let media_advertised_ip = media_advertised_ip(provider, advertised_ip)?;
-        let local_port = env_u16(&format!("{}_LOCAL_PORT", prefix), defaults.local_port)?;
+        let local_port = port_env("LOCAL_PORT", defaults.local_port)?;
         let tls_contact_mode = TlsContactMode::from_env(provider)?;
         let tls_local_port = if transport.is_tls() {
-            Some(env_u16(
-                &format!("{}_TLS_LOCAL_PORT", prefix),
+            Some(port_env(
+                "TLS_LOCAL_PORT",
                 defaults
                     .tls_local_port
                     .unwrap_or(defaults.local_port.saturating_add(1)),
@@ -905,14 +933,8 @@ impl EndpointConfig {
         } else {
             None
         };
-        let media_port_start = env_u16(
-            &format!("{}_MEDIA_PORT_START", prefix),
-            defaults.media_port_start,
-        )?;
-        let media_port_end = env_u16(
-            &format!("{}_MEDIA_PORT_END", prefix),
-            defaults.media_port_end,
-        )?;
+        let media_port_start = port_env("MEDIA_PORT_START", defaults.media_port_start)?;
+        let media_port_end = port_env("MEDIA_PORT_END", defaults.media_port_end)?;
         let codec_profile = CodecProfile::for_endpoint(Some(username), role)?;
         let output_dir = std::env::var("AUDIO_OUTPUT_DIR")
             .map(PathBuf::from)
@@ -1149,6 +1171,11 @@ impl EndpointConfig {
         // empty slice to "no mode-set offered".
         config = config.with_amr_mode_set(&amr_mode_set_requested().unwrap_or_default());
         self.codec_profile.apply(&mut config);
+        // RTCP/session-timer cells (#318). Same placement reasoning as the
+        // AMR knobs above: `session_config` returns this early for UDP.
+        if let Ok(scenario) = Scenario::from_env_or_args() {
+            rtcp_session_timer::apply_scenario_policy(scenario, &mut config);
+        }
         config
     }
 
@@ -1651,6 +1678,18 @@ pub fn endpoint_config_for(
     )
 }
 
+/// [`endpoint_config_for`] for a scenario whose PBX endpoint differs from
+/// the base user's (see [`rtcp_session_timer::scenario_username`]).
+pub fn endpoint_config_for_scenario(
+    provider: PbxProvider,
+    scenario: Scenario,
+    transport: TransportMode,
+    role: Role,
+) -> ExampleResult<EndpointConfig> {
+    let username = rtcp_session_timer::scenario_username(provider, scenario, transport, role);
+    EndpointConfig::new_for_role(provider, &username, transport, Some(role))
+}
+
 pub async fn new_stream_peer(cfg: &EndpointConfig) -> ExampleResult<StreamPeer> {
     Ok(StreamPeer::with_config(cfg.session_config()?).await?)
 }
@@ -2072,6 +2111,16 @@ async fn run_stream_peer(
         Scenario::B2buaCall => {
             return Err("b2bua_call runs through the endpoint API only; use --api endpoint".into());
         }
+        Scenario::RtcpMux
+        | Scenario::RtcpNonMux
+        | Scenario::RtcpMuxDeclined
+        | Scenario::SessionTimer => {
+            return Err(format!(
+                "{:?} runs through the endpoint API only; use --api endpoint",
+                scenario
+            )
+            .into());
+        }
         Scenario::BlindTransfer => {
             run_stream_peer_transfer(provider, transport, role, &cfg, &mut peer).await?;
         }
@@ -2087,7 +2136,7 @@ async fn run_endpoint(
     transport: TransportMode,
     role: Role,
 ) -> ExampleResult<()> {
-    let cfg = endpoint_config_for(provider, transport, role)?;
+    let cfg = endpoint_config_for_scenario(provider, scenario, transport, role)?;
     let mut endpoint = new_endpoint(&cfg).await?;
     register_endpoint_api(&mut endpoint, &cfg).await?;
     match scenario {
@@ -2107,6 +2156,20 @@ async fn run_endpoint(
         }
         Scenario::B2buaCall => {
             run_endpoint_b2bua(provider, transport, role, &cfg, &mut endpoint).await?;
+        }
+        Scenario::RtcpMux
+        | Scenario::RtcpNonMux
+        | Scenario::RtcpMuxDeclined
+        | Scenario::SessionTimer => {
+            rtcp_session_timer::run_endpoint_role(
+                provider,
+                scenario,
+                transport,
+                role,
+                &cfg,
+                &mut endpoint,
+            )
+            .await?;
         }
         Scenario::BlindTransfer => {
             run_endpoint_transfer(provider, transport, role, &cfg, &mut endpoint).await?;
@@ -2147,6 +2210,16 @@ async fn run_callback(
         }
         Scenario::B2buaCall => {
             return Err("b2bua_call runs through the endpoint API only; use --api endpoint".into());
+        }
+        Scenario::RtcpMux
+        | Scenario::RtcpNonMux
+        | Scenario::RtcpMuxDeclined
+        | Scenario::SessionTimer => {
+            return Err(format!(
+                "{:?} runs through the endpoint API only; use --api endpoint",
+                scenario
+            )
+            .into());
         }
         Scenario::BlindTransfer => {
             run_callback_transfer(transport, role, &mut runtime).await?;
@@ -6971,6 +7044,10 @@ mod tests {
             ("asterisk-tls", 5061),
             ("freeswitch", 5062),
             ("freeswitch-tls", 5063),
+            ("freeswitch-xcode", 5064),
+            ("freeswitch-xcode-tls", 5065),
+            // rvoip_udp_rtcp_timer: the RTCP and session-timer cells (#318).
+            ("freeswitch-rtcp-timer", 5069),
             ("kamailio", 5066),
             ("kamailio-tls", 5067),
             ("opensips", 5068),

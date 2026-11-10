@@ -528,6 +528,9 @@ pub struct RtpSessionWrapper {
     /// replaced with silence. This maintains RTP flow for NAT traversal
     /// and prevents remote endpoint timeouts.
     pub is_muted: bool,
+    /// Where asynchronous media keying (DTLS-SRTP) stands; gates outbound
+    /// audio frames before they reach the secure-only transport.
+    pub(super) secure_keying: SecureKeyingState,
     /// The session's RTP send handle, captured when the session started (it
     /// shares the session's sender, so it follows destination changes and
     /// the sender's close). Explicitly typed sends use it without locking
@@ -536,12 +539,32 @@ pub struct RtpSessionWrapper {
     pub(super) typed_send_handle: Option<rvoip_rtp_core::RtpSendHandle>,
     /// TX generation fence for senders cached outside this map
     /// ([`super::PreparedG711Sender`]). Bumped, under the shard guard,
-    /// whenever `transmission_enabled` or `is_muted` changes; retired when
-    /// the wrapper is removed.
+    /// whenever `transmission_enabled`, `is_muted` or `secure_keying`
+    /// changes; retired when the wrapper is removed.
     pub(super) tx_gate: Arc<DialogTxGate>,
 
     #[cfg(feature = "memory-diagnostics")]
     pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
+}
+
+/// Progress of the media keys a dialog's outbound audio waits for.
+///
+/// SDES-SRTP and plain RTP never leave [`Self::Ready`]: their keys (or
+/// their absence) are settled before media starts. DTLS-SRTP latches the
+/// transport secure-only before its handshake, so outbound audio frames
+/// that arrive in between cannot be protected.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(not(feature = "dtls-srtp"), allow(dead_code))]
+pub(crate) enum SecureKeyingState {
+    /// Nothing to wait for: frames go to the transport.
+    #[default]
+    Ready,
+    /// A key-agreement handshake is in flight. Outbound audio frames are
+    /// dropped (real-time audio is stale by the time keys exist) rather
+    /// than reported as errors.
+    Pending,
+    /// Key agreement failed; this dialog can never send protected media.
+    Failed(String),
 }
 
 /// Per-dialog TX generation. A cached sender is valid only while the epoch

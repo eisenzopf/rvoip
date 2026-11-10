@@ -1,0 +1,79 @@
+[2026-10-12 08:08:34] <--- Received SIP request (727 bytes) from UDP:192.168.64.1:5080 --->
+[2026-10-12 08:08:34] INVITE sip:2302@192.168.64.2:5060 SIP/2.0
+[2026-10-12 08:08:34] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:08:34] CSeq: 1 INVITE
+[2026-10-12 08:08:34] Session-Expires: 90;refresher=uac
+[2026-10-12 08:08:34] Min-SE: 90
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Transmitting SIP response (553 bytes) to UDP:192.168.64.1:5080 --->
+[2026-10-12 08:08:34] SIP/2.0 401 Unauthorized
+[2026-10-12 08:08:34] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:08:34] CSeq: 1 INVITE
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Received SIP request (1008 bytes) from UDP:192.168.64.1:5080 --->
+[2026-10-12 08:08:34] INVITE sip:2302@192.168.64.2:5060 SIP/2.0
+[2026-10-12 08:08:34] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:08:34] CSeq: 2 INVITE
+[2026-10-12 08:08:34] Session-Expires: 90;refresher=uac
+[2026-10-12 08:08:34] Min-SE: 90
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Transmitting SIP response (356 bytes) to UDP:192.168.64.1:5080 --->
+[2026-10-12 08:08:34] SIP/2.0 100 Trying
+[2026-10-12 08:08:34] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:08:34] CSeq: 2 INVITE
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Transmitting SIP request (1094 bytes) to UDP:192.168.64.1:5082 --->
+[2026-10-12 08:08:34] INVITE sip:2302@192.168.64.1:5082 SIP/2.0
+[2026-10-12 08:08:34] Call-ID: 83c5ad07-3e40-404c-9d95-07df8d26f89d
+[2026-10-12 08:08:34] CSeq: 13341 INVITE
+[2026-10-12 08:08:34] Session-Expires: 90
+[2026-10-12 08:08:34] Min-SE: 90
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Received SIP response (531 bytes) from UDP:192.168.64.1:5082 --->
+[2026-10-12 08:08:34] SIP/2.0 180 Ringing
+[2026-10-12 08:08:34] Call-ID: 83c5ad07-3e40-404c-9d95-07df8d26f89d
+[2026-10-12 08:08:34] CSeq: 13341 INVITE
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Transmitting SIP response (549 bytes) to UDP:192.168.64.1:5080 --->
+[2026-10-12 08:08:34] SIP/2.0 180 Ringing
+[2026-10-12 08:08:34] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:08:34] CSeq: 2 INVITE
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Received SIP response (854 bytes) from UDP:192.168.64.1:5082 --->
+[2026-10-12 08:08:34] SIP/2.0 200 OK
+[2026-10-12 08:08:34] Call-ID: 83c5ad07-3e40-404c-9d95-07df8d26f89d
+[2026-10-12 08:08:34] CSeq: 13341 INVITE
+[2026-10-12 08:08:34] Session-Expires: 90;refresher=uac
+[2026-10-12 08:08:34] 
+[2026-10-12 08:08:34] <--- Transmitting SIP response (939 bytes) to UDP:192.168.64.1:5080 --->
+[2026-10-12 08:08:34] SIP/2.0 200 OK
+[2026-10-12 08:08:34] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:08:34] CSeq: 2 INVITE
+[2026-10-12 08:08:34] Session-Expires: 90;refresher=uac
+[2026-10-12 08:08:34] 
+[2026-10-12 08:09:19] <--- Transmitting SIP request (541 bytes) to UDP:192.168.5.2:5082 --->
+[2026-10-12 08:09:19] UPDATE sip:2302@192.168.5.2:5082 SIP/2.0
+[2026-10-12 08:09:19] Call-ID: 83c5ad07-3e40-404c-9d95-07df8d26f89d
+[2026-10-12 08:09:19] CSeq: 13342 UPDATE
+[2026-10-12 08:09:19] Session-Expires: 90;refresher=uac
+[2026-10-12 08:09:19] Min-SE: 90
+[2026-10-12 08:09:19] 
+[2026-10-12 08:09:19] <--- Received SIP response (448 bytes) from UDP:192.168.5.2:5082 --->
+[2026-10-12 08:09:19] SIP/2.0 200 OK
+[2026-10-12 08:09:19] Call-ID: 83c5ad07-3e40-404c-9d95-07df8d26f89d
+[2026-10-12 08:09:19] CSeq: 13342 UPDATE
+[2026-10-12 08:09:19] Session-Expires: 90;refresher=uac
+[2026-10-12 08:09:19] 
+[2026-10-12 08:09:19] <--- Received SIP request (479 bytes) from UDP:192.168.64.1:5080 --->
+[2026-10-12 08:09:19] UPDATE sip:192.168.64.2:5060 SIP/2.0
+[2026-10-12 08:09:19] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:09:19] CSeq: 3 UPDATE
+[2026-10-12 08:09:19] Session-Expires: 90;refresher=uac
+[2026-10-12 08:09:19] Min-SE: 90
+[2026-10-12 08:09:19] 
+[2026-10-12 08:09:19] <--- Transmitting SIP response (643 bytes) to UDP:192.168.64.1:5080 --->
+[2026-10-12 08:09:19] SIP/2.0 200 OK
+[2026-10-12 08:09:19] Call-ID: session-99062371-b173-47ce-8b47-220bb17fd456@rvoip-sip
+[2026-10-12 08:09:19] CSeq: 3 UPDATE
+[2026-10-12 08:09:19] Session-Expires: 90;refresher=uac
+[2026-10-12 08:09:19] 

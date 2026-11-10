@@ -17,3 +17,25 @@ of each PBX rather than a remembered one.
 
 These files exist to make a mutated always-supported parser fail in CI: the
 `-without-amr` fixtures must parse to `amr=no amrwb=no`.
+
+## `rtcp-timer/`
+
+Trimmed genuine evidence from the RTCP and session-timer cells (#318),
+captured from the local Asterisk 20.20.1 and FreeSWITCH 1.10.12 labs, which
+`scripts/ci/test_pbx_rtcp_session_timer_policy.py` feeds to
+`pbx_evidence.sh check`. Each directory is one cell's evidence reduced to the
+lines the check reads:
+
+- `asterisk-rtcp-*`: `rtcp set debug` blocks (plus a few `rtp set debug`
+  lines for the declined cell) and, in `caller-log.txt`/`callee-log.txt`
+  (`caller.log`/`callee.log` in a cell; the repository ignores `*.log`), the
+  one role-log line naming the local RTP port.
+- `*-session-timer`: the INVITE/UPDATE transactions from `pjsip set logger`
+  or `sofia global siptrace`, keeping only the start line, Call-ID, CSeq,
+  Session-Expires and Min-SE.
+- `freeswitch-rtcp-mux`: the `uuid_dump` SDP lines of both channels and the
+  `RECV_RTCP_MESSAGE` events FreeSWITCH raised.
+
+The test checks that each fixture passes only its own scenario's check and
+that mutating the property under test (an RTCP payload type on the RTP port,
+a zero RTT, a missing refresh or 422, unechoed reports) fails it.

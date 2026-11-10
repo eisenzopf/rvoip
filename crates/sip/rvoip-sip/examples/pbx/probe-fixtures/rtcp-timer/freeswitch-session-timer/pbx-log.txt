@@ -1,0 +1,101 @@
+recv 732 bytes from udp/[192.168.64.1]:15080 at 08:00:01.320448:
+------------------------------------------------------------------------
+INVITE sip:2002@192.168.64.2:5069 SIP/2.0
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 1 INVITE
+Session-Expires: 90;refresher=uac
+Min-SE: 90
+
+send 640 bytes to udp/[192.168.64.1]:15080 at 08:00:01.320671:
+------------------------------------------------------------------------
+SIP/2.0 422 Session Interval Too Small
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 1 INVITE
+Min-SE: 120
+
+recv 734 bytes from udp/[192.168.64.1]:15080 at 08:00:01.325301:
+------------------------------------------------------------------------
+INVITE sip:2002@192.168.64.2:5069 SIP/2.0
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 2 INVITE
+Session-Expires: 120;refresher=uac
+Min-SE: 120
+
+send 752 bytes to udp/[192.168.64.1]:15080 at 08:00:01.327111:
+------------------------------------------------------------------------
+SIP/2.0 407 Proxy Authentication Required
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 2 INVITE
+
+recv 991 bytes from udp/[192.168.64.1]:15080 at 08:00:01.333932:
+------------------------------------------------------------------------
+INVITE sip:2002@192.168.64.2:5069 SIP/2.0
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 3 INVITE
+Session-Expires: 120;refresher=uac
+Min-SE: 120
+
+send 395 bytes to udp/[192.168.64.1]:15080 at 08:00:01.350899:
+------------------------------------------------------------------------
+SIP/2.0 100 Trying
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 3 INVITE
+
+send 1152 bytes to udp/[192.168.64.1]:15082 at 08:00:01.354152:
+------------------------------------------------------------------------
+INVITE sip:2002@192.168.64.1:15082 SIP/2.0
+Call-ID: c464dd67-40b5-1240-52a5-32419061c587
+CSeq: 121342208 INVITE
+Session-Expires: 120;refresher=uac
+Min-SE: 120
+
+recv 442 bytes from udp/[192.168.64.1]:15082 at 08:00:01.359081:
+------------------------------------------------------------------------
+SIP/2.0 180 Ringing
+Call-ID: c464dd67-40b5-1240-52a5-32419061c587
+CSeq: 121342208 INVITE
+
+recv 782 bytes from udp/[192.168.64.1]:15082 at 08:00:01.362408:
+------------------------------------------------------------------------
+SIP/2.0 200 OK
+Call-ID: c464dd67-40b5-1240-52a5-32419061c587
+CSeq: 121342208 INVITE
+Session-Expires: 120;refresher=uac
+
+send 1131 bytes to udp/[192.168.64.1]:15080 at 08:00:01.378200:
+------------------------------------------------------------------------
+SIP/2.0 200 OK
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 3 INVITE
+Session-Expires: 120;refresher=uac
+
+recv 481 bytes from udp/[192.168.64.1]:15080 at 08:01:01.395460:
+------------------------------------------------------------------------
+UPDATE sip:2002@192.168.64.2:5069;transport=udp SIP/2.0
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 4 UPDATE
+Session-Expires: 120;refresher=uac
+Min-SE: 120
+
+send 663 bytes to udp/[192.168.64.1]:15080 at 08:01:01.395796:
+------------------------------------------------------------------------
+SIP/2.0 200 OK
+Call-ID: session-7b76091d-9370-4fad-8a3d-6f710c312681@rvoip-sip
+CSeq: 4 UPDATE
+Session-Expires: 120;refresher=uac
+
+send 1120 bytes to udp/[192.168.64.1]:15082 at 08:01:04.236032:
+------------------------------------------------------------------------
+INVITE sip:2002@192.168.64.1:15082 SIP/2.0
+Call-ID: c464dd67-40b5-1240-52a5-32419061c587
+CSeq: 121342209 INVITE
+Session-Expires: 120;refresher=uac
+Min-SE: 120
+
+recv 742 bytes from udp/[192.168.64.1]:15082 at 08:01:04.238653:
+------------------------------------------------------------------------
+SIP/2.0 200 OK
+Call-ID: c464dd67-40b5-1240-52a5-32419061c587
+CSeq: 121342209 INVITE
+Session-Expires: 120;refresher=uac
+

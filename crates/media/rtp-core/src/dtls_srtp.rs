@@ -58,6 +58,12 @@ pub fn default_srtp_profiles() -> Vec<SrtpProtectionProfile> {
 /// decided. Typically one `DtlsIdentity` is generated per Connection/call
 /// and reused if the handshake needs to restart (e.g. an ICE restart or a
 /// retried connection), so the fingerprint you already sent stays valid.
+///
+/// Cloning shares the same certificate and fingerprint. When RTP and RTCP
+/// are not multiplexed, RFC 5764 §4.1 runs one handshake per component, and
+/// both present the certificate that the single `a=fingerprint` of the
+/// media section names, so the RTCP component's handshake takes a clone.
+#[derive(Clone)]
 pub struct DtlsIdentity {
     certificate: DtlsCertificate,
     /// SHA-256 fingerprint of `certificate`, for the outgoing SDP

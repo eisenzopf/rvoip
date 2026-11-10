@@ -1558,6 +1558,9 @@ pub struct SipAdapter {
     /// inspect `Connection.streams` off the `InboundConnection` event
     /// see a non-empty vec (QUIC/WT parity, gap plan §2.2).
     streams_cache: Arc<DashMap<ConnectionId, Arc<crate::media_stream::SipMediaStream>>>,
+    /// Calls whose media key agreement failed (`MediaSecurityFailed`), so
+    /// their terminal event reports the failure instead of a normal end.
+    media_security_failures: DashMap<SessionId, crate::api::events::MediaSecurityFailure>,
     inbound_contexts: Arc<SipInboundContextStore>,
     authenticated_inbound_sessions: DashMap<SessionId, ()>,
     lifecycle: AdapterLifecycleSinkSlot,
@@ -1832,6 +1835,7 @@ impl SipAdapter {
             out_tx: out_tx.clone(),
             out_rx: StdMutex::new(Some(out_rx)),
             streams_cache: Arc::new(DashMap::new()),
+            media_security_failures: DashMap::new(),
             inbound_contexts,
             authenticated_inbound_sessions: DashMap::new(),
             lifecycle: AdapterLifecycleSinkSlot::default(),
@@ -3618,12 +3622,23 @@ impl SipAdapter {
         signaling_end: Option<EndReason>,
     ) -> (AdapterEvent, &'static str) {
         let connection_id = epoch.connection_id.clone();
+        // A call rvoip-sip ended because its media key agreement failed sends
+        // its own BYE, so signaling usually ends first. The recorded failure
+        // still decides the terminal, exactly as in `translate_api_event`.
+        let security_failure = self
+            .media_security_failures
+            .remove(&epoch.session_id)
+            .map(|(_, failure)| media_security_failure_detail(failure));
         match signaling_end {
             Some(reason) => {
                 debug!(
                     ?reason,
                     "SipAdapter media stopped after signaling ended; reporting the signaling terminal"
                 );
+                let reason = match security_failure {
+                    Some(detail) => EndReason::Failed { detail },
+                    None => reason,
+                };
                 (
                     AdapterEvent::Ended {
                         connection_id,
@@ -3635,7 +3650,10 @@ impl SipAdapter {
             None => (
                 AdapterEvent::Failed {
                     connection_id,
-                    detail: "SIP media driver failed".to_string(),
+                    detail: match security_failure {
+                        Some(detail) => format!("SIP media driver failed; {detail}"),
+                        None => "SIP media driver failed".to_string(),
+                    },
                 },
                 "media-failed",
             ),
@@ -3802,7 +3820,17 @@ impl SipAdapter {
                     },
                 );
             }
+            ApiEvent::MediaSecurityFailed {
+                call_id, reason, ..
+            } => {
+                // rvoip-sip ends the call next; its terminal event carries
+                // the failure to the orchestrator.
+                if self.existing_mapped_epoch(&call_id).is_some() {
+                    self.media_security_failures.insert(call_id, reason);
+                }
+            }
             ApiEvent::CallEnded { call_id, .. } => {
+                let security_failure = self.media_security_failures.remove(&call_id);
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -3814,8 +3842,15 @@ impl SipAdapter {
                         // terminal event (including a peer BYE). Signaling
                         // failures arrive separately as `CallFailed`; treating
                         // a normal remote hangup as failed makes every
-                        // answered outbound call settle incorrectly.
-                        reason: EndReason::Normal,
+                        // answered outbound call settle incorrectly. The one
+                        // exception is a call rvoip-sip ended because its
+                        // media key agreement failed.
+                        reason: match security_failure {
+                            Some((_, failure)) => EndReason::Failed {
+                                detail: media_security_failure_detail(failure),
+                            },
+                            None => EndReason::Normal,
+                        },
                     },
                     "call-ended",
                 )
@@ -3826,6 +3861,7 @@ impl SipAdapter {
                 status_code,
                 reason,
             } => {
+                let security_failure = self.media_security_failures.remove(&call_id);
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -3833,13 +3869,20 @@ impl SipAdapter {
                     &epoch,
                     AdapterEvent::Failed {
                         connection_id: epoch.connection_id.clone(),
-                        detail: format!("{} {}", status_code, reason),
+                        detail: match security_failure {
+                            Some((_, failure)) => format!(
+                                "{status_code} {reason}; {}",
+                                media_security_failure_detail(failure)
+                            ),
+                            None => format!("{} {}", status_code, reason),
+                        },
                     },
                     "call-failed",
                 )
                 .await;
             }
             ApiEvent::CallCancelled { call_id } => {
+                let security_failure = self.media_security_failures.remove(&call_id);
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -3847,7 +3890,12 @@ impl SipAdapter {
                     &epoch,
                     AdapterEvent::Ended {
                         connection_id: epoch.connection_id.clone(),
-                        reason: EndReason::Cancelled,
+                        reason: match security_failure {
+                            Some((_, failure)) => EndReason::Failed {
+                                detail: media_security_failure_detail(failure),
+                            },
+                            None => EndReason::Cancelled,
+                        },
                     },
                     "call-cancelled",
                 )
@@ -5723,6 +5771,12 @@ fn sip_quality_snapshot(
         remote_packet_loss_pct: quality.remote_packet_loss_percent,
         remote_jitter_ms: quality.remote_jitter_ms,
     }
+}
+
+/// Orchestrator-facing detail for a call rvoip-sip ended because its media
+/// key agreement failed: a fixed prefix plus the bounded failure class.
+fn media_security_failure_detail(failure: crate::api::events::MediaSecurityFailure) -> String {
+    format!("media-security-failed: {failure}")
 }
 
 #[cfg(test)]
@@ -10722,6 +10776,123 @@ Signal=5\r\nDuration=160\r\n";
             })) if observed == connection_id
         ));
 
+        adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    /// The failed-media owner claims the route, so it, not
+    /// `translate_api_event`, publishes the terminal. A recorded media
+    /// security failure must still decide that terminal and be consumed on
+    /// both branches.
+    #[tokio::test]
+    async fn failed_media_terminal_reports_and_consumes_a_media_security_failure() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("media-security-owner", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let session_id = SessionId::new();
+        let _handle = admit_test_session(&coordinator, &session_id).await;
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id.clone())
+            .expect("exact inbound route");
+        let record = || async {
+            adapter
+                .translate_api_event(ApiEvent::MediaSecurityFailed {
+                    call_id: session_id.clone(),
+                    keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
+                    reason: crate::api::events::MediaSecurityFailure::FingerprintMismatch,
+                })
+                .await;
+            assert_eq!(adapter.media_security_failures.len(), 1);
+        };
+
+        // Signaling ended first (rvoip-sip's own BYE): a failed end, not Normal.
+        record().await;
+        match adapter.failed_media_terminal(&epoch, Some(EndReason::Normal)) {
+            (
+                AdapterEvent::Ended {
+                    reason: EndReason::Failed { detail },
+                    ..
+                },
+                "media-stopped-signaling-ended",
+            ) => assert_eq!(detail, "media-security-failed: fingerprint-mismatch"),
+            other => panic!("expected a failed end, got {other:?}"),
+        }
+        assert!(adapter.media_security_failures.is_empty());
+
+        // Media failed first: the driver failure names the security cause.
+        record().await;
+        match adapter.failed_media_terminal(&epoch, None) {
+            (AdapterEvent::Failed { detail, .. }, "media-failed") => assert_eq!(
+                detail,
+                "SIP media driver failed; media-security-failed: fingerprint-mismatch"
+            ),
+            other => panic!("expected a media failure, got {other:?}"),
+        }
+        assert!(adapter.media_security_failures.is_empty());
+
+        // Without a recorded failure the signaling terminal is unchanged.
+        match adapter.failed_media_terminal(&epoch, Some(EndReason::Cancelled)) {
+            (
+                AdapterEvent::Ended {
+                    reason: EndReason::Cancelled,
+                    ..
+                },
+                _,
+            ) => {}
+            other => panic!("expected a cancelled end, got {other:?}"),
+        }
+        adapter.shutdown().await.expect("adapter shutdown");
+    }
+
+    /// A call rvoip-sip ends because its media key agreement failed reaches
+    /// the orchestrator as a failed end naming the bounded failure class,
+    /// not as a normal hang-up.
+    #[tokio::test]
+    async fn media_security_failure_turns_the_following_call_end_into_a_failed_end() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("media-security-end", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let session_id = SessionId::new();
+        let handle = admit_test_session(&coordinator, &session_id).await;
+        let epoch = adapter
+            .ensure_mapped_epoch(session_id.clone())
+            .expect("exact inbound route");
+        let connection_id = epoch.connection_id.clone();
+
+        adapter
+            .translate_api_event(ApiEvent::MediaSecurityFailed {
+                call_id: session_id.clone(),
+                keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
+                reason: crate::api::events::MediaSecurityFailure::FingerprintMismatch,
+            })
+            .await;
+        retire_test_session(&coordinator, &handle).await;
+        adapter
+            .translate_api_event(ApiEvent::CallEnded {
+                call_id: session_id.clone(),
+                reason: "DTLS-SRTP handshake failed".into(),
+            })
+            .await;
+
+        match events.recv().await {
+            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
+                connection_id: observed,
+                reason: EndReason::Failed { detail },
+            })) => {
+                assert_eq!(observed, connection_id);
+                assert_eq!(detail, "media-security-failed: fingerprint-mismatch");
+            }
+            other => panic!("expected a failed end, got {other:?}"),
+        }
+        assert!(adapter.media_security_failures.is_empty());
         adapter.shutdown().await.expect("adapter shutdown");
     }
 

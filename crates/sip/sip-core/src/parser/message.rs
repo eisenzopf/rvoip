@@ -44,7 +44,7 @@ pub const MAX_BODY_SIZE: usize = crate::framing::MAX_SIP_BODY_BYTES;
 ///   from the parsed message so they are never forwarded: bare-LF line
 ///   endings and a missing empty line after the headers (`lenient_line_endings`),
 ///   the extra colon of RFC 3261's IPv6 ABNF (`lenient_ipv6_extra_colon`),
-///   start-line deviations ([`parse_request_line_with_mode`]), and header
+///   start-line deviations (`parse_request_line_with_mode`), and header
 ///   repairs (`recover_header`). Where those RFCs say a message must be
 ///   rejected, Lenient rejects it too.
 ///

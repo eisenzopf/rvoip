@@ -351,6 +351,13 @@ impl ClientTransactionData {
         )
     }
 
+    /// Whether the first transport write completed successfully, so any later
+    /// failure (Timer B/F, a closed stream flow) is an outcome of a request the
+    /// peer may have received rather than a failed send.
+    pub(crate) fn initial_send_succeeded(&self) -> bool {
+        self.initial_send_state.load(Ordering::Acquire) == INITIAL_SEND_SUCCEEDED
+    }
+
     /// Whether the runner is currently suspended inside the first transport
     /// write. It cannot service a queued termination command in this state, so
     /// the manager must abort the runner and perform terminal takeover rather

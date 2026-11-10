@@ -948,7 +948,7 @@ impl SimpleRequestBuilder {
     ///
     /// # Parameters
     /// - `host`: The sent-by, `host [":" port]` (e.g., "192.168.1.1", "example.com:5060" or
-    ///   "[2001:db8::1]:5060"; an IPv6 host followed by a port is bracketed)
+    ///   `"[2001:db8::1]:5060"`; an IPv6 host followed by a port is bracketed)
     /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)
     /// - `branch`: Optional branch parameter (should be prefixed with z9hG4bK per RFC 3261)
     ///

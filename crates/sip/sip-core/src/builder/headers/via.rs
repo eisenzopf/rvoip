@@ -225,7 +225,7 @@ pub trait ViaBuilderExt {
     ///
     /// # Parameters
     /// - `host`: The sent-by, `host [":" port]` (e.g., "192.168.1.1", "example.com:5060",
-    ///   "[2001:db8::1]:5060" or a bare "2001:db8::1"). An IPv6 host followed by a port must
+    ///   `"[2001:db8::1]:5060"` or a bare "2001:db8::1"). An IPv6 host followed by a port must
     ///   be bracketed (RFC 3261 §25.1 `IPv6reference`, RFC 5118 §4.1), which is the form
     ///   `SocketAddr` displays.
     /// - `transport`: The transport protocol (UDP, TCP, TLS, etc.)

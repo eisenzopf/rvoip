@@ -1,6 +1,6 @@
 # rvoip-sip Beta Compatibility Matrix
 
-Date: 2026-09-05
+Date: 2026-10-12
 
 This matrix is the beta release contract. `Supported` and `Interop tested`
 entries have repeatable in-repo or external-peer evidence. `Partial`,
@@ -8,10 +8,19 @@ entries have repeatable in-repo or external-peer evidence. `Partial`,
 as general beta capabilities.
 
 The current full reference is the
-[protected 0.3.9 qualification](BETA_RELEASE_REPORT.md), with exact executed
-coverage in the [208-gate report](BETA_GATE_REPORT.md). It describes run
-`33969263241` from clean tested commit
-`8cab44b10f872d21b304c02111d5d203ee8226da`.
+[protected 0.4.0 qualification](BETA_RELEASE_REPORT.md), with exact executed
+coverage in the [214-gate report](BETA_GATE_REPORT.md). It describes
+`remote-release` run
+[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080)
+(PASS) from clean tested commit `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`,
+published as [`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0).
+122 gates ran fresh on that commit; 92 were reused from candidate
+`d89c1bc34aadb7184e38792db5da1e91f5a1c8c1` with unchanged definitions, inputs,
+and environment, and the gate report marks which. A gate id in this document
+names a gate that passed in that run. "Tests only" means the behavior is covered
+by named unit or integration tests that run inside a crate-wide release gate
+(for rvoip-sip, the fresh `core.rvoip-sip` gate), but no gate exercises it
+against an independent peer.
 
 ## Support Levels
 
@@ -37,14 +46,16 @@ coverage in the [208-gate report](BETA_GATE_REPORT.md). It describes run
 
 ## External SIP Peers
 
-The published `0.3.9` qualification remains the current release authority.
-The following `0.3.10` candidate row records new scope and must not be read as
-published-release evidence until the protected exact-candidate report replaces
-its pending status.
+Asterisk 20.20.1 and FreeSWITCH 1.10.12 run the full public-API matrix in
+`interop.asterisk-matrix` and `interop.freeswitch-matrix` (202/202 cells each,
+fresh in `0.4.0`); see the [repository README](../../../../README.md#sip-interoperability-and-release-evidence)
+for their scope. Kamailio and OpenSIPS proxy rows (`interop.remote-proxies.*`,
+`interop.proxy-pbx.*`) are reused `0.4.0` ledger entries. The Jambonz profile is
+listed here because its exclusions are narrower than the PBX matrices.
 
 | Peer | Profile | APIs | Covered scenarios | Status and limits |
 |---|---|---|---|---|
-| Jambonz OSS 0.9.14 | Real inbound/outbound SBC, registrar, Drachtio, Redis, MySQL, and RTPengine; source revisions and images are digest-pinned and latest-version checked | `Endpoint`, `StreamPeer`, `CallbackPeer` | Authenticated registration; PCMU/PCMA bidirectional calls; provisional/final signaling; hold/resume; RFC 4733 DTMF; CANCEL/487; rejection; RFC 3515 blind transfer with ordered NOTIFY; optional RFC 3892 Referred-By propagation; replacement INVITE; either-side BYE; cleanup | Local Colima rehearsal passed; protected `0.3.10` exact-candidate result pending. UDP/plain RTP only. G.729, AMR, TLS/SRTP, RVoIP-as-B2BUA, WebRTC, PSTN, application verbs, recording, HA, and load are excluded from this peer profile. |
+| Jambonz OSS 0.9.14 | Real inbound/outbound SBC, registrar, Drachtio, Redis, MySQL, and RTPengine; source revisions and images are digest-pinned and latest-version checked | `Endpoint`, `StreamPeer`, `CallbackPeer` | Authenticated registration; PCMU/PCMA bidirectional calls; provisional/final signaling; hold/resume; RFC 4733 DTMF; CANCEL/487; rejection; RFC 3515 blind transfer with ordered NOTIFY; optional RFC 3892 Referred-By propagation; replacement INVITE; either-side BYE; cleanup | Interop tested: `interop.jambonz-latest` (0.9.14 `sbc-inbound`/`sbc-outbound` are the upstream heads), `interop.jambonz-up`, `interop.jambonz-matrix` (63/63 cells), and `interop.jambonz-down`, all fresh PASS in `0.4.0`. UDP/plain RTP only. G.729, AMR, TLS/SRTP, RVoIP-as-B2BUA, WebRTC, PSTN, application verbs, recording, HA, and load are excluded from this peer profile. |
 
 This is a SIP/SDP/RTP interoperability claim about the exact open-source
 profile above. It is not a claim about commercial Jambonz 10.x, hosted
@@ -59,11 +70,11 @@ jambonz.cloud, or the Jambonz application API.
 | BYE | Supported | Supported | Supported | Interop tested | Cleanup tests, PBX matrix, SIPp. |
 | CANCEL | Supported | Supported | Supported | Interop tested | `cancel_integration.rs`, ring-cancel PBX rows. |
 | REGISTER | Supported | Supported | Supported | Interop tested | `registration_test.rs`, `register_423_retry.rs`, PBX registration rows. |
-| OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests, SIPp scenario, and credentialed OOB auth retry test. |
-| re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. |
-| UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. |
+| OPTIONS | Supported | Supported | Supported | Supported | `options` send/response tests, SIPp scenario, and credentialed OOB auth retry test. Since `0.4.0`, OPTIONS keep-alive (`Config::options_keepalive_targets`, `Event::PeerReachabilityChanged`): tests only, `options_keepalive_integration.rs` and `tls_direct_routing_integration.rs::direct_routing_profile_runs_mutual_tls_srtp_and_options_keepalive` (two rvoip peers, mutual TLS). No peer gate. |
+| re-INVITE | Supported | Supported | Supported | Supported | Hold/resume PBX rows, glare retry tests. RFC 4028 refresh re-INVITEs: `0.4.0` evidence is tests only (`SIP-4028-TIMER`); FreeSWITCH's refresh re-INVITEs toward rvoip are covered by the `session_timer` PBX rows (`P-4028-I1`), release-gated against Asterisk and FreeSWITCH from 0.4.1; protected qualification evidence is pending the next run. |
+| UPDATE | Supported | Supported | Supported | Supported | Update send and session-timer coverage; outbound 491 completes the exact UPDATE attempt and does not emit `ReinviteGlare`. RFC 4028 refresh by UPDATE and `422`/Min-SE retry: `0.4.0` evidence is tests only (`SIP-4028-TIMER`); refresh by UPDATE in both directions with Asterisk and the `422`/Min-SE retry with FreeSWITCH are covered by the `session_timer` PBX rows (`P-4028-I1`), release-gated against Asterisk and FreeSWITCH from 0.4.1; protected qualification evidence is pending the next run. |
 | PRACK | Supported | Partial | Stack managed | Partial | PRACK integration and dialog tests; broader PBX 100rel matrix pending. |
-| REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests, and the Jambonz candidate transfer profile. |
+| REFER | Supported | Supported | Supported | Interop tested | Blind-transfer PBX rows, REFER/NOTIFY progress tests, and the Jambonz transfer profile (`interop.jambonz-matrix`). Since `0.4.0` REFER and every other in-dialog request use the peer's Contact as Request-URI (RFC 3261 §12.2.1.1): tests only, `in_dialog_request_target.rs`. |
 | NOTIFY | Supported | Supported | Supported | Supported | REFER progress, subscription, and notify-send tests. |
 | INFO | Supported | Supported | Supported | Supported | INFO auth retry and DTMF tests. |
 | SUBSCRIBE | Supported | Partial | Supported | Partial | Subscription dialog tests and credentialed OOB auth retry test; event-package matrix incomplete. |
@@ -94,8 +105,8 @@ Developer-facing auth API and crate-boundary guidance is in
 
 | Feature | Beta status | Evidence | Notes |
 |---------|-------------|----------|-------|
-| UDP | Interop tested | SIPp, Asterisk, FreeSWITCH, and the Jambonz candidate matrix | Primary beta transport. |
-| TCP | Supported | Transport/dialog tests | Include in external matrix where peers support it. |
+| UDP | Interop tested | SIPp, Asterisk, FreeSWITCH, and Jambonz matrices | Primary beta transport. |
+| TCP | Interop tested | Transport/dialog tests; `interop.remote-proxies.{kamailio,opensips}.*.tcp` (reused in `0.4.0`) | Proxy role only; no PBX or UA peer runs TCP in a release gate. |
 | TLS client | Supported | TLS transport tests, TLS call integration, PBX TLS rows | Server validation and SNI are tested. |
 | TLS server | Supported | TLS listener/call tests, PBX TLS rows | Requires cert/key configuration. |
 | mTLS | Partial | TLS config validation and transport primitives | Broad external mTLS interop is not claimed. |
@@ -110,7 +121,10 @@ Developer-facing auth API and crate-boundary guidance is in
 |---------|-------------|----------|-------|
 | SDP RFC 8866 | Supported | SDP parser/builder tests, generated validation, SDP fuzz target | WebRTC attributes are parser/carry-through only unless wired higher. |
 | SDP offer/answer RFC 3264 | Supported | Hold/resume, codec matching, glare tests | Advanced media changes are not beta-scoped. |
-| RTP/RTCP RFC 3550 | Supported | RTP steady-state perf, audio round-trip, bridge round-trip | Full RTCP feedback matrix is not a beta claim. |
+| RTP/RTCP RFC 3550 | Supported | RTP steady-state perf, audio round-trip, bridge round-trip | Full RTCP feedback matrix is not a beta claim. Since `0.4.0` periodic reports follow the RFC 3550 interval (five-second minimum, randomised) with a random per-session CNAME, and inbound RTCP is accepted only from the call's peer: tests only, rtp-core `session::tests::{periodic_report_interval_follows_rfc3550_under_paused_time, cname_is_random_per_session_and_names_no_user_or_host, neighbouring_calls_rtcp_is_dropped_and_leaves_stats_untouched}` (the rtp-core gates are reused `0.4.0` ledger entries). Report exchange with Asterisk and FreeSWITCH is release-gated against Asterisk and FreeSWITCH from 0.4.1; protected qualification evidence is pending the next run (`P-5761-I1`, `P-3605-I1`). |
+| RTCP multiplexing RFC 5761 | Supported | `0.4.0`: tests only, `RTP-5761-MUX` in the [RFC matrix](RFC_COMPLIANCE_MATRIX.md). From `0.4.1`: Asterisk `rtcp_mux` PBX rows (UDP and SDES-SRTP) and FreeSWITCH `rtcp_mux` PBX row (UDP), `P-5761-I1`; Asterisk `rtcp_mux_declined` rows, `P-5761-I2` | New in `0.4.0`: every offer carries `a=rtcp-mux`; `Config::offer_rtcp_mux = false` restores the 0.3.x offer; `Config::rtcp_mux_required` adds `a=rtcp-mux-only`. A peer that declines mux gets no RTCP unless `rtcp_non_mux` is on. The `0.4.0` Asterisk/FreeSWITCH RTCP runs were a local diagnostic lab, not a release gate. The PBX rows are release-gated against Asterisk and FreeSWITCH from 0.4.1; protected qualification evidence is pending the next run. Each requires reports both ways and `rtt_ms` and `remote_*` from `media_quality()`; Asterisk must compute an RTT from rvoip's reports and FreeSWITCH must receive reports that echo its own SRs; the declined row requires that no RTCP reaches the PBX's RTP port. |
+| RTCP on a separate port (non-mux) | Partial | `0.4.0`: tests only, `RTP-3605-NONMUX` in the [RFC matrix](RFC_COMPLIANCE_MATRIX.md). From `0.4.1`: Asterisk `rtcp_non_mux` PBX rows (UDP and SDES-SRTP), `P-3605-I1` | New in `0.4.0`, off by default (`Config::rtcp_non_mux`): RTP port + 1 or the answer's `a=rtcp`, SRTCP under SDES-SRTP. Not available with DTLS-SRTP, ICE, or `rtcp_mux_required`. The PBX rows (RTCP both ways between the RTP + 1 ports, with the same rvoip and Asterisk RTT requirements) are release-gated against Asterisk and FreeSWITCH from 0.4.1; protected qualification evidence is pending the next run; FreeSWITCH has no non-mux row. |
+| Media quality with peer reports | Supported | `0.4.0`: tests only, `media_quality_integration.rs`. From `0.4.1`: the PBX RTCP rows above require `rtt_ms` and `remote_*` | New in `0.4.0`: `Event::MediaQualityChanged` carries local and peer-reported RTCP statistics on muxed or non-mux calls. Peer-reported values against Asterisk and FreeSWITCH are release-gated against Asterisk and FreeSWITCH from 0.4.1; protected qualification evidence is pending the next run. |
 | PCMU/PCMA | Supported | Codec and RTP media tests | Available in the default build. |
 | telephone-event DTMF | Supported | DTMF tests and PBX interop | RFC 4733 behavior must stay covered. |
 | Comfort Noise PT 13 | Supported | Config validation and SDP/media tests | Requires `comfort_noise_enabled=true`. |
@@ -119,11 +133,18 @@ Developer-facing auth API and crate-boundary guidance is in
 | AMR-NB | Feature-gated | Bit-exact against the 3GPP reference plus the normative sequences; RFC 4867 framing checked against Wireshark's dissector; loopback and SRTP call tests; PBX and proxy lab rows | Requires the `amr-nb` feature. Not part of the bounded SIP beta media claim. |
 | AMR-WB | Feature-gated | Same evidence set as AMR-NB at 16 kHz, all 9 modes | Requires the `amr-wb` feature. Not part of the bounded SIP beta media claim. |
 | G.722 | Not supported | Construction/negotiation rejection tests | RTP payload parsing metadata remains available. |
-| SDES-SRTP | Partial | SRTP integration/negotiator tests and PBX rows where present | Limited to tested suites. |
+| SDES-SRTP | Partial | SRTP integration/negotiator tests and PBX rows where present | Limited to tested suites. SRTCP with Asterisk (mux and separate port) is covered by the TLS `rtcp_mux`/`rtcp_non_mux` PBX rows (release-gated from 0.4.1; protected qualification evidence is pending the next run). |
 | DTLS-SRTP | Post-beta | Explicit non-claim | Do not claim. |
 | ICE/TURN/WebRTC browser | Post-beta | Explicit non-claim | STUN remains limited address discovery. |
 | STIR/SHAKEN | Partial | STIR/SHAKEN crate tests and dialog identity tests | Library support, not certification. |
 | Trace redaction | Supported | `trace_redaction.rs`, infra-common redaction tests | Redacts auth, tokens, identity headers, SDES keys, and ICE passwords. |
+
+## Session and Deployment Configuration
+
+| Feature | Beta status | Evidence | Notes |
+|---------|-------------|----------|-------|
+| RFC 4028 session timers | Supported (bounded) | Tests only: `SIP-4028-TIMER` (`T-4028-*`) in the [RFC matrix](RFC_COMPLIANCE_MATRIX.md); the session-timer targets need the `test-hooks` feature; in `0.4.0` they ran in `core.rvoip-sip` only, and from the next release `test.sip-integration` builds with the feature and runs them too | Conformance fixes in `0.4.0`: 90 s Min-SE floor, `422`/`Min-SE`, `refresher=uac` on refreshes, re-INVITE fallback, rejected refreshes keep the call. No PBX, SBC, or proxy exercises session timers in a release gate. |
+| Deployment profiles | Supported | Tests only: `deployment_profiles.rs` (field-level checks of every profile constructor), `tls_direct_routing_integration.rs` | New in `0.4.0`: `Config::public_server`, `carrier_trunk_udp`, `behind_nat`, `tls_direct_routing`; `carrier_sbc` and `proxy_rtpengine` now enable 1800 s session timers. A profile only sets documented defaults. `tls_direct_routing` is modelled on Teams Direct Routing SBC requirements and is not certified or tested against Teams. `behind_nat` inherits the remote-endpoint limit: no two-UA real-NAT release evidence. |
 
 ## Performance Profiles
 

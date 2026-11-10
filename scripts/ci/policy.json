@@ -285,6 +285,21 @@
       ]
     },
     {
+      "gate": "rustdoc",
+      "patterns": [
+        ".cargo/**",
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/**/*.rs",
+        "crates/**/Cargo.toml",
+        "crates/extensions/rvoip-vapi/README.md",
+        "crates/sip/sip-core/src/builder/builder.md",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        "scripts/ci/run_checks.py"
+      ]
+    },
+    {
       "gate": "vcon-postgres",
       "patterns": [
         "crates/extensions/rvoip-vcon/**",

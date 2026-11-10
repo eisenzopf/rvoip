@@ -48,6 +48,7 @@ RUN_FAILURES=0
 RUN_INITIAL_FAILURES=0
 DIAG_PCAP_PID=""
 DIAG_SAMPLE_PID=""
+PBX_EVENT_PID=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -76,7 +77,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|jambonz|kamailio|opensips|proxies|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|jambonz|kamailio|opensips|proxies|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|g729_call|amr_call|amr_transcode_call|b2bua_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|rtcp_mux|rtcp_non_mux|rtcp_mux_declined|session_timer|all] [--transport UDP|TLS|all] [--repeat N] [--stop-on-fail 0|1]"
       exit 0
       ;;
     *)
@@ -130,6 +131,9 @@ PBX_CHILDREN=""
 PBX_REPORT_READY=0
 
 cleanup() {
+  if [ -n "$PBX_EVENT_PID" ]; then
+    kill "$PBX_EVENT_PID" 2>/dev/null || true
+  fi
   if [ -n "$DIAG_SAMPLE_PID" ]; then
     kill "$DIAG_SAMPLE_PID" 2>/dev/null || true
   fi
@@ -357,6 +361,23 @@ rtpengine_supports_amr() {
 provider_scenario_supported() {
   pss_provider=$1
   pss_scenario=$2
+  # RTCP and session-timer cells need PBX-side configuration that only the
+  # Asterisk and FreeSWITCH release profiles carry: dedicated rtcp_mux /
+  # timers endpoints on Asterisk, and the rvoip_udp_rtcp_timer profile on
+  # FreeSWITCH. FreeSWITCH has no non-mux cell (its RTCP-enabled profile
+  # accepts mux) -- Asterisk owns that row.
+  case "$pss_scenario" in
+    rtcp_mux|session_timer)
+      case "$pss_provider" in
+        asterisk|freeswitch) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+    rtcp_non_mux|rtcp_mux_declined)
+      [ "$pss_provider" = "asterisk" ]
+      return
+      ;;
+  esac
   case "$pss_provider" in
     kamailio|opensips)
       case "$pss_scenario" in
@@ -419,7 +440,7 @@ api_examples() {
 
 scenario_list() {
   case "$SCENARIO_ARG" in
-    all) printf '%s\n' registration basic_call g729_call amr_call amr_transcode_call b2bua_call hold_resume ring_cancel dtmf reject blind_transfer ;;
+    all) printf '%s\n' registration basic_call g729_call amr_call amr_transcode_call b2bua_call hold_resume ring_cancel dtmf reject blind_transfer rtcp_mux rtcp_non_mux rtcp_mux_declined session_timer ;;
     amr|amr_call) printf '%s\n' amr_call ;;
     amr_transcode|amr_transcode_call|transcode) printf '%s\n' amr_transcode_call ;;
     b2bua|b2bua_call) printf '%s\n' b2bua_call ;;
@@ -429,6 +450,10 @@ scenario_list() {
     ring|ring_cancel) printf '%s\n' ring_cancel ;;
     blind_transfer|transfer) printf '%s\n' blind_transfer ;;
     registration|dtmf|reject) printf '%s\n' "$SCENARIO_ARG" ;;
+    rtcp|rtcp_mux) printf '%s\n' rtcp_mux ;;
+    rtcp_non_mux|rtcp_port) printf '%s\n' rtcp_non_mux ;;
+    rtcp_mux_declined|rtcp_declined) printf '%s\n' rtcp_mux_declined ;;
+    session_timer|session_timers|timer|timers) printf '%s\n' session_timer ;;
     *) echo "Unknown scenario: $SCENARIO_ARG" >&2; exit 2 ;;
   esac
 }
@@ -1222,6 +1247,16 @@ run_one() {
         export FREESWITCH_TLS_ADDR="$FREESWITCH_XCODE_TLS_ADDR"
       fi
     fi
+    if [ "$provider" = "freeswitch" ]; then
+      case "$scenario" in
+        rtcp_mux|session_timer)
+          # The rvoip_udp/rvoip_tls_srtp profiles keep FreeSWITCH's RTCP off
+          # and its session timers at their defaults; these cells register
+          # against the dedicated rvoip_udp_rtcp_timer profile instead.
+          export FREESWITCH_UDP_ADDR="$(freeswitch_rtcp_timer_addr)"
+          ;;
+      esac
+    fi
     if [ "$scenario" = "amr_transcode_call" ]; then
       # One env var cannot name two codecs; the binary resolves its leg's
       # profile from the pairing and its role, and a stray PBX_CODEC_PROFILE
@@ -1725,6 +1760,343 @@ run_transfer() {
   return "$rc"
 }
 
+# --- RTCP and session-timer cells (#318) ----------------------------------
+# rvoip's side of each cell asserts on its own observations (media_quality,
+# SDP, redacted SIP trace) and writes them next to the logs. The PBX's side
+# is checked here, from the PBX's own CLI and log: the caller prints
+# PBX_EVIDENCE_WINDOW_OPEN once both roles hold their verdicts and keeps the
+# call up until this runner has snapshotted the PBX and written pbx.done.
+RTCP_TIMER_MARKER=PBX_EVIDENCE_WINDOW_OPEN
+
+freeswitch_rtcp_timer_addr() {
+  if [ -n "${FREESWITCH_RTCP_TIMER_UDP_ADDR:-}" ]; then
+    printf '%s\n' "$FREESWITCH_RTCP_TIMER_UDP_ADDR"
+  else
+    frta_udp=${FREESWITCH_UDP_ADDR:-127.0.0.1:5062}
+    printf '%s:%s\n' "${frta_udp%%:*}" "${FREESWITCH_RTCP_TIMER_UDP_PORT:-5069}"
+  fi
+}
+
+# The running PBX container: the local lab's or the release runner's name.
+pbx_container() {
+  case "$1" in
+    asterisk) pc_candidates="${PBX_ASTERISK_CONTAINER:-rvoip-asterisk rvoip-release-asterisk}" ;;
+    freeswitch) pc_candidates="${PBX_FREESWITCH_CONTAINER:-rvoip-freeswitch}" ;;
+    *) return 1 ;;
+  esac
+  command -v docker >/dev/null 2>&1 || return 1
+  for pc_candidate in $pc_candidates; do
+    if docker inspect --format '{{.State.Running}}' "$pc_candidate" 2>/dev/null | grep -q true; then
+      printf '%s\n' "$pc_candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+pbx_cli() {
+  pcli_provider=$1
+  pcli_container=$2
+  pcli_command=$3
+  case "$pcli_provider" in
+    asterisk) docker exec "$pcli_container" asterisk -rx "$pcli_command" 2>&1 ;;
+    freeswitch)
+      docker exec "$pcli_container" fs_cli \
+        -p "${FREESWITCH_EVENT_SOCKET_PASSWORD:-ClueCon}" -x "$pcli_command" 2>&1
+      ;;
+  esac
+}
+
+# The PBX debugging each cell switches on, and off again afterwards:
+#
+# - `rtcp set debug`: one block per RTCP packet received ("RTCP from
+#   <addr:port>", including the RTT Asterisk computes) and sent.
+# - `rtp set debug` (declined-mux cell only): one line per packet arriving
+#   on the RTP port, with its payload type. RTCP landing there would show as
+#   type 72-76 (PT 200-204 with the marker bit), which RFC 5761 forbids.
+# - `pjsip set logger` / `sofia global siptrace` (session timers): the PBX's
+#   own view of the refresh transactions. Credentials are redacted before
+#   the log is kept.
+#
+# FreeSWITCH logs no RTCP; its rtcp_mux evidence is the RECV_RTCP_MESSAGE
+# event stream (pbx_evidence_begin). Never `fsctl loglevel` without an
+# argument here: that sets the core log level to -1 and silences FreeSWITCH.
+pbx_evidence_commands() {
+  pec_provider=$1
+  pec_scenario=$2
+  pec_state=$3
+  case "$pec_provider:$pec_scenario" in
+    asterisk:rtcp_mux|asterisk:rtcp_non_mux) printf '%s\n' "rtcp set debug $pec_state" ;;
+    asterisk:rtcp_mux_declined)
+      printf '%s\n' "rtcp set debug $pec_state" "rtp set debug $pec_state"
+      ;;
+    asterisk:session_timer) printf '%s\n' "pjsip set logger $pec_state" ;;
+    freeswitch:session_timer) printf '%s\n' "sofia global siptrace $pec_state" ;;
+  esac
+}
+
+pbx_evidence_begin() {
+  peb_provider=$1
+  peb_container=$2
+  peb_scenario=$3
+  peb_out_dir=$4
+  date -u +%Y-%m-%dT%H:%M:%SZ >"$peb_out_dir/pbx-log-since.txt"
+  [ -n "$peb_container" ] || return 0
+  pbx_evidence_commands "$peb_provider" "$peb_scenario" on | while IFS= read -r peb_command; do
+    pbx_cli "$peb_provider" "$peb_container" "$peb_command" >/dev/null || true
+  done
+  if [ "$peb_provider:$peb_scenario" = "freeswitch:rtcp_mux" ]; then
+    # FreeSWITCH logs no RTCP, but it raises RECV_RTCP_MESSAGE for every
+    # report it accepts. An event-socket listener for the cell's duration
+    # records them; touching the stop file ends it.
+    rm -f "$peb_out_dir/.fs-events.stop"
+    (
+      echo "/event plain RECV_RTCP_MESSAGE"
+      while [ ! -f "$peb_out_dir/.fs-events.stop" ]; do sleep 1; done
+      echo "/exit"
+    ) | docker exec -i "$peb_container" fs_cli \
+      -p "${FREESWITCH_EVENT_SOCKET_PASSWORD:-ClueCon}" >"$peb_out_dir/pbx-rtcp-events.txt" 2>&1 &
+    PBX_EVENT_PID=$!
+  fi
+}
+
+pbx_evidence_end() {
+  pee_provider=$1
+  pee_container=$2
+  pee_scenario=$3
+  pee_out_dir=$4
+  [ -n "$pee_container" ] || return 0
+  if [ -n "${PBX_EVENT_PID:-}" ]; then
+    touch "$pee_out_dir/.fs-events.stop"
+    wait "$PBX_EVENT_PID" 2>/dev/null || true
+    PBX_EVENT_PID=""
+    rm -f "$pee_out_dir/.fs-events.stop"
+  fi
+  pbx_evidence_commands "$pee_provider" "$pee_scenario" off | while IFS= read -r pee_command; do
+    pbx_cli "$pee_provider" "$pee_container" "$pee_command" >/dev/null || true
+  done
+  pbx_collect_log "$pee_container" "$pee_out_dir"
+}
+
+# The PBX console since the cell started (Asterisk -vvv, FreeSWITCH stdout),
+# with terminal colours stripped and digest credentials redacted.
+pbx_collect_log() {
+  pcl_container=$1
+  pcl_out_dir=$2
+  [ -n "$pcl_container" ] || return 0
+  docker logs --since "$(cat "$pcl_out_dir/pbx-log-since.txt")" "$pcl_container" 2>&1 \
+    | awk '{
+        line = $0
+        gsub(/\033\[[0-9;]*m/, "", line)
+        if (match(tolower(line), /(authorization|authenticate):/)) {
+          line = substr(line, 1, RSTART + RLENGTH - 1) " <redacted>"
+        }
+        print line
+      }' >"$pcl_out_dir/pbx-log.txt" || true
+}
+
+# While the call is still up, wait until the PBX's own evidence is complete
+# (reports are periodic, so the PBX may lag rvoip by an interval), then let
+# the caller hang up by writing pbx.done. The definitive check runs again
+# once the call has ended; this only decides how long the call stays up.
+pbx_evidence_settle() {
+  pes_provider=$1
+  pes_container=$2
+  pes_scenario=$3
+  pes_transport=$4
+  pes_out_dir=$5
+  pes_deadline=$(( $(date +%s) + ${PBX_EVIDENCE_SETTLE_SECS:-30} ))
+  while :; do
+    pbx_collect_log "$pes_container" "$pes_out_dir"
+    if sh "$SCRIPT_DIR/pbx_evidence.sh" check "$pes_provider" "$pes_scenario" \
+      "$pes_transport" "$pes_out_dir" >/dev/null 2>&1; then
+      break
+    fi
+    [ "$(date +%s)" -lt "$pes_deadline" ] || break
+    sleep 2
+  done
+  touch "$pes_out_dir/pbx.done"
+}
+
+pbx_evidence_snapshot() {
+  pes_provider=$1
+  pes_container=$2
+  pes_scenario=$3
+  pes_out=$4
+  {
+    echo "# PBX snapshot while the call was up"
+    echo "- provider: $pes_provider"
+    echo "- container: ${pes_container:-<none>}"
+    echo "- scenario: $pes_scenario"
+    echo "- taken_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    if [ -z "$pes_container" ]; then
+      echo "no running $pes_provider container found"
+      return 0
+    fi
+    case "$pes_provider" in
+      asterisk)
+        for pes_command in "pjsip show channelstats" "core show channels concise"; do
+          echo
+          echo "## $pes_command"
+          pbx_cli asterisk "$pes_container" "$pes_command"
+        done
+        pbx_cli asterisk "$pes_container" "core show channels concise" \
+          | awk -F'!' '/^PJSIP\// { print $1 }' | while read -r pes_channel; do
+            echo
+            echo "## pjsip show channel $pes_channel"
+            pbx_cli asterisk "$pes_container" "pjsip show channel $pes_channel"
+          done
+        ;;
+      freeswitch)
+        echo
+        echo "## show channels"
+        pbx_cli freeswitch "$pes_container" "show channels"
+        pbx_cli freeswitch "$pes_container" "show channels as delim |" \
+          | awk -F'|' 'NR > 1 && $1 ~ /^[0-9a-f-]+$/ { print $1 }' | while read -r pes_uuid; do
+            echo
+            echo "## uuid_dump $pes_uuid"
+            pbx_cli freeswitch "$pes_container" "uuid_dump $pes_uuid"
+          done
+        ;;
+    esac
+  } >"$pes_out" 2>&1
+}
+
+run_rtcp_timer_cell() {
+  provider=$1
+  example=$2
+  scenario=$3
+  transport=$4
+  api_label=$(example_label "$example")
+  out_dir="$OUT_ROOT/$provider/$api_label/$scenario/$transport"
+  out_dir=$(iteration_out_dir "$out_dir")
+  rm -rf "$out_dir"
+  mkdir -p "$out_dir"
+  if [ "$transport" = "TLS" ]; then
+    prepare_tls "$provider" "$out_dir"
+  fi
+  diag_begin_cell "$provider" "$transport" "$out_dir"
+  container=$(pbx_container "$provider" || true)
+  pbx_evidence_begin "$provider" "$container" "$scenario" "$out_dir"
+  # The caller keeps the call up after PBX_EVIDENCE_WINDOW_OPEN until this
+  # runner writes pbx.done (pbx_evidence_settle).
+  export PBX_EVIDENCE_HANDSHAKE=1
+
+  rc=0
+  start_one "$provider" "$example" "$scenario" "$transport" callee "$out_dir" "$out_dir/callee.log"
+  pid_a=$LAST_PID
+  wait_for_log "$out_dir/callee.log" "Registered." "$pid_a" "$scenario-callee" || rc=$?
+  pid_b=""
+  if [ "$rc" -eq 0 ]; then
+    start_one "$provider" "$example" "$scenario" "$transport" caller "$out_dir" "$out_dir/caller.log"
+    pid_b=$LAST_PID
+    # A session-timer cell holds its call past the session expiry (about
+    # 65 s on Asterisk's 90 s interval, 95 s on FreeSWITCH's 120 s).
+    if wait_for_log "$out_dir/caller.log" "$RTCP_TIMER_MARKER" "$pid_b" "$scenario-caller" \
+      "${PBX_RTCP_TIMER_MARKER_SECS:-240}"; then
+      pbx_evidence_snapshot "$provider" "$container" "$scenario" "$out_dir/pbx-snapshot.txt"
+      if [ "$scenario" = "session_timer" ]; then
+        # The refresh transactions are already in the PBX's SIP log; nothing
+        # it can still see needs the call to stay up.
+        touch "$out_dir/pbx.done"
+      else
+        pbx_evidence_settle "$provider" "$container" "$scenario" "$transport" "$out_dir"
+      fi
+    else
+      rc=1
+    fi
+    wait_child "$pid_b" "$scenario-caller" "$out_dir/caller.log" || {
+      child_rc=$?
+      if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+    }
+  fi
+  wait_child "$pid_a" "$scenario-callee" "$out_dir/callee.log" || {
+    child_rc=$?
+    if [ "$rc" -eq 0 ]; then rc=$child_rc; fi
+  }
+  unset PBX_EVIDENCE_HANDSHAKE
+  pbx_evidence_end "$provider" "$container" "$scenario" "$out_dir"
+  if [ "$rc" -eq 0 ]; then
+    run_pbx_evidence_check "$provider" "$container" "$scenario" "$transport" "$out_dir" || rc=$?
+  fi
+  diag_end_cell "$provider" "$transport" "$out_dir"
+  return "$rc"
+}
+
+# The RTCP and session-timer cells a full release run must contain, as
+# "scenario transport" pairs: Asterisk runs all four (RTCP on UDP and
+# SDES-SRTP), FreeSWITCH the mux and timer cells on UDP.
+required_rtcp_timer_cells() {
+  case "$1" in
+    asterisk)
+      printf '%s\n' "rtcp_mux UDP" "rtcp_mux TLS" "rtcp_non_mux UDP" "rtcp_non_mux TLS" \
+        "rtcp_mux_declined UDP" "rtcp_mux_declined TLS" "session_timer UDP"
+      ;;
+    freeswitch) printf '%s\n' "rtcp_mux UDP" "session_timer UDP" ;;
+  esac
+}
+
+verify_required_rtcp_timer_cells() {
+  vrc_provider=$1
+  case "$API_ARG" in all|endpoint) ;; *) return 0 ;; esac
+  vrc_rc=0
+  vrc_required=$(required_rtcp_timer_cells "$vrc_provider")
+  [ -n "$vrc_required" ] || return 0
+  vrc_log="$OUT_ROOT/$vrc_provider/rtcp-timer-required.log"
+  mkdir -p "$OUT_ROOT/$vrc_provider"
+  : >"$vrc_log"
+  printf '%s\n' "$vrc_required" | while read -r vrc_scenario vrc_transport; do
+    transport_selected "$vrc_transport" || continue
+    if awk -F'\t' -v p="$vrc_provider" -v s="$vrc_scenario" -v t="$vrc_transport" \
+      'NR > 1 && $1 == "PASS" && $2 == p && $4 == s && $5 == t && $6 == "pbx" { found = 1 }
+       END { exit !found }' "$RUN_MATRIX"; then
+      echo "present: $vrc_scenario $vrc_transport" >>"$vrc_log"
+    else
+      echo "MISSING: $vrc_scenario $vrc_transport" >>"$vrc_log"
+    fi
+  done
+  if grep -q '^MISSING' "$vrc_log"; then
+    vrc_now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    echo "FAIL: $vrc_provider release matrix lacks passing RTCP/session-timer cells:" \
+      "$(grep '^MISSING' "$vrc_log" | sed 's/^MISSING: //' | tr '\n' ' ')" >&2
+    record_matrix FAIL "$vrc_provider" endpoint rtcp_timer_required all required 0 1 \
+      "$vrc_now" "$vrc_now" "$vrc_log" "$OUT_ROOT/$vrc_provider" default
+    vrc_rc=1
+  fi
+  return "$vrc_rc"
+}
+
+# The PBX-side verdict, recorded as its own matrix row (role `pbx`) so the
+# release report shows that the PBX -- not only rvoip -- saw the behaviour.
+run_pbx_evidence_check() {
+  rpec_provider=$1
+  rpec_container=$2
+  rpec_scenario=$3
+  rpec_transport=$4
+  rpec_out_dir=$5
+  rpec_log="$rpec_out_dir/pbx-evidence.log"
+  rpec_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  rpec_attempt=1
+  set +e
+  while :; do
+    sh "$SCRIPT_DIR/pbx_evidence.sh" check "$rpec_provider" "$rpec_scenario" "$rpec_transport" "$rpec_out_dir" >"$rpec_log" 2>&1
+    rpec_rc=$?
+    # The container's log can trail its console by a moment; re-read it
+    # before calling a verdict that the PBX itself has not finished writing.
+    [ "$rpec_rc" -ne 0 ] && [ "$rpec_attempt" -lt 3 ] || break
+    rpec_attempt=$((rpec_attempt + 1))
+    sleep 3
+    pbx_collect_log "$rpec_container" "$rpec_out_dir"
+  done
+  set -e
+  rpec_status=PASS
+  [ "$rpec_rc" -eq 0 ] || rpec_status=FAIL
+  echo "[$rpec_provider/$rpec_transport/$rpec_scenario/pbx] $rpec_status ($(tail -1 "$rpec_log"))"
+  record_matrix "$rpec_status" "$rpec_provider" endpoint "$rpec_scenario" "$rpec_transport" pbx 0 "$rpec_rc" \
+    "$rpec_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$rpec_log" "$rpec_out_dir" default
+  return "$rpec_rc"
+}
+
 run_matrix_cell() {
   provider=$1
   example=$2
@@ -1968,6 +2340,27 @@ run_matrix_cell() {
         unset PBX_CODEC_PROFILE
       fi
       ;;
+    rtcp_mux|rtcp_non_mux|rtcp_mux_declined|session_timer)
+      # Stack wire behaviour, not an API surface: one surface keeps the
+      # session-timer cells (a minute and more each) out of the other two.
+      if [ "$example" != "pbx_endpoint" ]; then
+        echo "[$provider] skipping $scenario for $(example_label "$example"): endpoint API only"
+        return 0
+      fi
+      if transport_selected UDP; then
+        run_rtcp_timer_cell "$provider" "$example" "$scenario" UDP || rc=$?
+        if [ "$rc" -ne 0 ] && [ "$STOP_ON_FAIL" = "1" ]; then return "$rc"; fi
+      fi
+      # SRTCP: Asterisk's SDES endpoints only. The session timer is
+      # signalling and FreeSWITCH's RTCP profile is UDP.
+      if [ "$provider" = "asterisk" ] && [ "$scenario" != "session_timer" ] \
+        && cell_transport_enabled "$provider" TLS; then
+        run_rtcp_timer_cell "$provider" "$example" "$scenario" TLS || {
+          tls_rc=$?
+          if [ "$rc" -eq 0 ]; then rc=$tls_rc; fi
+        }
+      fi
+      ;;
     blind_transfer)
       if transport_selected UDP; then
         run_transfer "$provider" "$example" UDP || rc=$?
@@ -2021,6 +2414,16 @@ for provider in $(pbx_list); do
     done
   done
 done
+
+# The release gates run `--scenario all`; make sure that, for each provider
+# here, every RTCP and session-timer cell it is qualified for recorded a
+# passing PBX verdict (#318). A matrix that is all green but stopped running
+# them must not pass.
+if [ "$SCENARIO_ARG" = "all" ]; then
+  for provider in $(pbx_list); do
+    verify_required_rtcp_timer_cells "$provider" || RUN_FAILURES=1
+  done
+fi
 
 echo
 echo "========================================================================"

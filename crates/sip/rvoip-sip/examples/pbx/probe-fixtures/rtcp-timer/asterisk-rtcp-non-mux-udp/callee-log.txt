@@ -1,0 +1,1 @@
+2026-10-12T08:07:17.946495Z  INFO rvoip_sip::adapters::media_adapter: ✅ Generated SDP for session session-6ff5da67-f270-4b4a-b836-047e5ecfa882 with local port 17120 direction sendrecv
