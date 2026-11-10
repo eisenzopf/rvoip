@@ -1055,10 +1055,9 @@ mod tests {
             .unwrap()
         };
         // A separate RTCP socket: its receive task unprotects SRTCP with the
-        // same context, so the RTP loop must not own it.
-        let rtcp_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let rtcp_addr = rtcp_port.local_addr().unwrap();
-        drop(rtcp_port);
+        // same context, so the RTP loop must not own it. The session binds
+        // the RTCP socket on an ephemeral port itself: probing for a free
+        // port and binding it again later races parallel tests for it.
         let non_mux = {
             let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
             RtpSession::new_event_driven_with_rtcp_socket(
@@ -1067,11 +1066,15 @@ mod tests {
                     ..RtpSessionConfig::default()
                 },
                 crate::transport::SymmetricRtpPolicy::default(),
-                rtcp_addr,
+                "127.0.0.1:0".parse().unwrap(),
             )
             .await
             .unwrap()
         };
+        let rtcp_addr = non_mux.local_rtcp_addr().expect("a separate RTCP socket");
+        assert_ne!(rtcp_addr.port(), 0);
+        assert_ne!(Some(rtcp_addr), non_mux.local_addr().ok());
+        assert!(!non_mux.rtcp_mux());
         for mut session in [session, non_mux] {
             assert!(session.inline_rx_enabled());
             udp(&session)
