@@ -1459,6 +1459,20 @@ mod tests {
             arrivals.push(std::time::Instant::now());
         }
         let gap = arrivals[1].duration_since(arrivals[0]);
+        // Pin the sender state for the close. `we_sent` (RFC 3550 §6.4) holds
+        // while the packet count differs from the one recorded two reports
+        // ago. With the media sent before both periodic reports, the closing
+        // report type depended on how many reports' bookkeeping had landed
+        // by the close, which a starved runner reorders: an SR from one
+        // executor and an RR from the other. Back on the 5 s minimum, at most
+        // one report already drawn on the fast interval can still follow, so
+        // one more media packet sent now keeps both executors senders however
+        // late the close runs.
+        session.set_rtcp_reduced_minimum(false);
+        session
+            .send_packet(480, Bytes::from(vec![0xd5; 160]), false)
+            .await
+            .unwrap();
         session.close().await.unwrap();
         // A report already in flight may precede the closing compound; the
         // report task is gone after it.
@@ -1510,9 +1524,16 @@ mod tests {
                 ]
             );
             assert!(v2.periodic[1][0].contains("fraction=0 cumulative=1 highest=4"));
-            // SR or RR, depending on whether the session still counts as a
-            // sender two intervals after its media (RFC 3550 §6.4).
-            assert!(v2.closing[0].contains(&format!("R ssrc={LOCAL_SSRC:08x}")));
+            // The media packet sent right before the close keeps the session
+            // a sender (RFC 3550 §6.4): the closing compound is an SR.
+            assert!(
+                v2.closing[0].starts_with(&format!(
+                    "SR ssrc={LOCAL_SSRC:08x} packets=3 octets=480 blocks="
+                )),
+                "{:?}",
+                v2.closing
+            );
+            assert!(v2.closing[0].contains("fraction=0 cumulative=1 highest=4"));
             assert_eq!(v2.closing[1], "SDES chunks=1");
             assert_eq!(
                 v2.closing[2],
