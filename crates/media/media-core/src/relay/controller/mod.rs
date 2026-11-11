@@ -2766,7 +2766,14 @@ impl MediaSessionController {
                             .to_string(),
                     )
                 })?;
-            udp_transport.set_remote_rtp_addr(remote_addr).await;
+            // Do not overwrite an ICE-nominated remote address with the
+            // SDP default. ICE retargets the RTP transport as soon as a pair
+            // is nominated; DTLS must send its handshake replies to that same
+            // nominated address or Chrome never sees ServerHello. Keep the
+            // SDP address only as a fallback for non-ICE calls.
+            if udp_transport.remote_rtp_addr().await.is_none() {
+                udp_transport.set_remote_rtp_addr(remote_addr).await;
+            }
             udp_transport
                 .dtls_conn_adapter()
                 .map_err(|e| Error::config(format!("dtls_conn_adapter: {e}")))?

@@ -58,6 +58,7 @@ pub fn default_srtp_profiles() -> Vec<SrtpProtectionProfile> {
 /// decided. Typically one `DtlsIdentity` is generated per Connection/call
 /// and reused if the handshake needs to restart (e.g. an ICE restart or a
 /// retried connection), so the fingerprint you already sent stays valid.
+#[derive(Clone)]
 pub struct DtlsIdentity {
     certificate: DtlsCertificate,
     /// SHA-256 fingerprint of `certificate`, for the outgoing SDP
