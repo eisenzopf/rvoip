@@ -342,6 +342,81 @@ const fn is_metadata_name_byte(byte: u8) -> bool {
         )
 }
 
+/// Where an adapter observed an [`ObservedCallerNumber`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ObservedCallerSource {
+    /// The identity a trusted peer asserted for the caller (in SIP, the
+    /// `P-Asserted-Identity` of a peer admitted by trusted-trunk policy).
+    TrustedAssertedIdentity,
+    /// The caller-supplied originator (in SIP, the `From` URI) of a request
+    /// from an admitted trusted peer that asserted no usable identity.
+    AdmittedFrom,
+}
+
+impl ObservedCallerSource {
+    /// Stable lowercase name, suitable for logs and records.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TrustedAssertedIdentity => "trusted_asserted_identity",
+            Self::AdmittedFrom => "admitted_from",
+        }
+    }
+}
+
+/// The caller number an adapter observed on an inbound connection, in E.164
+/// form (`+` and 7 to 15 digits, no leading zero).
+///
+/// This is a presentation hint, for example the number to show an agent or
+/// to record as the caller. It is never an authenticated identity or a
+/// routing selector: [`ObservedCallerSource`] says how much it can be
+/// relied on, and adapters only produce it for peers their own policy
+/// admitted. The number is redacted from `Debug`.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ObservedCallerNumber {
+    number: String,
+    source: ObservedCallerSource,
+}
+
+impl ObservedCallerNumber {
+    /// Accepts only an E.164 number: `+` followed by 7 to 15 ASCII digits,
+    /// the first of which is not `0`.
+    pub fn new(
+        number: impl Into<String>,
+        source: ObservedCallerSource,
+    ) -> Result<Self, InboundContextError> {
+        let number = number.into();
+        let valid = number.strip_prefix('+').is_some_and(|digits| {
+            (7..=15).contains(&digits.len())
+                && !digits.starts_with('0')
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !valid {
+            return Err(InboundContextError::InvalidMetadataValue);
+        }
+        Ok(Self { number, source })
+    }
+
+    /// The E.164 number, including its leading `+`.
+    pub fn number(&self) -> &str {
+        &self.number
+    }
+
+    pub const fn source(&self) -> ObservedCallerSource {
+        self.source
+    }
+}
+
+impl fmt::Debug for ObservedCallerNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservedCallerNumber")
+            .field("source", &self.source)
+            .field("number", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Principal- and transport-bound context for one inbound connection.
 ///
 /// Adapters may expose this exactly once. The Orchestrator retains it until
@@ -354,6 +429,8 @@ pub struct InboundConnectionContext {
     metadata: InboundSignalingMetadata,
     asserted_identity: Option<InboundAssertedIdentity>,
     trusted_signaling: Option<TrustedSignalingMetadata>,
+    observed_peer_address: Option<std::net::IpAddr>,
+    observed_caller_number: Option<ObservedCallerNumber>,
 }
 
 impl InboundConnectionContext {
@@ -378,6 +455,8 @@ impl InboundConnectionContext {
             metadata,
             asserted_identity: None,
             trusted_signaling: None,
+            observed_peer_address: None,
+            observed_caller_number: None,
         })
     }
 
@@ -391,6 +470,34 @@ impl InboundConnectionContext {
         self.asserted_identity = asserted_identity;
         self.trusted_signaling = trusted_signaling;
         self
+    }
+
+    /// Attach the network address the adapter's transport observed the
+    /// peer at, for example the source IP of the connection or datagram
+    /// that carried the request. Never take it from a signaling header.
+    ///
+    /// The address is evidence for policy that already trusts this
+    /// transport (such as matching a carrier's address against the trunk
+    /// its dialed number belongs to), not an identity.
+    pub fn with_observed_peer_address(mut self, address: Option<std::net::IpAddr>) -> Self {
+        self.observed_peer_address = address;
+        self
+    }
+
+    /// The transport-observed peer address, if the adapter attached one.
+    pub const fn observed_peer_address(&self) -> Option<std::net::IpAddr> {
+        self.observed_peer_address
+    }
+
+    /// Attach the caller number the adapter observed for presentation.
+    pub fn with_observed_caller_number(mut self, number: Option<ObservedCallerNumber>) -> Self {
+        self.observed_caller_number = number;
+        self
+    }
+
+    /// The observed caller number, if the adapter attached one.
+    pub fn observed_caller_number(&self) -> Option<&ObservedCallerNumber> {
+        self.observed_caller_number.as_ref()
     }
 
     pub fn connection_id(&self) -> &ConnectionId {
@@ -448,6 +555,14 @@ impl fmt::Debug for InboundConnectionContext {
             .field(
                 "asserted_identity_present",
                 &self.asserted_identity.is_some(),
+            )
+            .field(
+                "observed_peer_address_present",
+                &self.observed_peer_address.is_some(),
+            )
+            .field(
+                "observed_caller_number",
+                &self.observed_caller_number.as_ref().map(|n| n.source()),
             )
             .field(
                 "trusted_signaling_field_count",
@@ -1213,6 +1328,83 @@ impl fmt::Debug for AdapterEvent {
 mod tests {
     use super::*;
     use crate::identity::{AuthenticationMethod, IdentityAssurance};
+
+    #[test]
+    fn observed_caller_number_accepts_only_e164() {
+        for valid in [
+            "+1408555",
+            "+14085551212",
+            "+442071838750",
+            "+123456789012345",
+        ] {
+            let number =
+                ObservedCallerNumber::new(valid, ObservedCallerSource::AdmittedFrom).unwrap();
+            assert_eq!(number.number(), valid);
+            assert_eq!(number.source(), ObservedCallerSource::AdmittedFrom);
+            assert!(!format!("{number:?}").contains(&valid[1..]));
+        }
+        for invalid in [
+            "",
+            "+",
+            "14085551212",
+            "+0408555121",
+            "+140855",
+            "+1234567890123456",
+            "+1408555121a",
+            "+1 408 555 1212",
+            "%2B14085551212",
+        ] {
+            assert!(
+                ObservedCallerNumber::new(invalid, ObservedCallerSource::AdmittedFrom).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            ObservedCallerSource::TrustedAssertedIdentity.as_str(),
+            "trusted_asserted_identity"
+        );
+        assert_eq!(ObservedCallerSource::AdmittedFrom.as_str(), "admitted_from");
+    }
+
+    #[test]
+    fn observed_peer_and_caller_stay_connection_bound_and_out_of_debug() {
+        let connection = ConnectionId::new();
+        let owner = AuthenticatedPrincipal {
+            subject: "owner".into(),
+            tenant: Some("tenant".into()),
+            scopes: Vec::new(),
+            issuer: None,
+            expires_at: None,
+            method: AuthenticationMethod::ApiKey,
+            assurance: IdentityAssurance::Anonymous,
+        };
+        let address: std::net::IpAddr = "192.0.2.24".parse().unwrap();
+        let caller = ObservedCallerNumber::new(
+            "+14085551212",
+            ObservedCallerSource::TrustedAssertedIdentity,
+        )
+        .unwrap();
+        let context = InboundConnectionContext::new(
+            connection.clone(),
+            Transport::Sip,
+            &owner,
+            None,
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(context.observed_peer_address(), None);
+        assert!(context.observed_caller_number().is_none());
+        let context = context
+            .with_observed_peer_address(Some(address))
+            .with_observed_caller_number(Some(caller.clone()));
+        assert_eq!(context.observed_peer_address(), Some(address));
+        assert_eq!(context.observed_caller_number(), Some(&caller));
+        assert!(context.is_bound_to(&connection, Transport::Sip, &owner));
+        assert!(!context.is_bound_to(&ConnectionId::new(), Transport::Sip, &owner));
+        let debug = format!("{context:?}");
+        assert!(!debug.contains("192.0.2.24") && !debug.contains("14085551212"));
+        assert!(debug.contains("TrustedAssertedIdentity"));
+    }
 
     fn principal(tenant: Option<&str>) -> AuthenticatedPrincipal {
         AuthenticatedPrincipal {

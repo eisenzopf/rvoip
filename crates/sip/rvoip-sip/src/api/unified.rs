@@ -287,6 +287,9 @@ impl Drop for AbortOutboundDispatchTaskOnDrop {
 #[derive(Clone)]
 pub(crate) struct InboundInviteObservation {
     pub(crate) session_id: SessionId,
+    /// Source IP of the transport flow or datagram that carried the INVITE,
+    /// taken from the transport event, never from a SIP header.
+    pub(crate) observed_peer_address: Option<std::net::IpAddr>,
     pub(crate) request: Option<Arc<Request>>,
     pub(crate) principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
 }
