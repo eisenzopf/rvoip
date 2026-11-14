@@ -844,6 +844,16 @@ outcome unchanged, and add no configuration.
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
 
+### Identity
+
+- `rvoip-users-core` RS256 issuers verify the tokens they issue.
+  `JwtIssuer::new` built its verification key with
+  `DecodingKey::from_rsa_pem` from the private signing PEM, which parses but
+  cannot verify, so `validate_access_token` and `validate_refresh_token`
+  rejected every RS256 token. The verification key is now built from the
+  public modulus and exponent of the PKCS#8 or PKCS#1 signing key, the same
+  components `public_key_jwk` publishes. HS256 is unchanged.
+
 ### Release process, CI and dependencies
 
 - Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,
