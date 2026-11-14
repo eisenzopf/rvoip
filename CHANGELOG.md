@@ -844,6 +844,16 @@ outcome unchanged, and add no configuration.
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
 
+### WebRTC
+
+- `rvoip-webrtc` creates a route's audio media stream once when `accept()`
+  and `streams()`, or several `streams()` calls, reach a route that has none
+  at the same time. Each caller used to pass the empty check while the first
+  was still waiting up to 500 ms for the remote track, so the route kept one
+  stream per caller, each with its own inbound pump reading the same remote
+  RTP track, and callers received different streams. Creation is now
+  serialized per route and every caller gets the same stream.
+
 ### Release process, CI and dependencies
 
 - Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,

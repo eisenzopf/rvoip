@@ -309,6 +309,10 @@ impl WebRtcTransportHandle {
 pub struct Route {
     pub peer: Arc<RvoipPeerConnection>,
     pub streams: Arc<DashMap<StreamId, Arc<WebRtcMediaStream>>>,
+    /// Serializes audio media-stream creation across route clones. Each
+    /// stream starts an inbound pump on the remote RTP track, so concurrent
+    /// first callers must not each create one.
+    media_stream_create: Arc<AsyncMutex<()>>,
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     /// Outbound/reusable channels keyed by exact label + RFC 8832 reliability.
@@ -2140,6 +2144,11 @@ impl WebRtcAdapter {
     /// arrived) or as send-only (if not — late tracks attach via the
     /// track-attacher spawned in `insert_route`).
     async fn seed_media_stream(&self, conn: &ConnectionId, route: &Route) -> Result<()> {
+        // `accept()` and `streams()` can both find the route without a stream.
+        // Hold the creation lock across the remote-track wait so the second
+        // caller observes the first caller's stream instead of creating
+        // another one with a competing inbound reader.
+        let _create_guard = route.media_stream_create.lock().await;
         if !route.streams.is_empty() {
             return Ok(());
         }
@@ -2750,6 +2759,7 @@ impl WebRtcAdapter {
         let route = Route {
             peer,
             streams: Arc::new(DashMap::new()),
+            media_stream_create: Arc::new(AsyncMutex::new(())),
             local_sdp: Some(offer_sdp.clone()),
             remote_sdp: None,
             data_channel: channels,
@@ -2987,6 +2997,7 @@ impl WebRtcAdapter {
         let route = Route {
             peer: Arc::clone(&peer),
             streams: Arc::new(DashMap::new()),
+            media_stream_create: Arc::new(AsyncMutex::new(())),
             local_sdp: Some(answer_sdp.clone()),
             remote_sdp: Some(offer_sdp.to_owned()),
             data_channel: Arc::new(DashMap::new()),
@@ -4848,6 +4859,7 @@ impl ConnectionAdapter for WebRtcAdapter {
         let route = Route {
             peer,
             streams: Arc::new(DashMap::new()),
+            media_stream_create: Arc::new(AsyncMutex::new(())),
             local_sdp: Some(offer_sdp),
             remote_sdp: None,
             data_channel: data_channels,
