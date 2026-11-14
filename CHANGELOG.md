@@ -844,6 +844,21 @@ outcome unchanged, and add no configuration.
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
 
+### WebRTC
+
+- Short inbound Opus loss on a WebRTC stream is concealed instead of skipped.
+  When one to five 20 ms packets are missing, confirmed by both the RTP
+  sequence gap and the matching RTP clock gap, the inbound pump forwards one
+  lost-frame indication per missing packet (the previous packet's TOC byte
+  with no frame data, RFC 6716 §3.2.1) ahead of the next packet, with the
+  missing packets' RTP timestamps; libopus decodes each as 20 ms of
+  packet-loss concealment. The decoder used to jump straight from the last
+  received frame to the next one. Longer gaps, clock jumps without sequence
+  loss, other codecs and packet durations, SSRC or payload type changes and
+  telephone-event packets are not concealed. A duplicate or late packet up to
+  50 packets behind the last forwarded one of the same Opus source is now
+  dropped instead of being decoded out of order.
+
 ### Release process, CI and dependencies
 
 - Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,
