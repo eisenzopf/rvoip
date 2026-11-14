@@ -12,6 +12,12 @@ pub enum RvoipError {
     ParticipantNotFound(crate::ids::ParticipantId),
     BridgeNotFound(crate::ids::BridgeId),
     AdmissionRejected(&'static str),
+    /// Outbound activation failed because the call ended (for example a
+    /// remote final non-2xx response) and the adapter's own terminal event
+    /// was already published to the Orchestrator before this error returned.
+    /// That terminal, not this error, is the authoritative outcome; a caller
+    /// must not report a second failure for the connection.
+    OutboundTerminalPublishedDuringActivation,
 
     /// Lifecycle precondition violated — e.g. start_session on a Closed
     /// Conversation, join_session on an Ended Session, end_session on an
@@ -40,6 +46,7 @@ impl RvoipError {
             Self::ParticipantNotFound(_) => "participant-not-found",
             Self::BridgeNotFound(_) => "bridge-not-found",
             Self::AdmissionRejected(_) => "admission-rejected",
+            Self::OutboundTerminalPublishedDuringActivation => "outbound-terminal-published",
             Self::InvalidState(_) => "invalid-state",
             Self::UnsupportedCodec(_) => "unsupported-codec",
             Self::Adapter(_) => "adapter",

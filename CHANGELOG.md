@@ -84,6 +84,13 @@ Each item has a one-line migration.
   after media cleanup. Migration: do not rely on terminal ordering across
   connections, or on media cleanup having finished when `deliver_terminal`
   returns.
+- **`RvoipError` gains `OutboundTerminalPublishedDuringActivation`.** The
+  enum is not `#[non_exhaustive]`. rvoip-sip returns it from outbound
+  activation (and so from `PreparedOutboundConnection::commit` and
+  `originate_connection`) when the call ended during activation and its own
+  terminal event was already published. Migration: add an arm (or a
+  wildcard) to exhaustive `match`es on `RvoipError`, and do not report a
+  second failure for that connection.
 
 ### SIP
 
@@ -761,6 +768,20 @@ outcome unchanged, and add no configuration.
 
 ### Core and media graph
 
+- The operational event stream reports a SIP call's final failure status.
+  `OperationalFailureReason` gains `SipResponse { status_code,
+  network_blocked }`: a SIP connection that fails with a final non-2xx
+  response (300-699) publishes the numeric status and whether it was `603
+  Network Blocked`, the response carriers send when call analytics blocked
+  the call. The reason phrase and every other peer-controlled text are still
+  dropped; other failures stay `AdapterReported`. rvoip-sip now keeps the
+  peer's final response as an outbound call's terminal when it arrives
+  during activation, instead of replacing it with a generic activation
+  failure, and publishes that terminal before activation fails. Before, core
+  won that race and published `CoreReported`. For that, an adapter can hand
+  core a terminal with a receipt
+  (`AdapterLifecycleSinkSlot::queue_or_deliver_orchestrator_terminal_with_receipt`)
+  and wait until core has consumed it.
 - Connection admission no longer sweeps the lifecycle table when bounded
   lifecycle retention is enabled (#345). Inbound admission swept every
   retained row every 64 admissions, and outbound admission on every claim,

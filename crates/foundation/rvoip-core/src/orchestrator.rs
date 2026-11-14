@@ -8105,6 +8105,10 @@ impl Orchestrator {
             OrchestratorAdapterEvent::Public(event) => {
                 self.handle_adapter_event(transport, event).await;
             }
+            OrchestratorAdapterEvent::TerminalReceipt { event, consumed } => {
+                self.handle_adapter_event(transport, event).await;
+                consumed.send_replace(true);
+            }
             OrchestratorAdapterEvent::AuthenticatedInboundConnection {
                 connection,
                 participant_id,
@@ -8473,7 +8477,7 @@ impl Orchestrator {
                         transport,
                         at,
                         OperationalEventKind::Failed {
-                            reason: OperationalFailureReason::AdapterReported,
+                            reason: OperationalFailureReason::from_adapter(transport, &detail),
                         },
                     )
                     .await;
