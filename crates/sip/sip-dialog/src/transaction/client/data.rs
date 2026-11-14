@@ -402,7 +402,10 @@ impl ClientTransactionData {
             notified.as_mut().enable();
             match self.initial_send_state.load(Ordering::Acquire) {
                 INITIAL_SEND_SUCCEEDED => return Ok(()),
-                INITIAL_SEND_FAILED_BEFORE_WRITE | INITIAL_SEND_FAILED_AFTER_WRITE_ATTEMPT => {
+                // Route preparation failed before the write boundary: the
+                // request provably never reached the transport.
+                INITIAL_SEND_FAILED_BEFORE_WRITE => return Err(Error::InitialRequestNotSent),
+                INITIAL_SEND_FAILED_AFTER_WRITE_ATTEMPT => {
                     return Err(Error::transport_error(
                         rvoip_sip_transport::Error::ProtocolError(
                             "initial request transport send failed".into(),

@@ -152,6 +152,14 @@ pub enum SessionError {
     #[error("Dialog error: {}", TextDiagnostic(.0))]
     DialogError(String),
 
+    /// The initial INVITE failed before any of it reached the network: for
+    /// example target resolution or request construction failed, or the
+    /// transport connection was refused or its TLS handshake failed. The
+    /// peer never saw the INVITE, so no CANCEL or BYE is owed and the call
+    /// can be retried without creating a duplicate.
+    #[error("INVITE not sent: {}", TextDiagnostic(.0))]
+    InviteNotSent(String),
+
     /// An error originating in the media layer (`rvoip-media-core`).
     #[error("Media error: {}", TextDiagnostic(.0))]
     MediaError(String),
@@ -344,6 +352,10 @@ impl fmt::Debug for SessionError {
                 .finish(),
             Self::DialogError(value) => formatter
                 .debug_tuple("DialogError")
+                .field(&TextDiagnostic(value))
+                .finish(),
+            Self::InviteNotSent(value) => formatter
+                .debug_tuple("InviteNotSent")
                 .field(&TextDiagnostic(value))
                 .finish(),
             Self::MediaError(value) => formatter

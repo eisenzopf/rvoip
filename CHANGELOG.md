@@ -424,6 +424,28 @@ supported yet and is rejected by `Config::validate`.
   carry one.
 - `parse_sdp_connection` accepts `c=IN IP6`.
 
+#### Initial INVITE that never reached the wire
+
+- An initial INVITE whose transport failed before any SIP byte was written
+  (connection refused, TLS handshake failure, other route-preparation
+  errors) is now reported as not sent. It used to be reported as
+  wire-unknown, like a failure after a write, so callers could not tell
+  that the peer never saw the request and the dialog was kept for a
+  CANCEL/BYE teardown that had nothing to tear down.
+- sip-dialog: `InitialInviteWireOutcome::ZeroWire` now covers these
+  failures and the dialog is rolled back. New
+  `transaction::Error::InitialRequestNotSent` is returned when a client
+  transaction's first request fails before its write; non-INVITE
+  candidate failover treats it like a transport error, as before.
+- rvoip-sip: new `SessionError::InviteNotSent`, returned by
+  `invite(..).send()` for any zero-wire dispatch failure (previously
+  `SessionError::DialogError`). `SipAdapter` outbound activation reports
+  it as the new `RvoipError::OutboundNotSent` (class `outbound-not-sent`)
+  in `rvoip-core-traits`, instead of `RvoipError::Adapter`, and its
+  cleanup sends no CANCEL/BYE.
+- A failure after the INVITE was handed to the transport stays
+  wire-unknown.
+
 ### Signaling performance
 
 Wire output, published events and STIR/SHAKEN behaviour are unchanged unless a

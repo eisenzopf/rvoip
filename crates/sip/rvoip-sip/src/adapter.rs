@@ -268,6 +268,8 @@ enum SipActivationFailure {
     EventPublication,
     InvalidPlan,
     InviteFailed,
+    /// The INVITE failed before any of it reached the network.
+    InviteNotSent,
     MediaFailed,
 }
 
@@ -279,6 +281,7 @@ impl SipActivationFailure {
             Self::EventPublication => "SIP outbound lifecycle event publication was unavailable",
             Self::InvalidPlan => "SIP outbound activation plan was invalid",
             Self::InviteFailed => "SIP outbound INVITE activation failed",
+            Self::InviteNotSent => return RvoipError::OutboundNotSent,
             Self::MediaFailed => "SIP outbound media activation failed",
         };
         RvoipError::Adapter(detail.to_string())
@@ -426,6 +429,18 @@ impl SipOutboundRoute {
         }
         state.wire = SipOutboundWireState::Possible;
         Ok(())
+    }
+
+    /// The coordinator proved the INVITE never reached the network, so
+    /// cleanup owes no CANCEL/BYE.
+    fn mark_wire_not_sent(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.wire == SipOutboundWireState::Possible {
+            state.wire = SipOutboundWireState::NotStarted;
+        }
     }
 
     fn mark_wire_sent(&self) {
@@ -4617,6 +4632,13 @@ async fn activate_outbound_route(
         result = tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, &mut send) => {
             match result {
                 Ok(Ok(session_id)) => session_id,
+                Ok(Err(crate::errors::SessionError::InviteNotSent(_))) => {
+                    route.mark_wire_not_sent();
+                    if let Some(adapter) = weak_adapter.upgrade() {
+                        adapter.promote_outbound_route_if_admitted(&route);
+                    }
+                    return Err(SipActivationFailure::InviteNotSent);
+                }
                 Ok(Err(_)) | Err(_) => {
                     if let Some(adapter) = weak_adapter.upgrade() {
                         adapter.promote_outbound_route_if_admitted(&route);

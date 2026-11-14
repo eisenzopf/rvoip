@@ -2949,13 +2949,19 @@ impl DialogAdapter {
                             commit_owned_invite(operation, Ok(())).await
                         }
                         Err(error) => {
-                            let value = Err(redacted_invite_dispatch_error(failure, error));
                             match wire_outcome {
                                 InitialInviteWireOutcome::ZeroWire => {
+                                    // The dialog layer proved no INVITE byte
+                                    // was offered to the transport.
+                                    let value = Err(SessionError::InviteNotSent(
+                                        failure.diagnostic().to_string(),
+                                    ));
                                     rollback_owned_invite(operation, value).await
                                 }
                                 InitialInviteWireOutcome::Sent
                                 | InitialInviteWireOutcome::Unknown => {
+                                    let value =
+                                        Err(redacted_invite_dispatch_error(failure, error));
                                     commit_owned_invite(operation, value).await
                                 }
                             }

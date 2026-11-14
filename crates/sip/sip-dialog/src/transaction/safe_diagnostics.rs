@@ -439,6 +439,7 @@ impl fmt::Display for SafeTransactionError<'_> {
             TransactionCapacityExhausted { .. } => f.write_str("transaction_capacity"),
             MessageProcessingError { .. } => f.write_str("message_processing"),
             Transport(_) => f.write_str("transport_manager"),
+            InitialRequestNotSent => f.write_str("initial_request_not_sent"),
             Other(_) => f.write_str("other"),
         }
     }
