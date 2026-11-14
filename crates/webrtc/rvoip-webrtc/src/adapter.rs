@@ -37,7 +37,7 @@ use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
-use crate::media::stream::from_tracks_with_dtmf_events_and_task_counter;
+use crate::media::stream::{from_tracks_with_dtmf_events_and_task_counter, InboundFrameQueue};
 use crate::media::WebRtcMediaStream;
 use crate::originate::{WebRtcIceExchangePolicy, WebRtcOriginateContext, WebRtcSignalingMode};
 #[cfg(any(feature = "signaling-whip", feature = "signaling-ws"))]
@@ -2246,6 +2246,7 @@ impl WebRtcAdapter {
             negotiated_dtmf,
             Some(Arc::clone(&self.media_tasks)),
             Some(outbound_writer),
+            InboundFrameQueue::from_config(&self.config),
         );
         if has_remote {
             media.enable_webrtc_stats(

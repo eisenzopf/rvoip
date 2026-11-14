@@ -13,7 +13,8 @@ pub use fixtures::{
 };
 pub use pump::{
     silent_opus_payload, silent_rtp_packet, silent_rtp_payload, silent_rtp_payload_for_ssrc,
-    CandidatePairStats, InboundStats, OutboundStats, WebRtcStatsSnapshot, FRAME_CHANNEL_CAP,
+    CandidatePairStats, InboundStats, OutboundStats, WebRtcStatsSnapshot,
+    DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY, DEFAULT_INBOUND_SEND_DEADLINE_MS, FRAME_CHANNEL_CAP,
 };
 pub use stream::{
     from_tracks, from_tracks_with_dtmf_codecs, from_tracks_with_dtmf_events, WebRtcMediaStream,

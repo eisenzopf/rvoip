@@ -77,6 +77,9 @@ Each item has a one-line migration.
   media driver failed" }` (#355). Migration: stop treating that failure as a
   remote hangup; for a genuine media failure the terminal is now published
   before the BYE confirmation is joined.
+- **`rvoip_webrtc::WebRtcConfig` gains the public field
+  `inbound_frame_queue_capacity`.** Migration: add it to struct literals, or
+  end the literal with `..WebRtcConfig::default()`.
 - **rvoip-core may publish terminal events of different connections in a
   different order than the adapter reported them** (#345). Per-connection
   order is unchanged, and `AdapterLifecycleSink::deliver_terminal` now returns
@@ -843,6 +846,25 @@ outcome unchanged, and add no configuration.
   order, and hold, resume and end behave the same. Combined with
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
+
+### WebRTC
+
+- The inbound frame queue between a WebRTC media stream's RTP reader and its
+  consumer is bounded by the new `WebRtcConfig::inbound_frame_queue_capacity`
+  (default 8 frames, 160 ms of 20 ms audio; was a fixed 64), and
+  `WebRtcConfig::inbound_send_deadline_ms` now applies to adapter-created
+  streams (it was documented but every stream used a fixed 200 ms). When the
+  queue is full the reader waits at most that deadline (default 5 ms, was
+  200 ms) and drops the arriving frame, counted in `frames_dropped`. With a
+  consumer that had not started reading, such as a bridge waiting for its
+  other leg to answer, the reader used to block 200 ms per packet and fall
+  behind the wire: the track's event queue filled, the stack discarded
+  packets, and once the consumer attached it received about 6.5 s of stale
+  audio at once. The reader now keeps up with the wire and the consumer
+  receives at most the queue's capacity of old frames. Streams built with
+  `from_tracks*` use the same defaults; the new constants are
+  `media::DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY` and
+  `media::DEFAULT_INBOUND_SEND_DEADLINE_MS`.
 
 ### Release process, CI and dependencies
 
