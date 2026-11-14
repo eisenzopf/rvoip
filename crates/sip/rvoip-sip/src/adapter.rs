@@ -1584,6 +1584,9 @@ pub struct SipAdapter {
     force_drain_compensation_failure: AtomicBool,
     #[cfg(test)]
     inbound_rejection_test_gate: StdMutex<Option<InboundRejectionTestGate>>,
+    /// Stream to cache for the next mapped connection instead of a fresh one.
+    #[cfg(test)]
+    next_test_stream: StdMutex<Option<Arc<crate::media_stream::SipMediaStream>>>,
     drain_gate: AsyncMutex<()>,
     observer_registered: AtomicBool,
     inbound_invite_observer_id: u64,
@@ -1853,6 +1856,8 @@ impl SipAdapter {
             force_drain_compensation_failure: AtomicBool::new(false),
             #[cfg(test)]
             inbound_rejection_test_gate: StdMutex::new(None),
+            #[cfg(test)]
+            next_test_stream: StdMutex::new(None),
             drain_gate: AsyncMutex::new(()),
             observer_registered: AtomicBool::new(true),
             inbound_invite_observer_id,
@@ -3449,6 +3454,14 @@ impl SipAdapter {
         if let Some(stream) = self.streams_cache.get(conn) {
             return (stream.direction() == direction).then(|| Arc::clone(stream.value()));
         }
+        #[cfg(test)]
+        let stream = self
+            .next_test_stream
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_else(|| crate::media_stream::SipMediaStream::dormant_deferred(direction));
+        #[cfg(not(test))]
         let stream = crate::media_stream::SipMediaStream::dormant_deferred(direction);
         self.streams_cache.insert(conn.clone(), Arc::clone(&stream));
         Some(stream)
@@ -5218,6 +5231,46 @@ impl ConnectionAdapter for SipAdapter {
                         .existing_mapped_epoch(&session_id)
                         .filter(|epoch| epoch.connection_id == conn)
                         .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+                    // The ACK establishes signaling, but the inbound stream's
+                    // media bind runs independently and may not have finished.
+                    // `Connected` tells consumers the stream can be written,
+                    // so join that bind (it shares the stream's one retained
+                    // driver) within the same setup deadline, as outbound
+                    // activation does before its receipt.
+                    let stream = self
+                        .streams_cache
+                        .get(&conn)
+                        .map(|entry| Arc::clone(entry.value()))
+                        .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+                    tokio::select! {
+                        bound = stream.bind(Arc::clone(&self.coordinator), session_id.clone()) => {
+                            bound.map_err(Self::map_session_err)?;
+                        }
+                        _ = draining.changed() => {
+                            return Err(RvoipError::AdmissionRejected(
+                                "SIP adapter began draining while an inbound accept awaited media",
+                            ));
+                        }
+                        () = &mut deadline => {
+                            return Err(RvoipError::AdmissionRejected(
+                                "SIP inbound accept timed out awaiting media readiness",
+                            ));
+                        }
+                    }
+                    if self.draining.load(Ordering::Acquire) {
+                        return Err(RvoipError::AdmissionRejected(
+                            "SIP adapter began draining while an inbound accept awaited media",
+                        ));
+                    }
+                    if !matches!(
+                        *states.borrow_and_update(),
+                        Some(CallState::Active | CallState::Bridged)
+                    ) {
+                        return Err(RvoipError::InvalidState(
+                            "SIP inbound session ended while awaiting media readiness",
+                        ));
+                    }
+                    stream.try_frames_out()?;
                     // As in `try_send_for_epoch`, the epoch check and the
                     // enqueue share `mapping_lock`, so retirement cannot slip
                     // between them. The reserved slot cannot be full.
@@ -9264,6 +9317,145 @@ Signal=5\r\nDuration=160\r\n";
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    /// `Connected` tells the orchestrator the connection's media can be
+    /// written. An inbound ACK establishes SIP signaling independently of the
+    /// stream's media bind, so a slow bind must hold `Connected` back rather
+    /// than let the first frame written on it be refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn inbound_connected_waits_for_writable_media_after_ack() {
+        let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
+            ApiConfig::local("connected-after-media-bind", port)
+        })
+        .await;
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        // Hold the bind of the stream the next inbound connection caches, so
+        // the ACK reliably establishes signaling before media is bound.
+        let delayed = crate::media_stream::SipMediaStream::dormant_deferred(Direction::Inbound);
+        let bind_gate = delayed.pause_bind_for_test().await;
+        *adapter.next_test_stream.lock().unwrap() = Some(Arc::clone(&delayed));
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let caller = UnifiedCoordinator::new(ApiConfig::local("connected-after-media-caller", 0))
+            .await
+            .expect("caller");
+        let caller_session = caller
+            .invite(None, format!("sip:callee@127.0.0.1:{port}"))
+            .send()
+            .await
+            .expect("INVITE");
+        let connection_id = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(OrchestratorAdapterEvent::Public(AdapterEvent::InboundConnection {
+                    connection,
+                })) = events.recv().await
+                {
+                    break connection.id.clone();
+                }
+            }
+        })
+        .await
+        .expect("inbound INVITE published");
+        assert!(Arc::ptr_eq(
+            adapter.streams_cache.get(&connection_id).unwrap().value(),
+            &delayed
+        ));
+        let session_id = adapter.lookup_session(&connection_id).expect("session");
+        let accepting_adapter = Arc::clone(&adapter);
+        let accepting_connection = connection_id.clone();
+        let mut accept = tokio::spawn(async move {
+            ConnectionAdapter::accept(accepting_adapter.as_ref(), accepting_connection).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while coordinator.get_state(&session_id).await.ok() != Some(CallState::Active) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the ACK establishes signaling while media is still unbound");
+
+        // A consumer writes its first frame as soon as it sees Connected.
+        let first_frame = || rvoip_core::stream::MediaFrame {
+            stream_id: rvoip_core::ids::StreamId::new(),
+            kind: rvoip_core::stream::StreamKind::Audio,
+            payload: bytes::Bytes::from(vec![0xd5; 160]),
+            timestamp_rtp: 0,
+            captured_at: chrono::Utc::now(),
+            payload_type: Some(8),
+        };
+        let write_on_connected = |event: Option<OrchestratorAdapterEvent>| match event {
+            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Connected {
+                connection_id: connected,
+            })) if connected == connection_id => Some(
+                delayed
+                    .try_frames_out()
+                    .map_err(|error| error.to_string())
+                    .and_then(|frames| {
+                        frames
+                            .try_send(first_frame())
+                            .map_err(|error| error.to_string())
+                    }),
+            ),
+            _ => None,
+        };
+        let early = tokio::time::timeout(Duration::from_millis(200), async {
+            loop {
+                if let Some(write) = write_on_connected(events.recv().await) {
+                    break write;
+                }
+            }
+        })
+        .await
+        .ok();
+        let accepted_before_bind = tokio::time::timeout(Duration::from_millis(1), &mut accept)
+            .await
+            .is_ok();
+
+        drop(bind_gate);
+        let first_write = match early {
+            Some(write) => write,
+            None => tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Some(write) = write_on_connected(events.recv().await) {
+                        break write;
+                    }
+                }
+            })
+            .await
+            .expect("Connected after media bind"),
+        };
+        if !accepted_before_bind {
+            tokio::time::timeout(Duration::from_secs(5), accept)
+                .await
+                .expect("accept completes once media is bound")
+                .expect("accept task")
+                .expect("accept");
+        }
+
+        caller.hangup(&caller_session).await.expect("caller hangup");
+        adapter.drain().await.expect("adapter drain");
+        caller
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("caller shutdown");
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+
+        assert!(
+            !accepted_before_bind,
+            "accept completed after the ACK while its media stream was still unbound"
+        );
+        assert_eq!(
+            first_write,
+            Ok(()),
+            "the first frame written on Connected must be accepted"
+        );
     }
 
     #[test]
