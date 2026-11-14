@@ -216,7 +216,8 @@ pub struct DialogConfig {
     pub tls_advertised_local_address: Option<SocketAddr>,
 
     /// Accept explicit SIP TLS Contacts on SIPS INVITEs received over TLS.
-    /// Off by default; remote targets are normalized to SIPS, never cleartext.
+    /// Off by default. The peer's `sip:...;transport=tls` Contact is kept as
+    /// the remote target unchanged; it must name exactly one transport, TLS.
     #[serde(default)]
     pub allow_tls_contact_on_sips: bool,
 

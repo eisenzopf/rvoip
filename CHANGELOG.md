@@ -163,6 +163,17 @@ Each item has a one-line migration.
   `TlsTransport::client_only_with_flow_config`. Existing `TlsTransport`
   constructors use `TlsFlowConfig::default()`.
 
+#### TLS Contact compatibility
+
+- With `Config::sip_allow_tls_contact_on_sips` on, a peer's
+  `sip:...;transport=tls` Contact is now kept as the dialog's remote target
+  unchanged. It used to be rewritten to `sips:`, so BYE and other in-dialog
+  requests carried a Request-URI the peer had never advertised (RFC 3261
+  §§12.1.1, 12.2.1.1 build them from the peer's Contact), which some peers
+  reject. Requests still go over TLS, and a Contact that names more than one
+  `transport` parameter is now refused for this exception, as are cleartext
+  and non-TLS Contacts.
+
 #### Transaction layer (#339, #350)
 
 - The transaction layer no longer deadlocks against a dialog handler under
