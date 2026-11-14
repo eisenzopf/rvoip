@@ -624,6 +624,7 @@ fn adapter_event_connection_id(event: &AdapterEvent) -> Option<&ConnectionId> {
         | AdapterEvent::Failed { connection_id, .. }
         | AdapterEvent::Dtmf { connection_id, .. }
         | AdapterEvent::Quality { connection_id, .. }
+        | AdapterEvent::MediaCommitted { connection_id, .. }
         | AdapterEvent::Message { connection_id, .. }
         | AdapterEvent::DataMessage { connection_id, .. }
         | AdapterEvent::TransferStatus { connection_id, .. }

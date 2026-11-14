@@ -1182,6 +1182,20 @@ impl SessionState {
         }
     }
 
+    /// The negotiated RTP payload type only when SDP negotiation supplied it
+    /// for the current negotiated config, without the static legacy fallback
+    /// of [`Self::negotiated_payload_type`].
+    pub(crate) fn committed_negotiated_payload_type(&self) -> Option<u8> {
+        self.negotiated_payload
+            .as_ref()
+            .filter(|identity| {
+                self.negotiated_config
+                    .as_ref()
+                    .is_some_and(|config| identity.matches(config))
+            })
+            .map(|identity| identity.payload_type)
+    }
+
     /// Return the exact negotiated RTP payload type when SDP negotiation
     /// supplied one.
     ///

@@ -2457,6 +2457,7 @@ impl SipAdapter {
             | AdapterEvent::Failed { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -3782,6 +3783,14 @@ impl SipAdapter {
                         connection_id: epoch.connection_id.clone(),
                     },
                 );
+                self.publish_committed_media(&epoch);
+            }
+            ApiEvent::MediaSecurityNegotiated { call_id, .. } => {
+                // A wake-up only: the exact committed snapshot is re-read, so
+                // security set up before an inbound ACK publishes nothing.
+                if let Some(epoch) = self.existing_mapped_epoch(&call_id) {
+                    self.publish_committed_media(&epoch);
+                }
             }
             ApiEvent::CallProgress {
                 call_id,
@@ -4099,6 +4108,33 @@ impl SipAdapter {
     /// The nonblocking channel write occurs under `mapping_lock`, so terminal
     /// retirement cannot linearize between the liveness check and enqueue.
     /// Stale supervisors are treated as successfully discarded.
+    /// Publish the epoch's current committed audio selection, if any. Safe
+    /// to call on every wake-up: it reads the exact session snapshot.
+    fn publish_committed_media(&self, epoch: &SipRouteEpoch) {
+        let Some(handle) = epoch.admitted_handle() else {
+            return;
+        };
+        let Ok(snapshot) = self
+            .coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+        else {
+            return;
+        };
+        let Some(media) = committed_audio_media(snapshot.state(), snapshot.revision()) else {
+            return;
+        };
+        self.try_send_for_epoch(
+            epoch,
+            AdapterEvent::MediaCommitted {
+                connection_id: epoch.connection_id.clone(),
+                media,
+            },
+        );
+    }
+
     fn try_send_for_epoch(&self, epoch: &SipRouteEpoch, event: AdapterEvent) -> bool {
         let _mapping = self
             .mapping_lock
@@ -4256,6 +4292,88 @@ impl SipAdapter {
     fn map_session_err(err: crate::errors::SessionError) -> RvoipError {
         RvoipError::Adapter(format!("rvoip-sip: {}", err))
     }
+}
+
+/// The committed audio selection of one SIP session, or `None` while no
+/// offer/answer is complete (or one is pending) or the dialog is not
+/// established. Reads the same session-store values the media layer encodes
+/// with; the session revision orders successive selections.
+fn committed_audio_media(
+    session: &crate::session_store::state::SessionState,
+    revision: u64,
+) -> Option<rvoip_core::adapter::CommittedAudioMedia> {
+    if !session.sdp_negotiated
+        || session.pending_offer_answer.is_some()
+        || !matches!(
+            session.call_state,
+            CallState::Active | CallState::Bridged | CallState::OnHold
+        )
+    {
+        return None;
+    }
+    let config = session.negotiated_config.as_ref()?;
+    let media = rvoip_core::adapter::CommittedAudioMedia::new(
+        revision,
+        config.codec.to_ascii_uppercase(),
+        session.committed_negotiated_payload_type()?,
+        config.sample_rate,
+        config.channels,
+    );
+    let profile = committed_audio_profile(session);
+    let media = match session.media_security.as_ref() {
+        None => match profile {
+            Some(profile) if matches!(profile.as_str(), "RTP/AVP" | "RTP/AVPF") => {
+                media.with_media_profile(profile)
+            }
+            _ => media,
+        },
+        Some(security) => {
+            use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile};
+            // A secured selection always names its profile; one that does not
+            // match the negotiated security is not reported at all.
+            let profile = profile.filter(|profile| match security.profile {
+                MediaSecurityProfile::RtpSavp => {
+                    matches!(profile.as_str(), "RTP/SAVP" | "RTP/SAVPF")
+                }
+                MediaSecurityProfile::UdpTlsRtpSavp => {
+                    matches!(profile.as_str(), "UDP/TLS/RTP/SAVP" | "UDP/TLS/RTP/SAVPF")
+                }
+            })?;
+            let keying = match security.keying {
+                MediaSecurityKeying::Sdes => "sdes",
+                MediaSecurityKeying::DtlsSrtp => "dtls_srtp",
+            };
+            media.with_security(
+                profile,
+                keying,
+                security.suite.as_str(),
+                security.contexts_installed,
+            )
+        }
+    };
+    media.valid().then_some(media)
+}
+
+/// The audio transport profile both completed descriptions agree on for the
+/// committed payload type. Unknown or mismatched profiles yield `None`; they
+/// never imply plaintext.
+fn committed_audio_profile(session: &crate::session_store::state::SessionState) -> Option<String> {
+    fn profile(sdp: &str, payload: u8) -> Option<String> {
+        let parsed = rvoip_sip_core::types::sdp::SdpSession::from_str(sdp).ok()?;
+        let audio = parsed
+            .media_descriptions
+            .iter()
+            .find(|m| m.media.eq_ignore_ascii_case("audio") && m.port != 0)?;
+        audio
+            .formats
+            .iter()
+            .any(|p| p.parse::<u8>().ok() == Some(payload))
+            .then(|| audio.protocol.to_ascii_uppercase())
+    }
+    let payload = session.committed_negotiated_payload_type()?;
+    let local = profile(session.local_sdp.as_deref()?, payload)?;
+    let remote = profile(session.remote_sdp.as_deref()?, payload)?;
+    (local == remote).then_some(local)
 }
 
 async fn wait_for_route_cancel(cancel: &mut watch::Receiver<bool>) {
@@ -5221,7 +5339,7 @@ impl ConnectionAdapter for SipAdapter {
                     // As in `try_send_for_epoch`, the epoch check and the
                     // enqueue share `mapping_lock`, so retirement cannot slip
                     // between them. The reserved slot cannot be full.
-                    let _mapping = self
+                    let mapping = self
                         .mapping_lock
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -5233,6 +5351,8 @@ impl ConnectionAdapter for SipAdapter {
                             connection_id: conn.clone(),
                         },
                     ));
+                    drop(mapping);
+                    self.publish_committed_media(&epoch);
                     return Ok(());
                 }
                 Some(state) if state.is_final() || state == CallState::Terminating => {
@@ -5671,6 +5791,7 @@ impl ConnectionAdapter for SipAdapter {
                     "SIP re-INVITE selected a codec unavailable to the media graph".into(),
                 )
             })?;
+        self.publish_committed_media(&epoch);
         Ok(NegotiatedCodecs {
             audio: Some(chosen),
             video: None,

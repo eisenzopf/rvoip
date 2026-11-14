@@ -8495,6 +8495,7 @@ impl Orchestrator {
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -8525,6 +8526,7 @@ impl Orchestrator {
         let needs_authoritative_order = matches!(
             &event,
             AdapterEvent::Connected { .. }
+                | AdapterEvent::MediaCommitted { .. }
                 | AdapterEvent::Progress { .. }
                 | AdapterEvent::Ended { .. }
                 | AdapterEvent::Failed { .. }
@@ -8546,6 +8548,7 @@ impl Orchestrator {
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -8683,6 +8686,7 @@ impl Orchestrator {
                 | AdapterEvent::Progress { .. }
                 | AdapterEvent::Dtmf { .. }
                 | AdapterEvent::Quality { .. }
+                | AdapterEvent::MediaCommitted { .. }
                 | AdapterEvent::Message { .. }
                 | AdapterEvent::DataMessage { .. }
                 | AdapterEvent::TransferStatus { .. }
@@ -8992,6 +8996,24 @@ impl Orchestrator {
                         }
                     }
                 }
+            }
+            AdapterEvent::MediaCommitted {
+                connection_id,
+                media,
+            } => {
+                // Only the bounded vocabulary reaches the authoritative
+                // stream; an adapter bug cannot smuggle free text through.
+                if !media.valid() {
+                    warn!(?transport, "adapter reported invalid committed media");
+                    return;
+                }
+                self.emit_operational(
+                    connection_id,
+                    transport,
+                    Utc::now(),
+                    OperationalEventKind::MediaCommitted { media },
+                )
+                .await;
             }
             AdapterEvent::Quality {
                 connection_id,

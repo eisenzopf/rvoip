@@ -205,6 +205,13 @@ pub enum OperationalEventKind {
     MediaActivity {
         generation: u64,
     },
+    /// The connection's committed audio format: codec, payload type, clock
+    /// rate, channels and security posture, never SDP, addresses or keys.
+    /// Published when offer/answer first commits and again when it changes;
+    /// keep the highest [`CommittedAudioMedia::revision`](crate::adapter::CommittedAudioMedia::revision).
+    MediaCommitted {
+        media: crate::adapter::CommittedAudioMedia,
+    },
     /// Per-connection media quality, distilled from RTCP receiver reports
     /// and XR by the media layer.
     ///
@@ -271,6 +278,15 @@ impl fmt::Debug for OperationalEventKind {
             Self::MediaActivity { generation } => formatter
                 .debug_struct("MediaActivity")
                 .field("generation", generation)
+                .finish(),
+            Self::MediaCommitted { media } => formatter
+                .debug_struct("MediaCommitted")
+                .field("revision", &media.revision)
+                .field("codec", &media.codec)
+                .field("payload_type", &media.payload_type)
+                .field("clock_rate", &media.clock_rate)
+                .field("channels", &media.channels)
+                .field("secured", &media.keying.is_some())
                 .finish(),
             Self::Quality {
                 jitter_centi_ms,
