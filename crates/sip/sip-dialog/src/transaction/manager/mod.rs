@@ -7991,7 +7991,9 @@ impl TransactionManager {
             ));
         }
 
-        let mut ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
+        let (mut ack_request, same_proxy_route) = self
+            .create_ack_for_2xx_with_route_continuity(invite_tx_id, response)
+            .await?;
         if let Some(sdp_answer) = sdp_answer {
             ack_request.headers.retain(|header| {
                 !matches!(
@@ -8044,7 +8046,11 @@ impl TransactionManager {
         };
 
         let mut ack_route = original_route;
-        if ack_route.destination != destination {
+        if ack_route.destination != destination
+            && !(same_proxy_route
+                && ack_route.transport_type == Some(TransportType::Tls)
+                && ack_route.flow_id.is_some())
+        {
             ack_route.destination = destination;
             // An opaque stream flow is valid only for the peer it was bound
             // to. A Contact-selected destination must establish/select its
@@ -8206,6 +8212,16 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         response: &Response,
     ) -> Result<Request> {
+        self.create_ack_for_2xx_with_route_continuity(invite_tx_id, response)
+            .await
+            .map(|(request, _)| request)
+    }
+
+    async fn create_ack_for_2xx_with_route_continuity(
+        &self,
+        invite_tx_id: &TransactionKey,
+        response: &Response,
+    ) -> Result<(Request, bool)> {
         // Verify this is an INVITE client transaction
         if *invite_tx_id.method() != Method::Invite || invite_tx_id.is_server {
             return Err(Error::Other(
@@ -8257,7 +8273,12 @@ impl TransactionManager {
             &local_addr,
         )?;
 
-        Ok(ack_request)
+        let same_proxy_route =
+            crate::transaction::method::ack::ack_preserves_established_proxy_route(
+                &invite_request,
+                &ack_request,
+            );
+        Ok((ack_request, same_proxy_route))
     }
 
     /// Create a server transaction from an incoming request.
