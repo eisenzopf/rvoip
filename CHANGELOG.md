@@ -844,6 +844,23 @@ outcome unchanged, and add no configuration.
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
 
+### WebRTC
+
+- `rvoip-webrtc` binds the local audio track and its RTP writer to the
+  codec, payload type and clock the offer/answer selected. They used to be
+  Opus/48000/2 whatever was negotiated, so on a PCMU-only route, or an
+  Opus-first offer answered with G.711, the RTC sender dropped every packet
+  (its encoding matched no negotiated codec) after the media pump had been
+  told the write succeeded. Routes that contact a target over WebSocket,
+  WHIP or WHEP now commit the answered codec/PT to the route, as
+  `set_remote_answer` does, instead of keeping their offer's provisional
+  Opus. A receive-only (WHEP player) route needs no sender binding and
+  refuses outgoing frames at its writer. A renegotiation that would change
+  the codec of an audio sender already carrying media is refused, and
+  stream setup fails if the sender, payload type or clock do not match the
+  route's codec. With the default multi-codec profile, routes now record
+  the codec the final answer selected instead of a capability guess.
+
 ### Release process, CI and dependencies
 
 - Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,

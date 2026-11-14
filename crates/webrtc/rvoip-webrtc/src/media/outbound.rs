@@ -1,6 +1,7 @@
 //! Serialized RTP ownership for one locally-originated WebRTC audio SSRC.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex, OnceLock, Weak};
 
 use bytes::Bytes;
@@ -135,6 +136,7 @@ pub(crate) struct OutboundAudioRtpWriter {
     track: Arc<TrackLocalStaticRTP>,
     ssrc: u32,
     clock_rate_hz: u32,
+    send_enabled: AtomicBool,
     mid: SyncMutex<Option<String>>,
     state: Mutex<OutboundAudioRtpState>,
 }
@@ -190,6 +192,7 @@ impl OutboundAudioRtpWriter {
             track,
             ssrc,
             clock_rate_hz,
+            send_enabled: AtomicBool::new(true),
             mid: SyncMutex::new(None),
             state: Mutex::new(OutboundAudioRtpState::default()),
         });
@@ -197,11 +200,27 @@ impl OutboundAudioRtpWriter {
         writer
     }
 
+    pub(crate) fn set_send_enabled(&self, enabled: bool) {
+        self.send_enabled.store(enabled, Ordering::Release);
+    }
+
+    pub(crate) fn ensure_send_enabled(&self) -> webrtc::error::Result<()> {
+        if self.send_enabled.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(webrtc::error::Error::ErrRTPSenderNotExisted)
+        }
+    }
+
     pub(crate) fn set_mid(&self, mid: Option<String>) {
         *self
             .mid
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = mid;
+    }
+
+    pub(crate) fn clock_rate_hz(&self) -> u32 {
+        self.clock_rate_hz
     }
 
     pub(crate) fn ssrc(&self) -> u32 {
@@ -230,6 +249,7 @@ impl OutboundAudioRtpWriter {
         // Keep the owner locked through the actual enqueue so audio and
         // telephone-event packets cannot reach the track out of sequence.
         let mut state = self.state.lock().await;
+        self.ensure_send_enabled()?;
         let sequence_number = state.next_sequence_number();
         let packet = rtp::Packet {
             header: rtp::Header {
@@ -272,6 +292,7 @@ impl OutboundAudioRtpWriter {
         payload: Bytes,
     ) -> webrtc::error::Result<()> {
         let mut state = self.state.lock().await;
+        self.ensure_send_enabled()?;
         let samples_per_frame = (self.clock_rate_hz / 50).max(1);
         let timestamp = state.allocate_audio_timestamp(source_timestamp, samples_per_frame);
         let packet = rtp::Packet {
@@ -296,6 +317,7 @@ impl OutboundAudioRtpWriter {
             .clone();
         let extension = mid.as_deref().map(sdes_mid_header_extension);
         loop {
+            self.ensure_send_enabled()?;
             let result = if let Some(extension) = extension.as_ref() {
                 self.track
                     .write_rtp_with_extensions(packet.clone(), std::slice::from_ref(extension))
@@ -357,6 +379,31 @@ mod tests {
 
         let different_ssrc = OutboundAudioRtpWriter::new(track, 0x1020_3041, 48_000);
         assert!(!Arc::ptr_eq(&peer_writer, &different_ssrc));
+    }
+
+    #[tokio::test]
+    async fn receive_only_refuses_primary_and_event_enqueue_without_advancing_timeline() {
+        let writer = OutboundAudioRtpWriter::new(audio_track(0x1020_3042), 0x1020_3042, 48_000);
+        writer.set_send_enabled(false);
+        assert!(matches!(
+            writer
+                .write_audio(111, 960, Bytes::from_static(&[0xf8, 0xff, 0xfe]))
+                .await,
+            Err(webrtc::error::Error::ErrRTPSenderNotExisted)
+        ));
+        assert!(matches!(
+            writer
+                .write_supplemental_audio(101, 960, true, Bytes::from_static(&[5, 0x0a, 0, 160]))
+                .await,
+            Err(webrtc::error::Error::ErrRTPSenderNotExisted)
+        ));
+        let state = writer.state.lock().await;
+        assert_eq!(state.next_sequence_number, 1);
+        assert_eq!(state.last_wire_timestamp, None);
+        assert_eq!(state.last_source_timestamp, None);
+        drop(state);
+        writer.set_send_enabled(true);
+        assert!(writer.ensure_send_enabled().is_ok());
     }
 
     #[test]

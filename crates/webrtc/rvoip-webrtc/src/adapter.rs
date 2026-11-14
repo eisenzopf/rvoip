@@ -2173,6 +2173,10 @@ impl WebRtcAdapter {
             .local_audio_ssrc()
             .ok_or_else(|| WebRtcError::Adapter("no local audio SSRC".into()))?;
         let payload_type = route.audio_payload_type;
+        route
+            .peer
+            .validate_outbound_audio_codec(&codec, payload_type)
+            .await?;
         let outbound_writer = route
             .peer
             .outbound_audio_writer()
@@ -2387,12 +2391,6 @@ impl WebRtcAdapter {
     /// D2 — update the stored remote SDP for an existing route (e.g. after
     /// `apply_remote_answer` lands the offerer's answer). No-op when the
     /// route has already been reaped.
-    fn update_remote_sdp(&self, conn: &ConnectionId, sdp: &str) {
-        if let Some(mut entry) = self.routes.get_mut(conn) {
-            entry.remote_sdp = Some(sdp.to_owned());
-        }
-    }
-
     fn insert_route(&self, conn_id: ConnectionId, route: Route) -> Result<()> {
         let peer_track = Arc::clone(&route.peer);
         let peer_fail = Arc::clone(&route.peer);
@@ -2609,19 +2607,59 @@ impl WebRtcAdapter {
         self.enforce_fingerprint_policy(&conn, answer_sdp, None)
             .await?;
         let route = self.route(&conn)?;
-        let local_sdp = route.local_sdp.as_deref().ok_or_else(|| {
-            WebRtcError::Sdp("outbound WebRTC route has no retained offer".into())
+        Self::apply_target_answer(&self.routes, &conn, &route, answer_sdp).await
+    }
+
+    /// Apply a remote answer to a route this adapter offered and commit the
+    /// answered audio codec/PT to the route before any media is activated.
+    ///
+    /// Shared by the manual [`Self::set_remote_answer`] path and the WS, WHIP
+    /// and WHEP drivers, so every target-contacting route stamps the codec the
+    /// answer selected rather than the provisional one from its offer. The
+    /// selection uses the peer's retained capabilities, which include per-call
+    /// overrides, and is the same one the peer binds its audio sender to.
+    async fn apply_target_answer(
+        routes: &DashMap<ConnectionId, Route>,
+        conn: &ConnectionId,
+        route: &Route,
+        answer: &str,
+    ) -> Result<()> {
+        let offer = route
+            .local_sdp
+            .as_deref()
+            .ok_or_else(|| WebRtcError::Sdp("outbound route has no retained offer".into()))?;
+        // A video- or data-only offer has no audio codec to commit.
+        let audio = match route.peer.local_audio_track() {
+            Some(_) => Some(route.peer.selected_audio_payload(offer, answer)?),
+            None => None,
+        };
+        route.peer.set_remote_answer(answer).await?;
+        Self::store_target_audio(routes, conn, route, audio, None, answer)
+    }
+
+    fn store_target_audio(
+        routes: &DashMap<ConnectionId, Route>,
+        conn: &ConnectionId,
+        route: &Route,
+        audio: Option<crate::sdp::session::NegotiatedAudioPayload>,
+        local_answer: Option<&str>,
+        remote_sdp: &str,
+    ) -> Result<()> {
+        let mut stored = routes.get_mut(conn).ok_or_else(|| {
+            WebRtcError::Adapter("outbound route ended during negotiation".into())
         })?;
-        let final_audio = final_audio_negotiation(&self.config, local_sdp, answer_sdp)?;
-        route.peer.set_remote_answer(answer_sdp).await?;
-        // Update the stored remote SDP so subsequent verify_request_signature
-        // / remote_dtls_fingerprint calls see the answer's fingerprint.
-        self.update_remote_sdp(&conn, answer_sdp);
-        if let Some(mut stored) = self.routes.get_mut(&conn) {
-            if let Some((negotiated, payload_type)) = final_audio {
-                stored.negotiated = negotiated;
-                stored.audio_payload_type = payload_type;
-            }
+        if !Arc::ptr_eq(&stored.peer, &route.peer) {
+            return Err(WebRtcError::Adapter(
+                "outbound route peer changed during negotiation".into(),
+            ));
+        }
+        if let Some(audio) = audio {
+            stored.negotiated.audio = Some(audio.codec);
+            stored.audio_payload_type = audio.payload_type;
+        }
+        stored.remote_sdp = Some(remote_sdp.to_owned());
+        if let Some(answer) = local_answer {
+            stored.local_sdp = Some(answer.to_owned());
         }
         Ok(())
     }
@@ -3908,13 +3946,12 @@ impl WebRtcAdapter {
                                 )
                                 .await
                                 .is_err()
-                                || route.peer.set_remote_answer(&sdp).await.is_err()
+                                || Self::apply_target_answer(&routes, &conn, &route, &sdp)
+                                    .await
+                                    .is_err()
                             {
                                 Self::stop_ws_session(commands, task, Some(&connection_id), true).await;
                                 return OutboundDriverExit::RemoteFailed("WebRTC remote answer was rejected");
-                            }
-                            if let Some(mut stored) = routes.get_mut(&conn) {
-                                stored.remote_sdp = Some(sdp);
                             }
                             break connection_id;
                         }
@@ -4225,13 +4262,12 @@ impl WebRtcAdapter {
             )
             .await
             .is_err()
-            || route.peer.set_remote_answer(&answer_sdp).await.is_err()
+            || Self::apply_target_answer(&routes, &conn, &route, &answer_sdp)
+                .await
+                .is_err()
         {
             let _ = client.delete().await;
             return OutboundDriverExit::RemoteFailed("WHIP remote answer was rejected");
-        }
-        if let Some(mut stored) = routes.get_mut(&conn) {
-            stored.remote_sdp = Some(answer_sdp);
         }
 
         while let Some(candidate) = local_candidates.pop_front() {
@@ -4364,7 +4400,7 @@ impl WebRtcAdapter {
             }
         };
 
-        let (mut client, remote_sdp) = match created {
+        let mut client = match created {
             WhepCreation::Answer(created) => {
                 let mut client = created.client;
                 if cancel_requested {
@@ -4381,16 +4417,14 @@ impl WebRtcAdapter {
                     )
                     .await
                     .is_err()
-                    || route
-                        .peer
-                        .set_remote_answer(&created.answer_sdp)
+                    || Self::apply_target_answer(&routes, &conn, &route, &created.answer_sdp)
                         .await
                         .is_err()
                 {
                     let _ = client.delete().await;
                     return OutboundDriverExit::RemoteFailed("WHEP remote answer was rejected");
                 }
-                (client, created.answer_sdp)
+                client
             }
             WhepCreation::CounterOffer(mut counter_offer) => {
                 if cancel_requested {
@@ -4454,8 +4488,32 @@ impl WebRtcAdapter {
                         );
                     }
                 }
-                if let Some(mut stored) = routes.get_mut(&conn) {
-                    stored.local_sdp = Some(answer);
+                let audio = match route.peer.local_audio_track().map(|_| {
+                    route
+                        .peer
+                        .selected_audio_payload(&counter_offer.offer_sdp, &answer)
+                }) {
+                    None => None,
+                    Some(Ok(audio)) => Some(audio),
+                    Some(Err(_)) => {
+                        let _ = counter_offer.client.delete().await;
+                        return OutboundDriverExit::RemoteFailed(
+                            "WHEP counter-offer audio was rejected",
+                        );
+                    }
+                };
+                if Self::store_target_audio(
+                    &routes,
+                    &conn,
+                    &route,
+                    audio,
+                    Some(&answer),
+                    &counter_offer.offer_sdp,
+                )
+                .is_err()
+                {
+                    let _ = counter_offer.client.delete().await;
+                    return OutboundDriverExit::RemoteFailed("WHEP counter-offer route ended");
                 }
                 if trickle {
                     for event in route.peer.drain_local_ice_events().await {
@@ -4482,13 +4540,10 @@ impl WebRtcAdapter {
                         }
                     }
                 }
-                (counter_offer.client, counter_offer.offer_sdp)
+                counter_offer.client
             }
         };
 
-        if let Some(mut stored) = routes.get_mut(&conn) {
-            stored.remote_sdp = Some(remote_sdp);
-        }
         while let Some(candidate) = local_candidates.pop_front() {
             match tokio::time::timeout_at(deadline, client.patch_candidate(candidate)).await {
                 Ok(Ok(())) => {}
@@ -5419,9 +5474,10 @@ async fn attach_track_to_streams_matching(
 ///
 /// Profiles configured with one primary codec are explicitly deterministic:
 /// any malformed, rejected, or multi-primary final answer fails closed. The
-/// historical default profile retains several primary codecs for compatibility;
-/// those routes keep their legacy capability result until payload-aware
-/// multi-codec stream metadata is available.
+/// historical default profile retains several primary codecs; its route
+/// records the same final-answer codec/PT the local audio sender is bound to
+/// (see `selected_audio_payload`), and an answer that changes an offered
+/// mapping or selects nothing this endpoint supports fails closed.
 fn final_audio_negotiation(
     config: &WebRtcConfig,
     offer_sdp: &str,
@@ -5442,7 +5498,22 @@ fn final_audio_negotiation(
         {
             Err(error)
         }
-        Err(_) => Ok(None),
+        // No audio to describe (a video- or data-only offer).
+        Err(_) if !crate::sdp::session::has_audio_section(offer_sdp) => Ok(None),
+        Err(_) => {
+            let audio = crate::sdp::session::selected_audio_payload(
+                offer_sdp,
+                answer_sdp,
+                &config.capabilities.audio_codecs,
+            )?;
+            Ok(Some((
+                NegotiatedCodecs {
+                    audio: Some(audio.codec),
+                    video: None,
+                },
+                audio.payload_type,
+            )))
+        }
     }
 }
 
