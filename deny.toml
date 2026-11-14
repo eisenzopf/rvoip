@@ -49,12 +49,16 @@ unmaintained = "none"
 # full rationale is in the gate's security/accepted-advisories.md. Revisit
 # before stable release / when the upstream stacks publish fixes.
 ignore = [
-    # `rsa` — RustSec reports no fixed upgrade. Transitive via users-core
-    # RS256/JWK support and webauthn-rs crypto-glue.
+    # `rsa` — RustSec reports no fixed upgrade. Used directly by users-core
+    # (RS256 key handling) and transitively by webauthn-rs crypto-glue.
+    # jsonwebtoken signs with aws-lc-rs, not `rsa`.
     "RUSTSEC-2023-0071",
     # `crypto-bigint` 0.5 — transitive via the RustCrypto elliptic-curve 0.13
-    # stack (p256/p384/p521, webauthn-rs crypto-glue). The fix ships only in
-    # 0.7.6, which needs elliptic-curve 0.14. Revisit with that upgrade.
+    # stack. rtp-core, jsonwebtoken (aws-lc-rs backend) and webauthn-rs 0.6.2
+    # no longer use it; it remains only through third-party stacks: `dtls`
+    # 0.17 (rtp-core `dtls-webrtc`), the `rtc-*` 0.20 alphas and `aws-config`
+    # (amazon-connect). The fix ships only in 0.7.6, which needs
+    # elliptic-curve 0.14. Revisit when those move to it.
     "RUSTSEC-2026-0387",
     # `libsqlite3-sys` 0.30 (bundled SQLite 3.46) — transitive via
     # sqlx-sqlite in users-core. The fix is libsqlite3-sys 0.39 (SQLite
@@ -132,6 +136,15 @@ wrappers = [
     "rvoip-vcon-postgres",
 ]
 reason = "Adapter crates should consume type/trait surface from `rvoip-core-traits`; the implementation crate `rvoip-core` is reserved for the facade. See GAP_PLAN.md V2.A.10."
+
+# jsonwebtoken 10 needs exactly one crypto backend. With both `aws_lc_rs` and
+# `rust_crypto` enabled in one build it has no default provider, and every
+# encode/decode panics unless the application installs one. rvoip uses
+# `aws_lc_rs` (the backend rustls already links), so applications that also
+# pick `aws_lc_rs` work unchanged; keep every workspace crate on it.
+[[bans.features]]
+crate = "jsonwebtoken"
+deny  = ["rust_crypto"]
 
 # Source registry policy — workspace, crates.io, and reviewed project-owned
 # forks only. Cargo.toml must still use an exact 40-character `rev`; this URL
