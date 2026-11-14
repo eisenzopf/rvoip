@@ -249,6 +249,16 @@ Each item has a one-line migration.
   rejects the still-unanswered call with `503 Signaling Event Backpressure`
   and returns `AdmissionRejected`, instead of sending 200 OK and then leaving
   the answered call without its establishment handoff or media setup.
+- An outbound call the peer refuses during `SipAdapter` activation (486
+  Busy Here, 603 Decline, 404 and so on) now fails with that final
+  response as its `AdapterEvent::Failed` detail, such as `486 Busy Here`.
+  The activation waiter saw the recorded terminal before the adapter's own
+  event translator did, so the generic `SIP outbound activation failed`
+  became the cleanup cause and replaced the peer's response. Activation now
+  stages the recorded terminal on the route before failing, waits a bounded
+  2 s for that record when the final state is committed first, and a
+  cleanup cause no longer replaces a remote terminal that was staged before
+  it.
 - New `Config::sip_adapter_call_capacity: Option<usize>` and
   `Config::with_sip_adapter_call_capacity()` (#348). The default `None` keeps
   the 256-event queue and 4096 pending inbound observations; when set, the
