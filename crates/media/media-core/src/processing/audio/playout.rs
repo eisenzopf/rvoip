@@ -614,6 +614,20 @@ impl PlayoutBuffer {
             duration: last.duration,
             timestamp: last.timestamp,
         };
+        // Conceal only up to the next real frame when it starts inside this
+        // template's span: a lost packet shorter than the others, or a
+        // packet-time change at the loss, moves every later frame off the old
+        // grid, and a whole-frame repeat would step over each of them.
+        let channels = usize::from(concealed.channels.max(1));
+        let span = concealed.samples.len() / channels;
+        if let Some(next) = self.oldest_pending_timestamp() {
+            let missing = next.wrapping_sub(expected) as usize;
+            if missing > 0 && missing < span && concealed.sample_rate > 0 {
+                concealed.samples.truncate(missing * channels);
+                concealed.duration =
+                    Duration::from_secs_f64(missing as f64 / f64::from(concealed.sample_rate));
+            }
+        }
         if self.consecutive_concealed >= self.config.max_consecutive_concealed {
             // Past this, the far end is gone rather than jittery. Emitting
             // silence is honest; repeating is a buzz that sounds like us.
@@ -964,6 +978,57 @@ mod tests {
         );
         assert_eq!(playout.stats().frames_concealed, 1);
         assert_eq!(playout.pop().expect("resumes").timestamp, 320);
+    }
+
+    #[test]
+    fn a_gap_off_the_frame_grid_conceals_only_up_to_the_next_real_frame() {
+        // A lost packet that was shorter than the others (a 5 ms packet in a
+        // 20 ms stream, or a packet-time change at the loss) moves every
+        // later packet off the old frame grid. Concealing whole frames would
+        // step over each of them forever.
+        for (rate, channels) in [(8_000u32, 1u8), (48_000, 2)] {
+            let ticks = rate / 50;
+            let short = ticks / 4;
+            let channel_count = usize::from(channels);
+            let make = |timestamp: u32, level: i16| {
+                AudioFrame::new(
+                    vec![level; ticks as usize * channel_count],
+                    rate,
+                    channels,
+                    timestamp,
+                )
+            };
+            let (mut playout, now) = buffer();
+            playout.push(make(0, 1_000), now);
+            playout.push(make(ticks, 1_000), now);
+            assert_eq!(playout.pop().unwrap().timestamp, 0);
+            assert_eq!(playout.pop().unwrap().timestamp, ticks);
+            let resumed_at = 2 * ticks + short;
+            playout.push(make(resumed_at, 12_000), now);
+            playout.push(make(resumed_at + ticks, 12_000), now);
+
+            let gap = playout.pop().unwrap();
+            assert_eq!(gap.timestamp, 2 * ticks);
+            for expected in [resumed_at, resumed_at + ticks] {
+                let resumed = playout.pop().unwrap();
+                assert!(
+                    resumed.timestamp == expected
+                        && resumed.samples.iter().all(|sample| *sample == 12_000),
+                    "real audio after the gap must play (rate={rate} channels={channels})"
+                );
+            }
+            assert_eq!(
+                gap.samples.len(),
+                short as usize * channel_count,
+                "conceal only the missing span (rate={rate} channels={channels})"
+            );
+            assert_eq!(
+                gap.duration,
+                Duration::from_secs_f64(f64::from(short) / f64::from(rate))
+            );
+            assert_eq!(playout.stats().frames_concealed, 1);
+            assert_eq!(playout.stats().frames_late, 0);
+        }
     }
 
     #[test]

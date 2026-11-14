@@ -719,6 +719,16 @@ production v2 profile, measured on Xeon 6 SMT.
   destination only when it changed, instead of allocating an `Arc` and taking
   `arc_swap`'s writer path for every packet.
 
+#### Concealment of a gap off the frame grid
+
+- `PlayoutBuffer` conceals only up to the next real frame when that frame
+  starts inside a concealment frame's span. A lost packet shorter than the
+  others, or a packet-time change at the loss, moves every later packet off
+  the old frame grid; concealing whole frames stepped over each of them, so
+  the real audio after such a gap was never played and the stream faded to
+  silence. The concealment frame now carries the missing span and its
+  duration, and playout continues with the real frame.
+
 #### Hot path (#354, #357, #373)
 
 These changes keep wire output, statistics, RTCP content and every error
