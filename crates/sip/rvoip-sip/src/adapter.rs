@@ -3223,6 +3223,131 @@ impl SipAdapter {
         }
     }
 
+    /// Hold or resume one route, completing on the peer's answer.
+    ///
+    /// The state machine commits `OnHold` (or `Active`) only when the 2xx to
+    /// the re-INVITE arrives, and keeps the call as it was on a non-2xx or
+    /// timeout (RFC 3261 section 14.1). This waits for that outcome, as
+    /// `renegotiate_media` does, so a rejected hold or resume is an error
+    /// instead of a success that only meant the request was sent. A committed
+    /// answer is then applied to the live stream as a new media generation:
+    /// the answer may select another codec, and the inbound playout restarts
+    /// instead of keeping a playout clock that ran on through the hold, which
+    /// would drop the resumed audio of a source that paused its RTP clock.
+    async fn change_hold_direction(&self, conn: ConnectionId, hold: bool) -> CoreResult<()> {
+        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
+        let epoch = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.route_epoch_for_connection_locked(&conn)
+        };
+        let Some((epoch, handle)) = epoch.and_then(|epoch| {
+            let handle = epoch.admitted_handle().cloned()?;
+            (epoch.session_id == session_id).then_some((epoch, handle))
+        }) else {
+            // No admitted SIP lifetime to observe: dispatch as before.
+            return if hold {
+                self.coordinator.hold(&session_id).await
+            } else {
+                self.coordinator.resume(&session_id).await
+            }
+            .map_err(Self::map_session_err);
+        };
+        let target = if hold {
+            CallState::OnHold
+        } else {
+            CallState::Active
+        };
+        let before = self
+            .coordinator
+            .get_state_exact(&handle)
+            .await
+            .map_err(Self::map_session_err)?;
+        let mut completions = self.coordinator.subscribe_renegotiation_completions();
+        if hold {
+            self.coordinator.hold_exact(&handle).await
+        } else {
+            self.coordinator.resume_exact(&handle).await
+        }
+        .map_err(Self::map_session_err)?;
+        if before == target {
+            // Already in the requested direction: the state table answers
+            // this without a re-INVITE.
+            return Ok(());
+        }
+
+        let deadline = tokio::time::sleep(self.coordinator.reinvite_completion_timeout_duration());
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                _ = &mut deadline => {
+                    return Err(RvoipError::AdmissionRejected(
+                        "SIP hold/resume re-INVITE timed out before a committed answer",
+                    ));
+                }
+                result = completions.recv() => {
+                    let completion = result.map_err(|_| RvoipError::AdmissionRejected(
+                        "SIP hold/resume completion observation was unavailable",
+                    ))?;
+                    if completion.handle != handle || completion.method != "INVITE" {
+                        continue;
+                    }
+                    if completion.outcome
+                        == crate::api::lifecycle::RenegotiationCompletionOutcome::Failed
+                    {
+                        return Err(RvoipError::AdmissionRejected(
+                            "SIP hold/resume re-INVITE was not accepted by the peer",
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+        let state = self
+            .coordinator
+            .get_state_exact(&handle)
+            .await
+            .map_err(Self::map_session_err)?;
+        if state != target {
+            return Err(RvoipError::AdmissionRejected(
+                "SIP hold/resume answer did not commit the requested direction",
+            ));
+        }
+
+        let stream = {
+            let _mapping = self
+                .mapping_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if !self.epoch_is_current_locked(&epoch) {
+                return Err(RvoipError::ConnectionNotFound(conn));
+            }
+            self.streams_cache
+                .get(&conn)
+                .map(|entry| Arc::clone(entry.value()))
+        };
+        if let Some(stream) = stream {
+            if let Some((config, payload_type)) = self
+                .coordinator
+                .negotiated_media_config_exact(&handle)
+                .await
+                .map_err(Self::map_session_err)?
+            {
+                stream
+                    .apply_negotiated_media(&config, payload_type)
+                    .map_err(|_| {
+                        RvoipError::UnsupportedCodec(
+                            "SIP hold/resume answer selected a codec unavailable to the media graph"
+                                .into(),
+                        )
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
     /// Atomically reserve the only transfer attempt permitted for this exact
     /// live route. The history entry is intentionally not reusable after a
     /// terminal status: raw REFER events lack transaction correlation, so a
@@ -5378,19 +5503,11 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn hold(&self, conn: ConnectionId) -> CoreResult<()> {
-        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
-        self.coordinator
-            .hold(&session_id)
-            .await
-            .map_err(Self::map_session_err)
+        self.change_hold_direction(conn, true).await
     }
 
     async fn resume(&self, conn: ConnectionId) -> CoreResult<()> {
-        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
-        self.coordinator
-            .resume(&session_id)
-            .await
-            .map_err(Self::map_session_err)
+        self.change_hold_direction(conn, false).await
     }
 
     async fn transfer(&self, conn: ConnectionId, target: TransferTarget) -> CoreResult<()> {

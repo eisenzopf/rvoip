@@ -424,6 +424,22 @@ supported yet and is rejected by `Config::validate`.
   carry one.
 - `parse_sdp_connection` accepts `c=IN IP6`.
 
+#### Adapter hold and resume
+
+- `SipAdapter::hold` and `SipAdapter::resume` return the peer's answer. They
+  used to return as soon as the re-INVITE was sent, so a hold or resume the
+  peer rejected (for example with 488) was reported as success while the
+  call kept its previous direction. They now wait, bounded by the re-INVITE
+  completion timeout, for the committed 2xx and fail with
+  `AdmissionRejected` otherwise; a request for the direction the call is
+  already in still returns at once.
+- A committed hold or resume is applied to the live stream as a new media
+  generation, as `renegotiate_media` already did: the inbound playout buffer
+  restarts and a codec change in the answer is picked up. With a playout
+  buffer configured, the playout clock used to run on through the hold, so a
+  peer that paused its RTP clock while held resumed behind it and its audio
+  was dropped as late for seconds after the resume.
+
 ### Signaling performance
 
 Wire output, published events and STIR/SHAKEN behaviour are unchanged unless a
