@@ -647,6 +647,21 @@ enum SetupTeardownTimeoutTerminal {
     Failed,
 }
 
+/// Established-dialog states whose `HangupCall` row sends BYE (RFC 3261
+/// §15.1). A hangup from any of them joins the exact BYE transaction before
+/// it reports success, exactly as from `Active`.
+fn local_hangup_sends_bye(state: CallState) -> bool {
+    matches!(
+        state,
+        CallState::Active
+            | CallState::HoldPending
+            | CallState::OnHold
+            | CallState::Resuming
+            | CallState::Muted
+            | CallState::Bridged
+    )
+}
+
 /// The watchdog a local hangup arms once its transition has committed.
 ///
 /// A UAS hangup after 200 OK waits in `AnsweringHangupPending` for the ACK
@@ -12517,7 +12532,8 @@ impl UnifiedCoordinator {
             let _ = dispatched.send(*transitioned);
         }
         let dispatch = dispatch.map(|_| ());
-        let retained_new_bye = matches!(initial_state, Some(CallState::Active))
+        let established_dialog = initial_state.is_some_and(local_hangup_sends_bye);
+        let retained_new_bye = established_dialog
             && self
                 .dialog_adapter
                 .has_outgoing_bye_after_exact(handle, bye_generation_before_dispatch);
@@ -12541,7 +12557,7 @@ impl UnifiedCoordinator {
         // the dialog (the ordinary simultaneous-BYE race). The confirmation
         // helper always performs exact local reclamation on any other
         // timeout/non-2xx while preserving that wire failure for the caller.
-        if matches!(initial_state, Some(CallState::Active)) && !hangup_was_noop {
+        if established_dialog && !hangup_was_noop {
             return complete_established_bye_dispatch(
                 dispatch,
                 retained_new_bye,

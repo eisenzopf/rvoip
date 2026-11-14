@@ -3750,6 +3750,23 @@ impl StateMachine {
                     session.call_state = old_state;
                     session.entered_state_at = pre_event_snapshot.state().entered_state_at;
                 }
+                // A local hold/resume is committed only by the peer's 2xx
+                // (RFC 3261 §14.1). When its re-INVITE could not be sent,
+                // SendReINVITE has already rolled back the offer and pending
+                // re-INVITE; leaving the call in HoldPending/Resuming would
+                // strand it there with no transaction to complete it, and
+                // every later hold, resume or hangup would find no row.
+                // Return to the pre-event state and keep the original error.
+                if matches!(action, Action::SendReINVITE)
+                    && matches!(
+                        (old_state, &event),
+                        (CallState::Active, EventType::HoldCall)
+                            | (CallState::OnHold, EventType::ResumeCall)
+                    )
+                {
+                    session.call_state = old_state;
+                    session.entered_state_at = pre_event_snapshot.state().entered_state_at;
+                }
                 if response_input_active && !retryable_pre_wire_failure {
                     session.clear_pending_response_input();
                 }

@@ -340,6 +340,19 @@ Each item has a one-line migration.
   exact terminal release quiesces the local BYE before it cleans the dialog
   and media once.
 
+- A local hangup from `HoldPending`, `OnHold`, `Resuming`, `Muted` or
+  `Bridged` now sends BYE (RFC 3261 §15.1) and, as from `Active`, completes
+  only once the peer answers it. The default table had `HangupCall` rows only
+  for setup states and `Active`, so a hangup of a held call, or of a call
+  whose hold or resume re-INVITE was still pending, sent nothing and left the
+  dialog up at the peer.
+- A hold or resume whose re-INVITE cannot be sent (for example, a refused
+  connection to the peer's Contact) now returns the call to `Active` or
+  `OnHold`. `SendReINVITE` already rolled back the offer, but the call stayed
+  in `HoldPending` or `Resuming` with no transaction left to complete it, so
+  every later hold, resume or hangup found no row. The original error is
+  still returned.
+
 #### SIP media streams (#340, #342, #343)
 
 - Closing a `SipMediaStream` awaits the media driver's `JoinHandle` instead of
