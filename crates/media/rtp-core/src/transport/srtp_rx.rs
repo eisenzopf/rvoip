@@ -47,7 +47,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::executor::{record_owner_srtp_handoff, record_owner_srtp_loop, SrtpOwnerCounters};
-use crate::srtp::SrtpContext;
+use crate::srtp::{SrtpContext, SrtpMasterKeys};
 
 /// The inbound SRTP context of one transport and its hand-off state.
 pub(crate) struct SrtpRecvShared {
@@ -80,6 +80,10 @@ pub(crate) struct SrtpRecvSlot {
     /// kept so the rollback token of that replacement can restore it
     /// exactly. Cleared by the next replacement or rollback.
     returned: Option<(u64, SrtpContext)>,
+    /// Master keys of the installed context, wherever it is, so a
+    /// replacement with the same keys can be recognised while the receive
+    /// owner holds it.
+    keys: Option<SrtpMasterKeys>,
     next_id: u64,
 }
 
@@ -111,6 +115,11 @@ impl SrtpRecvSlot {
         }
     }
 
+    /// Master keys of the installed context, if one is installed.
+    pub(crate) fn installed_keys(&self) -> Option<&SrtpMasterKeys> {
+        self.keys.as_ref()
+    }
+
     /// Whether the installed context is checked out by the receive loop.
     pub(crate) fn owned_by_receiver(&self) -> bool {
         self.home.is_none() && self.installed.is_some_and(|i| self.owner == Some(i.id))
@@ -126,6 +135,7 @@ impl SrtpRecvShared {
                 installed: None,
                 owner: None,
                 returned: None,
+                keys: None,
                 next_id: 0,
             }),
         }
@@ -159,6 +169,7 @@ impl SrtpRecvShared {
             id,
             valid: context.validate_for_secure_transport().is_ok(),
         });
+        slot.keys = Some(context.master_keys());
         slot.home = Some(context);
         self.epoch.fetch_add(1, Ordering::Release);
         previous
@@ -178,9 +189,16 @@ impl SrtpRecvShared {
         }
     }
 
-    /// Retire the installed context and reinstall `previous` (the caller
-    /// checked [`Self::can_restore`] under the same lock).
-    pub(crate) fn restore(&self, slot: &mut SrtpRecvSlot, previous: PreviousRecv) {
+    /// Retire the installed context and reinstall `previous`, whose master
+    /// keys are `keys` (the caller checked [`Self::can_restore`] under the
+    /// same lock).
+    pub(crate) fn restore(
+        &self,
+        slot: &mut SrtpRecvSlot,
+        previous: PreviousRecv,
+        keys: Option<SrtpMasterKeys>,
+    ) {
+        slot.keys = keys;
         // At home: dropped here. Held by the owner: given back at its next
         // datagram, when it sees the new epoch.
         slot.home = None;
@@ -446,13 +464,13 @@ mod tests {
                     let previous = token.take().expect("a replacement to roll back");
                     let mut slot = shared.lock();
                     assert!(shared.can_restore(&slot, &previous));
-                    shared.restore(&mut slot, previous);
+                    shared.restore(&mut slot, previous, None);
                     Outcome::Control
                 }
                 Step::Remove => {
                     token = None;
                     let mut slot = shared.lock();
-                    shared.restore(&mut slot, PreviousRecv::None);
+                    shared.restore(&mut slot, PreviousRecv::None, None);
                     Outcome::Control
                 }
             })
@@ -679,7 +697,7 @@ mod tests {
             "no owner keeps the slot alive"
         );
         let mut slot = shared.lock();
-        shared.restore(&mut slot, PreviousRecv::None);
+        shared.restore(&mut slot, PreviousRecv::None, None);
         assert!(slot.home.is_none() && !slot.installed_valid());
     }
 

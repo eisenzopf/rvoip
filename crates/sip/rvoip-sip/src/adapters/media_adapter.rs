@@ -11139,4 +11139,212 @@ a=fmtp:101 0-15\r\n";
             "authority teardown must reuse the completed release cell"
         );
     }
+
+    /// One SDES-SRTP call whose peer keeps its master key across every
+    /// re-INVITE. Returns the adapter, the exact working session, the peer's
+    /// socket and its send context, plus the RTP session to observe.
+    async fn sdes_call_with_stable_peer_key(
+        name: &str,
+        port_base: u16,
+    ) -> (
+        MediaAdapter,
+        Arc<rvoip_media_core::relay::controller::MediaSessionController>,
+        SessionState,
+        DialogId,
+        tokio::net::UdpSocket,
+        String,
+        SrtpPair,
+    ) {
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        let controller = Arc::new(MediaSessionController::with_port_range(
+            port_base,
+            port_base + 100,
+        ));
+        let store = Arc::new(SessionStore::new());
+        let id = SessionId(name.into());
+        store
+            .create_session(id.clone(), crate::state_table::types::Role::UAS, false)
+            .await
+            .unwrap();
+        let mut adapter = MediaAdapter::new(
+            Arc::clone(&controller),
+            Arc::clone(&store),
+            "127.0.0.1".parse().unwrap(),
+            port_base,
+            port_base + 100,
+        );
+        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
+        let dialog = adapter.create_session(&id).await.unwrap();
+        let handle = store.lifecycle_handle(&id).unwrap();
+        let mut working = store.get_session_exact(&handle).await.unwrap();
+        working.media_session_id = Some(dialog.clone());
+        working.media_session_ready = true;
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (peer_offerer, peer_crypto) =
+            SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80]).unwrap();
+        let peer_offer =
+            build_srtp_offer("127.0.0.1", peer.local_addr().unwrap().port(), peer_crypto);
+        let (answer, _) = adapter
+            .negotiate_sdp_as_uas_lane_owned(&mut working, &peer_offer)
+            .await
+            .unwrap();
+        adapter
+            .commit_staged_media_negotiation_lane_owned(&mut working)
+            .await
+            .unwrap();
+        working.remote_sdp = Some(peer_offer.clone());
+        working.local_sdp = Some(answer.clone());
+        working.sdp_negotiated = true;
+        let answer_crypto =
+            MediaAdapter::extract_audio_crypto(&SdpSession::from_str(&answer).unwrap());
+        let peer_keys = peer_offerer.accept_answer(&answer_crypto[0]).unwrap();
+        (
+            adapter, controller, working, dialog, peer, peer_offer, peer_keys,
+        )
+    }
+
+    /// Send one SRTP packet from the peer and report whether the local RTP
+    /// session authenticated and delivered it.
+    async fn peer_srtp_packet_delivered(
+        peer: &tokio::net::UdpSocket,
+        local: SocketAddr,
+        events: &mut tokio::sync::broadcast::Receiver<rvoip_rtp_core::session::RtpSessionEvent>,
+        datagram: &[u8],
+        sequence: u16,
+    ) -> bool {
+        use rvoip_rtp_core::session::RtpSessionEvent;
+        peer.send_to(datagram, local).await.unwrap();
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match events.recv().await {
+                    Ok(RtpSessionEvent::PacketReceived(packet))
+                        if packet.header.sequence_number == sequence =>
+                    {
+                        break;
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(error) => panic!("RTP event stream closed: {error}"),
+                }
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    fn peer_srtp_datagram(peer_keys: &mut SrtpPair, sequence: u16, timestamp: u32) -> Vec<u8> {
+        let packet = rvoip_rtp_core::RtpPacket::new(
+            rvoip_rtp_core::RtpHeader::new(0, sequence, timestamp, 0x5151_5151),
+            bytes::Bytes::from(vec![0x7f; 160]),
+        );
+        peer_keys
+            .send_ctx
+            .protect(&packet)
+            .unwrap()
+            .serialize()
+            .unwrap()
+            .to_vec()
+    }
+
+    /// RFC 4568 section 7.1.4 / RFC 3711 section 3.3.1: a peer that keeps
+    /// its master key across a hold/resume re-INVITE keeps its crypto
+    /// context. Rebuilding the receive context restarts its rollover counter
+    /// at zero, so every packet after a sequence wrap fails authentication,
+    /// and forgets the replay window.
+    #[tokio::test]
+    async fn peer_hold_resume_with_unchanged_sdes_key_keeps_receive_rollover_and_replay_state() {
+        let (adapter, controller, mut working, dialog, peer, peer_offer, mut peer_keys) =
+            sdes_call_with_stable_peer_key("peer-hold-keeps-srtp-context", 38_400).await;
+        let rtp = controller.get_rtp_session(&dialog).await.unwrap();
+        let local = rtp.lock().await.local_addr().unwrap();
+        let mut events = rtp.lock().await.subscribe();
+
+        let before_wrap = peer_srtp_datagram(&mut peer_keys, 65_534, 0);
+        assert!(peer_srtp_packet_delivered(&peer, local, &mut events, &before_wrap, 65_534).await);
+        let last_before_wrap = peer_srtp_datagram(&mut peer_keys, 65_535, 160);
+        assert!(
+            peer_srtp_packet_delivered(&peer, local, &mut events, &last_before_wrap, 65_535).await
+        );
+
+        // The peer holds, then resumes, re-offering its unchanged key.
+        let hold_offer = peer_offer.replace("a=sendrecv", "a=sendonly");
+        assert_ne!(hold_offer, peer_offer);
+        for reoffer in [hold_offer, peer_offer.clone()] {
+            let (answer, _) = adapter
+                .negotiate_sdp_as_uas_lane_owned(&mut working, &reoffer)
+                .await
+                .unwrap();
+            adapter
+                .commit_staged_media_negotiation_lane_owned(&mut working)
+                .await
+                .unwrap();
+            working.remote_sdp = Some(reoffer);
+            working.local_sdp = Some(answer);
+        }
+
+        // Rollover counter 1: only the retained context can authenticate it.
+        let after_wrap = peer_srtp_datagram(&mut peer_keys, 0, 320);
+        assert!(
+            peer_srtp_packet_delivered(&peer, local, &mut events, &after_wrap, 0).await,
+            "the first packet after the sequence wrap must decrypt after resume"
+        );
+        assert!(
+            !peer_srtp_packet_delivered(&peer, local, &mut events, &last_before_wrap, 65_535).await,
+            "the replay window must survive hold and resume"
+        );
+        adapter.cleanup_session(&working.session_id).await.unwrap();
+    }
+
+    /// The same continuity for a local hold/resume: our re-offers carry fresh
+    /// keys, the peer answers with its unchanged one.
+    #[tokio::test]
+    async fn local_hold_resume_with_unchanged_peer_sdes_key_keeps_receive_rollover_state() {
+        let (adapter, controller, mut working, dialog, peer, peer_offer, mut peer_keys) =
+            sdes_call_with_stable_peer_key("local-hold-keeps-srtp-context", 38_500).await;
+        let rtp = controller.get_rtp_session(&dialog).await.unwrap();
+        let local = rtp.lock().await.local_addr().unwrap();
+        let mut events = rtp.lock().await.subscribe();
+
+        let last_before_wrap = peer_srtp_datagram(&mut peer_keys, 65_535, 0);
+        assert!(
+            peer_srtp_packet_delivered(&peer, local, &mut events, &last_before_wrap, 65_535).await
+        );
+
+        for hold in [true, false] {
+            let offer = if hold {
+                adapter
+                    .create_hold_sdp_for_session_lane_owned(&mut working)
+                    .await
+            } else {
+                adapter
+                    .create_active_sdp_for_session_lane_owned(&mut working)
+                    .await
+            }
+            .unwrap();
+            working
+                .begin_offer_answer(rvoip_sip_core::Method::Invite, offer.clone())
+                .unwrap();
+            working.local_sdp = Some(offer);
+            // The peer answers with the crypto attribute (tag 1, same key)
+            // it has used since the call started.
+            let answer =
+                peer_offer.replace("a=sendrecv", if hold { "a=recvonly" } else { "a=sendrecv" });
+            adapter
+                .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
+                .await
+                .unwrap();
+            adapter
+                .commit_staged_media_negotiation_lane_owned(&mut working)
+                .await
+                .unwrap();
+            working.remote_sdp = Some(answer);
+            working.commit_offer_answer();
+        }
+
+        let after_wrap = peer_srtp_datagram(&mut peer_keys, 0, 160);
+        assert!(
+            peer_srtp_packet_delivered(&peer, local, &mut events, &after_wrap, 0).await,
+            "the first packet after the sequence wrap must decrypt after resume"
+        );
+        adapter.cleanup_session(&working.session_id).await.unwrap();
+    }
 }
