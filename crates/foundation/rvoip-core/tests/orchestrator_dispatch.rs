@@ -4894,6 +4894,89 @@ async fn adapter_failure_payload_is_not_copied_into_operational_event() {
 }
 
 #[tokio::test]
+async fn outbound_peer_lease_dispatches_once_and_only_while_its_peer_is_current() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let _operational = orchestrator.install_operational_event_stream(16).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let peer = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-outbound-peer",
+    )
+    .await;
+    // Make the connection operationally connected, as an answered leg is.
+    sender
+        .send_atomic(OrchestratorAdapterEvent::Public(AdapterEvent::Connected {
+            connection_id: peer.clone(),
+        }))
+        .await
+        .unwrap();
+    let lease = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match orchestrator.reserve_outbound_peer(&peer) {
+                Ok(lease) => return lease,
+                Err(_) => tokio::time::sleep(Duration::from_millis(5)).await,
+            }
+        }
+    })
+    .await
+    .expect("connected peer can back a lease");
+    assert_eq!(lease.peer_connection_id(), &peer);
+    assert!(
+        matches!(
+            orchestrator.reserve_outbound_peer(&peer),
+            Err(RvoipError::AdmissionRejected(_))
+        ),
+        "a connection backs one live lease at a time"
+    );
+    assert!(lease.try_begin_dispatch());
+    assert!(!lease.clone().try_begin_dispatch(), "dispatch is one-shot");
+    assert!(!*lease.revocation().borrow());
+
+    // Explicit revocation, then a fresh lease once the old one is dropped.
+    orchestrator.revoke_outbound_peer(&peer);
+    assert!(*lease.revocation().borrow());
+    drop(lease);
+    let replacement = orchestrator.reserve_outbound_peer(&peer).unwrap();
+    let past = std::time::Instant::now();
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    drop(replacement);
+    let expired = orchestrator
+        .reserve_outbound_peer_before(&peer, past)
+        .unwrap();
+    assert!(!expired.try_begin_dispatch(), "dispatch deadline passed");
+    assert!(*expired.revocation().borrow());
+    drop(expired);
+
+    // The peer's own retirement revokes a live lease before dispatch.
+    let lease = orchestrator.reserve_outbound_peer(&peer).unwrap();
+    let mut revoked = lease.revocation();
+    adapter.mark_ended(&peer);
+    adapter
+        .deliver_terminal(AdapterEvent::Ended {
+            connection_id: peer.clone(),
+            reason: EndReason::Normal,
+        })
+        .await;
+    tokio::time::timeout(Duration::from_secs(2), revoked.wait_for(|revoked| *revoked))
+        .await
+        .expect("revocation deadline")
+        .expect("revoked");
+    assert!(!lease.try_begin_dispatch());
+    assert!(matches!(
+        orchestrator.reserve_outbound_peer(&peer),
+        Err(RvoipError::ConnectionNotFound(_) | RvoipError::AdmissionRejected(_))
+    ));
+    assert!(matches!(
+        orchestrator.reserve_outbound_peer(&ConnectionId::new()),
+        Err(RvoipError::ConnectionNotFound(_))
+    ));
+}
+
+#[tokio::test]
 async fn core_lifecycle_failure_is_authoritative_and_sanitized() {
     let orchestrator = Orchestrator::new(Config::default());
     let mut operational = orchestrator.install_operational_event_stream(2).unwrap();

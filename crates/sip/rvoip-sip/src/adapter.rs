@@ -268,12 +268,17 @@ enum SipActivationFailure {
     EventPublication,
     InvalidPlan,
     InviteFailed,
+    /// The outbound peer lease refused dispatch; no INVITE was sent.
+    PeerRevokedBeforeDispatch,
     MediaFailed,
 }
 
 impl SipActivationFailure {
     fn into_error(self) -> RvoipError {
         let detail = match self {
+            Self::PeerRevokedBeforeDispatch => {
+                return RvoipError::OutboundPeerUnavailableBeforeWrite;
+            }
             Self::RouteEnded => "SIP outbound route ended during activation",
             Self::EventOverflow => "SIP outbound lifecycle event stage overflowed",
             Self::EventPublication => "SIP outbound lifecycle event publication was unavailable",
@@ -4479,13 +4484,37 @@ async fn run_outbound_activation(
     events: mpsc::Sender<OrchestratorAdapterEvent>,
     retained_tasks: Arc<RetainedTasks>,
 ) {
-    let result = activate_outbound_route(
-        weak_adapter.clone(),
-        Arc::clone(&coordinator),
-        Arc::clone(&route),
-        events.clone(),
-    )
-    .await;
+    let result = {
+        let activation = activate_outbound_route(
+            weak_adapter.clone(),
+            Arc::clone(&coordinator),
+            Arc::clone(&route),
+            events.clone(),
+        );
+        tokio::pin!(activation);
+        if let Some(peer) = route.context.outbound_peer() {
+            let mut revoked = peer.revocation();
+            tokio::select! {
+                biased;
+                _ = wait_for_route_cancel(&mut revoked) => {
+                    if route.cleanup_snapshot().0 == SipOutboundWireState::NotStarted {
+                        Err(SipActivationFailure::PeerRevokedBeforeDispatch)
+                    } else {
+                        // The INVITE may have left. Capture its exact admitted
+                        // lifetime so retained cleanup can CANCEL or BYE it;
+                        // never report this as zero-wire.
+                        if let Some(adapter) = weak_adapter.upgrade() {
+                            adapter.promote_outbound_route_if_admitted(&route);
+                        }
+                        Err(SipActivationFailure::RouteEnded)
+                    }
+                }
+                result = &mut activation => result,
+            }
+        } else {
+            activation.await
+        }
+    };
     match result {
         Ok(receipt) => {
             let media_weak_adapter = weak_adapter.clone();
@@ -4526,7 +4555,12 @@ async fn run_outbound_activation(
                 events,
                 Some(AdapterEvent::Failed {
                     connection_id: route.connection_id.clone(),
-                    detail: "SIP outbound activation failed".to_string(),
+                    detail: if failure == SipActivationFailure::PeerRevokedBeforeDispatch {
+                        "joined outbound peer unavailable before INVITE"
+                    } else {
+                        "SIP outbound activation failed"
+                    }
+                    .to_string(),
                 }),
                 "activation-failed",
             );
@@ -4600,6 +4634,13 @@ async fn activate_outbound_route(
         .with_headers(headers)
         .map_err(|_| SipActivationFailure::InvalidPlan)?;
 
+    // A peer-bound call claims its single dispatch at the last moment before
+    // the wire becomes possible; a refusal here sent nothing.
+    if let Some(peer) = route.context.outbound_peer() {
+        if !peer.try_begin_dispatch() {
+            return Err(SipActivationFailure::PeerRevokedBeforeDispatch);
+        }
+    }
     // `Possible` begins immediately before the first poll of `send`: cleanup
     // must assume a packet escaped if this future is subsequently cancelled.
     route.begin_wire_send()?;
@@ -4714,6 +4755,7 @@ async fn monitor_outbound_media(
     events: mpsc::Sender<OrchestratorAdapterEvent>,
 ) {
     let mut media = route.stream.subscribe_lifecycle();
+    let mut peer_revoked = route.context.outbound_peer().map(|peer| peer.revocation());
     loop {
         // Copy the state out of the watch guard before an arm can request
         // cleanup. Cleanup closes the same stream and publishes a new
@@ -4742,8 +4784,36 @@ async fn monitor_outbound_media(
             | crate::media_stream::SipMediaLifecycle::Binding
             | crate::media_stream::SipMediaLifecycle::Bound => {}
         }
-        if media.changed().await.is_err() {
-            return;
+        let revoked = async {
+            match peer_revoked.as_mut() {
+                Some(signal) => wait_for_route_cancel(signal).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = revoked => {
+                // The peer this call depends on retired after dispatch:
+                // retained cleanup ends the call on the wire.
+                begin_outbound_cleanup(
+                    weak_adapter,
+                    coordinator,
+                    Arc::clone(&route),
+                    lifecycle,
+                    events,
+                    Some(AdapterEvent::Failed {
+                        connection_id: route.connection_id.clone(),
+                        detail: "joined outbound peer retired".to_string(),
+                    }),
+                    "outbound-peer-retired",
+                );
+                return;
+            }
+            changed = media.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
         }
     }
 }
@@ -7062,7 +7132,7 @@ Signal=5\r\nDuration=160\r\n";
         assert!(context.initial_headers().is_empty());
         assert_eq!(
             format!("{context:?}"),
-            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
+            "SipOriginateContext { has_profile_revision: false, has_outbound_peer: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
         );
     }
 

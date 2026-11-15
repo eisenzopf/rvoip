@@ -207,7 +207,8 @@ pub use operational_events::{
     OperationalTransferTarget,
 };
 pub use orchestrator::{
-    Orchestrator, PeerHandoffReceipt, PreparedOutboundConnection, PreparedPeerHandoff,
+    Orchestrator, OutboundPeerLease, PeerHandoffReceipt, PreparedOutboundConnection,
+    PreparedPeerHandoff,
 };
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
 pub use rvoip_core_traits::data::{

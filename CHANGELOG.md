@@ -84,6 +84,11 @@ Each item has a one-line migration.
   after media cleanup. Migration: do not rely on terminal ordering across
   connections, or on media cleanup having finished when `deliver_terminal`
   returns.
+- **`RvoipError` gains `OutboundPeerUnavailableBeforeWrite`.** The enum is
+  not `#[non_exhaustive]`. rvoip-sip returns it when an outbound call's
+  `OutboundPeerLease` refuses dispatch, before any INVITE is sent.
+  Migration: add an arm (or a wildcard) to exhaustive `match`es on
+  `RvoipError`.
 
 ### SIP
 
@@ -761,6 +766,19 @@ outcome unchanged, and add no configuration.
 
 ### Core and media graph
 
+- Outbound calls can depend on a live peer connection. A contact center that
+  calls a customer back for an agent wants the call to exist only while the
+  agent's own leg is up. `Orchestrator::reserve_outbound_peer` (or
+  `reserve_outbound_peer_before`, with a deadline for the first wire write)
+  returns an `OutboundPeerLease` tied to that connection's exact lifecycle
+  generation; a connection backs one live lease at a time. The peer's
+  retirement, or `Orchestrator::revoke_outbound_peer`, revokes it. rvoip-sip
+  takes it through `SipOriginateContext::with_outbound_peer`: the adapter
+  claims the lease's single dispatch immediately before the INVITE can
+  leave, so a call whose peer has gone fails with
+  `RvoipError::OutboundPeerUnavailableBeforeWrite` and sends nothing. A
+  revocation after dispatch ends the call on the wire (CANCEL or BYE) and
+  reports `Failed`.
 - Connection admission no longer sweeps the lifecycle table when bounded
   lifecycle retention is enabled (#345). Inbound admission swept every
   retained row every 64 admissions, and outbound admission on every claim,

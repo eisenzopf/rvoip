@@ -12,6 +12,10 @@ pub enum RvoipError {
     ParticipantNotFound(crate::ids::ParticipantId),
     BridgeNotFound(crate::ids::BridgeId),
     AdmissionRejected(&'static str),
+    /// Outbound activation stopped before any wire write because the peer
+    /// connection its `OutboundPeerLease` depends on retired, was revoked,
+    /// or missed its dispatch deadline. Nothing was sent.
+    OutboundPeerUnavailableBeforeWrite,
 
     /// Lifecycle precondition violated — e.g. start_session on a Closed
     /// Conversation, join_session on an Ended Session, end_session on an
@@ -40,6 +44,7 @@ impl RvoipError {
             Self::ParticipantNotFound(_) => "participant-not-found",
             Self::BridgeNotFound(_) => "bridge-not-found",
             Self::AdmissionRejected(_) => "admission-rejected",
+            Self::OutboundPeerUnavailableBeforeWrite => "outbound-peer-unavailable-before-write",
             Self::InvalidState(_) => "invalid-state",
             Self::UnsupportedCodec(_) => "unsupported-codec",
             Self::Adapter(_) => "adapter",
