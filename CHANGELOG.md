@@ -881,6 +881,11 @@ outcome unchanged, and add no configuration.
 - Several PRs in this release changed the `rvoip-sip` public API, so the
   baseline (`public-api/rvoip-sip.txt`) must be regenerated in the 0.5.0
   release commit.
+- `quinn-udp` 0.5.16 in the workspace and examples lockfiles fixes
+  RUSTSEC-2026-0538 (a receive loop that can spin after a truncated
+  datagram), which reaches rvoip through `quinn` 0.11 in the QUIC,
+  WebTransport, UCTP and MoQ crates. Its `socket2` 0.6 requirement also
+  moves `quinn` and `hyper-util` from `socket2` 0.5 to 0.6.
 
 ## 0.4.0 — 2026-10-11
 
