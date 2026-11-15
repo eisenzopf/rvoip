@@ -54,6 +54,10 @@ Each item has a one-line migration.
   the public fields `tls_flow` (#338) and `new_call_admission` (#350).**
   Migration: add them to struct literals, or end the literal with
   `..Default::default()`.
+- **`rvoip_sip_dialog::dialog::Dialog` gains the public field
+  `tls_proxy_flow`**, a process-local `Option<TlsProxyFlowBinding>` that is
+  never serialized. Migration: add `tls_proxy_flow: None` to struct
+  literals, or construct dialogs with `Dialog::new`.
 - **`rvoip_harness::InProcessAiConfig` is `#[non_exhaustive]`** and gains
   `gated_input` (#349). Code outside the crate can no longer build it with a
   struct literal, `..Default::default()` included. Migration: start from
@@ -162,6 +166,43 @@ Each item has a one-line migration.
   `TlsTransport::bind_with_role_and_flow_config` and
   `TlsTransport::client_only_with_flow_config`. Existing `TlsTransport`
   constructors use `TlsFlowConfig::default()`.
+
+#### TLS flow reuse for record-routing proxies
+
+- New opt-in `Config::sip_tls_proxy_flow_policies` (rvoip-sip, also
+  `with_sip_tls_proxy_flow_policies`) and
+  `DialogConfig::tls_proxy_flow_policies` (sip-dialog, also
+  `with_tls_proxy_flow_policies`), a list of `SipTlsProxyFlowPolicy`. A
+  gateway behind a carrier's record-routing TLS proxy receives the INVITE on
+  a connection the proxy opened, and its in-dialog requests (BYE,
+  re-INVITE for hold and resume, UPDATE) were sent by dialling the proxy's
+  logical listener named in Record-Route. Proxies that accept a dialog's
+  requests only on their own connection, or whose certificate does not name
+  the Record-Route IP address, then rejected them or the connection failed.
+  With a matching policy those requests go back on the accepted TLS
+  connection. A policy matches only when the INVITE's authenticated
+  principal (from `SipListenerAuthPolicy`, for example a trusted CIDR) has
+  the policy's `issuer`, `tenant` and `subject`, arrived over TLS from the
+  policy's `proxy_endpoint` IP address, and record-routes through exactly
+  that endpoint as a loose-routing TLS URI. Only requests whose next hop is
+  still that route use the connection. If it has closed the request fails;
+  setting `renewal_authority` instead allows one new connection to the fixed
+  `proxy_endpoint`, verified against that DNS name, which the dialog then
+  keeps. `SipTlsProxyFlowPolicy` is `#[non_exhaustive]` and serde
+  (de)serializable; build it with `SipTlsProxyFlowPolicy::new` and
+  `with_renewal_authority`, and check it with `validate`, which
+  `Config::validate` and `DialogConfig::validate` also run (at most 64
+  policies). With no policy configured routing is unchanged.
+- New opt-in `Config::sip_retain_outbound_tls_flow` (rvoip-sip, also
+  `with_sip_retain_outbound_tls_flow`) and
+  `DialogConfig::retain_outbound_tls_flow` (sip-dialog, also
+  `with_retained_outbound_tls_flow`). When set, in-dialog requests of a call
+  placed over TLS stay on the certificate-verified connection the INVITE
+  used while their next hop is the same loose route (or Contact) at the same
+  address, so a peer dialled by DNS name that record-routes with an IP
+  address its certificate does not name can still be reached. A closed
+  connection then fails the request instead of being redialled. Default
+  `false`.
 
 #### Transaction layer (#339, #350)
 

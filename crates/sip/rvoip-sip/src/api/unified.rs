@@ -98,6 +98,7 @@ pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
 pub use rvoip_sip_core::validation::UasCapabilities;
 pub use rvoip_sip_dialog::api::RelUsage;
+pub use rvoip_sip_dialog::api::SipTlsProxyFlowPolicy;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
 const OUTBOUND_DISPATCH_JOIN_FAILURE: &str = "SIP outbound dispatch task failed (class=join)";
@@ -2497,6 +2498,29 @@ pub struct Config {
     /// environment variable for it, so embedders map deployment settings here.
     pub sip_allow_tls_contact_on_sips: bool,
 
+    /// Trusted record-routing TLS proxies whose accepted connection carries
+    /// the in-dialog requests (BYE, re-INVITE, UPDATE, ...) of the calls they
+    /// deliver, instead of a new connection dialled to the Record-Route.
+    ///
+    /// Empty by default, which leaves routing unchanged. A policy applies to
+    /// an inbound call only when its INVITE was admitted by the listener
+    /// auth policy (for example [`crate::SipListenerAuthPolicy::with_trusted_cidr`])
+    /// with a principal whose issuer, tenant and subject equal the policy's,
+    /// arrived over TLS from the policy's proxy address, and record-routes
+    /// through exactly the policy's loose-routing TLS proxy URI. At most
+    /// 64 entries; [`Config::validate`] checks each with
+    /// [`SipTlsProxyFlowPolicy::validate`]. See [`SipTlsProxyFlowPolicy`].
+    pub sip_tls_proxy_flow_policies: Vec<SipTlsProxyFlowPolicy>,
+
+    /// Keep the in-dialog requests of a call this endpoint placed over SIP
+    /// TLS on the certificate-verified connection its INVITE used, while
+    /// their next hop is the same route (or Contact) at the same address.
+    /// This covers peers that are dialled by DNS name but record-route with
+    /// an IP address their certificate does not name. A closed connection
+    /// then makes the request fail instead of being redialled. Defaults to
+    /// `false` (normal routing).
+    pub sip_retain_outbound_tls_flow: bool,
+
     /// What this endpoint implements as a UAS. Inbound requests are checked
     /// against it before they are processed (RFC 3261 §8.2: 405/501 with
     /// Allow, 416, 420 with Unsupported, 415 with Accept, 406), and the
@@ -3583,6 +3607,14 @@ impl std::fmt::Debug for Config {
             )
             .field("sip_tls_mode", &self.sip_tls_mode)
             .field("sip_contact_mode", &self.sip_contact_mode)
+            .field(
+                "sip_tls_proxy_flow_policy_count",
+                &self.sip_tls_proxy_flow_policies.len(),
+            )
+            .field(
+                "sip_retain_outbound_tls_flow",
+                &self.sip_retain_outbound_tls_flow,
+            )
             .field("uas_capabilities", &self.uas_capabilities)
             .field("tls_bind_configured", &self.tls_bind_addr.is_some())
             .field(
@@ -3811,6 +3843,8 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
+            sip_tls_proxy_flow_policies: Vec::new(),
+            sip_retain_outbound_tls_flow: false,
             uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
@@ -3956,6 +3990,8 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
+            sip_tls_proxy_flow_policies: Vec::new(),
+            sip_retain_outbound_tls_flow: false,
             uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
@@ -5590,6 +5626,23 @@ impl Config {
         self
     }
 
+    /// Set the trusted record-routing TLS proxies whose accepted connection
+    /// carries in-dialog requests. See [`Config::sip_tls_proxy_flow_policies`].
+    pub fn with_sip_tls_proxy_flow_policies(
+        mut self,
+        policies: impl IntoIterator<Item = SipTlsProxyFlowPolicy>,
+    ) -> Self {
+        self.sip_tls_proxy_flow_policies = policies.into_iter().collect();
+        self
+    }
+
+    /// Keep in-dialog requests of calls placed over SIP TLS on the INVITE's
+    /// verified connection. See [`Config::sip_retain_outbound_tls_flow`].
+    pub fn with_sip_retain_outbound_tls_flow(mut self, retain: bool) -> Self {
+        self.sip_retain_outbound_tls_flow = retain;
+        self
+    }
+
     /// Require every inbound SIP TLS peer to present a certificate chaining
     /// to `client_ca_path`.
     pub fn require_tls_client_certificate(
@@ -5729,6 +5782,18 @@ impl Config {
         let effective_tls_mode = self.effective_tls_mode();
 
         self.validate_address_family()?;
+
+        if self.sip_tls_proxy_flow_policies.len()
+            > rvoip_sip_dialog::api::config::MAX_TLS_PROXY_FLOW_POLICIES
+        {
+            return Err(SessionError::ConfigError(format!(
+                "sip_tls_proxy_flow_policies accepts at most {} entries",
+                rvoip_sip_dialog::api::config::MAX_TLS_PROXY_FLOW_POLICIES
+            )));
+        }
+        for policy in &self.sip_tls_proxy_flow_policies {
+            policy.validate().map_err(SessionError::ConfigError)?;
+        }
 
         if let Some(address) = self.sip_advertised_addr {
             if address.ip().is_unspecified() || address.port() == 0 {
@@ -14855,6 +14920,8 @@ impl UnifiedCoordinator {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
+                dialog.tls_proxy_flow_policies = config.sip_tls_proxy_flow_policies.clone();
+                dialog.retain_outbound_tls_flow = config.sip_retain_outbound_tls_flow;
                 dialog.uas_capabilities = config.effective_uas_capabilities();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;

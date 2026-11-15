@@ -71,6 +71,14 @@ pub struct Dialog {
     #[serde(skip)]
     pub tls_contact_flow: Option<(Uri, rvoip_sip_transport::TransportRoute)>,
 
+    /// Exact TLS flow for in-dialog requests to a trusted record-routing
+    /// proxy (`DialogConfig::tls_proxy_flow_policies`) or, when
+    /// `DialogConfig::retain_outbound_tls_flow` is set, to the peer our
+    /// initial INVITE reached over TLS. `None` unless one of those opt-ins
+    /// admitted this dialog. Process-local: never serialized or restored.
+    #[serde(skip)]
+    pub tls_proxy_flow: Option<super::tls_proxy_flow::TlsProxyFlowBinding>,
+
     /// Route set for this dialog
     pub route_set: Vec<Uri>,
 
@@ -228,6 +236,7 @@ impl Dialog {
             secure_transport_required,
             allow_tls_contact_on_sips: false,
             tls_contact_flow: None,
+            tls_proxy_flow: None,
             route_set: Vec::new(),
             is_initiator,
             last_known_remote_addr: None,
@@ -438,6 +447,7 @@ impl Dialog {
             secure_transport_required,
             allow_tls_contact_on_sips: false,
             tls_contact_flow: None,
+            tls_proxy_flow: None,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -560,6 +570,7 @@ impl Dialog {
             secure_transport_required,
             allow_tls_contact_on_sips: false,
             tls_contact_flow: None,
+            tls_proxy_flow: None,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
