@@ -10902,6 +10902,7 @@ Signal=5\r\nDuration=160\r\n";
                 progress: Vec::new(),
                 answered: None,
                 media_security: None,
+                media: None,
                 terminal,
                 latest_transfer_outcome: None,
             };
