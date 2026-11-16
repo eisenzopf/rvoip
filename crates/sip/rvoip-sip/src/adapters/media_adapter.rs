@@ -12,7 +12,7 @@ use crate::adapters::srtp_negotiator::{
 };
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
-use crate::api::unified::{DtlsSetupRole, MediaMode, SdesBase64Mode};
+use crate::api::unified::{DtlsActpassAnswerRole, DtlsSetupRole, MediaMode, SdesBase64Mode};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_lifecycle::{
@@ -1614,6 +1614,10 @@ pub struct MediaAdapter {
     /// Role advertised in outgoing DTLS-SRTP offers.
     dtls_setup_role: DtlsSetupRole,
 
+    /// Role answered to an incoming DTLS-SRTP `actpass` offer.
+    #[cfg_attr(not(feature = "dtls-srtp"), allow(dead_code))]
+    dtls_actpass_answer_role: DtlsActpassAnswerRole,
+
     /// Per-negotiation certificate identity retained until the exact SIP
     /// answer/ACK commit boundary starts the handshake.
     #[cfg(feature = "dtls-srtp")]
@@ -1792,6 +1796,7 @@ impl MediaAdapter {
             negotiated_srtp: Arc::new(DashMap::new()),
             offer_dtls_srtp: false,
             dtls_setup_role: DtlsSetupRole::Actpass,
+            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
             media_security_failure_handler: Arc::new(std::sync::OnceLock::new()),
@@ -2495,6 +2500,11 @@ impl MediaAdapter {
         self.dtls_setup_role = setup_role;
     }
 
+    /// Select the role answered to an incoming DTLS-SRTP `actpass` offer.
+    pub fn set_dtls_actpass_answer_role(&mut self, role: DtlsActpassAnswerRole) {
+        self.dtls_actpass_answer_role = role;
+    }
+
     #[cfg(feature = "dtls-srtp")]
     fn dtls_offer_identity(
         &self,
@@ -3182,7 +3192,7 @@ impl MediaAdapter {
                         )
                         .into());
                     }
-                    let role = offer.setup_role.complementary();
+                    let role = offer.setup_role.answer_to(self.dtls_actpass_answer_role);
                     // Reuse the identity created for this negotiation when the
                     // answer SDP is rebuilt; otherwise the advertised
                     // fingerprint and the certificate used by the handshake
@@ -6431,6 +6441,7 @@ impl Clone for MediaAdapter {
             negotiated_srtp: self.negotiated_srtp.clone(),
             offer_dtls_srtp: self.offer_dtls_srtp,
             dtls_setup_role: self.dtls_setup_role,
+            dtls_actpass_answer_role: self.dtls_actpass_answer_role,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
             media_security_failure_handler: self.media_security_failure_handler.clone(),

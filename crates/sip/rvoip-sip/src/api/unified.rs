@@ -385,6 +385,28 @@ impl DtlsSetupRole {
     }
 }
 
+/// DTLS role this stack takes when it answers an SDP offer of
+/// `a=setup:actpass`, which leaves the choice to the answerer.
+///
+/// [`DtlsActpassAnswerRole::Active`] is the default: RFC 5763 §5 and JSEP
+/// (RFC 8829 §5.3.1) recommend it, because the answerer can send its
+/// ClientHello as soon as it answers, and because an answerer behind NAT
+/// opens its own media path by sending first.
+/// [`DtlsActpassAnswerRole::Passive`] makes this stack wait for the offerer's
+/// ClientHello instead; use it only for a peer that cannot act as the DTLS
+/// server. A passive answerer whose media address the offerer cannot reach
+/// first (NAT without ICE) waits for a ClientHello that never arrives, and
+/// the call fails its DTLS handshake.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DtlsActpassAnswerRole {
+    /// Answer `a=setup:active` and initiate DTLS as the client.
+    #[default]
+    Active,
+    /// Answer `a=setup:passive` and wait for the offerer to initiate DTLS.
+    Passive,
+}
+
 /// Named SRTP suite offer policies for common PBX/carrier interop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SrtpSuitePolicy {
@@ -2884,6 +2906,16 @@ pub struct Config {
     /// media path by sending the first DTLS packet.
     pub dtls_setup_role: DtlsSetupRole,
 
+    /// DTLS role to answer with when an incoming offer says
+    /// `a=setup:actpass`, when [`Config::srtp_keying`] is
+    /// [`SrtpKeyingMode::DtlsSrtp`].
+    ///
+    /// The default is [`DtlsActpassAnswerRole::Active`] (RFC 5763 §5,
+    /// RFC 8829 §5.3.1). See [`DtlsActpassAnswerRole`] for the NAT trade-off
+    /// of [`DtlsActpassAnswerRole::Passive`]. Offers of `active` or `passive`
+    /// always get the complementary answer.
+    pub dtls_actpass_answer_role: DtlsActpassAnswerRole,
+
     /// Inbound jitter buffer: playout smoothing and packet-loss concealment
     /// for received audio.
     ///
@@ -3696,6 +3728,7 @@ impl std::fmt::Debug for Config {
             .field("rtcp_non_mux", &self.rtcp_non_mux)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
+            .field("dtls_actpass_answer_role", &self.dtls_actpass_answer_role)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -3922,6 +3955,7 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
+            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4071,6 +4105,7 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
+            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4740,6 +4775,13 @@ impl Config {
     /// Select the DTLS role advertised by outgoing SIP SDP offers.
     pub fn with_dtls_setup_role(mut self, role: DtlsSetupRole) -> Self {
         self.dtls_setup_role = role;
+        self
+    }
+
+    /// Select the DTLS role answered to an incoming `a=setup:actpass` offer.
+    /// See [`Config::dtls_actpass_answer_role`].
+    pub fn with_dtls_actpass_answer_role(mut self, role: DtlsActpassAnswerRole) -> Self {
+        self.dtls_actpass_answer_role = role;
         self
     }
 
@@ -11473,6 +11515,7 @@ impl UnifiedCoordinator {
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         media_adapter_inner.set_dtls_setup_role(config.dtls_setup_role);
+        media_adapter_inner.set_dtls_actpass_answer_role(config.dtls_actpass_answer_role);
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
