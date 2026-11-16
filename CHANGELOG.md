@@ -1007,6 +1007,17 @@ outcome unchanged, and add no configuration.
 
 ### Core and media graph
 
+- The operational event stream reports each connection's committed audio
+  format. `OperationalEventKind::MediaCommitted { media }` carries a
+  `CommittedAudioMedia`: a monotonic per-connection `revision`, codec,
+  payload type, clock rate, channels, and the agreed media profile, keying
+  and SRTP suite. It never carries SDP, addresses or keys. Adapters report it
+  with `AdapterEvent::MediaCommitted`, and core forwards only values inside the
+  bounded vocabulary of `CommittedAudioMedia::valid`, after `Connected`.
+  rvoip-sip publishes it when a call is established, after an adapter-driven
+  renegotiation commits, and when SRTP is negotiated. It is the
+  transport-neutral push counterpart of the SIP-level negotiated media read
+  API.
 - Connection admission no longer sweeps the lifecycle table when bounded
   lifecycle retention is enabled (#345). Inbound admission swept every
   retained row every 64 admissions, and outbound admission on every claim,

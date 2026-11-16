@@ -148,7 +148,7 @@ pub mod vcon;
 pub mod virtual_publisher;
 
 pub use adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
+    AdapterEvent, AdapterKind, CommittedAudioMedia, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, ExternalConnectionReferenceError, InboundAssertedIdentity,
     InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
     OriginateContext, OriginateRequest, OutboundActivation, PlaybackCompletionSender,

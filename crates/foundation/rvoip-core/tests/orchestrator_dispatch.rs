@@ -4894,6 +4894,51 @@ async fn adapter_failure_payload_is_not_copied_into_operational_event() {
 }
 
 #[tokio::test]
+async fn committed_media_reaches_the_operational_stream_only_when_valid() {
+    use rvoip_core::adapter::CommittedAudioMedia;
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(8).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-committed-media",
+    )
+    .await;
+    let invalid = CommittedAudioMedia::new(1, "PCMU", 0, 8000, 1).with_media_profile("free text");
+    let valid = CommittedAudioMedia::new(2, "PCMU", 0, 8000, 1).with_media_profile("RTP/AVP");
+    for media in [invalid, valid.clone()] {
+        sender
+            .send_atomic(OrchestratorAdapterEvent::Public(
+                AdapterEvent::MediaCommitted {
+                    connection_id: connection_id.clone(),
+                    media,
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    let event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = operational.recv().await.unwrap();
+            if matches!(event.kind, OperationalEventKind::MediaCommitted { .. }) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("committed media published");
+    assert_eq!(event.connection_id, connection_id);
+    assert_eq!(
+        event.kind,
+        OperationalEventKind::MediaCommitted { media: valid }
+    );
+}
+
+#[tokio::test]
 async fn core_lifecycle_failure_is_authoritative_and_sanitized() {
     let orchestrator = Orchestrator::new(Config::default());
     let mut operational = orchestrator.install_operational_event_stream(2).unwrap();

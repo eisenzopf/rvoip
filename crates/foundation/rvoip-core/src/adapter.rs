@@ -12,12 +12,12 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 pub use rvoip_core_traits::adapter::{
-    AdapterEvent, AdapterKind, ConnectionHandle, EndReason, ExternalConnectionReference,
-    ExternalConnectionReferenceError, InboundAssertedIdentity, InboundConnectionContext,
-    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OriginateContext,
-    OriginateRequest, OutboundActivation, PlaybackCompletionSender, PlaybackHandle,
-    PlaybackOutcome, PlaybackWaitError, RejectReason, SignatureHeaders, TransferStatus,
-    TransferTarget, TrustedSignalingMetadata, TrustedSignalingProvenance,
+    AdapterEvent, AdapterKind, CommittedAudioMedia, ConnectionHandle, EndReason,
+    ExternalConnectionReference, ExternalConnectionReferenceError, InboundAssertedIdentity,
+    InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
+    OriginateContext, OriginateRequest, OutboundActivation, PlaybackCompletionSender,
+    PlaybackHandle, PlaybackOutcome, PlaybackWaitError, RejectReason, SignatureHeaders,
+    TransferStatus, TransferTarget, TrustedSignalingMetadata, TrustedSignalingProvenance,
     MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
     MAX_EXTERNAL_REFERENCE_VALUE_BYTES, MAX_INBOUND_ASSERTED_IDENTITY_BYTES,
     MAX_INBOUND_ROUTING_HINT_BYTES,
