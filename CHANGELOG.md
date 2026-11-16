@@ -378,6 +378,16 @@ bumps (they break the test fixtures and examples built on the older APIs).
   that bind within the same setup deadline, as outbound activation already
   does before its receipt, and fails without `Connected` if the bind fails,
   the call ends or the adapter drains meanwhile.
+- An outbound call the peer refuses during `SipAdapter` activation (486
+  Busy Here, 603 Decline, 404 and so on) now fails with that final
+  response as its `AdapterEvent::Failed` detail, such as `486 Busy Here`.
+  The activation waiter saw the recorded terminal before the adapter's own
+  event translator did, so the generic `SIP outbound activation failed`
+  became the cleanup cause and replaced the peer's response. Activation now
+  stages the recorded terminal on the route before failing, waits a bounded
+  2 s for that record when the final state is committed first, and a
+  cleanup cause no longer replaces a remote terminal that was staged before
+  it.
 - New `Config::sip_adapter_call_capacity: Option<usize>` and
   `Config::with_sip_adapter_call_capacity()` (#348). The default `None` keeps
   the 256-event queue and 4096 pending inbound observations; when set, the

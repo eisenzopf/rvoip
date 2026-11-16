@@ -655,8 +655,11 @@ impl SipOutboundRoute {
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // An explicit cause wins over the signaling terminal its own
+            // cleanup produces, but not over a remote terminal (such as the
+            // peer's final response) that was already staged before it.
             if let Some(event) = event {
-                if state.cleanup_event.is_none() {
+                if state.cleanup_event.is_none() && state.terminal.is_none() {
                     state.cleanup_event = Some(event);
                 }
             }
@@ -4361,24 +4364,38 @@ async fn wait_for_outbound_session_active(
     let deadline = tokio::time::Instant::now() + SIP_OUTBOUND_ACTIVATION_TIMEOUT;
     let mut lifecycle = coordinator.lifecycle_watcher_exact(&lifecycle_handle);
     let mut cancel = route.cancel.subscribe();
+    let mut terminal_fact_deadline = None;
 
     loop {
         let snapshot = coordinator
             .lifecycle_snapshot_exact(&lifecycle_handle)
             .await
             .map_err(|_| SipActivationFailure::RouteEnded)?;
-        if snapshot.terminal.is_some() {
+        if let Some(terminal) = snapshot.terminal.as_ref() {
+            // The lifecycle records the terminal fact before the adapter's
+            // own event translator sees it. Stage it on the route now, so the
+            // activation failure it causes reports the actual cause (such as
+            // the peer's final response) instead of a generic failure.
+            route.stage_event(outbound_terminal_event(
+                route.connection_id.clone(),
+                terminal,
+            ));
             return Err(SipActivationFailure::RouteEnded);
         }
         match snapshot.state {
             Some(CallState::Active) => return Ok(()),
-            Some(state)
-                if state.is_final()
-                    || matches!(
-                        state,
-                        CallState::CancelPending | CallState::Cancelling | CallState::Terminating
-                    ) =>
-            {
+            // A final state is committed just before its terminal fact is
+            // recorded. Wait a bounded time for that fact rather than fail
+            // activation without its cause.
+            Some(state) if state.is_final() => {
+                let wait_until = *terminal_fact_deadline.get_or_insert_with(|| {
+                    deadline.min(tokio::time::Instant::now() + SIP_RETAINED_TASK_TIMEOUT)
+                });
+                if tokio::time::Instant::now() >= wait_until {
+                    return Err(SipActivationFailure::RouteEnded);
+                }
+            }
+            Some(CallState::CancelPending | CallState::Cancelling | CallState::Terminating) => {
                 return Err(SipActivationFailure::RouteEnded);
             }
             None => return Err(SipActivationFailure::RouteEnded),
@@ -4390,8 +4407,12 @@ async fn wait_for_outbound_session_active(
             _ = wait_for_route_cancel(&mut cancel) => {
                 return Err(SipActivationFailure::RouteEnded);
             }
-            _ = tokio::time::sleep_until(deadline) => {
-                return Err(SipActivationFailure::InviteFailed);
+            _ = tokio::time::sleep_until(terminal_fact_deadline.unwrap_or(deadline)) => {
+                return Err(if terminal_fact_deadline.is_some() {
+                    SipActivationFailure::RouteEnded
+                } else {
+                    SipActivationFailure::InviteFailed
+                });
             }
             changed = lifecycle.changed() => {
                 if changed.is_err() {
@@ -4399,6 +4420,32 @@ async fn wait_for_outbound_session_active(
                 }
             }
         }
+    }
+}
+
+/// The adapter event for a terminal lifecycle fact, as the event translator
+/// publishes it for `CallFailed`, `CallCancelled` and `CallEnded`.
+fn outbound_terminal_event(
+    connection_id: ConnectionId,
+    terminal: &crate::api::lifecycle::CallTerminalInfo,
+) -> AdapterEvent {
+    use crate::api::lifecycle::CallTerminalInfo;
+    match terminal {
+        CallTerminalInfo::Failed {
+            status_code,
+            reason,
+        } => AdapterEvent::Failed {
+            connection_id,
+            detail: format!("{status_code} {reason}"),
+        },
+        CallTerminalInfo::Cancelled => AdapterEvent::Ended {
+            connection_id,
+            reason: EndReason::Cancelled,
+        },
+        CallTerminalInfo::Ended { .. } => AdapterEvent::Ended {
+            connection_id,
+            reason: EndReason::Normal,
+        },
     }
 }
 
@@ -10838,6 +10885,199 @@ Signal=5\r\nDuration=160\r\n";
             .shutdown_gracefully(Some(Duration::from_secs(1)))
             .await
             .expect("shutdown");
+    }
+
+    #[test]
+    fn staged_remote_terminal_wins_a_later_activation_failure_cause() {
+        let connection_id = ConnectionId::new();
+        let route = SipOutboundRoute::new(
+            connection_id.clone(),
+            SessionId::new(),
+            "sip:target@example.test".to_string(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant_deferred(Direction::Outbound),
+        );
+        assert!(route.claim_activation().unwrap());
+        // The peer's final response is staged first; the activation failure it
+        // causes then requests cleanup with its generic cause.
+        assert_eq!(
+            route.stage_event(AdapterEvent::Failed {
+                connection_id: connection_id.clone(),
+                detail: "486 Busy Here".to_string(),
+            }),
+            SipRouteStageDisposition::Retained
+        );
+        assert!(route.request_cleanup(Some(AdapterEvent::Failed {
+            connection_id: connection_id.clone(),
+            detail: "SIP outbound activation failed".to_string(),
+        })));
+        assert!(matches!(
+            route.seal_cleanup_event(),
+            Some(AdapterEvent::Failed { connection_id: observed, detail })
+                if observed == connection_id && detail == "486 Busy Here"
+        ));
+    }
+
+    #[tokio::test]
+    async fn final_state_waits_for_its_terminal_fact_before_activation_fails() {
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("final-before-terminal", 0))
+            .await
+            .expect("coordinator");
+        let session_id = SessionId::new();
+        let handle = admit_test_session(&coordinator, &session_id).await;
+        // The final state is committed before its terminal event is recorded.
+        set_test_call_state(
+            &coordinator,
+            &session_id,
+            CallState::Failed(crate::types::FailureReason::Rejected),
+        )
+        .await;
+        let route = SipOutboundRoute::new(
+            ConnectionId::new(),
+            session_id.clone(),
+            "sip:target@example.test".into(),
+            Arc::new(SipOriginateContext::default()),
+            crate::media_stream::SipMediaStream::dormant_deferred(Direction::Outbound),
+        );
+        assert!(route.claim_activation().unwrap());
+        assert!(route.attach_lifecycle_handle(handle.clone()));
+        let waiting_coordinator = Arc::clone(&coordinator);
+        let waiting_route = Arc::clone(&route);
+        let waiting = tokio::spawn(async move {
+            wait_for_outbound_session_active(&waiting_coordinator, &waiting_route).await
+        });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        let finished_before_terminal = waiting.is_finished();
+        coordinator
+            .publish_app_event_exact_for_test(
+                &handle,
+                ApiEvent::CallFailed {
+                    call_id: session_id,
+                    status_code: 603,
+                    reason: "Decline".into(),
+                },
+            )
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("bounded wait")
+            .expect("waiting task");
+        let staged = route.seal_cleanup_event();
+        retire_test_session_if_current(&coordinator, &handle).await;
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+
+        assert!(
+            !finished_before_terminal,
+            "a final state alone must not fail activation ahead of its cause"
+        );
+        assert!(matches!(outcome, Err(SipActivationFailure::RouteEnded)));
+        assert!(
+            matches!(&staged, Some(AdapterEvent::Failed { detail, .. }) if detail == "603 Decline"),
+            "the exact terminal must be staged on the route: {staged:?}"
+        );
+    }
+
+    /// A peer that refuses an outbound INVITE with a final response must be
+    /// reported with that response, not with the generic activation failure
+    /// its own refusal causes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn outbound_final_response_is_the_reported_failure_cause() {
+        use rvoip_sip_core::{parse_message, Message as SipMessage, Method, StatusCode};
+        use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
+
+        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
+            .await
+            .expect("capture UAS");
+        let target = capture.local_addr().expect("capture address");
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("busy-final-response", 0))
+            .await
+            .expect("coordinator");
+        let adapter = SipAdapter::new(Arc::clone(&coordinator))
+            .await
+            .expect("adapter");
+        let mut events = adapter
+            .try_subscribe_atomic_events()
+            .expect("atomic events");
+        let prepared = ConnectionAdapter::originate(
+            adapter.as_ref(),
+            OriginateRequest::new(
+                CoreSessionId::new(),
+                ParticipantId::new(),
+                format!("sip:target@{target}"),
+                Direction::Outbound,
+                CapabilityDescriptor::default(),
+            )
+            .with_transport(Transport::Sip),
+        )
+        .await
+        .expect("prepared route");
+        let connection_id = prepared.connection.id.clone();
+        let activation_adapter = Arc::clone(&adapter);
+        let activation_connection = connection_id.clone();
+        let activation = tokio::spawn(async move {
+            ConnectionAdapter::activate_outbound_with_receipt(
+                activation_adapter.as_ref(),
+                activation_connection,
+            )
+            .await
+        });
+
+        let mut packet = [0u8; 16_384];
+        let (invite_bytes, uac) =
+            tokio::time::timeout(Duration::from_secs(5), capture.recv_from(&mut packet))
+                .await
+                .expect("INVITE deadline")
+                .expect("INVITE datagram");
+        let SipMessage::Request(invite) =
+            parse_message(&packet[..invite_bytes]).expect("parse INVITE")
+        else {
+            panic!("expected INVITE request")
+        };
+        assert_eq!(invite.method(), Method::Invite);
+        let mut busy = create_response(&invite, StatusCode::BusyHere);
+        if let Some(TypedHeader::To(to)) = busy
+            .headers
+            .iter_mut()
+            .find(|header| matches!(header, TypedHeader::To(_)))
+        {
+            to.set_tag("busy-final-response-uas");
+        }
+        capture
+            .send_to(&SipMessage::Response(busy).to_bytes(), uac)
+            .await
+            .expect("refuse INVITE");
+
+        let activation = tokio::time::timeout(Duration::from_secs(5), activation)
+            .await
+            .expect("activation deadline")
+            .expect("activation task");
+        let failure = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match events.recv().await.expect("adapter events") {
+                    OrchestratorAdapterEvent::Public(AdapterEvent::Failed {
+                        connection_id: failed,
+                        detail,
+                    }) if failed == connection_id => break detail,
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("terminal failure event");
+
+        adapter.drain().await.expect("adapter drain");
+        coordinator
+            .shutdown_gracefully(Some(Duration::from_secs(1)))
+            .await
+            .expect("shutdown");
+
+        assert!(activation.is_err(), "a refused INVITE cannot activate");
+        assert_eq!(failure, "486 Busy Here");
     }
 
     #[test]
