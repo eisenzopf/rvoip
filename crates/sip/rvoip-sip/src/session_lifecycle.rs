@@ -45,6 +45,11 @@ const RETAINED_FENCE_BURST_MULTIPLIER: usize = 4;
 /// the authority's single admission index from monopolizing a Tokio worker,
 /// while the immediate follow-up turn still converges without new traffic.
 const REUSABLE_FENCE_EXPIRY_BATCH: usize = 4_096;
+/// Minimum anti-reuse deadline heap length before stale deadlines left by
+/// eagerly reclaimed unique-identifier fences are compacted. Compaction runs
+/// only when stale entries outnumber live index slots, so its O(n) cost is
+/// amortized over at least this many reclaimed lifetimes.
+const RECLAIMED_DEADLINE_COMPACTION_FLOOR: usize = 4_096;
 
 fn eager_active_lifetime_index_capacity(capacity: usize) -> usize {
     capacity.min(MAX_EAGER_ACTIVE_LIFETIME_INDEX_CAPACITY)
@@ -602,6 +607,25 @@ pub(crate) enum TeardownOutcome {
     },
 }
 
+/// How an admitted session identifier may be reused.
+///
+/// `Reusable` identifiers may be chosen by the application, so a retired
+/// lifetime keeps a compact anti-reuse fence for the full horizon: a raw-ID
+/// lookup held by a stale caller can never resolve to a later lifetime that
+/// reused the same string.
+///
+/// `Unique` identifiers are minted by the SIP stack itself from a random
+/// 122-bit UUID (for example the session created for an inbound INVITE) and
+/// are never handed back for admission. Their fence protects nothing once the
+/// session store has removed the exact lifetime, so it is reclaimed at that
+/// point instead of occupying retained capacity for the whole horizon. The
+/// normal horizon still applies as a backstop if store removal never happens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AdmissionIdentity {
+    Reusable,
+    Unique,
+}
+
 #[derive(Clone, Debug)]
 enum AdmissionSlot {
     Live(SessionKey),
@@ -611,6 +635,7 @@ enum AdmissionSlot {
         retired_at: Instant,
         reusable_at: Instant,
         reported_quarantine: Option<QuarantineReason>,
+        identity: AdmissionIdentity,
     },
 }
 
@@ -714,6 +739,7 @@ impl AdmissionIndex {
         retired_at: Instant,
         reusable_at: Instant,
         reported_quarantine: Option<QuarantineReason>,
+        identity: AdmissionIdentity,
     ) -> bool {
         let advances_next_deadline = self
             .reusable_deadlines
@@ -731,6 +757,7 @@ impl AdmissionIndex {
                 retired_at,
                 reusable_at,
                 reported_quarantine,
+                identity,
             },
         );
         self.reusable_deadlines.push(ReusableFenceDeadline {
@@ -765,6 +792,7 @@ struct CellState {
     /// lookup and this cell's mutex (see [`AuthorityLiveness`]).
     left_active: Arc<AtomicBool>,
     active_permit: Option<OwnedSemaphorePermit>,
+    identity: AdmissionIdentity,
     next_operation: u64,
     next_commit_revision: u64,
     next_resource: u64,
@@ -817,13 +845,14 @@ struct SessionCell {
 }
 
 impl SessionCell {
-    fn active(active_permit: OwnedSemaphorePermit) -> Self {
+    fn active(active_permit: OwnedSemaphorePermit, identity: AdmissionIdentity) -> Self {
         let (cancel, _) = watch::channel(false);
         Self {
             state: StdMutex::new(CellState {
                 phase: SessionPhase::Active,
                 left_active: Arc::new(AtomicBool::new(false)),
                 active_permit: Some(active_permit),
+                identity,
                 next_operation: 1,
                 next_commit_revision: 1,
                 next_resource: 1,
@@ -1742,6 +1771,8 @@ pub(crate) struct SessionLifecycleDiagnostics {
     pub(crate) retained_capacity: usize,
     pub(crate) resource_capacity_per_session: usize,
     pub(crate) lifecycle_count: usize,
+    pub(crate) unique_fences_reclaimed: u64,
+    pub(crate) reusable_deadlines: usize,
     pub(crate) admission_index_capacity: usize,
     pub(crate) reusable_deadline_capacity: usize,
     pub(crate) retained_identifier_payload_bytes: usize,
@@ -1785,6 +1816,7 @@ pub(crate) struct SessionLeaseAuthority {
     clock: Arc<dyn LifecycleClock>,
     reuse_pruner_started: AtomicBool,
     reuse_pruner_changed: Arc<Notify>,
+    unique_fences_reclaimed: AtomicU64,
     fatal: AtomicU8,
     fatal_changed: Notify,
     #[cfg(test)]
@@ -1871,6 +1903,7 @@ impl SessionLeaseAuthority {
             clock,
             reuse_pruner_started: AtomicBool::new(false),
             reuse_pruner_changed: Arc::new(Notify::new()),
+            unique_fences_reclaimed: AtomicU64::new(0),
             fatal: AtomicU8::new(0),
             fatal_changed: Notify::new(),
             #[cfg(test)]
@@ -2182,9 +2215,28 @@ impl SessionLeaseAuthority {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn admit(
         self: &Arc<Self>,
         session_id: SessionId,
+    ) -> Result<SessionLease, SessionAdmissionError> {
+        self.admit_with_identity(session_id, AdmissionIdentity::Reusable)
+    }
+
+    /// Admit an identifier the stack minted itself and will never reuse.
+    /// See [`AdmissionIdentity::Unique`].
+    #[cfg(test)]
+    pub(crate) fn admit_unique(
+        self: &Arc<Self>,
+        session_id: SessionId,
+    ) -> Result<SessionLease, SessionAdmissionError> {
+        self.admit_with_identity(session_id, AdmissionIdentity::Unique)
+    }
+
+    pub(crate) fn admit_with_identity(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        identity: AdmissionIdentity,
     ) -> Result<SessionLease, SessionAdmissionError> {
         #[cfg(test)]
         if self.draining.load(Ordering::Acquire) {
@@ -2250,7 +2302,7 @@ impl SessionLeaseAuthority {
             generation: self.allocate_generation()?,
         };
         self.cells
-            .insert(key.clone(), Arc::new(SessionCell::active(active_permit)));
+            .insert(key.clone(), Arc::new(SessionCell::active(active_permit, identity)));
         index.insert(
             Arc::new(session_id.clone()),
             AdmissionSlot::Live(key.clone()),
@@ -2303,11 +2355,12 @@ impl SessionLeaseAuthority {
         }) else {
             return false;
         };
-        let reported_quarantine = match index.get(session_id) {
+        let (reported_quarantine, identity) = match index.get(session_id) {
             Some(AdmissionSlot::Retired {
                 reported_quarantine,
+                identity,
                 ..
-            }) => *reported_quarantine,
+            }) => (*reported_quarantine, *identity),
             Some(AdmissionSlot::Live(_)) | Some(AdmissionSlot::NonReusable(_)) | None => {
                 return false
             }
@@ -2316,7 +2369,8 @@ impl SessionLeaseAuthority {
             session_id: session_id.clone(),
             generation,
         };
-        let advances_next_deadline = index.retire_until(key, retired_at, now, reported_quarantine);
+        let advances_next_deadline =
+            index.retire_until(key, retired_at, now, reported_quarantine, identity);
         drop(index);
         if advances_next_deadline || !self.reuse_pruner_started.load(Ordering::Acquire) {
             self.ensure_reuse_pruner();
@@ -2341,6 +2395,79 @@ impl SessionLeaseAuthority {
         };
         drop(state);
         liveness.is_current().then_some(liveness)
+    }
+
+    /// Reclaim the compact retired fence of one exact unique-identifier
+    /// lifetime after its owner has removed every external reference to it
+    /// (the session store calls this after exact removal).
+    ///
+    /// Returns `true` only when this call removed the fence. It never touches
+    /// active capacity: the permit was returned when the lifetime retired, so
+    /// a duplicate or late call cannot release a slot twice. A reusable
+    /// identifier, a different generation, or a lifetime that has not
+    /// retired is left untouched.
+    pub(crate) fn reclaim_unique_retired_fence(&self, key: &SessionKey) -> bool {
+        let Ok(mut index) = self.lock_index() else {
+            return false;
+        };
+        let reclaimable = matches!(
+            index.slots.get(&key.session_id),
+            Some(AdmissionSlot::Retired {
+                generation,
+                identity: AdmissionIdentity::Unique,
+                ..
+            }) if *generation == key.generation
+        );
+        if !reclaimable {
+            return false;
+        }
+        if self.cells.contains_key(key) {
+            // A retired fence is published only after its exact cell was
+            // removed; a cell under it is an impossible split-brain lifetime.
+            self.latch_fatal(AuthorityFatalReason::InvariantViolation);
+            return false;
+        }
+        index.slots.remove(&key.session_id);
+        self.unique_fences_reclaimed.fetch_add(1, Ordering::Relaxed);
+        Self::compact_reclaimed_deadlines_locked(&mut index);
+        true
+    }
+
+    /// Drop deadline entries whose fence was reclaimed eagerly. The heap has
+    /// no keyed removal, so stale entries are skipped at expiry and compacted
+    /// here once they dominate the live index, keeping memory proportional to
+    /// the fences that actually remain.
+    fn compact_reclaimed_deadlines_locked(index: &mut AdmissionIndex) {
+        let threshold = index
+            .slots
+            .len()
+            .saturating_mul(2)
+            .max(RECLAIMED_DEADLINE_COMPACTION_FLOOR);
+        if index.reusable_deadlines.len() <= threshold {
+            return;
+        }
+        let AdmissionIndex {
+            slots,
+            reusable_deadlines,
+            ..
+        } = index;
+        reusable_deadlines.retain(|deadline| {
+            matches!(
+                slots.get(deadline.session_id.as_ref()),
+                Some(AdmissionSlot::Retired {
+                    generation,
+                    reusable_at,
+                    ..
+                }) if *generation == deadline.generation && *reusable_at == deadline.reusable_at
+            )
+        });
+        let retained = reusable_deadlines.len();
+        if reusable_deadlines.capacity() > RECLAIMED_DEADLINE_COMPACTION_FLOOR.saturating_mul(2)
+            && reusable_deadlines.capacity() > retained.saturating_mul(4)
+        {
+            reusable_deadlines
+                .shrink_to(retained.saturating_mul(2).max(RECLAIMED_DEADLINE_COMPACTION_FLOOR));
+        }
     }
 
     pub(crate) fn is_current(&self, key: &SessionKey) -> bool {
@@ -2431,10 +2558,12 @@ impl SessionLeaseAuthority {
         }
         state.set_phase(SessionPhase::Retired { retired_at: now });
         state.active_permit.take();
+        let identity = state.identity;
         drop(state);
         self.current
             .remove_if(&key.session_id, |_, current| current == key);
-        let advances_next_deadline = index.retire_until(key.clone(), now, reusable_at, None);
+        let advances_next_deadline =
+            index.retire_until(key.clone(), now, reusable_at, None, identity);
         self.remove_exact_retired_cell(key, &cell)
             .map_err(SessionAdmissionError::AuthorityFatal)?;
         drop(index);
@@ -4178,10 +4307,16 @@ impl SessionLeaseAuthority {
         state.set_phase(SessionPhase::Retired { retired_at });
         state.active_permit.take();
         state.teardown_driver_complete = true;
+        let identity = state.identity;
         self.current
             .remove_if(&key.session_id, |_, current| current == &key);
-        let advances_next_deadline =
-            index.retire_until(key.clone(), retired_at, reusable_at, reported_quarantine);
+        let advances_next_deadline = index.retire_until(
+            key.clone(),
+            retired_at,
+            reusable_at,
+            reported_quarantine,
+            identity,
+        );
         if reported_quarantine.is_none() {
             control
                 .result
@@ -4217,6 +4352,7 @@ impl SessionLeaseAuthority {
             resource_capacity_per_session: self.config.resource_capacity_per_session.get(),
             current_index_capacity: self.current.capacity(),
             exact_cell_index_capacity: self.cells.capacity(),
+            unique_fences_reclaimed: self.unique_fences_reclaimed.load(Ordering::Relaxed),
             ..SessionLifecycleDiagnostics::default()
         };
         if snapshot.fatal_reason.is_some() {
@@ -4234,6 +4370,7 @@ impl SessionLeaseAuthority {
         };
         snapshot.admission_index_capacity = index.slots.capacity();
         snapshot.reusable_deadline_capacity = index.reusable_deadlines.capacity();
+        snapshot.reusable_deadlines = index.reusable_deadlines.len();
         snapshot.retained_identifier_payload_bytes = index
             .slots
             .keys()
@@ -7035,5 +7172,259 @@ mod tests {
         assert_eq!(report.abort_requested, 1);
         assert_eq!(report.stragglers, 0);
         assert_eq!(operation.await, Err(OwnedOperationError::SupervisorDropped));
+    }
+
+    fn authority_with_retained(
+        clock: &ManualClock,
+        capacity: usize,
+        retained_capacity: usize,
+    ) -> Arc<SessionLeaseAuthority> {
+        SessionLeaseAuthority::with_config(
+            AuthorityEpoch::fixed(29),
+            SessionLifecycleConfig::new(capacity, Duration::from_secs(64))
+                .and_then(|config| config.with_retained_capacity(retained_capacity))
+                .expect("retained test config"),
+            Arc::new(clock.clone()),
+        )
+    }
+
+    #[test]
+    fn unique_fence_is_reclaimed_exactly_once_and_frees_retained_capacity() {
+        let clock = ManualClock::new();
+        // The tightest legal bound: one active lifetime and one retained slot.
+        let authority = authority_with_retained(&clock, 1, 1);
+        let first = authority
+            .admit_unique(SessionId::from("session-unique-a"))
+            .expect("unique admission");
+        authority.retire(first.key()).expect("retire unique lifetime");
+
+        // Until the owner removes the exact lifetime the compact fence stays,
+        // so phase-based exact removal remains valid during cleanup.
+        assert!(matches!(
+            authority.phase(first.key()),
+            Some(SessionPhase::Retired { .. })
+        ));
+        assert_eq!(
+            authority.admit_unique(SessionId::from("session-unique-b")).err(),
+            Some(SessionAdmissionError::RetainedCapacityExhausted)
+        );
+        assert_eq!(authority.diagnostics().active_capacity_in_use, 0);
+
+        assert!(authority.reclaim_unique_retired_fence(first.key()));
+        assert_eq!(authority.lifecycle_count(), 0);
+        assert_eq!(authority.diagnostics().unique_fences_reclaimed, 1);
+        let second = authority
+            .admit_unique(SessionId::from("session-unique-b"))
+            .expect("reclaimed fence frees retained capacity without waiting");
+        assert!(second.is_current());
+
+        // A duplicate reclaim is a no-op and never touches active capacity.
+        assert!(!authority.reclaim_unique_retired_fence(first.key()));
+        assert_eq!(authority.diagnostics().unique_fences_reclaimed, 1);
+        assert_eq!(authority.diagnostics().active_capacity_in_use, 1);
+        assert_eq!(
+            authority.admit_unique(SessionId::from("session-unique-c")).err(),
+            Some(SessionAdmissionError::RetainedCapacityExhausted),
+            "the live lifetime still owns the only slot"
+        );
+    }
+
+    #[test]
+    fn reusable_fence_is_never_reclaimed_before_its_horizon() {
+        let clock = ManualClock::new();
+        let authority = authority_with_retained(&clock, 1, 1);
+        let id = SessionId::from("application-chosen");
+        let first = authority.admit(id.clone()).expect("reusable admission");
+        authority.retire(first.key()).expect("retire reusable lifetime");
+
+        assert!(!authority.reclaim_unique_retired_fence(first.key()));
+        assert_eq!(authority.lifecycle_count(), 1);
+        assert_eq!(
+            authority.admit(id.clone()).err(),
+            Some(SessionAdmissionError::ReuseBlocked)
+        );
+        assert_eq!(
+            authority.admit(SessionId::from("other")).err(),
+            Some(SessionAdmissionError::RetainedCapacityExhausted)
+        );
+        clock.advance(Duration::from_secs(64));
+        let second = authority.admit(id).expect("reuse after the full horizon");
+        assert_ne!(first.key().generation, second.key().generation);
+    }
+
+    #[test]
+    fn reclaim_ignores_live_quiescing_and_other_generations() {
+        let clock = ManualClock::new();
+        let authority = authority_with_retained(&clock, 2, 4);
+        let id = SessionId::from("session-unique-live");
+        let live = authority.admit_unique(id.clone()).expect("admission");
+        assert!(
+            !authority.reclaim_unique_retired_fence(live.key()),
+            "a live lifetime has no retired fence to reclaim"
+        );
+        assert!(live.is_current());
+
+        let forged = SessionKey {
+            session_id: id,
+            generation: SessionGeneration {
+                authority_epoch: live.key().generation.authority_epoch,
+                sequence: live.key().generation.sequence.saturating_add(1_000),
+            },
+        };
+        authority.retire(live.key()).expect("retire");
+        assert!(
+            !authority.reclaim_unique_retired_fence(&forged),
+            "a different generation never matches the exact fence"
+        );
+        assert_eq!(authority.lifecycle_count(), 1);
+        assert!(authority.reclaim_unique_retired_fence(live.key()));
+    }
+
+    #[tokio::test]
+    async fn late_work_for_a_reclaimed_unique_lifetime_cannot_resurrect_or_double_release() {
+        let clock = ManualClock::new();
+        let authority = authority_with_retained(&clock, 1, 1);
+        let id = SessionId::from("session-unique-late");
+        let lease = authority.admit_unique(id.clone()).expect("admission");
+        let old = lease.key().clone();
+        let teardown = authority
+            .teardown(&old, Duration::from_secs(1))
+            .expect("teardown");
+        assert!(matches!(
+            teardown.wait().await,
+            Ok(TeardownOutcome::Retired { .. })
+        ));
+        authority
+            .wait_for_supervisors()
+            .await
+            .expect("teardown supervisor cleanup");
+        assert!(authority.reclaim_unique_retired_fence(&old));
+
+        // Every late exact path sees a stale generation; none can recreate
+        // state or return capacity a second time.
+        assert!(!authority.is_current(&old));
+        assert_eq!(authority.phase(&old), None);
+        assert_eq!(authority.current_key(&id), None);
+        assert_eq!(
+            authority.teardown(&old, Duration::from_secs(1)).err(),
+            Some(SessionOperationError::StaleGeneration)
+        );
+        assert_eq!(
+            authority
+                .try_operation_exact(&old, SessionOperationKind::Test("late-bye"))
+                .err(),
+            Some(SessionOperationError::StaleGeneration)
+        );
+        assert!(!authority.reclaim_unique_retired_fence(&old));
+        let diagnostics = authority.diagnostics();
+        assert_eq!(diagnostics.active_capacity_in_use, 0);
+        assert_eq!(diagnostics.lifecycle_count, 0);
+        assert_eq!(diagnostics.unique_fences_reclaimed, 1);
+        assert_eq!(authority.active_slots.available_permits(), 1);
+
+        // Even if the same raw identifier were presented again it is a new
+        // generation; delayed work for the old key still cannot reach it.
+        let replacement = authority.admit_unique(id).expect("new generation");
+        assert_ne!(replacement.key().generation, old.generation);
+        assert!(!authority.reclaim_unique_retired_fence(&old));
+        assert!(!authority.is_current(&old));
+        assert!(replacement.is_current());
+        assert_eq!(
+            authority.teardown(&old, Duration::from_secs(1)).err(),
+            Some(SessionOperationError::StaleGeneration)
+        );
+        assert!(replacement.is_current());
+        assert_eq!(authority.active_slots.available_permits(), 0);
+    }
+
+    #[test]
+    fn unreclaimed_unique_fence_still_expires_at_the_backstop_horizon() {
+        let clock = ManualClock::new();
+        let authority = authority_with_retained(&clock, 1, 1);
+        let first = authority
+            .admit_unique(SessionId::from("session-unique-backstop"))
+            .expect("admission");
+        authority.retire(first.key()).expect("retire");
+        // The owner never removed the lifetime (for example a failed store
+        // removal): the fence keeps the normal horizon instead of leaking.
+        clock.advance(Duration::from_secs(63));
+        assert_eq!(
+            authority.admit_unique(SessionId::from("session-unique-next")).err(),
+            Some(SessionAdmissionError::RetainedCapacityExhausted)
+        );
+        clock.advance(Duration::from_secs(1));
+        authority
+            .admit_unique(SessionId::from("session-unique-next"))
+            .expect("backstop horizon expires the fence");
+        assert_eq!(authority.lifecycle_count(), 1);
+    }
+
+    #[test]
+    fn steady_unique_churn_above_fence_rate_is_never_retained_exhausted_and_stays_bounded() {
+        // Active 4 and retained 4 sustain only 4 / 64 s = 0.0625 lifetimes per
+        // second with full-horizon fences. Retire and remove 50,000 unique
+        // lifetimes while the clock advances 1 ms each (~1,000 per second,
+        // far above that bound): none may be rejected for retained capacity,
+        // and the index and deadline heap must stay bounded.
+        const LIFETIMES: usize = 50_000;
+        let clock = ManualClock::new();
+        let authority = authority_with_retained(&clock, 4, 4);
+        let mut peak_deadlines = 0_usize;
+        let mut peak_deadline_capacity = 0_usize;
+        for sequence in 0..LIFETIMES {
+            let lease = authority
+                .admit_unique(SessionId::from(format!("session-churn-{sequence}")))
+                .unwrap_or_else(|error| panic!("lifetime {sequence} rejected: {error}"));
+            authority.retire(lease.key()).expect("retire");
+            assert!(authority.reclaim_unique_retired_fence(lease.key()));
+            clock.advance(Duration::from_millis(1));
+            if sequence % 997 == 0 {
+                let diagnostics = authority.diagnostics();
+                assert_eq!(diagnostics.lifecycle_count, 0);
+                assert_eq!(diagnostics.active_capacity_in_use, 0);
+                peak_deadlines = peak_deadlines.max(diagnostics.reusable_deadlines);
+                peak_deadline_capacity =
+                    peak_deadline_capacity.max(diagnostics.reusable_deadline_capacity);
+            }
+        }
+        let diagnostics = authority.diagnostics();
+        assert_eq!(diagnostics.lifecycle_count, 0);
+        assert_eq!(diagnostics.unique_fences_reclaimed, LIFETIMES as u64);
+        assert!(
+            peak_deadlines <= RECLAIMED_DEADLINE_COMPACTION_FLOOR + 1,
+            "stale deadline entries must be compacted (peak {peak_deadlines})"
+        );
+        assert!(
+            peak_deadline_capacity <= RECLAIMED_DEADLINE_COMPACTION_FLOOR * 4,
+            "deadline heap allocation must stay bounded (peak {peak_deadline_capacity})"
+        );
+    }
+
+    #[test]
+    fn compaction_keeps_live_reusable_deadlines_exact() {
+        let clock = ManualClock::new();
+        let authority = authority_with_retained(&clock, 1, 8);
+        let reusable = authority
+            .admit(SessionId::from("app-reusable"))
+            .expect("reusable admission");
+        authority.retire(reusable.key()).expect("retire reusable");
+        for sequence in 0..(RECLAIMED_DEADLINE_COMPACTION_FLOOR * 2) {
+            let lease = authority
+                .admit_unique(SessionId::from(format!("session-mix-{sequence}")))
+                .expect("unique admission");
+            authority.retire(lease.key()).expect("retire unique");
+            assert!(authority.reclaim_unique_retired_fence(lease.key()));
+        }
+        let diagnostics = authority.diagnostics();
+        assert_eq!(diagnostics.lifecycle_count, 1, "only the reusable fence remains");
+        assert!(diagnostics.reusable_deadlines <= RECLAIMED_DEADLINE_COMPACTION_FLOOR + 1);
+        assert_eq!(
+            authority.admit(SessionId::from("app-reusable")).err(),
+            Some(SessionAdmissionError::ReuseBlocked)
+        );
+        clock.advance(Duration::from_secs(64));
+        authority
+            .admit(SessionId::from("app-reusable"))
+            .expect("the surviving deadline still expires the reusable fence");
     }
 }
