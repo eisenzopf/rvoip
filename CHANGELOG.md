@@ -370,6 +370,14 @@ bumps (they break the test fixtures and examples built on the older APIs).
   rejects the still-unanswered call with `503 Signaling Event Backpressure`
   and returns `AdmissionRejected`, instead of sending 200 OK and then leaving
   the answered call without its establishment handoff or media setup.
+- `ConnectionAdapter::accept` publishes an inbound call's `Connected` only
+  once its media stream is writable. The peer's ACK establishes the call
+  independently of the stream's media bind, and `Connected` used to follow
+  the ACK alone, so a frame written as soon as it arrived could be refused
+  with `InvalidState` while the bind was still running. Accept now joins
+  that bind within the same setup deadline, as outbound activation already
+  does before its receipt, and fails without `Connected` if the bind fails,
+  the call ends or the adapter drains meanwhile.
 - New `Config::sip_adapter_call_capacity: Option<usize>` and
   `Config::with_sip_adapter_call_capacity()` (#348). The default `None` keeps
   the 256-event queue and 4096 pending inbound observations; when set, the
