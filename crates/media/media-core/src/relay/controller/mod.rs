@@ -1436,7 +1436,7 @@ mod tests;
 
 // Re-export important types
 pub use audio_generation::{AudioSource, AudioTransmitterConfig};
-pub use bridge::{BridgeError, BridgeHandle, BridgeMode};
+pub use bridge::{BridgeError, BridgeHandle, BridgeMode, TranscodeBridgeStats};
 pub use inline_rx::{
     inline_rx_counters, InlineAudioConsumer, InlineAudioConsumerGuard, InlineAudioDelivery,
     InlineRxCounters,
@@ -1444,9 +1444,10 @@ pub use inline_rx::{
 pub use rtp_management::{EncodedG711Format, G711SendNow, PreparedG711Sender};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
-    MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
-    REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER, RTCP_REDUCED_MINIMUM_PARAMETER,
-    RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
+    MediaSessionInfo, MediaSessionStatus, TelephoneEventFormat, AMR_DTX_PARAMETER,
+    NEGOTIATED_FMTP_PARAMETER, REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER,
+    RTCP_REDUCED_MINIMUM_PARAMETER, RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
+    TELEPHONE_EVENT_PARAMETER,
 };
 
 use types::{DialogTxGate, RtpSessionWrapper, SecureKeyingState};

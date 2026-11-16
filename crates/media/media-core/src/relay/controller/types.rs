@@ -99,6 +99,21 @@ pub const RTCP_XR_PARAMETER: &str = "rtcp_xr";
 /// an update changes it.
 pub const RTCP_REDUCED_MINIMUM_PARAMETER: &str = "rtcp_reduced_minimum";
 
+/// [`MediaConfig::parameters`] key naming the RFC 4733 telephone-event
+/// format a session negotiated, as `<payload type>/<clock rate>` (for
+/// example `101/8000`). Absent when the session negotiated no
+/// telephone-event. Set it with [`MediaConfig::with_telephone_event`].
+pub const TELEPHONE_EVENT_PARAMETER: &str = "telephone_event";
+
+/// The RFC 4733 telephone-event format one session negotiated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TelephoneEventFormat {
+    /// RTP payload type of telephone-event on this session.
+    pub payload_type: u8,
+    /// Telephone-event RTP clock rate in hertz.
+    pub clock_rate: u32,
+}
+
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -160,6 +175,51 @@ impl MediaConfig {
             }
         }
         self
+    }
+
+    /// Record the RFC 4733 telephone-event format the session negotiated
+    /// ([`TELEPHONE_EVENT_PARAMETER`]), or clear it with `None`.
+    ///
+    /// A transcoding bridge relays DTMF to a leg only when that leg has one,
+    /// under its payload type and clock. Like the fmtp, `None` removes a
+    /// value an earlier negotiation left behind.
+    #[must_use]
+    pub fn with_telephone_event(mut self, format: Option<TelephoneEventFormat>) -> Self {
+        match format {
+            Some(format) => {
+                self.parameters.insert(
+                    TELEPHONE_EVENT_PARAMETER.to_string(),
+                    format!("{}/{}", format.payload_type, format.clock_rate),
+                );
+            }
+            None => {
+                self.parameters.remove(TELEPHONE_EVENT_PARAMETER);
+            }
+        }
+        self
+    }
+
+    /// The telephone-event format recorded by
+    /// [`Self::with_telephone_event`], if any and well formed.
+    pub fn telephone_event(&self) -> Option<TelephoneEventFormat> {
+        let (payload_type, clock_rate) = self
+            .parameters
+            .get(TELEPHONE_EVENT_PARAMETER)?
+            .split_once('/')?;
+        let payload_type = payload_type
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .filter(|pt| *pt < 128)?;
+        let clock_rate = clock_rate
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|rate| *rate > 0)?;
+        Some(TelephoneEventFormat {
+            payload_type,
+            clock_rate,
+        })
     }
 
     /// Set or clear the AMR discontinuous-transmission opt-in

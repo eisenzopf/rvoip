@@ -796,6 +796,36 @@ fn audio_rtpmap(
         })
 }
 
+/// The RFC 4733 telephone-event format an offer/answer agreed: the first
+/// `telephone-event` format of the answer's audio stream that the offer also
+/// lists, with the answer's payload type and clock rate.
+fn negotiated_telephone_event(
+    answer: &SdpSession,
+    offer: &SdpSession,
+) -> Option<rvoip_media_core::relay::controller::TelephoneEventFormat> {
+    fn audio(sdp: &SdpSession) -> Option<&rvoip_sip_core::MediaDescription> {
+        sdp.media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+    }
+    let offered = audio(offer)?;
+    audio(answer)?
+        .formats
+        .iter()
+        .filter(|format| offered.formats.contains(format))
+        .filter_map(|format| format.parse::<u8>().ok())
+        .find_map(|payload_type| {
+            let mapping = audio_rtpmap(answer, payload_type)?;
+            mapping
+                .encoding_name
+                .eq_ignore_ascii_case("telephone-event")
+                .then_some(rvoip_media_core::relay::controller::TelephoneEventFormat {
+                    payload_type,
+                    clock_rate: mapping.clock_rate,
+                })
+        })
+}
+
 fn negotiated_audio_shape_from_sdp(
     session: &SdpSession,
     payload_type: u8,
@@ -1135,6 +1165,9 @@ struct StagedMediaNegotiation {
     /// The peer's RTCP address from its `a=rtcp:` line (RFC 3605), used by
     /// a separate RTCP socket when mux was not negotiated.
     remote_rtcp_addr: Option<SocketAddr>,
+    /// RFC 4733 telephone-event format both sides kept, if any; a
+    /// transcoding bridge relays DTMF to this leg only when it is set.
+    telephone_event: Option<rvoip_media_core::relay::controller::TelephoneEventFormat>,
     #[cfg(feature = "dtls-srtp")]
     dtls: Option<StagedDtlsHandshake>,
 }
@@ -2267,6 +2300,7 @@ impl MediaAdapter {
         rtcp_mux: bool,
         peer_requested_rtcp_xr: bool,
         remote_rtcp_addr: Option<SocketAddr>,
+        telephone_event: Option<rvoip_media_core::relay::controller::TelephoneEventFormat>,
     ) -> Result<()> {
         let mut config = self
             .controller
@@ -2283,6 +2317,7 @@ impl MediaAdapter {
                 negotiated.channels,
             )
             .with_negotiated_fmtp(negotiated.negotiated_fmtp.as_deref())
+            .with_telephone_event(telephone_event)
             // Sender policy rather than a negotiated value, but it belongs on
             // the same commit as the codec identity: this is the moment the
             // session learns it is AMR, and media-core reads both out of the
@@ -3033,6 +3068,7 @@ impl MediaAdapter {
                 rtcp_mux: audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&parsed_answer),
                 rtcp_xr: sdp_requests_voip_metrics_xr(&parsed_answer),
                 remote_rtcp_addr: audio_rtcp_address(&parsed_answer, remote_ip),
+                telephone_event: negotiated_telephone_event(&parsed_answer, &parsed_offer),
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3339,6 +3375,7 @@ impl MediaAdapter {
                     rtcp_mux: false,
                     rtcp_xr: false,
                     remote_rtcp_addr: None,
+                    telephone_event: None,
                     #[cfg(feature = "dtls-srtp")]
                     dtls: None,
                 },
@@ -3543,6 +3580,7 @@ impl MediaAdapter {
             .map_err(|_| bounded_sdp_failure("answer-build", "builder"))?;
         let sdp_answer = session.to_string();
         let rtcp_mux = audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&session);
+        let telephone_event = negotiated_telephone_event(&session, &parsed_offer);
 
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
@@ -3574,6 +3612,7 @@ impl MediaAdapter {
                 rtcp_mux,
                 rtcp_xr: sdp_requests_voip_metrics_xr(&parsed_offer),
                 remote_rtcp_addr: audio_rtcp_address(&parsed_offer, remote_ip),
+                telephone_event,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3928,6 +3967,7 @@ impl MediaAdapter {
                 staged.rtcp_mux,
                 staged.rtcp_xr,
                 staged.remote_rtcp_addr,
+                staged.telephone_event,
             )
             .await?;
 
@@ -10735,6 +10775,43 @@ a=fmtp:101 0-15\r\n";
     }
 
     #[test]
+    fn negotiated_telephone_event_needs_both_sides() {
+        use rvoip_media_core::relay::controller::TelephoneEventFormat;
+        let sdp = |formats: &[&str], telephone_event: Option<(&str, &str)>| {
+            let mut media = SdpBuilder::new("Session")
+                .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
+                .connection("IN", "IP4", "127.0.0.1")
+                .time("0", "0")
+                .media_audio(16_000, "RTP/AVP")
+                .formats(formats)
+                .rtpmap("0", "PCMU/8000");
+            if let Some((pt, map)) = telephone_event {
+                media = media.rtpmap(pt, map);
+            }
+            media.done().build().unwrap()
+        };
+        let offer = sdp(&["0", "101"], Some(("101", "telephone-event/8000")));
+        assert_eq!(
+            negotiated_telephone_event(&offer, &offer),
+            Some(TelephoneEventFormat {
+                payload_type: 101,
+                clock_rate: 8_000,
+            })
+        );
+        // The answer dropped it.
+        assert_eq!(negotiated_telephone_event(&sdp(&["0"], None), &offer), None);
+        // An answer format the offer never listed does not count.
+        let unoffered = sdp(&["0", "100"], Some(("100", "telephone-event/8000")));
+        assert_eq!(negotiated_telephone_event(&unoffered, &offer), None);
+        // The answer's clock rate is the one recorded.
+        let wideband_offer = sdp(&["0", "101"], Some(("101", "telephone-event/16000")));
+        assert_eq!(
+            negotiated_telephone_event(&wideband_offer, &wideband_offer).map(|f| f.clock_rate),
+            Some(16_000)
+        );
+    }
+
+    #[test]
     fn uac_answer_rejects_unoffered_unsupported_and_changed_payloads() {
         let offer = SdpBuilder::new("Session")
             .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
@@ -11266,6 +11343,7 @@ a=fmtp:101 0-15\r\n";
             rtcp_mux: false,
             rtcp_xr: false,
             remote_rtcp_addr: None,
+            telephone_event: None,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -11341,6 +11419,7 @@ a=fmtp:101 0-15\r\n";
             rtcp_mux: false,
             rtcp_xr: false,
             remote_rtcp_addr: None,
+            telephone_event: None,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -11448,6 +11527,7 @@ a=fmtp:101 0-15\r\n";
                 rtcp_mux: false,
                 rtcp_xr: false,
                 remote_rtcp_addr: None,
+                telephone_event: None,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
@@ -11650,6 +11730,7 @@ a=fmtp:101 0-15\r\n";
                 rtcp_mux: false,
                 rtcp_xr: false,
                 remote_rtcp_addr: None,
+                telephone_event: None,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
