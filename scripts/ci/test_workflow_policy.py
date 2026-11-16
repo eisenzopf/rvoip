@@ -98,7 +98,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         # change that would have selected the old combined gate still verifies
         # all four packages, it just does so concurrently instead of against
         # one shared 45-minute budget it could not fit inside.
-        gates = sorted(run_checks.CODEC_FEATURE_GATES)
+        gates = sorted(run_checks.ALL_CODEC_FEATURE_GATES)
         main = (ROOT / ".github/workflows/main-ci.yml").read_text()
         for gate in gates:
             with self.subTest(gate=gate):

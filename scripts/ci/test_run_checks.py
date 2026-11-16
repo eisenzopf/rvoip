@@ -198,6 +198,9 @@ class RunChecksTests(unittest.TestCase):
             sorted(expected_packages),
         )
         for gate, package in run_checks.CODEC_FEATURE_GATES.items():
+            if package == "rvoip-sip":
+                # Sharded; see test_sip_codec_shards_cover_the_whole_gate_once.
+                continue
             with self.subTest(gate=gate):
                 commands = run_checks.specialty_commands(gate, Path("/workspace"))
                 argv = [item[0] for item in commands]
@@ -223,6 +226,53 @@ class RunChecksTests(unittest.TestCase):
                 self.assertEqual(
                     sorted(command[1] for command in owned), ["clippy", "test"]
                 )
+
+    def test_sip_codec_shards_cover_the_whole_gate_once(self) -> None:
+        # The four rvoip-sip shards together run exactly what the single gate
+        # ran: one clippy over every target, the library, binary and example
+        # tests once, and every eligible test target in exactly one shard.
+        commands = [
+            command
+            for gate in run_checks.CODEC_FEATURE_SIP_SHARDS
+            for command, _, _ in run_checks.specialty_commands(gate, ROOT)
+        ]
+        for command in commands:
+            self.assertIn("--features", command)
+            self.assertIn(run_checks.NON_PERF_SIP_FEATURES, command)
+            self.assertNotIn("--all-features", command)
+            self.assertEqual(command[command.index("-p") + 1], "rvoip-sip")
+        clippy = [command for command in commands if command[1] == "clippy"]
+        tests = [command for command in commands if command[1] == "test"]
+        self.assertEqual(len(clippy), 1)
+        self.assertIn("--all-targets", clippy[0])
+        self.assertEqual(len(tests), run_checks.CODEC_FEATURE_SIP_TEST_PARTITIONS)
+        for flag in ("--lib", "--bins", "--examples"):
+            self.assertEqual(sum(flag in command for command in tests), 1)
+        self.assertFalse(any("--tests" in command for command in tests))
+        selected = [
+            command[index + 1]
+            for command in tests
+            for index, value in enumerate(command)
+            if value == "--test"
+        ]
+        expected = run_checks.codec_sip_test_targets(ROOT)
+        self.assertEqual(sorted(selected), expected)
+        self.assertEqual(len(selected), len(set(selected)))
+        # perf-only targets stay out; generated-validation targets stay in.
+        self.assertNotIn("perf_call_setup_cps", expected)
+        self.assertIn("generated_sip_compliance", expected)
+        # The 8-minute audio round trip does not share a shard's run time.
+        heavy = next(command for command in tests if "audio_roundtrip_integration" in command)
+        self.assertEqual(heavy.count("--test"), 1)
+
+    def test_policy_job_checks_the_examples_lockfile_like_release_preparation(self) -> None:
+        commands = [command for command, _, _ in run_checks.policy_commands()]
+        self.assertIn(list(run_checks.EXAMPLES_LOCK_COMMAND), commands)
+        script = run_checks.EXAMPLES_LOCK_COMMAND[2]
+        self.assertIn("--manifest-path examples/Cargo.toml", script)
+        self.assertIn("--locked", script)
+        release = (ROOT / "scripts/release.py").read_text()
+        self.assertIn('Path("examples/Cargo.toml")', release)
 
     def test_sip_codec_gate_names_every_feature_except_the_perf_harness(self) -> None:
         # Derived from the manifest rather than restated, so adding a feature
