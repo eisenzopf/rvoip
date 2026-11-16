@@ -75,6 +75,7 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
 | `uctp` |  | Developer preview | UCTP protocol plus QUIC, WebTransport, and WebSocket adapters under `rvoip::uctp` |
 | `vapi` |  | Developer preview | Vapi bidirectional WebSocket agent adapter under `rvoip::vapi` |
+| `webex-byova` |  | Experimental | Webex Contact Center BYOVA virtual-agent transport (WebSocket; gRPC through the crate's `grpc` feature) under `rvoip::webex_byova`. Not in `full`: `rvoip-webex-byova` is not published to crates.io until Cisco's schema terms are resolved |
 | `sip-stir-shaken` |  | Developer preview | STIR/SHAKEN signing/verification under `rvoip::stir_shaken`; implies `sip` |
 | `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
 | `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
@@ -136,7 +137,8 @@ facade also exposes the listener's per-source request budget and admission
 observer through `SipConfig::source_rate_limit(SipSourceRateLimit)` and
 `SipConfig::ingress_observer(Arc<dyn SipIngressObserver>)`.
 
-`full` means every **facade feature**, not every crate in the rvoip workspace.
+`full` means every published **facade feature** (everything except the
+experimental `webex-byova`), not every crate in the rvoip workspace.
 
 ## Module layout
 
@@ -150,6 +152,7 @@ observer through `SipConfig::source_rate_limit(SipSourceRateLimit)` and
 | `rvoip::auth` | `webrtc` | [`rvoip-auth-core`](../identity/auth-core) |
 | `rvoip::uctp::{protocol, quic, webtransport, websocket}` | `uctp` | UCTP and substrate crates |
 | `rvoip::amazon_a2a` | `amazon-a2a` | [`rvoip-amazon-a2a`](../extensions/rvoip-amazon-a2a) |
+| `rvoip::webex_byova` | `webex-byova` (not in `full`) | [`rvoip-webex-byova`](../extensions/rvoip-webex-byova) |
 | `rvoip::vapi` | `vapi` | [`rvoip-vapi`](../extensions/rvoip-vapi) |
 | `rvoip::{vcon, identity, harness}` | `voip-3` | Conversation-model extension crates |
 | `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |

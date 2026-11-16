@@ -44,6 +44,7 @@
 //! | `webrtc` | | WebRTC interop adapter (`rvoip::webrtc`) — developer preview |
 //! | `uctp` | | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) — developer preview |
 //! | `amazon-a2a` | | Amazon Connect A2A external-agent transport (`rvoip::amazon_a2a`) — developer preview |
+//! | `webex-byova` | | Webex Contact Center BYOVA virtual-agent transport (`rvoip::webex_byova`) — experimental, not in `full` |
 //! | `vapi` | | Vapi bidirectional WebSocket agent adapter (`rvoip::vapi`) — developer preview |
 //! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — developer preview |
 //! | `voip-3` | | SIP + WebRTC + UCTP **+** vCon / identity / AI-harness extensions — developer preview |
@@ -159,6 +160,13 @@ pub mod vapi {
 #[cfg(feature = "amazon-a2a")]
 pub mod amazon_a2a {
     pub use rvoip_amazon_a2a::*;
+}
+
+/// Webex Contact Center BYOVA (Bring Your Own Virtual Agent) transport
+/// (experimental). Not part of `full`.
+#[cfg(feature = "webex-byova")]
+pub mod webex_byova {
+    pub use rvoip_webex_byova::*;
 }
 
 // ---------------------------------------------------------------------------

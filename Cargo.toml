@@ -243,6 +243,7 @@ rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.4.0"
 rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.4.0" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.4.0" }
 rvoip-amazon-a2a    = { path = "crates/extensions/rvoip-amazon-a2a", version = "0.4.0" }
+rvoip-webex-byova   = { path = "crates/extensions/rvoip-webex-byova", version = "0.4.0" }
 rvoip-vapi          = { path = "crates/extensions/rvoip-vapi", version = "0.4.0" }
 rvoip               = { path = "crates/rvoip", version = "0.4.0" }
 rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.4.0" }
