@@ -19,6 +19,9 @@ import sys
 import time
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci"))
+from fetch_webex_byova_protos import needed as webex_byova_protos_needed  # noqa: E402
+
 
 CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
 PLAN_SCHEMA = "rvoip-release-gate-plan-v1"
@@ -926,12 +929,26 @@ def execute_gate(
                 candidate=candidate,
                 environment_id=environment_id,
             ) or expand_command(gate["command"], root, artifact, candidate)
-            final_code = run_to_log(
-                argv,
-                cwd=root / gate.get("working_directory", "."),
-                log_path=log_path,
-                timeout_seconds=timeout_seconds,
-            )
+            # Cisco's Webex BYOVA protobuf contract is not committed: a gate
+            # that builds `rvoip-webex-byova/grpc` (the workspace rustdoc gate)
+            # first fetches the pinned, checksum-verified files into the
+            # ignored target/third_party directory and fails closed if it
+            # cannot.
+            final_code = 0
+            if webex_byova_protos_needed(argv):
+                final_code = run_to_log(
+                    [sys.executable, "scripts/ci/fetch_webex_byova_protos.py"],
+                    cwd=root,
+                    log_path=log_path,
+                    timeout_seconds=timeout_seconds,
+                )
+            if final_code == 0:
+                final_code = run_to_log(
+                    argv,
+                    cwd=root / gate.get("working_directory", "."),
+                    log_path=log_path,
+                    timeout_seconds=timeout_seconds,
+                )
         attempts.append(
             {
                 "attempt": attempt,
