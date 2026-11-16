@@ -52,6 +52,7 @@ def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, o
         'journal_sample': 1,
         'output': output,
         'linger_seconds': 30,
+        'metrics_listen': '0.0.0.0:9465',
     }
 
 
