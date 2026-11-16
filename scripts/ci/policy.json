@@ -292,6 +292,7 @@
         "Cargo.toml",
         "crates/**/*.rs",
         "crates/**/Cargo.toml",
+        "crates/extensions/rvoip-amazon-a2a/README.md",
         "crates/extensions/rvoip-vapi/README.md",
         "crates/sip/sip-core/src/builder/builder.md",
         "rust-toolchain",
