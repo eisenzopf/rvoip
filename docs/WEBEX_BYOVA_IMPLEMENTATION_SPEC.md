@@ -1,6 +1,6 @@
 # Webex BYOVA connector implementation specification
 
-Date: 2026-10-28. Status: implementation design plus WebSocket/gRPC prototype. Section 20 supersedes the original transport scope and checkpoint; section 21 records the WebSocket sandbox WAV exception; live Cisco qualification remains distinct from simulator/provider evidence.
+Date: 2026-10-28, updated 2026-11-15. Status: rvoip 0.5 adapter integration (section 22) on top of the WebSocket/gRPC prototype. Section 22 supersedes the `raw_session` bypass and the "full ConnectionAdapter integration remains design work" statements below; earlier sections remain as design rationale and historical evidence. Live Cisco qualification remains distinct from simulator/provider evidence.
 
 Baseline: fresh checkout of rvoip main at f4d528eaabbac935bce9a6404d3ce4fdec35ed0f, workspace version 0.4.0. All proposed interfaces below are additions unless explicitly identified as existing. A successful simulator run does not establish Cisco or Vapi production qualification.
 
@@ -9,7 +9,7 @@ Baseline: fresh checkout of rvoip main at f4d528eaabbac935bce9a6404d3ce4fdec35ed
 The submitted library includes the WebSocket protocol/session engine, bounded
 startup/result metadata, optional gRPC protobuf validation and response framing,
 opt-in WAV compatibility, fast-start answer buffering, and the separate ordered
-`rvoip-vapi::raw_session` API. The protocol crate has no Vapi dependency. Default
+`rvoip-vapi::raw_session` API (removed in 0.5; see section 22). The protocol crate has no Vapi dependency. Default
 builds do not compile the optional gRPC protobuf toolchain.
 
 Full `ConnectionAdapter` registration, facade exports, server/authentication,
@@ -716,3 +716,102 @@ schema describes PCM16/16 kHz and includes a RIFF-prefixed example. Do not promo
 this opt-in profile to the default or claim general availability support without
 confirmation. WebSocket context handoff, DTMF, interruption, load, renewal and
 recovery remain separate acceptance gates.
+
+## 22. rvoip 0.5 adapter integration — 2026-11-15
+
+The crate is renamed `rvoip-webex-byova` and becomes a standard rvoip
+extension, following the pattern of `rvoip-vapi`, the in-process AI harness,
+`rvoip-amazon-connect` and `rvoip-amazon-a2a`.
+
+### 22.1 What is implemented
+
+- `WebexByovaAdapter` implements `ConnectionAdapter` as `Transport::WebexByova`
+  (`AdapterKind::Interop`), for the WebSocket protocol and, behind `grpc`, the
+  gRPC protocol. Outbound origination, hold/resume, SIP-target transfer,
+  messages and outbound DTMF return typed `NotImplemented` errors.
+- Admission follows section 5: authenticate the upgrade or each RPC, require a
+  valid SESSION_START from the authenticated organization, mint a local
+  `ConnectionId` (Webex's conversation ID is a correlation key only), and
+  publish one atomic `AuthenticatedInboundConnection` whose principal's tenant
+  is the organization. The adapter advertises `FAIL_CLOSED_INBOUND`, supports
+  admission confirmation (a rejected `notify_inbound_admission_outcome` ends
+  the conversation; a late notification finds no route to resurrect), retains
+  a connection permit through cleanup, rejects a duplicate live (organization,
+  conversation), and writes nothing to Webex until core accepts the connection.
+- The rvoip facade exposes it as `rvoip::webex_byova` behind the
+  `webex-byova` feature, which is not part of `full` while the crate is
+  `publish = false`.
+
+### 22.2 Ordered, unpaced media through core
+
+The `rvoip-amazon-a2a` path (Orchestrator media graph to the default Vapi
+adapter) does not preserve what Webex needs (risks R2 and R5): the default
+Vapi adapter publishes events on a broadcast channel separate from audio,
+releases audio on a 20 ms clock through a drop-oldest jitter buffer, flushes
+queues on barge-in, and the media graph drops the oldest frame when a sink
+queue is full. A2A's `complete_turn` relies on the host knowing that upstream
+media is quiescent, which a host cannot observe.
+
+The 0.5 design adds an opt-in mode at two layers, both off by default:
+
+1. Core: `MediaGraphPolicy::backpressure_stall_timeout`. A lossless graph stops
+   reading its source while a sink queue is full and evicts a sink that stays
+   full for the budget. A stream requests it through
+   `MediaStream::lossless_delivery_stall_timeout`; a directional bridge uses
+   the shorter budget either side declares. The Webex stream always requests
+   it (`WebexByovaConfig::media_stall_timeout`, 5 s).
+2. Vapi: `VapiMediaDelivery::Ordered` per call. Binary messages are forwarded
+   unchanged and immediately, backpressure replaces drop-oldest (bounded by
+   `ordered_inbound_buffer_bytes`, then `ordered_media_stall_timeout`), caller
+   audio is written unpaced, barge-in does not flush, and every event is also
+   published on an exclusive ordered channel with `audio_offset`, the bytes
+   forwarded before it. Each event is published before any audio that follows
+   it on the Vapi socket.
+
+On the Webex side reply boundaries are positions in the agent audio received
+from the media path. `WebexByovaCall::follow_reply_marks` lets the session
+task consume `ReplyMark`s itself; before writing each agent frame it takes the
+marks already published, so a mark lands on its exact byte even when later
+audio is already queued. `complete_reply`/`interrupt` by command remain for
+hosts without an in-band source; a completion waits for its audio
+(`reply_boundary_timeout`), an interruption discards unwritten audio before
+its position. Positions agree only without transcoding, so the agent side
+uses PCMU/8 kHz; other payload types fail the call. `rvoip-vapi::raw_session`
+is removed.
+
+This makes FINAL ordering and the stale-audio fence exact relative to the
+provider's events. It does not make the provider's events authoritative:
+Vapi speech-stop and user-interrupted remain heuristics (R1, R3, V1-V3).
+
+### 22.3 JWS validation and assumptions
+
+`WebexJwsValidator` implements section 20.4 against host-supplied keys: RS256
+(configurable), `kid`-selected JWK, allowlisted issuer, audience, optional
+subject, `exp`, `nbf`, `iat` (not in the future), a 24-hour maximum lifetime,
+registration nonce in `jti` (constant-time, reusable), and organization, data
+source URL and schema ID bound per transport (`a38a10b7-...` for WebSocket,
+`5397013b-...` for gRPC). Key sets older than one hour fail closed until the
+host calls `replace_keys`; the adapter never fetches a URL from a token.
+
+Assumed, not confirmed by public Cisco documentation: the claim names for the
+organization (`com.cisco.user.orgid`), data source URL
+(`com.cisco.datasource.url`) and schema ID (`com.cisco.datasource.schema.uuid`),
+and RS256. Cisco's pages name the identity broker key endpoint
+(`.../idb/oauth2/v2/keys/verificationjwk`) and require URL and schema claim
+checks without naming the claims; Cisco's Python sample reads only `iss`,
+`aud` and `sub`. The names are configurable (`WebexClaimNames`) and must be
+confirmed against a live token. WebSocket requires `Authorization: Bearer`;
+gRPC accepts the `authorization` metadata with or without `Bearer `.
+
+### 22.4 Still open
+
+Live Cisco interoperability of the adapter; load and soak; an authoritative
+provider turn contract; BYODS registration renewal and JWKS fetching (host);
+digit collection, handoff tool and transcript policy (host application); the
+list-agents response shape (`{"virtual_agents":[{"id","name"}]}`) and gRPC
+cancellation semantics need sandbox confirmation; and publication, which
+waits on Cisco's schema terms. While the crate is unpublished, the facade's
+optional dependency on it prevents packaging `rvoip` for crates.io; resolve
+this before the 0.5 publish (publish the crate, or drop the facade feature
+from the published manifest).
+
