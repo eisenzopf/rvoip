@@ -8386,7 +8386,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rvoip-webex-byob"
+name = "rvoip-webex-byova"
 version = "0.4.0"
 dependencies = [
  "base64 0.23.1",

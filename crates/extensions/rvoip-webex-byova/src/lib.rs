@@ -11,7 +11,7 @@
 //! Write every returned batch in order before processing the next input.
 //!
 //! ```
-//! use rvoip_webex_byob::{Input, ProtocolError, Session};
+//! use rvoip_webex_byova::{Input, ProtocolError, Session};
 //! use serde_json::json;
 //!
 //! # fn main() -> Result<(), ProtocolError> {

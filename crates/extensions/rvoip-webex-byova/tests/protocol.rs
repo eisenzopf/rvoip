@@ -1,5 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use rvoip_webex_byob::{Input, ProtocolError, Session};
+use rvoip_webex_byova::{Input, ProtocolError, Session};
 use serde_json::{json, Value};
 
 fn request(seq: u64, input: Value) -> String {
@@ -278,9 +278,9 @@ fn teardown_is_terminal_and_multiple_replies_share_connection() {
 #[cfg(feature = "wav-compat")]
 #[test]
 fn wav_compat_bounds_each_container_preserves_samples_and_finality() {
-    use rvoip_webex_byob::AudioOutput;
+    use rvoip_webex_byova::AudioOutput;
     let audio: Vec<u8> = (0..75003).map(|n| (n % 256) as u8).collect();
-    let expected = rvoip_webex_byob::wav::pcmu_to_pcm16_wav(&audio).unwrap();
+    let expected = rvoip_webex_byova::wav::pcmu_to_pcm16_wav(&audio).unwrap();
     for split in [1, 319, 640, 8192, 32000, 75003] {
         let mut session = started().with_audio_output(AudioOutput::Pcm16Wav);
         let id = session.begin_reply().unwrap();
@@ -323,7 +323,7 @@ fn wav_compat_bounds_each_container_preserves_samples_and_finality() {
 #[cfg(feature = "wav-compat")]
 #[test]
 fn wav_aggregates_small_frames_and_discards_interrupted_tail() {
-    use rvoip_webex_byob::AudioOutput;
+    use rvoip_webex_byova::AudioOutput;
     let mut session = started().with_audio_output(AudioOutput::Pcm16Wav);
     let id = session.begin_reply().unwrap();
     let mut messages = Vec::new();
@@ -367,7 +367,7 @@ fn wav_aggregates_small_frames_and_discards_interrupted_tail() {
 #[cfg(feature = "wav-compat")]
 #[test]
 fn whole_wav_is_one_final_preserves_audio_and_bounds_buffer() {
-    use rvoip_webex_byob::{wav, AudioOutput};
+    use rvoip_webex_byova::{wav, AudioOutput};
     let audio: Vec<u8> = (0..160_003).map(|n| (n % 256) as u8).collect();
     let mut session = started().with_audio_output(AudioOutput::Pcm16WavWhole);
     let id = session.begin_reply().unwrap();
@@ -466,7 +466,7 @@ fn startup_context_and_result_metadata_are_bounded_and_call_scoped() {
 #[cfg(feature = "wav-compat")]
 #[test]
 fn fast_answers_preserve_intro_and_samples_without_tiny_prompt_train() {
-    use rvoip_webex_byob::AudioOutput;
+    use rvoip_webex_byova::AudioOutput;
     let mut session = started()
         .with_audio_output(AudioOutput::Pcm16Wav)
         .with_answer_audio_output(AudioOutput::Pcm16WavFastStart);
@@ -514,7 +514,7 @@ fn fast_answers_preserve_intro_and_samples_without_tiny_prompt_train() {
             .collect();
         assert_eq!(
             actual,
-            rvoip_webex_byob::wav::pcmu_to_pcm16_wav(&audio).unwrap()[44..]
+            rvoip_webex_byova::wav::pcmu_to_pcm16_wav(&audio).unwrap()[44..]
         );
     }
     let old = session.begin_reply().unwrap();

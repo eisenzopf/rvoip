@@ -452,7 +452,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
-        "rvoip-webex-byob",
+        "rvoip-webex-byova",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -542,7 +542,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
-        "rvoip-webex-byob",
+        "rvoip-webex-byova",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -634,7 +634,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
-        "rvoip-webex-byob",
+        "rvoip-webex-byova",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -2007,7 +2007,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
-        "rvoip-webex-byob",
+        "rvoip-webex-byova",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -9974,10 +9974,10 @@
     },
     {
       "affected_crates": [
-        "rvoip-webex-byob"
+        "rvoip-webex-byova"
       ],
       "affected_paths": [
-        "crates/extensions/rvoip-webex-byob/**",
+        "crates/extensions/rvoip-webex-byova/**",
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
@@ -9987,16 +9987,16 @@
         "scripts/ci/run_checks.py",
         "shard",
         "--name",
-        "release-rvoip-webex-byob",
+        "release-rvoip-webex-byova",
         "--packages",
-        "rvoip-webex-byob",
+        "rvoip-webex-byova",
         "--output",
         "{artifact_dir}/nested-ci-receipt.json"
       ],
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "test and lint rvoip-webex-byob",
+      "display_command": "test and lint rvoip-webex-byova",
       "estimated_seconds": 120,
       "executor": "argv",
       "expected_outputs": [
@@ -10004,11 +10004,11 @@
         "command.log",
         "nested-ci-receipt.json"
       ],
-      "id": "core.rvoip-webex-byob",
+      "id": "core.rvoip-webex-byova",
       "kind": "cargo",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "rvoip-webex-byob unit, integration, example, and Clippy checks",
+      "name": "rvoip-webex-byova unit, integration, example, and Clippy checks",
       "resource_class": "github-standard",
       "retry_on_exit_codes": [
         75
@@ -10725,7 +10725,7 @@
         "core.rvoip-vcon",
         "core.rvoip-vcon-postgres",
         "core.rvoip-webauthn",
-        "core.rvoip-webex-byob",
+        "core.rvoip-webex-byova",
         "core.rvoip-webrtc",
         "core.rvoip-webrtc-stack",
         "core.rvoip-websocket",
@@ -11040,7 +11040,7 @@
       "core.rvoip-vcon",
       "core.rvoip-vcon-postgres",
       "core.rvoip-webauthn",
-      "core.rvoip-webex-byob",
+      "core.rvoip-webex-byova",
       "core.rvoip-webrtc",
       "core.rvoip-webrtc-stack",
       "core.rvoip-websocket",
@@ -11171,7 +11171,7 @@
       "core.rvoip-vcon",
       "core.rvoip-vcon-postgres",
       "core.rvoip-webauthn",
-      "core.rvoip-webex-byob",
+      "core.rvoip-webex-byova",
       "core.rvoip-webrtc",
       "core.rvoip-webrtc-stack",
       "core.rvoip-websocket",

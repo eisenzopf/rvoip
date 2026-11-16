@@ -448,7 +448,7 @@ class GateFrameworkTests(unittest.TestCase):
         # Adding the 47th crate (rvoip-amazon-a2a) adds a two-minute core gate.
         # Packing the updated catalog raises the longest planned shard from
         # 1345 to 1347 seconds while preserving the twelve-shard concurrency cap.
-        # The 48th crate (rvoip-webex-byob) adds one more bounded two-minute
+        # The 48th crate (rvoip-webex-byova) adds one more bounded two-minute
         # core gate, raising the longest planned shard from 1347 to 1359 seconds.
         self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1359)
 

@@ -1,4 +1,4 @@
-# Webex BYOB connector implementation specification
+# Webex BYOVA connector implementation specification
 
 Date: 2026-10-28. Status: implementation design plus WebSocket/gRPC prototype. Section 20 supersedes the original transport scope and checkpoint; section 21 records the WebSocket sandbox WAV exception; live Cisco qualification remains distinct from simulator/provider evidence.
 
@@ -36,9 +36,9 @@ publication of the vendored schemas. Path/Git library evaluation is supported.
 
 ## 1. Decision and outcome
 
-Add a provider-neutral extension at crates/extensions/rvoip-webex-byob, beside the existing rvoip-vapi extension. A thin Rust application in the separate webex-vapi-connector repository composes the two. The Webex crate must not depend on Vapi, contain Vapi assistant IDs, or implement application-specific handoff policy.
+Add a provider-neutral extension at crates/extensions/rvoip-webex-byova, beside the existing rvoip-vapi extension. A thin Rust application in the separate webex-vapi-connector repository composes the two. The Webex crate must not depend on Vapi, contain Vapi assistant IDs, or implement application-specific handoff policy.
 
-Cisco names this integration BYOVA, Bring Your Own Virtual Agent. The requested BYOB name is retained for the package. Scope is Webex Contact Center voice flows; Meetings bots, Webex Calling SIP trunks and messaging bots are outside this protocol. Sections 1–19 describe WebSocket; section 20 adds the separately selectable gRPC variant.
+Cisco names this integration BYOVA, Bring Your Own Virtual Agent. The package uses Cisco's term: `rvoip-webex-byova`, `Transport::WebexByova` and the `webex-byova` facade feature (renamed from the prototype's `byob` before its first release). Scope is Webex Contact Center voice flows; Meetings bots, Webex Calling SIP trunks and messaging bots are outside this protocol. Sections 1–19 describe WebSocket; section 20 adds the separately selectable gRPC variant.
 
 Use rvoip 0.4 consistently. Bridgefu is an optional future host. Its reviewed main commit c4793d79e0c1810e42155d494f2ab1cc308bca11 pins the coordinated 0.3.8 graph and has no Webex or Vapi-WebSocket leg variant. Upgrading that gateway does not solve the turn-control problem and must not block this integration.
 
@@ -78,7 +78,7 @@ These gaps do not prevent implementing the generic Webex extension. They do prev
 ## 4. Components and ownership
 
 ~~~text
-Webex Contact Center -- WSS JSON + Base64 --> rvoip-webex-byob
+Webex Contact Center -- WSS JSON + Base64 --> rvoip-webex-byova
                                              |
                                       ordered session actor
                                              |
@@ -112,9 +112,9 @@ Proposed crate modules:
 | server | Optional Axum router and WebSocket upgrade integration |
 | error / metrics | Content-free errors and bounded-cardinality metrics |
 
-Use workspace version/MSRV/lints and shared dependency versions. Add workspace membership and dependency; expose an opt-in webex-byob facade feature and rvoip::webex_byob module. Do not add SIP, RTP, WebRTC, AWS, or Vapi dependencies to the Webex protocol layer. Keep server and Cisco-JWS dependencies behind features where practical.
+Use workspace version/MSRV/lints and shared dependency versions. Add workspace membership and dependency; expose an opt-in webex-byova facade feature and rvoip::webex_byova module. Do not add SIP, RTP, WebRTC, AWS, or Vapi dependencies to the Webex protocol layer. Keep server and Cisco-JWS dependencies behind features where practical.
 
-Introduce Transport::WebexByob with AdapterKind::Interop. Existing Transport::WebSocket means UCTP and must not be reused. Audit exhaustive matches, serde representations, metrics labels, persistence, capability negotiation, and facade tests. Adding a variant to the currently exhaustive public Transport enum is a source-compatibility change: coordinate the release, do not describe it as a patch-only change.
+Introduce Transport::WebexByova with AdapterKind::Interop. Existing Transport::WebSocket means UCTP and must not be reused. Audit exhaustive matches, serde representations, metrics labels, persistence, capability negotiation, and facade tests. Adding a variant to the currently exhaustive public Transport enum is a source-compatibility change: coordinate the release, do not describe it as a patch-only change.
 
 Implement inbound accept/reject/end, stream access, authenticated admission, terminal fallback, and resource counts. Outbound originate, hold/resume, arbitrary SIP-target transfer, and sending DTMF toward Webex are unsupported unless a later contract explicitly provides them. Return typed unsupported errors; never report success for a no-op.
 

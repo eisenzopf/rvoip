@@ -3,19 +3,19 @@ name: Webex BYOVA optional profiles
 on:
   pull_request:
     paths:
-      - "crates/extensions/rvoip-webex-byob/**"
+      - "crates/extensions/rvoip-webex-byova/**"
       - "crates/media/codec-core/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain.toml"
-      - ".github/workflows/webex-byob.yml"
+      - ".github/workflows/webex-byova.yml"
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
 concurrency:
-  group: webex-byob-${{ github.event.pull_request.number || github.ref }}
+  group: webex-byova-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 env:
@@ -35,11 +35,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
-          shared-key: webex-byob-profiles
+          shared-key: webex-byova-profiles
       # Default-profile tests and lint also run in the normal PR crate shard.
       - name: Test WAV compatibility without gRPC
-        run: cargo test --locked -p rvoip-webex-byob --features wav-compat
+        run: cargo test --locked -p rvoip-webex-byova --features wav-compat
       - name: Test all profiles and the Rustdoc example
-        run: cargo test --locked -p rvoip-webex-byob --all-features
+        run: cargo test --locked -p rvoip-webex-byova --all-features
       - name: Lint optional profiles
-        run: cargo clippy --locked -p rvoip-webex-byob --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked -p rvoip-webex-byova --all-targets --all-features -- -D warnings

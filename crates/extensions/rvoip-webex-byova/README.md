@@ -1,4 +1,4 @@
-# rvoip-webex-byob
+# rvoip-webex-byova
 
 Provider-neutral Webex Contact Center BYOVA protocol engines (WebSocket and optional gRPC) for rvoip 0.4.
 
@@ -29,9 +29,9 @@ Short replies and the final remainder flush on completion; interruption discards
 the pending tail. This avoids wrapping every small provider frame as a separate
 playback prompt. Raw output keeps its existing chunking policy.
 
-No full ConnectionAdapter registration exists yet. The intended adapter contract, known upstream schema contradictions and qualification gates are in `docs/WEBEX_BYOB_IMPLEMENTATION_SPEC.md` at the workspace root. The sibling `webex-vapi-connector` repository contains a private Axum host and independent simulator. Passing its simulator does not prove Cisco conformance.
+No full ConnectionAdapter registration exists yet. The intended adapter contract, known upstream schema contradictions and qualification gates are in `docs/WEBEX_BYOVA_IMPLEMENTATION_SPEC.md` at the workspace root. The sibling `webex-vapi-connector` repository contains a private Axum host and independent simulator. Passing its simulator does not prove Cisco conformance.
 
-Run `cargo test -p rvoip-webex-byob` from the workspace root.
+Run `cargo test -p rvoip-webex-byova` from the workspace root.
 The crate-level Rustdoc includes a runnable session/reply example.
 Default builds do not compile protobuf tooling; it is enabled only by `grpc`.
 
@@ -42,7 +42,7 @@ responses that decode PCMU to mono 8 kHz PCM16 with rvoip codec-core. The host s
 transport, authentication and conversation ownership; gRPC uses a new RPC per
 interaction. See section 20 of the implementation specification for this distinct
 lifecycle and the sibling application's `docs/GRPC.md` for running both simulators.
-Run `cargo test -p rvoip-webex-byob --features grpc` for both wire variants.
+Run `cargo test -p rvoip-webex-byova --features grpc` for both wire variants.
 
 `AudioOutput::Pcm16WavWhole` is an explicit deployment override for Cisco-approved
 whole-reply output. It emits no audio until finish, then one WAV on FINAL.
@@ -72,9 +72,9 @@ reduces connector buffering; it cannot guarantee when Cisco starts playback.
 For review, run the default and optional profiles independently:
 
 ```sh
-cargo test --locked -p rvoip-webex-byob
-cargo test --locked -p rvoip-webex-byob --features wav-compat
-cargo test --locked -p rvoip-webex-byob --all-features
-cargo clippy --locked -p rvoip-webex-byob --all-features --all-targets -- -D warnings
+cargo test --locked -p rvoip-webex-byova
+cargo test --locked -p rvoip-webex-byova --features wav-compat
+cargo test --locked -p rvoip-webex-byova --all-features
+cargo clippy --locked -p rvoip-webex-byova --all-features --all-targets -- -D warnings
 cargo test --locked -p rvoip-vapi
 ```
