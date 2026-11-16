@@ -90,7 +90,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 pub use rvoip_media_core::relay::controller::{
-    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
+    AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaSessionControllerConfig,
 };
 pub use rvoip_rtp_core::executor::{MediaExecutorConfig, MediaExecutorMode};
 pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
@@ -383,6 +383,28 @@ impl DtlsSetupRole {
             Self::Passive => "passive",
         }
     }
+}
+
+/// DTLS role this stack takes when it answers an SDP offer of
+/// `a=setup:actpass`, which leaves the choice to the answerer.
+///
+/// [`DtlsActpassAnswerRole::Active`] is the default: RFC 5763 §5 and JSEP
+/// (RFC 8829 §5.3.1) recommend it, because the answerer can send its
+/// ClientHello as soon as it answers, and because an answerer behind NAT
+/// opens its own media path by sending first.
+/// [`DtlsActpassAnswerRole::Passive`] makes this stack wait for the offerer's
+/// ClientHello instead; use it only for a peer that cannot act as the DTLS
+/// server. A passive answerer whose media address the offerer cannot reach
+/// first (NAT without ICE) waits for a ClientHello that never arrives, and
+/// the call fails its DTLS handshake.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DtlsActpassAnswerRole {
+    /// Answer `a=setup:active` and initiate DTLS as the client.
+    #[default]
+    Active,
+    /// Answer `a=setup:passive` and wait for the offerer to initiate DTLS.
+    Passive,
 }
 
 /// Named SRTP suite offer policies for common PBX/carrier interop.
@@ -2884,6 +2906,16 @@ pub struct Config {
     /// media path by sending the first DTLS packet.
     pub dtls_setup_role: DtlsSetupRole,
 
+    /// DTLS role to answer with when an incoming offer says
+    /// `a=setup:actpass`, when [`Config::srtp_keying`] is
+    /// [`SrtpKeyingMode::DtlsSrtp`].
+    ///
+    /// The default is [`DtlsActpassAnswerRole::Active`] (RFC 5763 §5,
+    /// RFC 8829 §5.3.1). See [`DtlsActpassAnswerRole`] for the NAT trade-off
+    /// of [`DtlsActpassAnswerRole::Passive`]. Offers of `active` or `passive`
+    /// always get the complementary answer.
+    pub dtls_actpass_answer_role: DtlsActpassAnswerRole,
+
     /// Inbound jitter buffer: playout smoothing and packet-loss concealment
     /// for received audio.
     ///
@@ -3696,6 +3728,7 @@ impl std::fmt::Debug for Config {
             .field("rtcp_non_mux", &self.rtcp_non_mux)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
+            .field("dtls_actpass_answer_role", &self.dtls_actpass_answer_role)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -3922,6 +3955,7 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
+            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4071,6 +4105,7 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
+            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4740,6 +4775,13 @@ impl Config {
     /// Select the DTLS role advertised by outgoing SIP SDP offers.
     pub fn with_dtls_setup_role(mut self, role: DtlsSetupRole) -> Self {
         self.dtls_setup_role = role;
+        self
+    }
+
+    /// Select the DTLS role answered to an incoming `a=setup:actpass` offer.
+    /// See [`Config::dtls_actpass_answer_role`].
+    pub fn with_dtls_actpass_answer_role(mut self, role: DtlsActpassAnswerRole) -> Self {
+        self.dtls_actpass_answer_role = role;
         self
     }
 
@@ -11473,6 +11515,7 @@ impl UnifiedCoordinator {
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         media_adapter_inner.set_dtls_setup_role(config.dtls_setup_role);
+        media_adapter_inner.set_dtls_actpass_answer_role(config.dtls_actpass_answer_role);
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
@@ -12285,17 +12328,24 @@ impl UnifiedCoordinator {
     }
 
     pub(crate) async fn lifecycle_snapshot(&self, id: &SessionId) -> CallLifecycleSnapshot {
-        let (state, media_security) = self
+        let (state, media_security, media) = self
             .helpers
             .state_machine
             .store
             .with_session(id, |session| {
-                (Some(session.call_state), session.media_security.clone())
+                (
+                    Some(session.call_state),
+                    session.media_security.clone(),
+                    Self::negotiated_media_from_session(session),
+                )
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         let mut snapshot = self.lifecycle.snapshot(id, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
+        }
+        if snapshot.media.is_none() {
+            snapshot.media = media;
         }
         snapshot
     }
@@ -12318,14 +12368,21 @@ impl UnifiedCoordinator {
         let media_security = current
             .as_ref()
             .and_then(|session| session.media_security.clone());
+        let media = current
+            .as_ref()
+            .and_then(|snapshot| Self::negotiated_media_from_session(snapshot.state()));
         let mut snapshot = self.lifecycle.snapshot_exact(handle, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
+        }
+        if snapshot.media.is_none() {
+            snapshot.media = media;
         }
         let has_exact_evidence = current.is_some()
             || !snapshot.progress.is_empty()
             || snapshot.answered.is_some()
             || snapshot.media_security.is_some()
+            || snapshot.media.is_some()
             || snapshot.terminal.is_some()
             || snapshot.latest_transfer_outcome.is_some();
         has_exact_evidence.then_some(snapshot).ok_or_else(|| {
@@ -13824,8 +13881,26 @@ impl UnifiedCoordinator {
         session_a: &SessionId,
         session_b: &SessionId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
+        self.bridge_with_mode(session_a, session_b, BridgeMode::Relay)
+            .await
+    }
+
+    /// Bridge two calls, choosing relay vs per-direction transcoding.
+    ///
+    /// [`BridgeMode::Relay`] is the historical [`Self::bridge`] behaviour and
+    /// requires both legs to share an interchangeable payload type.
+    /// [`BridgeMode::Transcode`] decodes and re-encodes per direction with each
+    /// leg's SIP-negotiated codec, so calls whose legs negotiated different
+    /// codecs still exchange audio. Both codecs must be compiled into the
+    /// media layer (feature-gated codecs such as Opus need their feature).
+    pub async fn bridge_with_mode(
+        &self,
+        session_a: &SessionId,
+        session_b: &SessionId,
+        mode: BridgeMode,
+    ) -> std::result::Result<BridgeHandle, BridgeError> {
         self.media_adapter
-            .bridge_rtp_sessions(session_a, session_b)
+            .bridge_rtp_sessions_with_mode(session_a, session_b, mode)
             .await
     }
 
@@ -14629,6 +14704,22 @@ impl UnifiedCoordinator {
             .await
     }
 
+    /// The SIP-negotiated media format recorded on one session, or `None`
+    /// until SDP negotiation has produced a codec and payload type.
+    fn negotiated_media_from_session(
+        session: &crate::session_store::state::SessionState,
+    ) -> Option<crate::api::lifecycle::NegotiatedMedia> {
+        let config = session.negotiated_config.as_ref()?;
+        let payload_type = session.negotiated_payload_type()?;
+        Some(crate::api::lifecycle::NegotiatedMedia {
+            codec: config.codec.clone(),
+            payload_type,
+            clock_rate: config.sample_rate,
+            channels: config.channels,
+            fmtp: config.fmtp.clone(),
+        })
+    }
+
     /// Resolve the exact SDP-negotiated media format for one exact live
     /// session lifetime.
     ///
@@ -14639,6 +14730,34 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
     ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
         self.helpers.negotiated_media_config_exact(handle).await
+    }
+
+    /// The SIP-negotiated media format for one call, or `None` until SDP
+    /// negotiation has committed.
+    ///
+    /// This is the codec/rate/channel shape the answer actually selected, read
+    /// from the session store — the same value the media layer encodes with.
+    /// Re-INVITE renegotiation replaces it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
+    /// if let Some(media) = coordinator.negotiated_media(&call).await? {
+    ///     println!("{} at {} Hz, {} ch (PT {})", media.codec, media.clock_rate, media.channels, media.payload_type);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn negotiated_media(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
+        Ok(self
+            .helpers
+            .state_machine
+            .store
+            .with_session(session, Self::negotiated_media_from_session)?)
     }
 
     /// Exact number of range-backed RTP/RTCP ports currently leased by SIP

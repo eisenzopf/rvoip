@@ -882,6 +882,9 @@ pub(crate) struct OutboundSessionStateInput {
     credentials: Option<crate::types::Credentials>,
     auth: Option<crate::auth::SipClientAuth>,
     pai_uri: Option<String>,
+    /// Offer plain RTP (`RTP/AVP`) for this call (carrier trunks, legacy
+    /// peers) instead of the endpoint's secure/WebRTC profile.
+    plain_rtp: bool,
     transferor_session_id: Option<SessionId>,
     transferor_lifecycle_handle: Option<SessionRegistryHandle>,
     extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
@@ -900,6 +903,7 @@ impl OutboundSessionStateInput {
             credentials,
             auth,
             pai_uri,
+            plain_rtp: false,
             transferor_session_id,
             transferor_lifecycle_handle,
             extra_headers,
@@ -915,6 +919,7 @@ impl OutboundSessionStateInput {
             credentials: snapshot.credentials.clone(),
             auth: snapshot.auth.clone(),
             pai_uri,
+            plain_rtp: snapshot.plain_rtp,
             transferor_session_id: snapshot.transfer_leg.clone(),
             transferor_lifecycle_handle,
             extra_headers: snapshot.extra_headers.clone(),
@@ -1081,6 +1086,7 @@ impl EventStateInput {
             session.credentials = input.credentials;
             session.auth = input.auth;
             session.pai_uri = input.pai_uri;
+            session.plain_rtp_offer = input.plain_rtp;
             session.is_transfer_call = input.transferor_session_id.is_some();
             session.transferor_session_id = input.transferor_session_id;
             session.transferor_lifecycle_handle = input.transferor_lifecycle_handle;

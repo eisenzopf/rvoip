@@ -1436,7 +1436,7 @@ mod tests;
 
 // Re-export important types
 pub use audio_generation::{AudioSource, AudioTransmitterConfig};
-pub use bridge::{BridgeError, BridgeHandle};
+pub use bridge::{BridgeError, BridgeHandle, BridgeMode, TranscodeBridgeStats};
 pub use inline_rx::{
     inline_rx_counters, InlineAudioConsumer, InlineAudioConsumerGuard, InlineAudioDelivery,
     InlineRxCounters,
@@ -1444,9 +1444,10 @@ pub use inline_rx::{
 pub use rtp_management::{EncodedG711Format, G711SendNow, PreparedG711Sender};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
-    MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
-    REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER, RTCP_REDUCED_MINIMUM_PARAMETER,
-    RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
+    MediaSessionInfo, MediaSessionStatus, TelephoneEventFormat, AMR_DTX_PARAMETER,
+    NEGOTIATED_FMTP_PARAMETER, REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER,
+    RTCP_REDUCED_MINIMUM_PARAMETER, RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
+    TELEPHONE_EVENT_PARAMETER,
 };
 
 use types::{DialogTxGate, RtpSessionWrapper, SecureKeyingState};
@@ -1804,6 +1805,10 @@ pub struct MediaSessionController {
     /// Both directions are stored so lookup is O(1) from either end. Cleared
     /// on `BridgeHandle` drop or `stop_media` of a bridged session.
     pub(super) bridge_partners: Arc<DashMap<DialogId, DialogId>>,
+    /// Bridge mode per bridged dialog. Only transcode bridges register here;
+    /// relay bridges are identified by the absence of an entry (relay is the
+    /// historical default and needs no guard bypass).
+    pub(super) bridge_modes: Arc<DashMap<DialogId, bridge::BridgeMode>>,
 
     /// Sprint 3.6 C1 follow-up — RFC 3389 comfort-noise gate state per
     /// dialog. Lazily populated on first audio frame for sessions
@@ -1990,6 +1995,7 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::with_capacity(capacity_hint)),
+            bridge_modes: Arc::new(DashMap::with_capacity(capacity_hint)),
             cn_gate_state: Arc::new(DashMap::with_capacity(capacity_hint)),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
@@ -2340,6 +2346,7 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
+            bridge_modes: Arc::new(DashMap::new()),
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::new()),
@@ -2846,7 +2853,14 @@ impl MediaSessionController {
                             .to_string(),
                     )
                 })?;
-            udp_transport.set_remote_rtp_addr(remote_addr).await;
+            // Do not overwrite an ICE-nominated remote address with the
+            // SDP default. ICE retargets the RTP transport as soon as a pair
+            // is nominated; DTLS must send its handshake replies to that same
+            // nominated address or Chrome never sees ServerHello. Keep the
+            // SDP address only as a fallback for non-ICE calls.
+            if udp_transport.remote_rtp_addr().await.is_none() {
+                udp_transport.set_remote_rtp_addr(remote_addr).await;
+            }
             udp_transport
                 .dtls_conn_adapter()
                 .map_err(|e| Error::config(format!("dtls_conn_adapter: {e}")))?

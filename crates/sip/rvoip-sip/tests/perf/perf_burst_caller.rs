@@ -1768,6 +1768,7 @@ mod tests {
             progress: Vec::new(),
             answered: None,
             media_security: None,
+            media: None,
             terminal: Some(terminal),
             latest_transfer_outcome: None,
         };

@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use rvoip_sip::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile};
 use rvoip_sip::api::stream_peer::EventReceiver;
-use rvoip_sip::api::unified::{Config, DtlsSetupRole, SrtpKeyingMode, UnifiedCoordinator};
+use rvoip_sip::api::unified::{
+    Config, DtlsActpassAnswerRole, DtlsSetupRole, SrtpKeyingMode, UnifiedCoordinator,
+};
 use rvoip_sip_core::types::sdp::CryptoSuite;
 
 fn reserve_loopback_port() -> u16 {
@@ -67,6 +69,7 @@ fn assert_dtls_srtp_installed(event: Event, endpoint: &str, expected_suite: Cryp
 async fn dtls_srtp_call_negotiates_and_installs_contexts_on_both_endpoints() {
     run_dtls_srtp_call(
         DtlsSetupRole::Actpass,
+        DtlsActpassAnswerRole::default(),
         vec![
             CryptoSuite::AesCm128HmacSha1_80,
             CryptoSuite::AesCm128HmacSha1_32,
@@ -80,14 +83,29 @@ async fn dtls_srtp_call_negotiates_and_installs_contexts_on_both_endpoints() {
 async fn active_dtls_offer_negotiates_the_only_configured_profile() {
     run_dtls_srtp_call(
         DtlsSetupRole::Active,
+        DtlsActpassAnswerRole::default(),
         vec![CryptoSuite::AesCm128HmacSha1_32],
         CryptoSuite::AesCm128HmacSha1_32,
     )
     .await;
 }
 
+/// The opt-in passive answer to an `actpass` offer: the answerer waits for
+/// the offerer's ClientHello, and the call still keys both endpoints.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn passive_answer_to_actpass_offer_negotiates_when_opted_in() {
+    run_dtls_srtp_call(
+        DtlsSetupRole::Actpass,
+        DtlsActpassAnswerRole::Passive,
+        vec![CryptoSuite::AesCm128HmacSha1_80],
+        CryptoSuite::AesCm128HmacSha1_80,
+    )
+    .await;
+}
+
 async fn run_dtls_srtp_call(
     setup_role: DtlsSetupRole,
+    bob_actpass_answer: DtlsActpassAnswerRole,
     suites: Vec<CryptoSuite>,
     expected_suite: CryptoSuite,
 ) {
@@ -111,6 +129,7 @@ async fn run_dtls_srtp_call(
     bob_cfg.srtp_required = true;
     bob_cfg.srtp_keying = SrtpKeyingMode::DtlsSrtp;
     bob_cfg.srtp_offered_suites = suites;
+    bob_cfg.dtls_actpass_answer_role = bob_actpass_answer;
 
     let alice = UnifiedCoordinator::new(alice_cfg)
         .await
@@ -150,14 +169,27 @@ async fn run_dtls_srtp_call(
     })
     .await
     .expect("alice saw no terminal signaling event");
-    if let Event::CallFailed {
-        status_code,
-        reason,
-        ..
-    } = answered
-    {
-        panic!("DTLS-SRTP setup failed: {status_code} {reason}");
-    }
+    let answer_sdp = match answered {
+        Event::CallAnswered { sdp, .. } => sdp.expect("the 200 OK carries the SDP answer"),
+        Event::CallFailed {
+            status_code,
+            reason,
+            ..
+        } => panic!("DTLS-SRTP setup failed: {status_code} {reason}"),
+        _ => unreachable!(),
+    };
+    // RFC 8842 §5.1: the answer picks the complement of an active/passive
+    // offer, and the configured role for an actpass offer.
+    let expected_answer_setup = match (setup_role, bob_actpass_answer) {
+        (DtlsSetupRole::Active, _) => "a=setup:passive",
+        (DtlsSetupRole::Passive, _) => "a=setup:active",
+        (_, DtlsActpassAnswerRole::Passive) => "a=setup:passive",
+        _ => "a=setup:active",
+    };
+    assert!(
+        answer_sdp.contains(expected_answer_setup),
+        "answer should carry {expected_answer_setup}:\n{answer_sdp}"
+    );
 
     let alice_security = wait_for(&mut alice_events, Duration::from_secs(12), |event| {
         matches!(event, Event::MediaSecurityNegotiated { .. })
