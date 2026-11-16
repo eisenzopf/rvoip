@@ -359,6 +359,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-stream"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5a71a6f37880a80d1d7f19efd781e4b5de42c88f0722cc13bcb6cc2cfe8476"
+dependencies = [
+ "async-stream-impl",
+ "futures-core",
+ "pin-project-lite",
+]
+
+[[package]]
+name = "async-stream-impl"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7c24de15d275a1ecfd47a380fb4d5ec9bfe0933f309ed5e705b775596a3574d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -659,7 +681,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tower",
+ "tower 0.5.3",
  "tracing",
 ]
 
@@ -814,7 +836,7 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-tungstenite 0.24.0",
- "tower",
+ "tower 0.5.3",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -840,7 +862,7 @@ dependencies = [
  "pin-project-lite",
  "serde_core",
  "sync_wrapper",
- "tower",
+ "tower 0.5.3",
  "tower-layer",
  "tower-service",
 ]
@@ -1690,7 +1712,7 @@ dependencies = [
  "futures-core",
  "prost 0.14.4",
  "prost-types 0.14.4",
- "tonic",
+ "tonic 0.14.6",
  "tonic-prost",
  "tracing-core",
 ]
@@ -1715,7 +1737,7 @@ dependencies = [
  "thread_local",
  "tokio",
  "tokio-stream",
- "tonic",
+ "tonic 0.14.6",
  "tracing",
  "tracing-core",
  "tracing-subscriber",
@@ -6016,6 +6038,70 @@ dependencies = [
 ]
 
 [[package]]
+name = "protoc-bin-vendored"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8760a25b6ff9c620324822737e468478fa092234190d2e449760344354896ed9"
+dependencies = [
+ "protoc-bin-vendored-linux-aarch_64",
+ "protoc-bin-vendored-linux-ppcle_64",
+ "protoc-bin-vendored-linux-s390_64",
+ "protoc-bin-vendored-linux-x86_32",
+ "protoc-bin-vendored-linux-x86_64",
+ "protoc-bin-vendored-macos-aarch_64",
+ "protoc-bin-vendored-macos-x86_64",
+ "protoc-bin-vendored-win32",
+]
+
+[[package]]
+name = "protoc-bin-vendored-linux-aarch_64"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73fa2624782ca04cd44f51554566717377acd240e4c0016d757dd74fccc9324f"
+
+[[package]]
+name = "protoc-bin-vendored-linux-ppcle_64"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2417e9817fa237dab803ad4dda7357a111656e242959cc6b8f9a1a583367d42"
+
+[[package]]
+name = "protoc-bin-vendored-linux-s390_64"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d189c34636356a46a7ed3188233dc8a88c431278cc54d4a19b096a2d270e985"
+
+[[package]]
+name = "protoc-bin-vendored-linux-x86_32"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "171e39f1e846e5f322ced1ac3b8d4cd3a3833ca24b6e5d58b3632574fe6204fa"
+
+[[package]]
+name = "protoc-bin-vendored-linux-x86_64"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "873cdcc097593432086661aa432b8078f1cd87bfb02847c332e98ae2c119e966"
+
+[[package]]
+name = "protoc-bin-vendored-macos-aarch_64"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eeb72df001783b8297847fe8f5f874ee400fd742c843d60583e8c23d96977c7f"
+
+[[package]]
+name = "protoc-bin-vendored-macos-x86_64"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b04652167eca899dda05f32f5481adeaf25c623a98ce2fc146a001cc59a2add7"
+
+[[package]]
+name = "protoc-bin-vendored-win32"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "263a3f48f01e7309e857138bd47f785585b4a005e8e56c6d2824ce91195999c3"
+
+[[package]]
 name = "ptr_meta"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6588,7 +6674,7 @@ dependencies = [
  "tokio",
  "tokio-native-tls",
  "tokio-rustls",
- "tower",
+ "tower 0.5.3",
  "tower-http 0.6.11",
  "tower-service",
  "url",
@@ -6620,7 +6706,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
- "tower",
+ "tower 0.5.3",
  "tower-http 0.6.11",
  "tower-service",
  "url",
@@ -7294,6 +7380,7 @@ dependencies = [
  "rvoip-uctp",
  "rvoip-vapi",
  "rvoip-vcon",
+ "rvoip-webex-byova",
  "rvoip-webrtc",
  "rvoip-websocket",
  "rvoip-webtransport",
@@ -8211,7 +8298,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
- "tower",
+ "tower 0.5.3",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
@@ -8300,6 +8387,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-webex-byova"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "base64 0.23.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "futures",
+ "jsonwebtoken",
+ "parking_lot",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "protoc-bin-vendored",
+ "rvoip-codec-core",
+ "rvoip-core",
+ "rvoip-vapi",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "tonic 0.12.3",
+ "tonic-build",
+ "tracing",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "rvoip-webrtc"
 version = "0.4.0"
 dependencies = [
@@ -8344,7 +8463,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
- "tower",
+ "tower 0.5.3",
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
@@ -9754,6 +9873,36 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "tonic"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877c5b330756d856ffcc4553ab34a5684481ade925ecc54bcd1bf02b1d0d4d52"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum 0.7.9",
+ "base64 0.22.1",
+ "bytes",
+ "h2 0.4.16",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "hyper 1.11.0",
+ "hyper-timeout",
+ "hyper-util",
+ "percent-encoding",
+ "pin-project",
+ "prost 0.13.5",
+ "socket2 0.5.10",
+ "tokio",
+ "tokio-stream",
+ "tower 0.4.13",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "tonic"
 version = "0.14.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
@@ -9775,10 +9924,24 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-stream",
- "tower",
+ "tower 0.5.3",
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "tonic-build"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9557ce109ea773b399c9b9e5dca39294110b74f1f342cb347a80d1fce8c26a11"
+dependencies = [
+ "prettyplease",
+ "proc-macro2",
+ "prost-build",
+ "prost-types 0.13.5",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -9789,7 +9952,27 @@ checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
  "prost 0.14.4",
- "tonic",
+ "tonic 0.14.6",
+]
+
+[[package]]
+name = "tower"
+version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
+dependencies = [
+ "futures-core",
+ "futures-util",
+ "indexmap 1.9.3",
+ "pin-project",
+ "pin-project-lite",
+ "rand 0.8.7",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tower-layer",
+ "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -9823,7 +10006,7 @@ dependencies = [
  "http 1.5.0",
  "http-body 1.1.0",
  "pin-project-lite",
- "tower",
+ "tower 0.5.3",
  "tower-layer",
  "tower-service",
  "url",

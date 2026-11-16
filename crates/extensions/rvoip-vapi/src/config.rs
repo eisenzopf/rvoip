@@ -152,6 +152,16 @@ pub struct VapiConfig {
     /// Kept separate from `media_queue_capacity`, which sizes the media stream
     /// channels rather than this jitter buffer.
     pub outbound_queue_capacity: usize,
+    /// Ordered mode only ([`crate::VapiMediaDelivery::Ordered`]): Vapi audio
+    /// held while the downstream consumer applies backpressure. When it is
+    /// full the adapter stops reading the Vapi socket, so TCP flow control
+    /// reaches the provider. Default 256 KiB (32 s of PCMU/8 kHz).
+    pub ordered_inbound_buffer_bytes: usize,
+    /// Ordered mode only: how long the downstream consumer, or the Vapi
+    /// socket writer, may make no progress before the call fails. Ordered
+    /// mode never discards audio to recover. Also the stall budget the
+    /// stream asks the core media graph to apply. Default 5 s.
+    pub ordered_media_stall_timeout: Duration,
     pub(crate) allow_insecure_transport: bool,
 }
 
@@ -193,6 +203,8 @@ impl VapiConfig {
             jitter_target_floor_ms: 60,
             jitter_target_ceiling_ms: 400,
             max_catchup_frames_per_tick: 2,
+            ordered_inbound_buffer_bytes: 256 * 1024,
+            ordered_media_stall_timeout: Duration::from_secs(5),
             allow_insecure_transport: false,
         }
     }
@@ -225,6 +237,7 @@ impl VapiConfig {
             || self.media_write_timeout.is_zero()
             || self.graceful_shutdown_timeout.is_zero()
             || self.heartbeat_interval.is_zero()
+            || self.ordered_media_stall_timeout.is_zero()
         {
             return Err(VapiError::InvalidConfiguration(
                 "timeouts and heartbeat interval must be non-zero",
@@ -244,6 +257,13 @@ impl VapiConfig {
         if self.startup_audio_frames > 100 {
             return Err(VapiError::InvalidConfiguration(
                 "startup audio buffering cannot exceed 100 frames",
+            ));
+        }
+        if self.ordered_inbound_buffer_bytes < self.max_message_bytes.min(64 * 1024)
+            || self.ordered_inbound_buffer_bytes > 64 * 1024 * 1024
+        {
+            return Err(VapiError::InvalidConfiguration(
+                "the ordered inbound buffer must hold one message and stay below 64 MiB",
             ));
         }
         if self.max_message_bytes < 640 {

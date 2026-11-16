@@ -294,10 +294,13 @@
         "crates/**/Cargo.toml",
         "crates/extensions/rvoip-amazon-a2a/README.md",
         "crates/extensions/rvoip-vapi/README.md",
+        "crates/extensions/rvoip-webex-byova/README.md",
         "crates/sip/sip-core/src/builder/builder.md",
         "rust-toolchain",
         "rust-toolchain.toml",
-        "scripts/ci/run_checks.py"
+        "scripts/ci/fetch_webex_byova_protos.py",
+        "scripts/ci/run_checks.py",
+        "third_party/cisco-webex-byova-proto/**"
       ]
     },
     {

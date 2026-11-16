@@ -1574,7 +1574,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 qualified_head=head,
             )
 
-    def test_current_workspace_has_all_47_unique_publishable_packages(self) -> None:
+    def test_current_workspace_has_all_48_unique_publishable_packages(self) -> None:
         root = SCRIPT.parent.parent
         workspace_version = tomllib.loads(
             (root / "Cargo.toml").read_text()
@@ -1583,7 +1583,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             root, workspace_version, locked=True
         )
         self.assertEqual(len(packages), release.EXPECTED_PACKAGE_COUNT)
-        self.assertEqual(len(ordered), 47)
+        self.assertEqual(len(ordered), 48)
         self.assertIn("rvoip-audio-send-queue", packages)
         self.assertIn("rvoip-sip-dialog", packages)
         self.assertIn("rvoip-sip-transport", packages)
@@ -1592,6 +1592,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
         self.assertIn("rvoip-moq-relay", packages)
         self.assertIn("rvoip-moq-transport", packages)
         self.assertIn("rvoip-rtc", packages)
+        self.assertIn("rvoip-webex-byova", packages)
         self.assertIn("rvoip-webrtc-stack", packages)
         self.assertIn("rvoip-vapi", packages)
 

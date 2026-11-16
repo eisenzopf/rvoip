@@ -65,6 +65,8 @@ pub(crate) struct VapiMediaStream {
     active: AtomicBool,
     closed: AtomicBool,
     cancel: CancellationToken,
+    /// `Some` in ordered mode: bridges deliver losslessly with this budget.
+    lossless_stall: Option<std::time::Duration>,
 }
 
 impl VapiMediaStream {
@@ -73,6 +75,7 @@ impl VapiMediaStream {
         incoming_capacity: usize,
         outgoing_capacity: usize,
         cancel: CancellationToken,
+        lossless_stall: Option<std::time::Duration>,
     ) -> Arc<Self> {
         let (incoming_tx, incoming_rx) = mpsc::channel(incoming_capacity);
         let (outgoing_tx, outgoing_rx) = mpsc::channel(outgoing_capacity);
@@ -89,7 +92,25 @@ impl VapiMediaStream {
             active: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             cancel,
+            lossless_stall,
         })
+    }
+
+    /// Ordered mode writes through a reserved permit so the session loop can
+    /// wait for downstream capacity without blocking its other work.
+    pub(crate) fn incoming_sender(&self) -> mpsc::Sender<MediaFrame> {
+        self.incoming_tx.clone()
+    }
+
+    pub(crate) fn frame(&self, payload: Bytes, timestamp_rtp: u32) -> MediaFrame {
+        MediaFrame {
+            stream_id: self.id.clone(),
+            kind: StreamKind::Audio,
+            payload,
+            timestamp_rtp,
+            captured_at: Utc::now(),
+            payload_type: Some(self.format.payload_type()),
+        }
     }
 
     pub(crate) fn take_peer_receiver(
@@ -119,14 +140,7 @@ impl VapiMediaStream {
     }
 
     pub(crate) fn try_push_incoming(&self, payload: Bytes, timestamp_rtp: u32) -> Result<()> {
-        let frame = MediaFrame {
-            stream_id: self.id.clone(),
-            kind: StreamKind::Audio,
-            payload,
-            timestamp_rtp,
-            captured_at: Utc::now(),
-            payload_type: Some(self.format.payload_type()),
-        };
+        let frame = self.frame(payload, timestamp_rtp);
         self.incoming_tx
             .try_send(frame)
             .map_err(|_| VapiError::MediaQueueOverflow)
@@ -244,6 +258,10 @@ impl MediaStream for VapiMediaStream {
             return Err(RvoipError::InvalidState("Vapi media stream is not active"));
         }
         Ok(self.peer_tx.clone())
+    }
+
+    fn lossless_delivery_stall_timeout(&self) -> Option<std::time::Duration> {
+        self.lossless_stall
     }
 
     fn quality_snapshot(&self) -> QualitySnapshot {

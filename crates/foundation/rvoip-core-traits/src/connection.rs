@@ -19,6 +19,10 @@ pub enum Transport {
     AmazonConnect,
     /// Amazon Connect external-agent A2A JSON-RPC over WebSocket.
     AmazonA2a,
+    /// Webex Contact Center BYOVA (Bring Your Own Virtual Agent) over its
+    /// WebSocket or gRPC protocol. Distinct from [`Transport::WebSocket`],
+    /// which is UCTP.
+    WebexByova,
     /// Vapi's bidirectional WebSocket agent transport. The adapter owns the
     /// remote AI session while rvoip owns the SIP or WebRTC caller leg.
     Vapi,

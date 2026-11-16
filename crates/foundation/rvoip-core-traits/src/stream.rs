@@ -608,6 +608,22 @@ pub trait MediaStream: Send + Sync {
         None
     }
 
+    /// Ask bridges that read from or write into this stream for lossless,
+    /// ordered delivery.
+    ///
+    /// `None` (the default) keeps real-time delivery: bounded queues drop
+    /// their oldest frame, which suits paced RTP endpoints. `Some(stall)`
+    /// marks an unpaced application stream (a protocol gateway that frames
+    /// replies itself) whose consumer must see every frame in order: a
+    /// bridge's media graph then applies backpressure to its source instead
+    /// of dropping, and fails a consumer that stays full for `stall`. When
+    /// both bridged streams ask, the shorter budget applies. It only affects
+    /// media graphs created for the bridge; a graph that already exists for
+    /// the source keeps its policy.
+    fn lossless_delivery_stall_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
     /// Offer a synchronous consumer for this stream's inbound frames (see
     /// [`InboundFrameSink`]). `Err` hands the sink back: the stream cannot
     /// host one (the default), or one was already offered. `Ok` means the
