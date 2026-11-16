@@ -1452,6 +1452,18 @@ rvoip-rtc = { path = "../rvoip-rtc" }
         with self.assertRaisesRegex(release.ReleaseError, "cycle"):
             release.topological_levels(packages)
 
+    def test_release_packaging_assembles_while_the_gate_verifies(self) -> None:
+        source = SCRIPT.read_text()
+        package_release = source.split("def package_release(", 1)[1].split("\ndef ", 1)[0]
+        package_check = source.split("def package_check(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('"--no-verify"', package_release)
+        self.assertNotIn('"--no-verify"', package_check)
+        catalog = json.loads((SCRIPT.parent / "release/gates.json").read_text())
+        gate = next(g for g in catalog["gates"] if g["id"] == "package.archives")
+        self.assertEqual(gate["command"], ["python3", "scripts/release.py", "package-check"])
+        self.assertFalse(gate["always_fresh"])
+        self.assertIn("package.archives", catalog["profiles"]["remote-release"])
+
     def test_execute_publishes_only_packaged_archives(self) -> None:
         with (
             mock.patch.object(release, "ensure_release_state", return_value="a" * 40),

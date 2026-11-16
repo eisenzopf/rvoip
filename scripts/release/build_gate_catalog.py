@@ -1190,6 +1190,37 @@ def facade_feature_bundle_gate() -> dict[str, Any]:
     return gate
 
 
+def package_archives_gate() -> dict[str, Any]:
+    """Build every publishable crate from its packaged archive.
+
+    This was the compiling `cargo publish --dry-run` the protected publish
+    job ran crate by crate. As a gate it runs on the nightly candidate, in
+    parallel with the EC2 fanout, and the version-bump commit reuses it, so
+    publication only assembles and uploads the archives.
+    """
+
+    gate = synthetic_gate(
+        "package.archives",
+        "every publishable crate builds from its packaged archive",
+        executor="argv",
+        command=["python3", "scripts/release.py", "package-check"],
+        # The hosted evidence shard holds one-second bookkeeping gates and
+        # the CodeQL poll; a sixty-minute build there adds no hosted job.
+        resource="github-evidence",
+        dependencies=["source.remote-clean"],
+        paths=[
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/**",
+            "scripts/release.py",
+        ],
+        timeout_minutes=180,
+        estimated_seconds=3_600,
+    )
+    gate["kind"] = "remote"
+    return gate
+
+
 def codeql_gate() -> dict[str, Any]:
     """Exact-candidate CodeQL with zero open alerts, as a parallel gate.
 
@@ -1324,6 +1355,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
         facade_feature_bundle_gate(),
         codeql_gate(),
+        package_archives_gate(),
         synthetic_gate(
             "perf.canonical-2k-current",
             "three-pass exact-candidate 2,000-CPS performance evaluation",
@@ -1462,6 +1494,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "interop.browser-dtmf",
                 "build.facade-feature-bundles",
                 "security.codeql-exact",
+                "package.archives",
                 "report.remote-aggregate",
                 "source.remote-final",
             ]

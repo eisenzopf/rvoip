@@ -5646,6 +5646,43 @@
       "affected_paths": [
         "Cargo.lock",
         "Cargo.toml",
+        "crates/**",
+        "scripts/release.py"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "python3",
+        "scripts/release.py",
+        "package-check"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "python3 scripts/release.py package-check",
+      "estimated_seconds": 3600,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "package.archives",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "every publishable crate builds from its packaged archive",
+      "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 180,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
         "crates/foundation/**",
         "crates/media/**",
         "crates/sip/rvoip-sip/**",
@@ -11026,6 +11063,7 @@
         "interop.remote-proxies.opensips.rvoip-first.tcp",
         "interop.remote-proxies.opensips.rvoip-first.tls",
         "interop.remote-proxies.opensips.rvoip-first.udp",
+        "package.archives",
         "package.inventory",
         "perf.canonical-2k-current",
         "perf.media-burst.access-edge-microburst",
@@ -11461,6 +11499,7 @@
       "interop.sipp-start",
       "interop.sipp-stop",
       "interop.strict-ua",
+      "package.archives",
       "package.inventory",
       "perf.ai-agent",
       "perf.b2bua",
@@ -11681,6 +11720,7 @@
       "interop.sipp-start",
       "interop.sipp-stop",
       "interop.strict-ua",
+      "package.archives",
       "package.inventory",
       "perf.ai-agent",
       "perf.b2bua",
@@ -12036,6 +12076,7 @@
       "interop.sipp-start",
       "interop.sipp-stop",
       "interop.strict-ua",
+      "package.archives",
       "package.inventory",
       "perf.ai-agent",
       "perf.b2bua",

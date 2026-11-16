@@ -401,10 +401,14 @@ Use the protected **Publish protected release** workflow and provide the
 successful release-profile qualification run ID. One dispatch needs one
 approval. Its `package` job runs without the protected environment: it
 verifies the qualified commit, checks the release notes are final, and runs
-one `cargo package` over every publishable crate, which builds each archive
-against Cargo's local registry overlay before any of them is on crates.io.
-The archives, their SHA-256 (`SHA256SUMS`) and the topological publication
-plan are uploaded as the `release-packages` artifact. With `execute=false`
+one `cargo package` over every publishable crate, which assembles each
+archive against Cargo's local registry overlay before any of them is on
+crates.io. Building every crate from its archive takes about 30 minutes on 16
+vCPUs, so that is the `package.archives` qualification gate
+(`release.py package-check`): it runs on the nightly candidate and the
+version-bump commit reuses it. The archives, their SHA-256 (`SHA256SUMS`) and
+the topological publication plan are uploaded as the `release-packages`
+artifact. With `execute=false`
 the run stops there; that is the dry run.
 
 With `execute=true` the `publish` job then waits for the `release-publish`
