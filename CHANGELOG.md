@@ -1066,6 +1066,21 @@ outcome unchanged, and add no configuration.
   codec group instead of looking each one up for every frame (#349). Names,
   labels and counts are unchanged; a metrics recorder installed after a graph
   started is not seen by that graph's counters.
+- A late frame on a media graph route that changes RTP clock rate stays late.
+  The route's clock translator read a timestamp behind the previous one as an
+  unsigned delta, almost a full source-clock wrap ahead, so the frame and every
+  later frame on that route jumped far into the future (about 2^32 / 3 samples
+  on a 48 kHz to 16 kHz route). Deltas are now signed RTP serial offsets, so a
+  late frame is translated behind its predecessor and later frames keep their
+  spacing.
+- Media-pressure eviction now waits for a full `eviction_window` of steady
+  state before it judges the drop ratio. With 20 ms frames the
+  `minimum_eviction_samples` default of 50 filled one second after the
+  warm-up, so a consumer still catching up when the warm-up ended could be
+  evicted for a single burst. The observation restarts when the window empties
+  after a quiet gap and on renegotiation. Queue capacity and drop-oldest still
+  bound latency during the observation. `eviction_warmup: Duration::ZERO`
+  still arms eviction immediately, with no observation period.
 
 ### AI harness
 
