@@ -936,6 +936,13 @@ impl EndpointIncomingCall {
     ///
     /// Returns `None` when the header is absent or the parsed INVITE is not
     /// available (see [`raw_request`](Self::raw_request)).
+    ///
+    /// This is the raw value the peer sent, not a verified fact: any peer can
+    /// put any `P-Asserted-Identity` or `X-*` header on an INVITE. Trust it
+    /// only as far as you trust the peer that sent it. For a caller number
+    /// the stack itself vouches for, use the adapter-observed
+    /// `observed_caller_number()` of the inbound connection context, which
+    /// is set only for a peer admitted by trusted-trunk policy.
     pub fn header(&self, name: &str) -> Option<String> {
         use crate::api::headers::view::SipHeaderView;
         let name = rvoip_sip_core::types::headers::HeaderName::from_str(name).ok()?;
