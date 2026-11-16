@@ -446,7 +446,7 @@ mod tls {
     use rvoip_sip::api::stream_peer::EventReceiver;
     use rvoip_sip::api::unified::{SipTlsMode, UnifiedCoordinator};
     use std::io::Write;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn self_signed_localhost() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -463,18 +463,12 @@ mod tls {
         (dir, cert_path, key_path)
     }
 
-    fn with_tls(
-        mut config: Config,
-        port: u16,
-        user: &str,
-        cert: &PathBuf,
-        key: &PathBuf,
-    ) -> Config {
+    fn with_tls(mut config: Config, port: u16, user: &str, cert: &Path, key: &Path) -> Config {
         let tls_port = port + 1;
         config.sip_tls_mode = SipTlsMode::ClientAndServer;
         config.tls_bind_addr = Some(format!("127.0.0.1:{tls_port}").parse().expect("TLS bind"));
-        config.tls_cert_path = Some(cert.clone());
-        config.tls_key_path = Some(key.clone());
+        config.tls_cert_path = Some(cert.to_path_buf());
+        config.tls_key_path = Some(key.to_path_buf());
         config.contact_uri = Some(format!("sips:{user}@127.0.0.1:{tls_port};transport=tls"));
         config.tls_insecure_skip_verify = true;
         config
