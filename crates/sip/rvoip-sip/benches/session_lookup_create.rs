@@ -27,11 +27,12 @@
 //! `dialog_steady_state` to size the contribution to whole-call cost.
 
 use arc_swap::ArcSwapOption;
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dashmap::DashMap;
 use rvoip_sip::session_store::{SessionState, SessionStore};
 use rvoip_sip::state_table::{DialogId, Role, SessionId};
 use rvoip_sip::types::CallState;
+use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::{Builder, Runtime};

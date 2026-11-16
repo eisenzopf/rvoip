@@ -15,9 +15,10 @@
 //!   a SIP stack sees in production. Driven by a real INVITE message
 //!   so the inbound parser succeeds.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip_transport::transport::udp::UdpListener;
 use rvoip_sip_transport::{Transport, TransportEvent, UdpTransport};
+use std::hint::black_box;
 use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::runtime::Builder;

@@ -8,7 +8,8 @@
 use codec_core::codecs::g711::{alaw_expand, ulaw_expand, G711Codec};
 use codec_core::types::{AudioCodecExt, CodecConfig, CodecType, SampleRate};
 use codec_core::utils::simd::{encode_alaw_optimized, encode_mulaw_optimized};
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::hint::black_box;
 
 const FRAME_SIZES: [(&str, usize); 3] =
     [("ptime_10ms", 80), ("ptime_20ms", 160), ("batch_1s", 8000)];

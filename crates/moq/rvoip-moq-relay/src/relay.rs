@@ -1788,7 +1788,7 @@ mod security_tests {
     use moq_native_ietf::tls;
     use moq_transport::{coding::TrackNamespace, session::SetupAuthorization};
     use rcgen::{
-        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+        BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
         KeyUsagePurpose,
     };
     use time::OffsetDateTime;
@@ -2850,6 +2850,7 @@ mod security_tests {
         let ca = ca_params.self_signed(&ca_key)?;
         let ca_path = directory.path().join("ca.pem");
         fs::write(&ca_path, ca.pem())?;
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
 
         let identity = |name: &str,
                         dns_name: &str,
@@ -2861,7 +2862,7 @@ mod security_tests {
             params.not_before = OffsetDateTime::now_utc() - time::Duration::days(1);
             params.not_after = OffsetDateTime::now_utc() + time::Duration::days(1);
             let key = KeyPair::generate()?;
-            let certificate = params.signed_by(&key, &ca, &ca_key)?;
+            let certificate = params.signed_by(&key, &issuer)?;
             let cert_path = directory.path().join(format!("{name}-cert.pem"));
             let key_path = directory.path().join(format!("{name}-key.pem"));
             fs::write(&cert_path, certificate.pem())?;

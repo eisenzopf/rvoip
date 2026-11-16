@@ -12,6 +12,7 @@ use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
 use hmac::{Hmac, Mac};
 use p256::ecdh::EphemeralSecret;
+use p256::elliptic_curve::Generate;
 use p256::PublicKey;
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
@@ -390,11 +391,11 @@ impl Zrtp {
 
         // Generate DH key pair based on selected key agreement
         if self.selected_key_agreement == Some(ZrtpKeyAgreement::EC25) {
-            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
+            self.dh_key = Some(EphemeralSecret::generate());
         } else {
             // Fallback to default EC25 for now
             // In a full implementation, we'd support all key agreement methods
-            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
+            self.dh_key = Some(EphemeralSecret::generate());
         }
 
         // Update state
@@ -418,10 +419,10 @@ impl Zrtp {
 
         // Generate DH key pair based on selected key agreement
         if self.selected_key_agreement == Some(ZrtpKeyAgreement::EC25) {
-            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
+            self.dh_key = Some(EphemeralSecret::generate());
         } else {
             // Fallback to default EC25 for now
-            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
+            self.dh_key = Some(EphemeralSecret::generate());
         }
 
         // Create DH Part 1

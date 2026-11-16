@@ -85,6 +85,55 @@ Each item has a one-line migration.
   connections, or on media cleanup having finished when `deliver_terminal`
   returns.
 
+### Dependencies
+
+The low-risk part of the grouped dependabot update (#298). No public API
+changes: none of the crates below has a type in a published rvoip API.
+
+- **thiserror** 1.0 → 2.0 across the workspace.
+- **base64** 0.22 → 0.23 and **pem** 3 → 4 (pem 4 only moves to base64 0.23).
+- **config** 0.14 → 0.15 in `rvoip-infra-common`. `ConfigLoader` moves from
+  the removed `Config::merge` to the builder API with the same layer order
+  (base file, environment file, `NAME__` environment variables) and the same
+  per-stage error messages; new tests pin both. Upstream, 0.15 drops 0.14's
+  case folding of file keys, so TOML keys match case-sensitively again;
+  environment variable keys are still lowercased.
+- **socket2** 0.5 → 0.6, **webpki-roots** 0.26 → 1.0, **rustls-native-certs**
+  0.7 → 0.8 (`rvoip-moq-native` still fails on any platform-certificate load
+  error), **tower-http** 0.6 → 0.7.
+- **axum-server** 0.7 → 0.8. The WHIPS server now switches the listener it is
+  given to non-blocking itself, since axum-server no longer does.
+- **roxmltree** 0.20 → 0.21, **strum** 0.26 → 0.28, **md5** 0.7 → 0.8,
+  **biquad** 0.4 → 0.6.
+- Dev and bench only: **criterion** 0.5 → 0.8 (benches use
+  `std::hint::black_box`), **chromiumoxide** 0.7 → 0.8, **jsonschema**
+  0.33 → 0.58, **rcgen** 0.13 → 0.14 in the MoQ test PKI,
+  **console-subscriber** 0.4 → 0.5 (rvoip-sip `tokio-console` feature, used
+  only by the profiling examples).
+- Patch releases: tokio 1.53.2, uuid 1.27.0, futures 0.3.34, clap 4.6.7,
+  quinn 0.11.12, tokio-rustls 0.26.6, http 1.5.0, hickory-server 0.26.3,
+  serde_with 3.24.0, moka 0.12.16 and others in #298.
+
+Not in this release, coordinated with downstream applications: **metrics**
+0.23 → 0.24 with **metrics-exporter-prometheus** 0.16 → 0.18, and
+**opentelemetry** / **opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33
+with **tracing-opentelemetry** 0.33 → 0.34. rvoip emits into whatever metrics
+recorder and OpenTelemetry global provider the application installs, and those
+are keyed to the crate's semver line. Moving rvoip alone would make its metrics
+silently disappear for applications whose recorder is still on metrics 0.23, and
+the OpenTelemetry globals have the same coupling. Both move in a later release
+together with the applications that consume them.
+
+Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
+and axum 0.8 / tower 0.5, as planned. Also held back:
+jsonwebtoken 11, validator 0.21, ordered-float 5, prost 0.14, redis 1.x,
+quick-xml 0.42 and web-transport 0.13 (their types are in rvoip's public
+API); opus 0.4 and cpal 0.18 (bundled libopus 1.6 and changed audio-device
+behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
+(they need a newer Rust than the 1.91 MSRV); password-hash 0.6 (argon2 0.5
+needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
+bumps (they break the test fixtures and examples built on the older APIs).
+
 ### SIP
 
 #### Configurable UAS capabilities
@@ -878,6 +927,26 @@ outcome unchanged, and add no configuration.
   datagram), which reaches rvoip through `quinn` 0.11 in the QUIC,
   WebTransport, UCTP and MoQ crates. Its `socket2` 0.6 requirement also
   moves `quinn` and `hyper-util` from `socket2` 0.5 to 0.6.
+- jsonwebtoken uses its `aws_lc_rs` backend in every workspace crate
+  (`rvoip-auth-core`, `rvoip-users-core`, `rvoip-vcon`, `rvoip-stir-shaken`,
+  `rvoip-uctp`, `rvoip-moq`), the backend rustls already links. With
+  `rust_crypto`, an application that also enabled `aws_lc_rs` (directly or
+  through another crate) got both features unified, so jsonwebtoken had no
+  default provider and its first encode or decode panicked; rvoip-core reaches
+  jsonwebtoken through `rvoip-vcon`, so this hit every rvoip application.
+  `rsa` is no longer used for JWT signing. `deny.toml` bans the
+  `rust_crypto` feature so the workspace stays on one backend. Applications
+  that enabled only `rust_crypto` now need `aws_lc_rs` instead, or must install
+  a jsonwebtoken `CryptoProvider` themselves.
+- `rvoip-rtp-core` uses `p256` 0.14 (elliptic-curve 0.14). DTLS ECDHE rejects
+  a private key that is not exactly 32 bytes with an error instead of
+  panicking. Key generation uses the system CSPRNG through `Generate`.
+  `webauthn-rs` moves to 0.6.2 (crypto-glue 0.2) because crypto-glue 0.1.17
+  pins a pre-release `digest` that cannot coexist with the 0.14 stack.
+  RUSTSEC-2026-0387 stays accepted: `crypto-bigint` 0.5 now arrives only
+  through `dtls` 0.17, the `rtc-*` 0.20 alphas and `aws-config`.
+- `rvoip-sip` parses YAML with `yaml_serde`, the maintained continuation of
+  the deprecated `serde_yaml`, under the same `serde_yaml` name.
 
 ## 0.4.0 — 2026-10-11
 

@@ -25,7 +25,7 @@ web-transport-quinn = { version = "0.11.8", default-features = false, features =
 
 rustls = { version = "0.23", features = ["ring"] }
 rustls-pemfile = "2"
-rustls-native-certs = "0.7"
+rustls-native-certs = "0.8"
 quinn = { version = "0.11.9", features = ["ring", "qlog"] }
 ring = "0.17"
 webpki = "0.22"
@@ -37,13 +37,13 @@ rand = "0.8"
 
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
-socket2 = "0.5"
+socket2 = "0.6"
 
 anyhow = { version = "1", features = ["backtrace"] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
-rcgen = { version = "0.13", features = ["pem"] }
+rcgen = { version = "0.14", features = ["pem"] }
 tempfile = "3"
 time = "0.3"

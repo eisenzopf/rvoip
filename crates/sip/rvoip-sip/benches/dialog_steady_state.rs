@@ -10,8 +10,9 @@
 //! For heap-side measurement, run the `profiling_dhat_dialog` example
 //! under the `dhat` feature; see `crates/sip/rvoip-sip/docs/PROFILING.md`.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use rvoip_sip::{Config, StreamPeer};
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 #[path = "common/mod.rs"]
