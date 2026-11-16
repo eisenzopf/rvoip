@@ -1255,15 +1255,20 @@ outcome unchanged, and add no configuration.
   handoff and metadata results. Reply boundaries are exact agent-audio
   positions, applied in band with `follow_reply_marks` or by command. Not yet
   qualified against live Cisco traffic.
-- `rvoip-webex-byova` publishes without Cisco's protobuf contract, which has no
-  published licence. The files moved out of the crate to the unpublished
-  `third_party/cisco-webex-byova-proto/` (pinned commit and SHA-256). The
-  optional `grpc` feature compiles them at build time from
-  `RVOIP_WEBEX_BYOVA_PROTO_DIR`, falling back to that directory inside the
-  workspace checkout; a build without them fails with download instructions.
-  Default builds need nothing. The `webex-byova.yml` workflow verifies the
-  pin, keeps `.proto` files out of the package, and builds gRPC through the
-  environment variable. The release graph now has 48 publishable packages.
+- `rvoip-webex-byova` is publishable and rvoip no longer redistributes Cisco's
+  protobuf contract, which has no published licence: the two `.proto` files
+  are removed from the repository and the package.
+  `third_party/cisco-webex-byova-proto/` keeps only SHA-256 pins. The optional
+  `grpc` feature compiles the files at build time from
+  `RVOIP_WEBEX_BYOVA_PROTO_DIR` or, in the workspace, from the ignored
+  `target/third_party/cisco-webex-byova-proto/`, which
+  `python3 scripts/ci/fetch_webex_byova_protos.py` fills from webex/dataSourceSchemas at the pinned commit,
+  failing closed on a checksum mismatch. A build without the files fails with
+  instructions. Default builds need nothing. `run_checks.py`, the release gate
+  runner and the `webex-byova.yml` workflow fetch automatically before every
+  command that builds `grpc`, including `--all-features` workspace builds such
+  as the rustdoc gate; run the script once before a local `--all-features`
+  build. The release graph now has 48 publishable packages.
 - `WebexJwsValidator` verifies Cisco BYODS JWS with host-supplied JWKS:
   signature by `kid` (RS256 by default), allowlisted issuer, audience,
   optional subject, `exp`/`nbf`/`iat`, a 24-hour maximum lifetime, the

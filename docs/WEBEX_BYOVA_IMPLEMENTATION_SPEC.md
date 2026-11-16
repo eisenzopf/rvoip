@@ -808,37 +808,39 @@ gRPC accepts the `authorization` metadata with or without `Bearer `.
 
 Live Cisco interoperability of the adapter; load and soak; an authoritative
 provider turn contract; BYODS registration renewal and JWKS fetching (host);
-digit collection, handoff tool and transcript policy (host application); the
-list-agents response shape (`{"virtual_agents":[{"id","name"}]}`) and gRPC
-cancellation semantics need sandbox confirmation; and Cisco's licence for the
-protobuf contract, which the workspace repository still carries as an
-unpublished input (22.5).
+digit collection, handoff tool and transcript policy (host application); and
+the list-agents response shape (`{"virtual_agents":[{"id","name"}]}`) and gRPC
+cancellation semantics need sandbox confirmation.
 
 ### 22.5 Build-time protobuf input
 
 Cisco's `voicevirtualagent.proto` and `byova_common.proto` (webex/dataSourceSchemas
-commit `fca090dfa806e28695acb145e927ad0d557ce7fe`, re-verified byte for byte on
-2026-11-15) have no published licence, so no published package contains them.
-They moved from the crate to `third_party/cisco-webex-byova-proto/`, outside
-every package, with provenance and a `SHA256SUMS` pin, and
-`rvoip-webex-byova` dropped `publish = false`.
+commit `fca090dfa806e28695acb145e927ad0d557ce7fe`) have no published licence, so
+rvoip does not redistribute them: they are neither committed to the repository
+nor part of any package. `third_party/cisco-webex-byova-proto/` keeps only
+their SHA-256 pins (re-verified byte for byte on 2026-11-15) and provenance.
+`rvoip-webex-byova` is publishable.
 
 - Default builds (WebSocket transport, adapter, authentication) compile no
-  protobuf and need no input. The facade's `webex-byova` feature, and so
-  `full`, enables only that surface.
+  protobuf. The facade's `webex-byova` feature, and so `full`, enables only
+  that surface.
 - The crate's `grpc` feature reads the files from `RVOIP_WEBEX_BYOVA_PROTO_DIR`
-  (`cargo:rerun-if-env-changed`). Inside the workspace checkout it falls back
-  to `third_party/cisco-webex-byova-proto`, so `--all-features` workspace
-  builds, the rustdoc gate and release qualification need no setup. Elsewhere,
-  a missing or wrong directory fails the build with instructions to download
-  the two files from Cisco's repository at the tested commit.
-- CI: the `webex-byova.yml` workflow checks the pinned SHA-256s, fails if
-  `cargo package -p rvoip-webex-byova --list` contains a `.proto` file or the
-  third-party directory, builds and runs the gRPC tests through an explicit
-  `RVOIP_WEBEX_BYOVA_PROTO_DIR` (the packaged-crate path), and runs the
-  all-features tests and clippy through the workspace fallback.
-
-If the files must leave the repository as well, every `--all-features`
-workspace build (clippy shards, the rustdoc gate, release qualification) needs
-a pinned fetch step that sets `RVOIP_WEBEX_BYOVA_PROTO_DIR`; the build already
-supports that.
+  (`cargo:rerun-if-env-changed`), or, in the workspace checkout, from the
+  ignored `target/third_party/cisco-webex-byova-proto/`. Missing files fail the
+  build: in the workspace the message names `python3 scripts/ci/fetch_webex_byova_protos.py`; elsewhere it names the
+  environment variable and Cisco's source.
+- `python3 scripts/ci/fetch_webex_byova_protos.py` downloads both files at the pinned commit, verifies the pins, never
+  writes a mismatched file, and exits non-zero (fail closed). Verified files
+  are reused without network access.
+- CI fetches automatically wherever `grpc` is built:
+  `scripts/ci/run_checks.py` prepends the fetch (as a recorded command) to any
+  run whose commands build `rvoip-webex-byova/grpc`, which covers the
+  `rustdoc` specialty gate in `main-ci.yml` and `pr-gate.yml`; `scripts/release/gates.py` runs it before such a gate
+  in release qualification (`build.rustdoc`, on hosted shards and EC2
+  workers, which already need HTTPS egress to GitHub); and `webex-byova.yml`
+  fetches explicitly, keeps `.proto` files out of the package listing, builds
+  the gRPC tests through an explicit `RVOIP_WEBEX_BYOVA_PROTO_DIR`, and runs
+  the all-features tests and clippy. Per-crate shards, `nextest-parity.yml`,
+  the doctest lane and `release-publish.yml` build default features and need
+  no fetch. A lane without access to raw.githubusercontent.com fails at the
+  fetch step rather than building without the contract.
