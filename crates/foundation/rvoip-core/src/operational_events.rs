@@ -147,8 +147,57 @@ impl From<&EndReason> for OperationalEndReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OperationalFailureReason {
+    /// The adapter reported a failure that has no stable classification.
     AdapterReported,
+    /// Core failed the connection (for example a rejected accept).
     CoreReported,
+    /// A SIP call failed with a final non-2xx response (300-699).
+    ///
+    /// Only the numeric status code and a fixed analytics-block flag are
+    /// carried; the reason phrase, headers and any other peer-controlled
+    /// text are dropped. `network_blocked` is `true` only for
+    /// `603 Network Blocked`, the response carriers send when call
+    /// analytics blocked the call; every other phrase on a 603 (for
+    /// example `603 Decline`) reads as `false`.
+    ///
+    /// Produced for [`Transport::Sip`] connections whose adapter reports
+    /// [`AdapterEvent::Failed`](crate::adapter::AdapterEvent::Failed) with
+    /// a `detail` of the form `"<status> <reason phrase>"`, which is how
+    /// `rvoip-sip` reports a final failure response. Any other detail, and
+    /// every non-SIP transport, stays [`Self::AdapterReported`].
+    SipResponse {
+        /// Final SIP status code, always in `300..=699`.
+        status_code: u16,
+        /// `true` for `603 Network Blocked` only.
+        network_blocked: bool,
+    },
+}
+
+impl OperationalFailureReason {
+    /// Classify an adapter failure without retaining any of its text.
+    pub(crate) fn from_adapter(transport: Transport, detail: &str) -> Self {
+        if transport != Transport::Sip {
+            return Self::AdapterReported;
+        }
+        let detail = detail.trim();
+        let (status, phrase) = detail
+            .split_once(' ')
+            .map_or((detail, ""), |(status, phrase)| (status, phrase.trim()));
+        if status.len() != 3 || !status.bytes().all(|b| b.is_ascii_digit()) {
+            return Self::AdapterReported;
+        }
+        let Some(status_code) = status
+            .parse::<u16>()
+            .ok()
+            .filter(|status| (300..700).contains(status))
+        else {
+            return Self::AdapterReported;
+        };
+        Self::SipResponse {
+            status_code,
+            network_blocked: status_code == 603 && phrase.eq_ignore_ascii_case("network blocked"),
+        }
+    }
 }
 
 /// Redacted transfer destination shape. URI contents remain with the caller
@@ -556,6 +605,54 @@ mod tests {
     use crate::ids::MessageId;
     use bytes::Bytes;
     use rvoip_core_traits::data::DataReliability;
+
+    #[test]
+    fn sip_failure_keeps_only_final_status_and_fixed_block_flag() {
+        for (detail, status_code, network_blocked) in [
+            ("603 Decline", 603, false),
+            ("603 Network Blocked", 603, true),
+            ("603 network blocked", 603, true),
+            ("603 Network Blocked by policy", 603, false),
+            ("486 Busy Here", 486, false),
+            ("404 Not Found", 404, false),
+            ("302", 302, false),
+            ("  503 credential-like-secret  ", 503, false),
+        ] {
+            let reason = OperationalFailureReason::from_adapter(Transport::Sip, detail);
+            assert_eq!(
+                reason,
+                OperationalFailureReason::SipResponse {
+                    status_code,
+                    network_blocked
+                },
+                "{detail:?}"
+            );
+            assert!(!format!("{reason:?}").contains("credential-like-secret"));
+        }
+        for detail in [
+            "200 OK",
+            "180 Ringing",
+            "700 private",
+            "0486 Busy Here",
+            "+486 Busy Here",
+            "603Network Blocked",
+            "SIP media driver failed",
+            "session rejected locally: Busy",
+            "",
+        ] {
+            assert_eq!(
+                OperationalFailureReason::from_adapter(Transport::Sip, detail),
+                OperationalFailureReason::AdapterReported,
+                "{detail:?}"
+            );
+        }
+        for transport in [Transport::WebRtc, Transport::Quic, Transport::WebSocket] {
+            assert_eq!(
+                OperationalFailureReason::from_adapter(transport, "603 Network Blocked"),
+                OperationalFailureReason::AdapterReported
+            );
+        }
+    }
 
     #[test]
     fn debug_redacts_operational_payloads() {

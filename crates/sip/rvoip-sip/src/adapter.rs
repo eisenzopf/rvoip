@@ -65,7 +65,7 @@ const SIP_INBOUND_REJECTION_CONCURRENCY: usize = 256;
 const DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET: usize = 262_144;
 const SIP_OUTBOUND_EVENT_STAGE_CAPACITY: usize = 32;
 const MAX_SIP_OUTBOUND_TARGET_BYTES: usize = 4_096;
-const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
 const SIP_OUTBOUND_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 const SIP_CONFIRMED_HANGUP_TIMEOUT: Duration = Duration::from_secs(3);
 const SIP_ADAPTER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -332,6 +332,9 @@ struct SipOutboundRoute {
     activation: watch::Sender<Option<SipActivationCompletion>>,
     cleanup: watch::Sender<Option<bool>>,
     cancel: watch::Sender<bool>,
+    /// Set by retained cleanup once the route's terminal event has been
+    /// consumed by the Orchestrator (or its direct lifecycle sink).
+    terminal_published: AtomicBool,
 }
 
 impl SipOutboundRoute {
@@ -374,6 +377,7 @@ impl SipOutboundRoute {
             activation,
             cleanup,
             cancel,
+            terminal_published: AtomicBool::new(false),
         })
     }
 
@@ -649,6 +653,24 @@ impl SipOutboundRoute {
         }
     }
 
+    /// Wait for the activation outcome. A failed activation first waits for
+    /// retained cleanup, which publishes the route's own terminal event, so
+    /// that terminal (for example the peer's final non-2xx response) reaches
+    /// the Orchestrator before core sees the failed receipt and runs its own
+    /// abort. When that terminal was consumed, report
+    /// [`RvoipError::OutboundTerminalPublishedDuringActivation`] so callers do
+    /// not publish a second failure.
+    async fn wait_activation_receipt(&self) -> CoreResult<OutboundActivation> {
+        let result = self.wait_activation().await;
+        if result.is_err() {
+            self.wait_cleanup().await?;
+            if self.terminal_published.load(Ordering::Acquire) {
+                return Err(RvoipError::OutboundTerminalPublishedDuringActivation);
+            }
+        }
+        result
+    }
+
     fn request_cleanup(&self, event: Option<AdapterEvent>) -> bool {
         let start = {
             let mut state = self
@@ -657,9 +679,10 @@ impl SipOutboundRoute {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // An explicit cause wins over the signaling terminal its own
             // cleanup produces, but not over a remote terminal (such as the
-            // peer's final response) that was already staged before it.
+            // peer's final non-2xx response) staged before cleanup began:
+            // that terminal is the cause, not an effect, of the cleanup.
             if let Some(event) = event {
-                if state.cleanup_event.is_none() && state.terminal.is_none() {
+                if state.cleanup_event.is_none() && !state.remote_terminal_seen {
                     state.cleanup_event = Some(event);
                 }
             }
@@ -5269,10 +5292,33 @@ async fn run_outbound_cleanup(
     if let Some(adapter) = weak_adapter.upgrade() {
         adapter.retire_outbound_route(&route);
     }
-    if let Some(event) = terminal {
-        SipAdapter::deliver_terminal_event_to(&lifecycle, &events, event, source).await;
-    }
-    route.complete_cleanup(wire_teardown_success && local_release_success && media_success);
+    let terminal_delivered = if let Some(event) = terminal {
+        // Wait for core consumption, not queue admission: a failed
+        // activation receipt is released only after this, so the route's
+        // own terminal wins over core's fallback abort.
+        let delivery = tokio::time::timeout(
+            SIP_RETAINED_TASK_TIMEOUT,
+            lifecycle.queue_or_deliver_orchestrator_terminal_with_receipt(&events, event),
+        )
+        .await;
+        let delivered = matches!(
+            delivery,
+            Ok(TerminalDelivery::Queued | TerminalDelivery::Fallback)
+        );
+        if !delivered {
+            warn!(
+                source,
+                "SipAdapter outbound terminal event was undeliverable"
+            );
+        }
+        route.terminal_published.store(delivered, Ordering::Release);
+        delivered
+    } else {
+        true
+    };
+    route.complete_cleanup(
+        wire_teardown_success && local_release_success && media_success && terminal_delivered,
+    );
 }
 
 impl Drop for SipAdapter {
@@ -5436,7 +5482,7 @@ impl ConnectionAdapter for SipAdapter {
             Ok(false) => {}
             Err(error) => return Err(error.into_error()),
         }
-        route.wait_activation().await
+        route.wait_activation_receipt().await
     }
 
     async fn start_inbound_early_media(&self, conn: ConnectionId) -> CoreResult<()> {

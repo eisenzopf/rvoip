@@ -9,7 +9,7 @@ use crate::stream::MediaStream;
 use crate::DataMessage;
 use std::fmt;
 use std::sync::{Arc, OnceLock};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 pub use rvoip_core_traits::adapter::{
     AdapterEvent, AdapterKind, CommittedAudioMedia, ConnectionHandle, EndReason,
@@ -34,6 +34,16 @@ pub use rvoip_core_traits::ids::TransferAttemptId;
 #[non_exhaustive]
 pub enum OrchestratorAdapterEvent {
     Public(AdapterEvent),
+    /// A terminal event whose producer waits until the Orchestrator has
+    /// consumed it. The Orchestrator sets `consumed` to `true` after it has
+    /// handled `event` exactly as a [`Self::Public`] terminal. A receiver that
+    /// cannot acknowledge drops the sender, which the producer reads as
+    /// undeliverable. See
+    /// [`AdapterLifecycleSinkSlot::queue_or_deliver_orchestrator_terminal_with_receipt`].
+    TerminalReceipt {
+        event: AdapterEvent,
+        consumed: watch::Sender<bool>,
+    },
     AuthenticatedInboundConnection {
         connection: crate::connection::Connection,
         participant_id: String,
@@ -45,6 +55,10 @@ impl fmt::Debug for OrchestratorAdapterEvent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Public(event) => formatter.debug_tuple("Public").field(event).finish(),
+            Self::TerminalReceipt { event, .. } => formatter
+                .debug_tuple("TerminalReceipt")
+                .field(event)
+                .finish(),
             Self::AuthenticatedInboundConnection { connection, .. } => formatter
                 .debug_struct("AuthenticatedInboundConnection")
                 .field("transport", &connection.transport)
@@ -172,6 +186,58 @@ impl AdapterLifecycleSinkSlot {
         }
     }
 
+    /// Like [`Self::queue_or_deliver_orchestrator_terminal`], but when an
+    /// Orchestrator is registered, return only after it has consumed the
+    /// terminal, not when the event was queued.
+    ///
+    /// The event keeps its FIFO position behind events already queued. An
+    /// adapter uses this when a caller must not observe the route's failure
+    /// before core has published the adapter's own terminal, for example an
+    /// outbound activation that a remote final response ended. `Queued` means
+    /// consumed; a full or closed queue falls back to the direct lifecycle
+    /// sink as usual. Without a registered Orchestrator this is the plain
+    /// queueing variant. The caller owns any deadline.
+    pub async fn queue_or_deliver_orchestrator_terminal_with_receipt(
+        &self,
+        events: &mpsc::Sender<OrchestratorAdapterEvent>,
+        event: AdapterEvent,
+    ) -> TerminalDelivery {
+        if self.inner.get().is_none() {
+            return self
+                .queue_or_deliver_orchestrator_terminal(events, event)
+                .await;
+        }
+        let (consumed, mut receipt) = watch::channel(false);
+        match events.try_send(OrchestratorAdapterEvent::TerminalReceipt { event, consumed }) {
+            Ok(()) => loop {
+                if *receipt.borrow_and_update() {
+                    return TerminalDelivery::Queued;
+                }
+                if receipt.changed().await.is_err() {
+                    return TerminalDelivery::Undeliverable;
+                }
+            },
+            Err(mpsc::error::TrySendError::Full(OrchestratorAdapterEvent::TerminalReceipt {
+                event,
+                ..
+            }))
+            | Err(mpsc::error::TrySendError::Closed(OrchestratorAdapterEvent::TerminalReceipt {
+                event,
+                ..
+            })) => {
+                if self.deliver_terminal(event).await {
+                    TerminalDelivery::Fallback
+                } else {
+                    TerminalDelivery::Undeliverable
+                }
+            }
+            Err(mpsc::error::TrySendError::Full(_)) | Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug_assert!(false, "terminal receipt wrapper changed unexpectedly");
+                TerminalDelivery::Undeliverable
+            }
+        }
+    }
+
     /// Atomic-stream counterpart to [`Self::queue_or_deliver_terminal`].
     pub async fn queue_or_deliver_orchestrator_terminal(
         &self,
@@ -239,6 +305,13 @@ pub fn legacy_normalized_event_receiver(
                     }
                 }
                 OrchestratorAdapterEvent::Public(event) => {
+                    if events.send(event).await.is_err() {
+                        break;
+                    }
+                }
+                // A direct subscription cannot acknowledge core consumption;
+                // dropping `consumed` makes the producer's receipt fail closed.
+                OrchestratorAdapterEvent::TerminalReceipt { event, consumed: _ } => {
                     if events.send(event).await.is_err() {
                         break;
                     }

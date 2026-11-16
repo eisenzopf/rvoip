@@ -5062,3 +5062,129 @@ async fn bounded_lookup_terminal_cleans_existing_route_but_cannot_create_or_revi
     assert_eq!(core.connection_id_budget_usage(), (0, 4));
     assert!(core.connection_transport(&id).is_err());
 }
+
+#[tokio::test]
+async fn sip_final_failure_status_reaches_operational_event_without_its_phrase() {
+    for (transport, detail, expected) in [
+        (
+            Transport::Sip,
+            "486 Busy Here private-peer-text",
+            OperationalFailureReason::SipResponse {
+                status_code: 486,
+                network_blocked: false,
+            },
+        ),
+        (
+            Transport::Sip,
+            "603 Network Blocked",
+            OperationalFailureReason::SipResponse {
+                status_code: 603,
+                network_blocked: true,
+            },
+        ),
+        (
+            Transport::Sip,
+            "SIP media driver failed",
+            OperationalFailureReason::AdapterReported,
+        ),
+        (
+            Transport::WebRtc,
+            "486 Busy Here private-peer-text",
+            OperationalFailureReason::AdapterReported,
+        ),
+    ] {
+        let orchestrator = Orchestrator::new(Config::default());
+        let mut operational = orchestrator.install_operational_event_stream(2).unwrap();
+        let mut public_events = orchestrator.subscribe_events();
+        let (adapter, sender, _) = StubAdapter::new_for(transport);
+        orchestrator.register(adapter.clone()).unwrap();
+        let connection_id = publish_operational_test_connection(
+            &orchestrator,
+            &adapter,
+            &sender,
+            transport,
+            "tenant-sip-failure",
+        )
+        .await;
+        adapter.mark_ended(&connection_id);
+        adapter
+            .deliver_terminal(AdapterEvent::Failed {
+                connection_id: connection_id.clone(),
+                detail: detail.into(),
+            })
+            .await;
+        let event = operational.recv().await.unwrap();
+        assert_eq!(event.connection_id, connection_id);
+        assert_eq!(
+            event.kind,
+            OperationalEventKind::Failed { reason: expected },
+            "{transport:?} {detail:?}"
+        );
+        assert!(!format!("{event:?}").contains("private-peer-text"));
+        // The public event keeps the adapter's full detail.
+        loop {
+            match public_events.recv().await.unwrap() {
+                Event::ConnectionFailed {
+                    connection_id: failed,
+                    detail: public_detail,
+                    ..
+                } if failed == connection_id => {
+                    assert_eq!(public_detail, detail);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_receipt_is_acknowledged_after_core_publishes_the_terminal() {
+    let orchestrator = Orchestrator::new(Config::default());
+    let mut operational = orchestrator.install_operational_event_stream(2).unwrap();
+    let (adapter, sender, _) = StubAdapter::new();
+    orchestrator.register(adapter.clone()).unwrap();
+    let connection_id = publish_operational_test_connection(
+        &orchestrator,
+        &adapter,
+        &sender,
+        Transport::Sip,
+        "tenant-terminal-receipt",
+    )
+    .await;
+    adapter.mark_ended(&connection_id);
+    let (consumed, mut receipt) = tokio::sync::watch::channel(false);
+    sender
+        .send_atomic(OrchestratorAdapterEvent::TerminalReceipt {
+            event: AdapterEvent::Failed {
+                connection_id: connection_id.clone(),
+                detail: "486 Busy Here".into(),
+            },
+            consumed,
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        receipt.wait_for(|consumed| *consumed),
+    )
+    .await
+    .expect("receipt deadline")
+    .expect("receipt acknowledged");
+    // The acknowledgement means core has consumed the terminal and owns its
+    // publication.
+    let event = tokio::time::timeout(Duration::from_secs(2), operational.recv())
+        .await
+        .expect("terminal publication deadline")
+        .expect("terminal published");
+    assert_eq!(event.connection_id, connection_id);
+    assert_eq!(
+        event.kind,
+        OperationalEventKind::Failed {
+            reason: OperationalFailureReason::SipResponse {
+                status_code: 486,
+                network_blocked: false,
+            },
+        }
+    );
+}
