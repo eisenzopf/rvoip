@@ -3177,6 +3177,72 @@ mod tests {
         coordinator.shutdown();
     }
 
+    /// `EndpointIncomingCall::header` returns the value of the first header
+    /// with that name, matches names case-insensitively (standard and
+    /// extension headers alike), and returns `None` for an absent header or a
+    /// call without a parsed INVITE.
+    #[tokio::test]
+    async fn endpoint_incoming_call_header_reads_first_matching_invite_header() {
+        let coordinator = UnifiedCoordinator::new(Config::local("endpoint-header", 0))
+            .await
+            .expect("coordinator");
+        let raw = "INVITE sip:+15551230000@127.0.0.1 SIP/2.0\r\n\
+                   Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-endpoint-header\r\n\
+                   Max-Forwards: 70\r\n\
+                   From: <sip:alice@example.test>;tag=from-tag\r\n\
+                   To: <sip:+15551230000@127.0.0.1>\r\n\
+                   Call-ID: endpoint-header-test\r\n\
+                   CSeq: 1 INVITE\r\n\
+                   X-Trunk-Id: first-trunk\r\n\
+                   P-Asserted-Identity: <sip:+15550001111@carrier.example.test>\r\n\
+                   x-trunk-id: second-trunk\r\n\
+                   Content-Length: 0\r\n\r\n";
+        let request = match rvoip_sip_core::parse_message(raw.as_bytes()).expect("parse INVITE") {
+            rvoip_sip_core::Message::Request(request) => request,
+            other => panic!("expected request, got {other:?}"),
+        };
+        let call_id = CallId::from_string("endpoint-header-test");
+        let incoming = EndpointIncomingCall::new(
+            IncomingCall::with_request_captured(
+                call_id,
+                "sip:alice@example.test".to_string(),
+                "sip:+15551230000@127.0.0.1".to_string(),
+                None,
+                Arc::clone(&coordinator),
+                Arc::new(request),
+                None,
+            ),
+            None,
+            EndpointTransport::Udp,
+        );
+
+        // First header of that name wins, whatever the case of either name.
+        assert_eq!(incoming.header("X-Trunk-Id").as_deref(), Some("first-trunk"));
+        assert_eq!(incoming.header("x-trunk-id").as_deref(), Some("first-trunk"));
+        assert_eq!(incoming.header("X-TRUNK-ID").as_deref(), Some("first-trunk"));
+        // A standard header sip-core types is found by name too.
+        assert_eq!(
+            incoming.header("p-asserted-identity").as_deref(),
+            Some("<sip:+15550001111@carrier.example.test>")
+        );
+        assert_eq!(incoming.header("X-Absent"), None);
+
+        // Without a parsed INVITE there is nothing to read.
+        let bare = EndpointIncomingCall::new(
+            IncomingCall::new(
+                CallId::from_string("endpoint-header-bare"),
+                "sip:alice@example.test".to_string(),
+                "sip:bob@example.test".to_string(),
+                None,
+                Arc::clone(&coordinator),
+            ),
+            None,
+            EndpointTransport::Udp,
+        );
+        assert_eq!(bare.header("X-Trunk-Id"), None);
+        coordinator.shutdown();
+    }
+
     #[test]
     fn endpoint_builder_maps_asterisk_tls_profile() {
         let parts = Endpoint::builder()
