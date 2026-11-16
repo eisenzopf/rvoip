@@ -49,12 +49,6 @@ use super::codec_runtime::normalized_codec_name;
 use super::types::{MediaConfig, NEGOTIATED_FMTP_PARAMETER};
 use super::MediaSessionController;
 
-/// RFC 4733 telephone-event payload type. Both legs of a bridged call
-/// advertise it at the 8 kHz telephone-event clock, so in transcode mode these
-/// packets are relayed verbatim (payload **and** timestamp) instead of being
-/// decoded as audio.
-pub(super) const TELEPHONE_EVENT_PAYLOAD_TYPE: u8 = 101;
-
 /// How a bridge moves payloads between its two legs.
 ///
 /// [`BridgeMode::Relay`] forwards RTP payloads byte-for-byte (the historical
@@ -211,9 +205,11 @@ impl MediaSessionController {
     /// direction decodes with the *source* leg's negotiated codec, converts the
     /// decoded PCM to the *destination* leg's negotiated rate/channel shape,
     /// and re-encodes with the destination codec. Both codecs must be
-    /// encodable/decodable in this build. RFC 4733 telephone-event packets
-    /// (payload type 101) are still relayed verbatim — both legs advertise the
-    /// 8 kHz telephone-event clock, so payload and timestamp pass through.
+    /// encodable/decodable in this build. Packets whose payload type is not
+    /// the source leg's negotiated audio payload type (RFC 4733
+    /// telephone-event, comfort noise) are relayed verbatim, payload type and
+    /// timestamp included, which assumes both legs negotiated the same
+    /// payload type and clock for them.
     pub async fn bridge_sessions_with_mode(
         &self,
         a: DialogId,
@@ -735,9 +731,11 @@ impl TranscodeDirection {
 /// rate/channel shape, re-encode with the destination codec, and send on the
 /// destination session.
 ///
-/// RFC 4733 telephone-event payloads (payload type 101, 8 kHz event clock on
-/// both legs) bypass the codec path and are relayed verbatim so DTMF survives
-/// a codec change.
+/// Packets with any payload type other than the source leg's negotiated
+/// audio payload type (RFC 4733 telephone-event, comfort noise) bypass the
+/// codec path and are relayed verbatim, payload type and timestamp included,
+/// so DTMF survives a codec change when both legs negotiated the same
+/// telephone-event payload type and clock.
 ///
 /// The destination codec runtime is re-read from the controller whenever its
 /// generation changes, so a re-INVITE that renegotiates either leg's codec is
@@ -832,8 +830,9 @@ async fn forward_rtp_transcode(
                 let marker = packet.header.marker;
                 let packet_pt = packet.header.payload_type;
 
-                // DTMF (telephone-event) rides the 8 kHz event clock on both
-                // legs; relay it verbatim rather than decoding it as audio.
+                // Anything but the source's audio payload type (DTMF
+                // telephone-event, CN) is relayed verbatim rather than
+                // decoded as audio.
                 if packet_pt != direction_state.src_payload_type {
                     let send_result = match &dst_send_handle {
                         Some(handle) => {
@@ -1023,7 +1022,6 @@ mod tests {
     async fn transcode_bridge_moves_audio_between_different_codecs() {
         use bytes::Bytes;
         use rvoip_rtp_core::packet::rtp::RtpPacket;
-        use std::net::UdpSocket as StdUdpSocket;
 
         let controller = MediaSessionController::new();
         let a = DialogId::new("xcode-a");
@@ -1078,7 +1076,7 @@ mod tests {
                     .expect("send PCMU toward leg A");
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        });
+        })
         };
 
         // Expect PCMA (PT 8) payloads on B's peer.
@@ -1107,7 +1105,7 @@ mod tests {
             received_pt8 >= 5,
             "expected several transcoded PCMA packets, got {received_pt8}"
         );
-        drop(send_a);
+        send_a.abort();
 
         // Drive B → A: PCMA (PT 8) in, PCMU (PT 0) out.
         let send_b = {
@@ -1129,7 +1127,7 @@ mod tests {
                     .expect("send PCMA toward leg B");
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        });
+        })
         };
 
         let mut received_pt0 = 0usize;
@@ -1154,7 +1152,7 @@ mod tests {
             received_pt0 >= 5,
             "expected several transcoded PCMU packets, got {received_pt0}"
         );
-        drop(send_b);
+        send_b.abort();
 
         drop(handle);
         assert!(!controller.is_bridged(&a) && !controller.is_bridged(&b));
