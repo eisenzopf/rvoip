@@ -665,11 +665,22 @@ impl SipOutboundRoute {
     /// abort. When that terminal was consumed, report
     /// [`RvoipError::OutboundTerminalPublishedDuringActivation`] so callers do
     /// not publish a second failure.
+    ///
+    /// The exception is a failure that proves nothing reached the wire
+    /// ([`RvoipError::OutboundNotSent`],
+    /// [`RvoipError::OutboundPeerUnavailableBeforeWrite`]): that error is
+    /// kept, because it is what tells the caller a retry cannot duplicate the
+    /// call and no teardown is owed. Cleanup has still completed first, so the
+    /// route's terminal is already ordered ahead of the failed receipt.
     async fn wait_activation_receipt(&self) -> CoreResult<OutboundActivation> {
         let result = self.wait_activation().await;
-        if result.is_err() {
+        if let Err(error) = &result {
             self.wait_cleanup().await?;
-            if self.terminal_published.load(Ordering::Acquire) {
+            let never_sent = matches!(
+                error,
+                RvoipError::OutboundNotSent | RvoipError::OutboundPeerUnavailableBeforeWrite
+            );
+            if !never_sent && self.terminal_published.load(Ordering::Acquire) {
                 return Err(RvoipError::OutboundTerminalPublishedDuringActivation);
             }
         }
