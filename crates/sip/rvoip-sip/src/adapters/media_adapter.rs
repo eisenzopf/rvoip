@@ -2508,7 +2508,7 @@ impl MediaAdapter {
         // rebuild); generating a fresh certificate each time makes the
         // a=fingerprint line advertise a certificate the handshake no longer
         // uses, so Chrome aborts and retries ClientHello forever.
-        let identity = match self.pending_dtls_identities.get(&negotiation_key) {
+        let identity = match self.pending_dtls_identities.get(negotiation_key) {
             Some(existing) => existing.value().clone(),
             None => {
                 let generated =
