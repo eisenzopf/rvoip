@@ -452,6 +452,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
+        "rvoip-webex-byob",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -541,6 +542,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
+        "rvoip-webex-byob",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -632,6 +634,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
+        "rvoip-webex-byob",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -2004,6 +2007,7 @@
         "rvoip-vcon",
         "rvoip-vcon-postgres",
         "rvoip-webauthn",
+        "rvoip-webex-byob",
         "rvoip-webrtc",
         "rvoip-webrtc-stack",
         "rvoip-websocket",
@@ -5478,7 +5482,7 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "47-package release inventory audit",
+      "name": "publishable package release inventory audit",
       "resource_class": "github-evidence",
       "retry_on_exit_codes": [
         75
@@ -8085,7 +8089,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8129,7 +8133,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8173,7 +8177,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8217,7 +8221,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8261,7 +8265,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8305,7 +8309,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8349,7 +8353,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8393,7 +8397,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8437,7 +8441,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8481,7 +8485,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8525,7 +8529,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8569,7 +8573,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8613,7 +8617,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8657,7 +8661,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8701,7 +8705,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8745,7 +8749,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8789,7 +8793,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8833,7 +8837,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8877,7 +8881,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8921,7 +8925,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8965,7 +8969,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9009,7 +9013,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9053,7 +9057,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9097,7 +9101,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9141,7 +9145,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9185,7 +9189,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9229,7 +9233,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9273,7 +9277,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9317,7 +9321,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9361,7 +9365,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9405,7 +9409,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9449,7 +9453,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9493,7 +9497,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9537,7 +9541,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9581,7 +9585,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9625,7 +9629,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9669,7 +9673,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9713,7 +9717,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9757,7 +9761,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9801,7 +9805,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9845,7 +9849,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9889,7 +9893,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9933,7 +9937,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9970,6 +9974,50 @@
     },
     {
       "affected_crates": [
+        "rvoip-webex-byob"
+      ],
+      "affected_paths": [
+        "crates/extensions/rvoip-webex-byob/**",
+        "scripts/ci/run_checks.py"
+      ],
+      "always_fresh": false,
+      "category": "Parallel workspace core",
+      "command": [
+        "python3",
+        "scripts/ci/run_checks.py",
+        "shard",
+        "--name",
+        "release-rvoip-webex-byob",
+        "--packages",
+        "rvoip-webex-byob",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "test and lint rvoip-webex-byob",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log",
+        "nested-ci-receipt.json"
+      ],
+      "id": "core.rvoip-webex-byob",
+      "kind": "cargo",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "rvoip-webex-byob unit, integration, example, and Clippy checks",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [
         "rvoip-webrtc"
       ],
       "affected_paths": [
@@ -9977,7 +10025,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10021,7 +10069,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10065,7 +10113,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10109,7 +10157,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 47-crate core",
+      "category": "Parallel workspace core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10677,6 +10725,7 @@
         "core.rvoip-vcon",
         "core.rvoip-vcon-postgres",
         "core.rvoip-webauthn",
+        "core.rvoip-webex-byob",
         "core.rvoip-webrtc",
         "core.rvoip-webrtc-stack",
         "core.rvoip-websocket",
@@ -10991,6 +11040,7 @@
       "core.rvoip-vcon",
       "core.rvoip-vcon-postgres",
       "core.rvoip-webauthn",
+      "core.rvoip-webex-byob",
       "core.rvoip-webrtc",
       "core.rvoip-webrtc-stack",
       "core.rvoip-websocket",
@@ -11121,6 +11171,7 @@
       "core.rvoip-vcon",
       "core.rvoip-vcon-postgres",
       "core.rvoip-webauthn",
+      "core.rvoip-webex-byob",
       "core.rvoip-webrtc",
       "core.rvoip-webrtc-stack",
       "core.rvoip-websocket",
@@ -11281,5 +11332,5 @@
     "unautomated_legacy_ids": []
   },
   "schema": "rvoip-release-gate-catalog-v1",
-  "workspace_package_count": 47
+  "workspace_package_count": 48
 }

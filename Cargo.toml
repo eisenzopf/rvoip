@@ -63,6 +63,7 @@ members = [
     "crates/extensions/rvoip-harness",
     "crates/extensions/rvoip-vapi",
     "crates/extensions/rvoip-amazon-a2a",
+    "crates/extensions/rvoip-webex-byob",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
     "crates/extensions/rvoip-redis",

@@ -1,0 +1,33 @@
+[package]
+name = "rvoip-webex-byob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Webex Contact Center BYOVA WebSocket and gRPC protocols"
+# Cisco schema redistribution terms must be resolved before a crates.io release.
+publish = false
+
+[features]
+default = []
+grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:tonic-build", "dep:protoc-bin-vendored", "wav-compat"]
+# Explicit early-access compatibility exception, contrary to the public WS guide.
+wav-compat = ["dep:rvoip-codec-core"]
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tonic = { version = "0.12", optional = true }
+prost = { version = "0.13", optional = true }
+prost-types = { version = "0.13", optional = true }
+rvoip-codec-core = { workspace = true, optional = true }
+
+[build-dependencies]
+tonic-build = { version = "0.12", optional = true }
+protoc-bin-vendored = { version = "3", optional = true }
+
+[lints]
+workspace = true

@@ -83,14 +83,19 @@ class GateFrameworkTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
 
-    def test_catalog_maps_108_legacy_and_47_core_gates(self) -> None:
+    def test_catalog_maps_108_legacy_and_all_workspace_core_gates(self) -> None:
         gates.validate_catalog(ROOT, self.catalog)
         self.assertEqual(
             sum(bool(gate.get("legacy")) for gate in self.catalog["gates"]), 108
         )
         self.assertEqual(
             sum(gate["id"].startswith("core.") for gate in self.catalog["gates"]),
-            47,
+            self.catalog["workspace_package_count"],
+        )
+        roots, _ = gates.workspace_graph(ROOT)
+        self.assertEqual(
+            {gate["id"].removeprefix("core.") for gate in self.catalog["gates"] if gate["id"].startswith("core.")},
+            set(roots),
         )
         self.assertEqual(
             self.catalog["remote_release_legacy_coverage"]["required_legacy_count"],
@@ -443,7 +448,9 @@ class GateFrameworkTests(unittest.TestCase):
         # Adding the 47th crate (rvoip-amazon-a2a) adds a two-minute core gate.
         # Packing the updated catalog raises the longest planned shard from
         # 1345 to 1347 seconds while preserving the twelve-shard concurrency cap.
-        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1347)
+        # The 48th crate (rvoip-webex-byob) adds one more bounded two-minute
+        # core gate, raising the longest planned shard from 1347 to 1359 seconds.
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1359)
 
     def test_remote_diagnostic_runs_only_exact_ec2_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]
