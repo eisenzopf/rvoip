@@ -314,6 +314,17 @@ bumps (they break the test fixtures and examples built on the older APIs).
   ten occurrences, then powers of two, then every 10,000th, each carrying an
   `occurrences` count (#350).
 
+- The ACK for a re-INVITE's 2xx keeps the dialog's established route set
+  (RFC 3261 §§12.2, 13.2.2.4). It was built from the 2xx's Record-Route, as
+  for a dialog-forming INVITE, so a re-INVITE answered without
+  Record-Route sent its ACK straight to the Contact, bypassing every proxy in
+  the dialog's path, and one answered with a different Record-Route followed
+  that instead. The initial INVITE's ACK still adopts the response's
+  Record-Route. When such an ACK has the same non-empty route set, target,
+  Call-ID, tags and CSeq as its re-INVITE, it is sent on the re-INVITE's TLS
+  flow even if the proxy's logical port differs from the connection's peer
+  port, instead of opening a new connection to that port.
+
 #### Stateless new-call admission (#350)
 
 - New stateless admission for new dialog-forming INVITEs in `rvoip-sip-dialog`
