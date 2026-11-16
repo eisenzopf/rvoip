@@ -125,11 +125,7 @@ fn header<'a>(message: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn status_code(message: &str) -> Option<u16> {
-    message
-        .strip_prefix("SIP/2.0 ")?
-        .get(..3)?
-        .parse()
-        .ok()
+    message.strip_prefix("SIP/2.0 ")?.get(..3)?.parse().ok()
 }
 
 fn cseq_method(message: &str) -> Option<&str> {
@@ -170,11 +166,10 @@ impl RawUac {
         let mut buffer = vec![0_u8; 65_535];
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let (length, _) =
-                tokio::time::timeout(remaining, self.socket.recv_from(&mut buffer))
-                    .await
-                    .ok()?
-                    .expect("receive raw SIP");
+            let (length, _) = tokio::time::timeout(remaining, self.socket.recv_from(&mut buffer))
+                .await
+                .ok()?
+                .expect("receive raw SIP");
             let message = String::from_utf8_lossy(&buffer[..length]).into_owned();
             if header(&message, "Call-ID") == Some(call_id)
                 && cseq_method(&message) == Some(method)
@@ -468,7 +463,13 @@ mod tls {
         (dir, cert_path, key_path)
     }
 
-    fn with_tls(mut config: Config, port: u16, user: &str, cert: &PathBuf, key: &PathBuf) -> Config {
+    fn with_tls(
+        mut config: Config,
+        port: u16,
+        user: &str,
+        cert: &PathBuf,
+        key: &PathBuf,
+    ) -> Config {
         let tls_port = port + 1;
         config.sip_tls_mode = SipTlsMode::ClientAndServer;
         config.tls_bind_addr = Some(format!("127.0.0.1:{tls_port}").parse().expect("TLS bind"));
@@ -480,7 +481,10 @@ mod tls {
     }
 
     /// Wait for the answer or failure of one exact outbound call.
-    async fn answered(events: &mut EventReceiver, call: &rvoip_sip::api::events::CallId) -> Result<(), u16> {
+    async fn answered(
+        events: &mut EventReceiver,
+        call: &rvoip_sip::api::events::CallId,
+    ) -> Result<(), u16> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -512,7 +516,13 @@ mod tls {
         );
         let (shutdown, task) = start_uas(uas_config).await;
 
-        let mut uac_config = with_tls(Config::local("slot-release-tls-uac", UAC_PORT), UAC_PORT, "uac", &cert, &key);
+        let mut uac_config = with_tls(
+            Config::local("slot-release-tls-uac", UAC_PORT),
+            UAC_PORT,
+            "uac",
+            &cert,
+            &key,
+        );
         uac_config.media_port_start = 30_200;
         uac_config.media_port_end = 30_400;
         let uac = UnifiedCoordinator::new(uac_config).await.expect("TLS UAC");

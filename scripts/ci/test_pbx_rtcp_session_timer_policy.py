@@ -281,7 +281,7 @@ class PbxRtcpSessionTimerPolicyTests(unittest.TestCase):
         for label, path in documents.items():
             with self.subTest(document=label):
                 text = " ".join(path.read_text(encoding="utf-8").split())
-                self.assertRegex(text, r"release-gated (?:against Asterisk and FreeSWITCH )?from `?0\.4\.1`?")
+                self.assertRegex(text, r"release-gated (?:against Asterisk and FreeSWITCH )?after `?0\.4\.0`?")
                 self.assertRegex(text, r"(?i)pending|no protected qualification has recorded")
         readme = (PBX / "README.md").read_text(encoding="utf-8")
         for scenario in NEW_SCENARIOS:
