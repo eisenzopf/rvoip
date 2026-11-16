@@ -1599,6 +1599,60 @@ version = "{version}"
                 " ".join(json.loads(output.read_text())["failures"]),
             )
 
+    def test_collector_binds_bench_receipts_to_gate_profile_and_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate_dir = root / "perf.rfc7502-release"
+            gate_dir.mkdir()
+            log = gate_dir / "command.log"
+            log.write_text("pass\n")
+            bench = {
+                "schema": gates.BENCH_RECEIPT_SCHEMA,
+                "profile": "release",
+                "candidate_sha": "c" * 40,
+                "status": "PASS",
+                "failures": [],
+            }
+            (gate_dir / "bench-receipt.json").write_text(json.dumps(bench))
+            receipt = {
+                "schema": gates.RECEIPT_SCHEMA,
+                "gate_id": "perf.rfc7502-release",
+                "candidate_sha": "c" * 40,
+                "status": "PASS",
+                "gate_definition_sha256": "d" * 64,
+                "input_sha256": "i" * 64,
+                "environment_sha256": "e" * 64,
+                "log": {
+                    "path": "perf.rfc7502-release/command.log",
+                    "sha256": gates.file_sha256(log),
+                    "bytes": log.stat().st_size,
+                },
+            }
+            (gate_dir / "receipt.json").write_bytes(gates.canonical_bytes(receipt))
+            plan = {
+                "schema": gates.PLAN_SCHEMA,
+                "candidate_sha": "c" * 40,
+                "profile": "bench-release",
+                "catalog_sha256": "x" * 64,
+                "environment_id": "test",
+                "gates": [
+                    {
+                        "id": "perf.rfc7502-release",
+                        "decision": "RUN",
+                        "resource_class": "bench-lane",
+                        "gate_definition_sha256": "d" * 64,
+                        "input_sha256": "i" * 64,
+                        "environment_sha256": "e" * 64,
+                    }
+                ],
+            }
+            output = root / "aggregate.json"
+            self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 0)
+            for key, value in (("profile", "minor"), ("candidate_sha", "f" * 40), ("status", "FAIL")):
+                with self.subTest(key=key):
+                    (gate_dir / "bench-receipt.json").write_text(json.dumps({**bench, key: value}))
+                    self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 1)
+
     def test_lab_teardowns_are_reused_with_their_chain_not_always_fresh(self) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         for gate_id in (

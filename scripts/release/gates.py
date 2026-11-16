@@ -72,6 +72,12 @@ PERFORMANCE_EVIDENCE_CLASS_PREFIX = "ec2-performance"
 REUSED_EVIDENCE_EXCLUDED_TOP_LEVEL = ("_perf-results",)
 # Release-only RFC 7502 benchmark lanes (docs/release/BENCH_GATE_INTERFACE.md).
 BENCH_LANE_CLASS = "bench-lane"
+BENCH_RECEIPT_SCHEMA = "rvoip-bench-lane-receipt-v1"
+BENCH_RECEIPT_NAME = "bench-receipt.json"
+BENCH_GATE_PROFILES = {
+    "perf.rfc7502-release": "release",
+    "perf.rfc7502-minor": "minor",
+}
 RELEASE_PROFILES = (
     "remote-preflight",
     "remote-diagnostic",
@@ -1209,7 +1215,7 @@ def execute_gate(
     artifact_root: Path,
     allow_legacy_groups: bool,
 ) -> dict[str, Any]:
-    artifact = artifact_root / re.sub(r"[^A-Za-z0-9_.-]", "-", gate["id"])
+    artifact = artifact_root / gate_artifact_name(gate["id"])
     artifact.mkdir(parents=True, exist_ok=True)
     log_path = artifact / "command.log"
     started = utc_now()
@@ -1656,6 +1662,39 @@ def reconcile_performance_metrics(
     }
 
 
+def gate_artifact_name(gate_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", gate_id)
+
+
+def validate_bench_receipt(gate_dir: Path, gate_id: str, candidate: str) -> str | None:
+    """Check the receipt `scripts/bench/run_lane.py` wrote for a bench gate.
+
+    The gate's exit code already decides PASS; this binds the measured lane
+    to the gate, its profile and the commit it measured, so a lane result
+    can never be attributed to another candidate or profile.
+    """
+
+    path = gate_dir / BENCH_RECEIPT_NAME
+    try:
+        payload = load_json(path, "bench lane receipt")
+    except GateError as error:
+        return f"{gate_id}: {error}"
+    problems = []
+    if payload.get("schema") != BENCH_RECEIPT_SCHEMA:
+        problems.append("schema")
+    if payload.get("profile") != BENCH_GATE_PROFILES.get(gate_id):
+        problems.append("profile")
+    if payload.get("candidate_sha") != candidate:
+        problems.append("candidate_sha")
+    if payload.get("status") not in {"PASS", "WARN"}:
+        problems.append("status")
+    if payload.get("failures") != []:
+        problems.append("failures")
+    if problems:
+        return f"{gate_id}: bench lane receipt mismatch in {', '.join(problems)}"
+    return None
+
+
 def stage_reused_evidence(
     plan: dict[str, Any], prior_root: Path, evidence_root: Path
 ) -> list[str]:
@@ -1783,6 +1822,18 @@ def collect(
         if mismatches:
             failures.append(f"{gate_id}: receipt mismatch in {', '.join(mismatches)}")
             continue
+        if item.get("resource_class") == BENCH_LANE_CLASS:
+            gate_dir = (
+                Path(receipt["_path"]).parent
+                if receipt.get("_path")
+                else evidence_root / gate_artifact_name(gate_id)
+            )
+            problem = validate_bench_receipt(
+                gate_dir, gate_id, str(receipt.get("candidate_sha"))
+            )
+            if problem:
+                failures.append(problem)
+                continue
         accepted.append(
             {
                 "gate_id": gate_id,

@@ -201,6 +201,19 @@ rvoip-expires-at=<ISO 8601 UTC, creation + 4h>
   verifies every bundle, and terminates the fleet.
 - `cleanup-aws` sweeps instances tagged with this run that an interrupted
   controller left behind and fails if any remain.
+- `gate-bench` runs the release-only `bench-lane` shards (the RFC 7502
+  benchmark) from a hosted controller job holding the provisioner role; the
+  lane provisions its own DUT and callers
+  (`docs/release/BENCH_GATE_INTERFACE.md`). It runs only for the
+  `bench-release`, `bench-minor`, `release-patch` and `release-minor` profiles
+  and only when the bench receipt cannot be reused.
+
+A requalification whose plan reuses every EC2 gate (a version-only bump on top
+of a qualified candidate) creates no worker at all: `aws_shard_count` is zero,
+so `preflight-aws`, `gate-aws` and `cleanup-aws` are skipped. The lab teardown
+gates are reused with their chains and rerun whenever anything in their chain
+reruns, and `interop.jambonz-latest` (a network-only upstream check) runs in
+the hosted evidence shard.
 
 Cleanup runs in three layers as before: worker self-termination after
 evidence upload, controller terminate on `always()`, and the scheduled
