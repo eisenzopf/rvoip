@@ -2301,8 +2301,10 @@ impl SessionLeaseAuthority {
             session_id: session_id.clone(),
             generation: self.allocate_generation()?,
         };
-        self.cells
-            .insert(key.clone(), Arc::new(SessionCell::active(active_permit, identity)));
+        self.cells.insert(
+            key.clone(),
+            Arc::new(SessionCell::active(active_permit, identity)),
+        );
         index.insert(
             Arc::new(session_id.clone()),
             AdmissionSlot::Live(key.clone()),
@@ -2465,8 +2467,11 @@ impl SessionLeaseAuthority {
         if reusable_deadlines.capacity() > RECLAIMED_DEADLINE_COMPACTION_FLOOR.saturating_mul(2)
             && reusable_deadlines.capacity() > retained.saturating_mul(4)
         {
-            reusable_deadlines
-                .shrink_to(retained.saturating_mul(2).max(RECLAIMED_DEADLINE_COMPACTION_FLOOR));
+            reusable_deadlines.shrink_to(
+                retained
+                    .saturating_mul(2)
+                    .max(RECLAIMED_DEADLINE_COMPACTION_FLOOR),
+            );
         }
     }
 
@@ -7196,7 +7201,9 @@ mod tests {
         let first = authority
             .admit_unique(SessionId::from("session-unique-a"))
             .expect("unique admission");
-        authority.retire(first.key()).expect("retire unique lifetime");
+        authority
+            .retire(first.key())
+            .expect("retire unique lifetime");
 
         // Until the owner removes the exact lifetime the compact fence stays,
         // so phase-based exact removal remains valid during cleanup.
@@ -7205,7 +7212,9 @@ mod tests {
             Some(SessionPhase::Retired { .. })
         ));
         assert_eq!(
-            authority.admit_unique(SessionId::from("session-unique-b")).err(),
+            authority
+                .admit_unique(SessionId::from("session-unique-b"))
+                .err(),
             Some(SessionAdmissionError::RetainedCapacityExhausted)
         );
         assert_eq!(authority.diagnostics().active_capacity_in_use, 0);
@@ -7223,7 +7232,9 @@ mod tests {
         assert_eq!(authority.diagnostics().unique_fences_reclaimed, 1);
         assert_eq!(authority.diagnostics().active_capacity_in_use, 1);
         assert_eq!(
-            authority.admit_unique(SessionId::from("session-unique-c")).err(),
+            authority
+                .admit_unique(SessionId::from("session-unique-c"))
+                .err(),
             Some(SessionAdmissionError::RetainedCapacityExhausted),
             "the live lifetime still owns the only slot"
         );
@@ -7235,7 +7246,9 @@ mod tests {
         let authority = authority_with_retained(&clock, 1, 1);
         let id = SessionId::from("application-chosen");
         let first = authority.admit(id.clone()).expect("reusable admission");
-        authority.retire(first.key()).expect("retire reusable lifetime");
+        authority
+            .retire(first.key())
+            .expect("retire reusable lifetime");
 
         assert!(!authority.reclaim_unique_retired_fence(first.key()));
         assert_eq!(authority.lifecycle_count(), 1);
@@ -7349,7 +7362,9 @@ mod tests {
         // removal): the fence keeps the normal horizon instead of leaking.
         clock.advance(Duration::from_secs(63));
         assert_eq!(
-            authority.admit_unique(SessionId::from("session-unique-next")).err(),
+            authority
+                .admit_unique(SessionId::from("session-unique-next"))
+                .err(),
             Some(SessionAdmissionError::RetainedCapacityExhausted)
         );
         clock.advance(Duration::from_secs(1));
@@ -7416,7 +7431,10 @@ mod tests {
             assert!(authority.reclaim_unique_retired_fence(lease.key()));
         }
         let diagnostics = authority.diagnostics();
-        assert_eq!(diagnostics.lifecycle_count, 1, "only the reusable fence remains");
+        assert_eq!(
+            diagnostics.lifecycle_count, 1,
+            "only the reusable fence remains"
+        );
         assert!(diagnostics.reusable_deadlines <= RECLAIMED_DEADLINE_COMPACTION_FLOOR + 1);
         assert_eq!(
             authority.admit(SessionId::from("app-reusable")).err(),
