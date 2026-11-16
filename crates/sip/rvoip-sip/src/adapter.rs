@@ -4662,7 +4662,11 @@ async fn activate_outbound_route(
             }
             return Err(SipActivationFailure::RouteEnded);
         }
-        result = tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, &mut send) => {
+        // The first INVITE's send includes DNS resolution and the TCP/TLS
+        // connect and handshake. The short retained-cleanup budget would
+        // cancel a reachable peer whose handshake takes longer than 2 s;
+        // bound the send by the outbound activation budget instead.
+        result = tokio::time::timeout(SIP_OUTBOUND_ACTIVATION_TIMEOUT, &mut send) => {
             match result {
                 Ok(Ok(session_id)) => session_id,
                 Ok(Err(_)) | Err(_) => {

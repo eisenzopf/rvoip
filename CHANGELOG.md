@@ -391,6 +391,16 @@ bumps (they break the test fixtures and examples built on the older APIs).
   the lifetime already carries a normal (`Ended`) terminal fact; any other
   terminal, or none, still fails.
 
+#### Outbound activation
+
+- `SipAdapter` outbound activation no longer cancels the first INVITE while
+  its transport is being prepared. The send, which includes DNS resolution
+  and the TCP connect and TLS handshake to a new destination, was bounded by
+  the adapter's 2 s retained-task budget, so a reachable peer whose handshake
+  took longer than 2 s failed activation (often after the INVITE had reached
+  it). The send is now bounded by the 30 s outbound activation budget; route
+  cancellation still interrupts it at once.
+
 #### Orphan sweep and RTP port admission (#360)
 
 - New `SessionCleanupConfig::orphan_session_ttl` (default 60 s, 5 s to 1 h,
