@@ -804,14 +804,19 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         # well inside the account's On-Demand Standard vCPU quota, while a
         # failed row can still be retried alone.
         "ec2-proxy-interop": 2,
-        # Interoperability gates share one stateful peer lab. Keep their
-        # lifecycle dependency chain in one shard so start/matrix/stop/restore
-        # operations cannot race across ephemeral jobs.
-        "ec2-interop": 1,
+        # Interoperability gates run one shard per lab lane (`interop_lane`,
+        # build_gate_catalog.INTEROP_LANES): a lane keeps its stateful
+        # start/matrix/stop chain on one worker, and lanes run concurrently.
     }
     for resource in sorted(groups):
         gates = groups[resource]
-        shards = balance_gates(gates, min(limits.get(resource, 1), len(gates)))
+        if resource == "ec2-interop":
+            lanes: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+            for gate in gates:
+                lanes[gate.get("interop_lane") or "interop"].append(gate)
+            shards = [lanes[lane] for lane in sorted(lanes)]
+        else:
+            shards = balance_gates(gates, min(limits.get(resource, 1), len(gates)))
         for index, shard in enumerate(shards, start=1):
             gate_ids = sorted(gate["id"] for gate in shard)
             if resource.startswith("ec2-") or resource == BENCH_LANE_CLASS:
@@ -820,7 +825,13 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                 runs_on = "ubuntu-latest"
             matrix.append(
                 {
-                    "id": re.sub(r"[^A-Za-z0-9_-]", "-", f"{resource}-{index}"),
+                    "id": re.sub(
+                        r"[^A-Za-z0-9_-]",
+                        "-",
+                        f"{resource}-{shard[0].get('interop_lane') or index}"
+                        if resource == "ec2-interop"
+                        else f"{resource}-{index}",
+                    ),
                     "resource_class": resource,
                     "runs_on": runs_on,
                     "hosted": not resource.startswith("ec2-") and resource != BENCH_LANE_CLASS,

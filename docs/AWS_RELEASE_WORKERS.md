@@ -43,20 +43,27 @@ thresholds rather than a reviewed baseline, so resizing that class needed no
 rebaseline.
 
 The full `remote-release` shape is six short-performance workers, three
-long-soak workers, seven burst/soak workers, one interoperability worker, and
-two proxy-interoperability workers, 192 vCPUs concurrently. The interop and
+long-soak workers, seven burst/soak workers, six interoperability workers, and
+two proxy-interoperability workers, 272 vCPUs concurrently. The interop and
 proxy-interop workers read no performance bundle, so they launch alongside the
 32-vCPU builder instead of waiting for it; the performance workers launch once
-the builder's bundle is verified. Interop is the fleet's longest serial chain,
-one stateful peer lab running 27 gates, three of which compile on the worker,
-which is why it has 16 vCPUs and why it no longer waits about 26 minutes for a
-bundle it never reads. Each long-soak
+the builder's bundle is verified.
+
+Interoperability runs one worker per lab lane (`INTEROP_LANES` in
+`scripts/release/build_gate_catalog.py`, each gate's `interop_lane`):
+Asterisk, FreeSWITCH, Jambonz, SIPp and strict UA, libSRTP, and the AMR
+per-rate sweep. It used to be one stateful lab running 27 gates in series,
+about two hours by the catalog estimates; each lane now starts its own fresh
+lab, ordering dependencies remain only between gates of the same lane, and the
+interop critical path is the longest lane (the AMR sweep, about 35 minutes).
+Each worker keeps 16 vCPUs because three lanes compile on the worker. Each
+long-soak
 worker owns one long gate: the canonical 2,000-CPS evaluation, the monolithic
 soak, or the soak candidate. Packed two to a worker, the two hour-long soaks
 ran back to back for about 2 h 20 min, leaving the three-hour controller job,
 which also covers the prebuild, about ten minutes of slack, and starting the
 second soak on a machine the first had just loaded. Peak
-demand is therefore 192 On-Demand Standard vCPUs against the account's
+demand is therefore 272 On-Demand Standard vCPUs against the account's
 1,152-vCPU quota in `us-west-2`.
 
 Machine classes are policy values recorded in every attestation. Moving clouds
@@ -197,8 +204,15 @@ rvoip-expires-at=<ISO 8601 UTC, creation + 4h>
 - `gate-aws` prepares the manifest, builds the performance bundle once on an
   `m5.8xlarge` (or reuses the content-addressed cache), creates every worker
   concurrently with `run-instances`, polls S3 and instance states, applies the
-  same early-failure cutoff by stopping deferred workers, downloads and
-  verifies every bundle, and terminates the fleet.
+  early-failure cutoff, downloads and verifies every bundle, and terminates
+  the fleet. The cutoff is scoped by the gate catalog: once the bounded lanes
+  have settled with a failure, it stops only deferred workers (interop lanes,
+  long soaks) holding a gate that depends on a failed shard. Independent
+  hour-long work keeps running and its evidence stays reusable, so one flake
+  costs a rerun of its own shard.
+- Hosted gate shards restore a per-shard compiler cache
+  (`Swatinem/rust-cache`, keyed by `Cargo.lock` and the toolchain); every gate
+  still builds and runs the exact candidate.
 - `cleanup-aws` sweeps instances tagged with this run that an interrupted
   controller left behind and fails if any remain.
 - `gate-bench` runs the release-only `bench-lane` shards (the RFC 7502
@@ -218,6 +232,18 @@ the hosted evidence shard.
 Cleanup runs in three layers as before: worker self-termination after
 evidence upload, controller terminate on `always()`, and the scheduled
 janitor.
+
+## Nightly qualification
+
+`nightly-qualification.yml` runs this workflow every night on the head of
+`main` with the `remote-release` profile (never the RFC 7502 benchmark, which
+runs only for a release), as a reusable workflow call. It passes the last two
+nightly runs that kept their evidence as `prior_run_id`, so gates whose exact
+inputs did not change are reused and a quiet night reruns only the bookkeeping
+gates. The browser interop and credential-timing jobs (`nightly-interop.yml`)
+run inside it, so a failure there fails the nightly instead of going unnoticed.
+A release starts from a `main` commit with a green nightly
+(`docs/RELEASING.md`, "Release day").
 
 ## What was removed
 

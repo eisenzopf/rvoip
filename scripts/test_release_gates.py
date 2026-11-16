@@ -357,7 +357,7 @@ class GateFrameworkTests(unittest.TestCase):
 
     def test_remote_preflight_recreates_the_complete_ec2_worker_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-preflight"]
-        self.assertEqual(len(selected), 19)
+        self.assertEqual(len(selected), 24)
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
             [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
@@ -379,16 +379,17 @@ class GateFrameworkTests(unittest.TestCase):
                 "ec2-performance": 6,
                 "ec2-performance-soak": 7,
                 "ec2-performance-soak-long": 3,
-                "ec2-interop": 1,
+                # One worker per interop lane, as in the release profile.
+                "ec2-interop": 6,
                 "ec2-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(matrix), 19)
+        self.assertEqual(len(matrix), 24)
         self.assertEqual(
             sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in matrix),
-            192,
+            272,
         )
-        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 3600)
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in matrix), 4600)
         self.assertTrue(all(not shard["hosted"] for shard in matrix))
         self.assertTrue(all(len(shard["gates"]) == 1 for shard in matrix))
         for gate_id in selected:
@@ -400,7 +401,7 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["command"],
                 )
 
-    def test_remote_release_uses_the_same_192_vcpu_ec2_shape(self) -> None:
+    def test_remote_release_uses_the_same_272_vcpu_ec2_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-release"]
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         matrix = gates.matrix_for(
@@ -431,16 +432,39 @@ class GateFrameworkTests(unittest.TestCase):
                 "ec2-performance": 6,
                 "ec2-performance-soak": 7,
                 "ec2-performance-soak-long": 3,
-                "ec2-interop": 1,
+                "ec2-interop": 6,
                 "ec2-proxy-interop": 2,
             },
         )
-        self.assertEqual(len(ec2), 19)
+        self.assertEqual(len(ec2), 24)
+        # Six concurrent interop lanes instead of one serial lab chain add
+        # 80 vCPUs at peak; the account quota is 1,152.
         self.assertEqual(
             sum(fanout.MACHINE_VCPUS[shard["machine_type"]] for shard in ec2),
-            192,
+            272,
         )
-        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in ec2), 3600)
+        self.assertEqual(sum(int(shard["disk_size_gb"]) for shard in ec2), 4600)
+        interop = {shard["id"]: shard for shard in ec2 if shard["resource_class"] == "ec2-interop"}
+        self.assertEqual(
+            sorted(interop),
+            [
+                "ec2-interop-amr-sweep",
+                "ec2-interop-asterisk",
+                "ec2-interop-freeswitch",
+                "ec2-interop-jambonz",
+                "ec2-interop-libsrtp",
+                "ec2-interop-sipp",
+            ],
+        )
+        # The interop critical path is the longest lane, not the chain's sum.
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in interop.values()), 2200)
+        lane_of = {gate_id: shard_id for shard_id, shard in interop.items() for gate_id in shard["gates"]}
+        for shard in interop.values():
+            for gate_id in shard["gates"]:
+                for dependency in by_id[gate_id].get("dependencies", []):
+                    if dependency in lane_of:
+                        with self.subTest(gate=gate_id, dependency=dependency):
+                            self.assertEqual(lane_of[dependency], lane_of[gate_id])
         hosted = [shard for shard in matrix if shard["hosted"]]
         standard = [
             shard for shard in hosted if shard["resource_class"] == "github-standard"
@@ -1667,7 +1691,9 @@ version = "{version}"
         latest = by_id["interop.jambonz-latest"]
         self.assertTrue(latest["always_fresh"])
         self.assertEqual(latest["resource_class"], "github-evidence")
-        self.assertIn("interop.freeswitch-down-after", by_id["interop.jambonz-up"]["dependencies"])
+        # Jambonz has its own interop lane and worker now.
+        self.assertNotIn("interop.freeswitch-down-after", by_id["interop.jambonz-up"]["dependencies"])
+        self.assertEqual(by_id["interop.jambonz-up"]["interop_lane"], "jambonz")
 
     def test_bump_requalification_needs_no_ec2_worker(self) -> None:
         """Everything still always-fresh in a release profile runs hosted."""
