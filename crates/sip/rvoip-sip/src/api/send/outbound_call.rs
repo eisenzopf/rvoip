@@ -370,7 +370,13 @@ impl OutboundCallBuilder {
     ///
     /// The answer is validated against the plain offer, so a plain SDP answer
     /// is accepted even when the endpoint requires SRTP/RTCP mux for secure
-    /// calls.
+    /// calls. The offer still names a separate RTCP port (`a=rtcp:`, RFC 3605)
+    /// when the call has one.
+    ///
+    /// One RFC 3264 relaxation applies to such a call only: an answer that
+    /// adds an RFC 4733 `telephone-event` format the offer did not list (as
+    /// some carrier trunks do) is accepted, and that format is ignored. Any
+    /// other unoffered format still fails the answer.
     pub fn with_plain_rtp(mut self, enabled: bool) -> Self {
         self.plain_rtp = enabled;
         self

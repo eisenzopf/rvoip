@@ -886,10 +886,21 @@ fn negotiated_audio_shape_from_sdp(
     Ok((canonical.to_string(), clock_rate, channels))
 }
 
+/// Validate a UAC's SDP answer against its offer and pick the primary audio
+/// format.
+///
+/// RFC 3264 §6.1 lets an answer carry only formats from the offer, and an
+/// unoffered format fails the answer. The one exception is
+/// `allow_unoffered_telephone_event`, set only for a call that opted into a
+/// plain-RTP offer (`OutboundCallBuilder::with_plain_rtp`): carrier trunks
+/// often answer RFC 4733 telephone-event under a payload type the offer did
+/// not list, and that format alone is then ignored. It is never used to send
+/// DTMF, and any other unoffered format still fails the answer.
 fn validate_uac_audio_answer(
     offer: &SdpSession,
     answer: &SdpSession,
     g729_annex_b: bool,
+    allow_unoffered_telephone_event: bool,
 ) -> Result<(u8, String, u32, u8)> {
     let offered_audio = offer
         .media_descriptions
@@ -912,13 +923,19 @@ fn validate_uac_audio_answer(
             .iter()
             .any(|offered| offered == format)
         {
-            // RFC 3264 says an answer may only repeat formats from the offer,
-            // but real gateways/carriers append auxiliary formats we did not
-            // offer (commonly telephone-event, sometimes CN). Ignore those
-            // unknown formats instead of failing the call: the primary audio
-            // format still has to come from the offer (checked below).
-            tracing::debug!(payload_type, "ignoring answer format that was not offered");
-            continue;
+            let telephone_event = audio_rtpmap(answer, payload_type).is_some_and(|mapping| {
+                mapping
+                    .encoding_name
+                    .eq_ignore_ascii_case("telephone-event")
+            });
+            if allow_unoffered_telephone_event && telephone_event {
+                tracing::debug!(
+                    payload_type,
+                    "ignoring an unoffered telephone-event format on a plain-RTP answer"
+                );
+                continue;
+            }
+            return Err(bounded_sdp_failure("remote-answer", "unoffered-payload"));
         }
         if !sdp_payload_codec_available(answer, payload_type) {
             return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
@@ -2812,8 +2829,12 @@ impl MediaAdapter {
         if !session.plain_rtp_offer {
             validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
         }
-        let (payload_type, negotiated_codec, clock_rate, channels) =
-            validate_uac_audio_answer(&parsed_offer, &parsed_answer, self.g729_annex_b)?;
+        let (payload_type, negotiated_codec, clock_rate, channels) = validate_uac_audio_answer(
+            &parsed_offer,
+            &parsed_answer,
+            self.g729_annex_b,
+            session.plain_rtp_offer,
+        )?;
         let answer_direction = audio_direction(&parsed_answer);
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
@@ -5276,6 +5297,11 @@ impl MediaAdapter {
         let offer_rtcp_port = info.rtcp_port.filter(|_| port == local_rtp_port);
         if !plain_rtp {
             media_builder = self.with_offer_rtcp_mux_attributes(media_builder, offer_rtcp_port);
+        } else if let Some(rtcp_port) = offer_rtcp_port {
+            // A plain-RTP offer drops RTCP mux (a secure/WebRTC profile
+            // attribute) but still names a separate RTCP port (RFC 3605),
+            // since without mux RTCP runs on its own port (RFC 3550 §11).
+            media_builder = media_builder.attribute("rtcp", Some(rtcp_port.to_string()));
         }
         if dtls_offer_attrs.is_some() {
             media_builder = media_builder.setup(self.dtls_setup_role.as_str());
@@ -7829,6 +7855,40 @@ mod sdp_format_tests {
     }
 
     #[tokio::test]
+    async fn plain_rtp_offer_keeps_a_rtcp_port_and_drops_secure_profile_attributes() {
+        use crate::state_table::types::Role;
+        let mut call = non_mux_call("plain-rtp", Role::UAC, 28_400, None, |adapter| {
+            adapter.set_rtcp_non_mux(true);
+            adapter.set_srtp_policy(true, true, Vec::new());
+        })
+        .await;
+        let rtcp_port = call.info().await.rtcp_port.expect("separate RTCP port");
+
+        // The endpoint's secure profile: SDES and RTCP mux beside a=rtcp.
+        let secure = call.offer().await;
+        assert!(secure.contains("RTP/SAVP"), "{secure}");
+        assert!(secure.contains("a=crypto:"), "{secure}");
+        assert!(secure.contains("a=rtcp-mux\r\n"), "{secure}");
+
+        // The per-call plain offer drops those but still names the RTCP
+        // port (RFC 3605), since RTCP is not multiplexed.
+        call.working.plain_rtp_offer = true;
+        let plain = call.offer().await;
+        let media_line = plain
+            .lines()
+            .find(|line| line.starts_with("m=audio"))
+            .expect("m=audio line");
+        assert!(media_line.contains(" RTP/AVP "), "{plain}");
+        assert!(!plain.contains("a=crypto:"), "{plain}");
+        assert!(!plain.contains("a=rtcp-mux"), "{plain}");
+        assert!(!plain.contains("a=fingerprint:"), "{plain}");
+        assert!(!plain.contains("a=setup:"), "{plain}");
+        assert!(!plain.contains("a=candidate:"), "{plain}");
+        assert_eq!(sdp_ports(&plain).1, Some(rtcp_port), "{plain}");
+        call.hang_up().await;
+    }
+
+    #[tokio::test]
     async fn rtcp_non_mux_off_reserves_no_rtcp_port_and_offers_no_a_rtcp() {
         use crate::state_table::types::Role;
         let mut call = non_mux_call("off", Role::UAC, 26_300, None, |_| {}).await;
@@ -9487,7 +9547,7 @@ a=fmtp:101 0-15\r\n";
             .build()
             .unwrap();
         let multiple_primary = offer.clone();
-        let negotiated = validate_uac_audio_answer(&offer, &multiple_primary, true)
+        let negotiated = validate_uac_audio_answer(&offer, &multiple_primary, true, false)
             .expect("an answer may retain multiple offered formats");
         assert_eq!(negotiated.0, 0, "answer order selects the preferred codec");
 
@@ -9501,7 +9561,7 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true).is_err());
+        assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true, false).is_err());
     }
 
     #[test]
@@ -10697,11 +10757,12 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &unoffered, true).is_err());
+        assert!(validate_uac_audio_answer(&offer, &unoffered, true, false).is_err());
 
         // Real carriers append telephone-event (101) to an answer even when
-        // the offer did not list it; that auxiliary format must be ignored, and
-        // the offered primary format selected.
+        // the offer did not list it. RFC 3264 forbids that, so it fails the
+        // answer unless the call opted into a plain-RTP offer; then that
+        // format alone is ignored and the offered primary format selected.
         let carrier_answer = SdpBuilder::new("Session")
             .origin("-", "2", "2", "IN", "IP4", "127.0.0.1")
             .connection("IN", "IP4", "127.0.0.1")
@@ -10713,12 +10774,33 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
+        assert!(
+            validate_uac_audio_answer(&offer, &carrier_answer, true, false).is_err(),
+            "an unoffered telephone-event fails a call that did not opt in"
+        );
         let (payload_type, codec, clock_rate, channels) =
-            validate_uac_audio_answer(&offer, &carrier_answer, true).expect("carrier answer");
+            validate_uac_audio_answer(&offer, &carrier_answer, true, true)
+                .expect("carrier answer on a plain-RTP call");
         assert_eq!(
             (payload_type, codec.as_str(), clock_rate, channels),
             (0, "PCMU", 8_000, 1)
         );
+
+        // Opting in tolerates telephone-event only: unoffered CN, or an
+        // unoffered audio codec, still fails the answer.
+        let carrier_cn = SdpBuilder::new("Session")
+            .origin("-", "2", "2", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["0", "13"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("13", "CN/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert!(validate_uac_audio_answer(&offer, &carrier_cn, true, true).is_err());
+        assert!(validate_uac_audio_answer(&offer, &unoffered, true, true).is_err());
 
         let changed = SdpBuilder::new("Session")
             .origin("-", "3", "3", "IN", "IP4", "127.0.0.1")
@@ -10730,7 +10812,7 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &changed, true).is_err());
+        assert!(validate_uac_audio_answer(&offer, &changed, true, false).is_err());
 
         let unsupported_offer = SdpBuilder::new("Session")
             .origin("-", "4", "4", "IN", "IP4", "127.0.0.1")
@@ -10752,7 +10834,10 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&unsupported_offer, &unsupported_answer, true).is_err());
+        assert!(
+            validate_uac_audio_answer(&unsupported_offer, &unsupported_answer, true, false)
+                .is_err()
+        );
     }
 
     #[cfg(feature = "opus")]
