@@ -64,13 +64,19 @@ impl SetupRole {
     ///
     /// | Offer role | Answer role |
     /// |---|---|
-    /// | `actpass` | `active` (we initiate) |
+    /// | `actpass` | `passive` (we accept the peer's client handshake) |
     /// | `active`  | `passive` (peer initiates) |
     /// | `passive` | `active`  (we initiate) |
     /// | `holdconn`| `holdconn` (re-use existing) |
+    ///
+    /// Answering `actpass` with `passive` is valid (RFC 8842 §5.1) and is
+    /// required for this stack: the committed DTLS handshake implementation is
+    /// the server for an answerer. Answering `active` there left the answerer
+    /// waiting for a ClientHello as a server while Chrome waited as the server
+    /// too, stalling media.
     pub fn complementary(self) -> Self {
         match self {
-            SetupRole::Actpass => SetupRole::Active,
+            SetupRole::Actpass => SetupRole::Passive,
             SetupRole::Active => SetupRole::Passive,
             SetupRole::Passive => SetupRole::Active,
             SetupRole::Holdconn => SetupRole::Holdconn,
@@ -222,7 +228,7 @@ mod tests {
 
     #[test]
     fn rfc_8842_complementary_role_matrix() {
-        assert_eq!(SetupRole::Actpass.complementary(), SetupRole::Active);
+        assert_eq!(SetupRole::Actpass.complementary(), SetupRole::Passive);
         assert_eq!(SetupRole::Active.complementary(), SetupRole::Passive);
         assert_eq!(SetupRole::Passive.complementary(), SetupRole::Active);
         assert_eq!(SetupRole::Holdconn.complementary(), SetupRole::Holdconn);

@@ -1715,7 +1715,9 @@ impl UdpRtpTransport {
     /// Build a [`Conn`](webrtc_util::conn::Conn) adapter for running a
     /// DTLS-SRTP handshake over this transport's RTP socket, sharing the
     /// port with RTP/RTCP. [`Self::set_remote_rtp_addr`] must be called
-    /// first — the adapter needs a fixed peer to send handshake bytes to.
+    /// first. The adapter sends to the transport's live remote RTP address
+    /// rather than a copy taken here, so a later retarget (ICE nomination,
+    /// symmetric RTP) moves the handshake to the same destination as media.
     ///
     /// From this point on, incoming datagrams the receive loop classifies
     /// as DTLS (RFC 7983) are routed to the returned adapter instead of
@@ -1725,16 +1727,11 @@ impl UdpRtpTransport {
     pub fn dtls_conn_adapter(
         &self,
     ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
-        let remote = self
-            .remote_rtp_addr
-            .load()
-            .as_deref()
-            .copied()
-            .ok_or_else(|| {
-                crate::error::Error::Transport(
-                    "remote RTP address must be set before starting a DTLS handshake".to_string(),
-                )
-            })?;
+        if self.remote_rtp_addr.load().is_none() {
+            return Err(crate::error::Error::Transport(
+                "remote RTP address must be set before starting a DTLS handshake".to_string(),
+            ));
+        }
 
         let (tx, rx) = mpsc::channel(64);
         *self.dtls_tx.lock() = Some(tx);
@@ -1742,7 +1739,7 @@ impl UdpRtpTransport {
         Ok(Arc::new(
             crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
                 self.rtp_socket.clone(),
-                remote,
+                Arc::clone(&self.remote_rtp_addr),
                 rx,
             ),
         ))
@@ -1792,8 +1789,16 @@ impl UdpRtpTransport {
             })?;
         let (tx, rx) = mpsc::channel(64);
         *self.rtcp_dtls_tx.lock() = Some(tx);
+        // The RTCP component's destination is the adapter's own: the
+        // receive loop retargets it at the source a NAT'd peer's handshake
+        // arrives from without moving the transport's signalled RTCP
+        // address, which symmetric RTCP learning governs separately.
         Ok(Arc::new(
-            crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(socket, remote, rx),
+            crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
+                socket,
+                Arc::new(ArcSwapOption::from(Some(Arc::new(remote)))),
+                rx,
+            ),
         ))
     }
 
