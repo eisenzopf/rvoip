@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import sys
 import tomllib
@@ -251,6 +252,25 @@ class RunChecksTests(unittest.TestCase):
         ):
             for command, _, _ in commands:
                 self.assertNotIn("--all-features", command)
+
+    def test_rustdoc_gate_runs_the_release_catalog_command_verbatim(self) -> None:
+        # #315: the release gate `build.rustdoc` denies rustdoc warnings and no
+        # PR check built documentation, so a broken intra-doc link first
+        # failed at release qualification. The PR gate must run the same
+        # argv; deriving the expectation from the catalog makes drift fail.
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        release_gate = next(
+            gate for gate in catalog["gates"] if gate["id"] == "build.rustdoc"
+        )
+        commands = run_checks.specialty_commands("rustdoc", Path("/workspace"))
+        self.assertEqual(len(commands), 1)
+        argv, cwd, env = commands[0]
+        self.assertEqual(argv, release_gate["command"])
+        self.assertIsNone(cwd)
+        self.assertIsNone(env)
+        self.assertIn("RUSTDOCFLAGS=-D warnings", argv)
+        for flag in ("--locked", "--workspace", "--all-features", "--no-deps"):
+            self.assertIn(flag, argv)
 
     def test_release_tooling_gate_owns_proxy_harness_tests(self) -> None:
         commands = run_checks.specialty_commands("release-tooling", Path("/workspace"))

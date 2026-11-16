@@ -26,6 +26,7 @@ use rvoip_rtp_core::RtpSession;
 
 use super::{
     audio_generation::{AudioSource, AudioTransmitter, AudioTransmitterConfig},
+    types::SecureKeyingState,
     DialogTxGate, MediaSessionController,
 };
 
@@ -183,7 +184,8 @@ impl PreparedG711Sender {
 impl MediaSessionController {
     /// Resolve an encoded G.711 sender for `dialog_id` once (see
     /// [`PreparedG711Sender`]). `Ok(None)` where the PCM path would transform
-    /// the audio (comfort noise on, muted), where the negotiated codec is not
+    /// the audio (comfort noise on, muted), while DTLS-SRTP keying is not
+    /// ready, where the negotiated codec is not
     /// mono 8 kHz G.711 of `format` with `payload_type`, or when the session
     /// has no send handle; the caller then takes the PCM path.
     pub fn prepare_g711_sender(
@@ -244,6 +246,11 @@ impl MediaSessionController {
             return Ok(None);
         }
         if session.is_muted {
+            return Ok(None);
+        }
+        // While DTLS-SRTP keys are pending or have failed, the PCM path's
+        // keying gate drops or rejects the frame; the encoded path has none.
+        if session.secure_keying != SecureKeyingState::Ready {
             return Ok(None);
         }
         let sender = if session.transmission_enabled {
@@ -1090,7 +1097,7 @@ impl MediaSessionController {
         // Check if transmission is enabled and if audio is muted.
         // DashMap shard guard is held only for the synchronous bool
         // reads + dropped via the `map` closure.
-        let (is_muted, is_enabled) = self
+        let (is_muted, is_enabled, keying) = self
             .rtp_sessions
             .get(dialog_id)
             .map(|r| {
@@ -1099,15 +1106,34 @@ impl MediaSessionController {
                     "✅ Found RTP session for dialog: {}, muted={}, enabled={}",
                     dialog_id, w.is_muted, w.transmission_enabled
                 );
-                (w.is_muted, w.transmission_enabled)
+                (w.is_muted, w.transmission_enabled, w.secure_keying.clone())
             })
             .unwrap_or_else(|| {
                 warn!(
                     "⚠️ No RTP session found for dialog: {} - using defaults",
                     dialog_id
                 );
-                (false, true)
+                (false, true, SecureKeyingState::Ready)
             });
+
+        match keying {
+            SecureKeyingState::Ready => {}
+            SecureKeyingState::Pending => {
+                // DTLS-SRTP keys are still being agreed. The transport would
+                // refuse the packet; a real-time frame is worthless by the
+                // time keys exist, so drop it and keep the caller running.
+                trace!(
+                    "Dropping outbound audio for dialog {} until its DTLS-SRTP keys are installed",
+                    dialog_id
+                );
+                return Ok(());
+            }
+            SecureKeyingState::Failed(reason) => {
+                return Err(Error::config(format!(
+                    "media keying failed for dialog {dialog_id}; no audio can be sent: {reason}"
+                )));
+            }
+        }
 
         if !is_enabled {
             // Transmission is disabled, don't send anything

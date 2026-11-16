@@ -27,6 +27,64 @@ mod tests {
         assert!(matches!(error, Error::Config(_)));
     }
 
+    /// DTLS-SRTP outbound audio gate: before the handshake's keys exist a
+    /// frame is dropped without an error (and never leaves as plaintext);
+    /// once the handshake fails every frame reports the failure.
+    #[cfg(feature = "dtls-srtp")]
+    #[tokio::test]
+    async fn dtls_pending_keys_drop_audio_quietly_and_failed_keying_reports_it() {
+        // A range no other test in this binary binds; tests run in parallel.
+        let controller = MediaSessionController::with_port_range(24_500, 24_509);
+        let dialog = DialogId::new("dtls-audio-gate");
+        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = loopback_config();
+        config.remote_addr = Some(peer.local_addr().unwrap());
+        controller
+            .start_media(dialog.clone(), config)
+            .await
+            .unwrap();
+        let frame = || crate::types::AudioFrame::new(vec![1000i16; 160], 8_000, 1, 0);
+        let mut bytes = [0u8; 2048];
+
+        controller.require_secure_media(&dialog).await.unwrap();
+        for _ in 0..3 {
+            controller
+                .encode_and_send_audio(&dialog, frame())
+                .await
+                .expect("a frame sent before DTLS keys exist is dropped, not an error");
+        }
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(300),
+                peer.recv_from(&mut bytes)
+            )
+            .await
+            .is_err(),
+            "audio left a secure-only transport before its keys existed"
+        );
+
+        let error = controller
+            .run_dtls_handshake_and_install(
+                &dialog,
+                rvoip_rtp_core::dtls_srtp::generate_identity().unwrap(),
+                DtlsRole::Client,
+                peer.local_addr().unwrap(),
+                [0; 32],
+                rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
+                std::time::Duration::from_millis(200),
+            )
+            .await;
+        assert!(error.is_err(), "nobody answered the handshake");
+        assert!(
+            controller
+                .encode_and_send_audio(&dialog, frame())
+                .await
+                .is_err(),
+            "audio after failed key agreement must report the failure"
+        );
+        controller.stop_media(&dialog).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_start_stop_session() {
         let controller = MediaSessionController::new();
@@ -2189,6 +2247,63 @@ mod tests {
     /// same sequence space, and every state change that makes the PCM path
     /// transform or drop audio (mute, direction, comfort noise, a new codec
     /// generation, stop/restart) closes its fence.
+    /// DTLS-SRTP keying gates the encoded G.711 path as it gates the PCM
+    /// path: no prepared sender while keys are pending or failed, and a
+    /// sender prepared before the handshake started is fenced off.
+    #[cfg(feature = "dtls-srtp")]
+    #[tokio::test]
+    async fn cached_g711_sender_is_fenced_by_dtls_keying() {
+        use super::super::types::SecureKeyingState;
+        use tokio::net::UdpSocket;
+
+        let controller = MediaSessionController::new();
+        let dialog = DialogId::new("cached-g711-dtls-keying");
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let config = MediaConfig {
+            local_addr: "127.0.0.1:0".parse().unwrap(),
+            remote_addr: Some(peer.local_addr().unwrap()),
+            preferred_codec: Some("PCMU".to_string()),
+            parameters: HashMap::new(),
+        }
+        .with_negotiated_audio_codec("PCMU", 0, 8000, 1);
+        controller
+            .start_media(dialog.clone(), config)
+            .await
+            .unwrap();
+        let prepare = || {
+            controller
+                .prepare_g711_sender(&dialog, EncodedG711Format::MuLaw, 0)
+                .unwrap()
+        };
+
+        let before_handshake = prepare().expect("plain session prepares a sender");
+        controller.set_secure_keying(&dialog, SecureKeyingState::Pending);
+        assert!(
+            !before_handshake.is_current(EncodedG711Format::MuLaw, 0),
+            "a handshake starting moves the fence"
+        );
+        assert!(
+            prepare().is_none(),
+            "pending keys take the PCM path, which drops the frame"
+        );
+
+        controller.set_secure_keying(
+            &dialog,
+            SecureKeyingState::Failed("handshake failed".to_string()),
+        );
+        assert!(
+            prepare().is_none(),
+            "failed keying takes the PCM path, which reports the failure"
+        );
+
+        controller.set_secure_keying(&dialog, SecureKeyingState::Ready);
+        assert!(
+            prepare().is_some_and(|sender| sender.is_current(EncodedG711Format::MuLaw, 0)),
+            "installed keys allow the encoded path again"
+        );
+        controller.stop_media(&dialog).await.unwrap();
+    }
+
     #[tokio::test]
     async fn cached_g711_sender_matches_the_pcm_path_and_is_fenced_by_every_tx_state_change() {
         use crate::codec::audio::common::AudioCodec;

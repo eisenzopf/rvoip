@@ -1,12 +1,13 @@
 # rvoip-sip Beta Security Posture
 
-Date: 2026-09-05
+Date: 2026-10-12
 
 This document records the security claims that may be made for the beta line
 and the evidence required before release notes are cut. The current clean
-release is `0.3.9` at `8cab44b10f872d21b304c02111d5d203ee8226da`,
+release is `0.4.0` at `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f` (tag `v0.4.0`),
 documented by the [protected qualification report](BETA_RELEASE_REPORT.md) and
-[complete 208-gate ledger](BETA_GATE_REPORT.md).
+[complete 214-gate ledger](BETA_GATE_REPORT.md) of `remote-release` run
+[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080).
 
 ## Beta Claims
 
@@ -76,7 +77,7 @@ Current security evidence:
 
 | Check | Status |
 |-------|--------|
-| Dependency advisory audit archived with no unaccepted advisories | Complete in protected 0.3.9 run `33969263241`. |
-| Parser fuzz-smoke logs archived | Complete in protected 0.3.9 run, including the expanded AMR and remote fuzz scopes. |
-| Final remote-release gate from clean commit | Complete: `8cab44b10f872d21b304c02111d5d203ee8226da`, `208` passed, `0` failed. |
+| Dependency advisory audit archived with no unaccepted advisories | Complete in protected 0.4.0 run `38195041080`: `security.advisory-audit` ran fresh; `security.remote-advisories` is a reused entry from candidate `d89c1bc34aadb7184e38792db5da1e91f5a1c8c1`. |
+| Parser fuzz-smoke logs archived | Complete in protected 0.4.0 run: the ten local `security.fuzz-*` targets ran fresh; the AMR and remote fuzz scopes are reused entries. |
+| Final remote-release gate from clean commit | Complete: `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, `214` passed, `0` failed (122 fresh, 92 reused). |
 | Long-duration evidence | The policy accepts the recorded one-hour monolithic and split soak configurations; this is not a 24-hour claim. |

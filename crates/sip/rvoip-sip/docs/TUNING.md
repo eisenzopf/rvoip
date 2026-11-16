@@ -611,10 +611,20 @@ follows RFC 3550 without further configuration:
 Capacity: every call that keeps a separate RTCP port uses two ports, so a
 media port range filled with such calls holds half as many calls. Size
 `media_port_start..=media_port_end` for twice the concurrent non-mux calls.
-The option is ignored with ICE (component 1 only), DTLS-SRTP keying (RFC 5764
-§4.1 would need a second DTLS handshake on the RTCP port), strict
+The option is ignored with ICE (component 1 only), strict
 `rtcp_mux_required`, and signalling-only media. With a static public address
 whose port differs from the local RTP port, no `a=rtcp:` is advertised.
+
+With SRTP the RTCP port carries SRTCP. SDES-SRTP keys it from the call's one
+`a=crypto` key. DTLS-SRTP runs a second handshake on the RTCP port (RFC 5764
+§4.1), concurrently with the RTP one, with the same `a=setup` role and the
+certificate the media section's `a=fingerprint` names; SRTCP there uses that
+handshake's keys. Until it completes the RTCP port sends nothing and drops
+what it receives. Behind NAT the RTCP handshake answers the port it actually
+arrives from on the RTP peer's IP, under the same symmetric-RTP policy. If
+the RTCP handshake fails or times out (10 s), the call keeps its SRTP media
+without RTCP and a warning is logged, so treat a missing RTT on such a call
+like a peer that sends no RTCP.
 
 | Config field | Default | When to change it |
 | --- | --- | --- |

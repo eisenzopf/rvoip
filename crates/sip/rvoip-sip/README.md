@@ -13,14 +13,13 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-Publication of `0.4.0` requires strict, exact-source qualification. The
-signed artifacts attached to its GitHub release identify the tested PBX,
-proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
-repository's generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
+The published `0.4.0` release came from a strict, exact-source qualification.
+Its generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
 ledger](docs/BETA_GATE_REPORT.md), and [performance
-report](docs/BETA_PERFORMANCE_REPORT.md) identify the source commit they cover;
-the [immutable qualification history](docs/releases/qualification/README.md)
-retains prior releases.
+report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
+proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
+[immutable qualification history](docs/releases/qualification/README.md)
+retains prior releases and the detailed 0.4.0 performance evaluation.
 
 What changed in this release: the [release notes](docs/RELEASE_NOTES_NEXT.md)
 and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
@@ -192,8 +191,11 @@ Periodic RTCP sender/receiver reports reach a peer in one of two ways:
   (`a=rtcp:` per RFC 3605, otherwise its RTP port + 1). Use it for PBXes and
   carriers without mux, such as Asterisk on default pjsip settings. It
   reserves a port pair per offered call, so a port range holds half as many
-  calls, and it is ignored with ICE, DTLS-SRTP, strict mode and
-  signalling-only media.
+  calls, and it is ignored with ICE, strict mode and signalling-only media.
+  SRTCP protects the RTCP port under SRTP; with DTLS-SRTP keying the RTCP
+  port runs its own DTLS handshake (RFC 5764 §4.1) and stays closed until it
+  completes. A failed RTCP handshake leaves the call's media running without
+  RTCP.
 
 With neither, a peer that declines mux gets a working call but **no RTCP
 from rvoip**: no RTCP quality statistics on either side, and an SBC or PBX
@@ -340,26 +342,41 @@ do not imply carrier certification or untested peer-version/topology coverage.
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## Release evidence for the prior qualified version
+## Current 0.4.0 release evidence
 
-The following repository reports describe the prior protected qualification.
-For `0.4.0`, use the signed artifacts attached to its GitHub release once
-available. The prior `0.3.10` protected run
-[`34074372543`](https://github.com/eisenzopf/rvoip/actions/runs/34074372543)
-qualified its exact published commit
-`77a99cd38a07641294cf7dc547146b115b135dc7`: **213/213 gates passed**, all
-213 were fresh, and all 108 legacy release requirements were covered.
+Protected run
+[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080)
+qualified the exact published commit
+`f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, tagged
+[`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0) and
+published by run
+[`38204650077`](https://github.com/eisenzopf/rvoip/actions/runs/38204650077):
+**214/214 gates passed** and all 108 legacy release requirements were covered.
+122 gates ran fresh on that commit. The other 92 were reused from the
+qualification of candidate `d89c1bc34aadb7184e38792db5da1e91f5a1c8c1` (run
+[`38181512663`](https://github.com/eisenzopf/rvoip/actions/runs/38181512663))
+because their definition, inputs, and environment digests were unchanged; the
+only source change between the two candidates was the release notes. The gate
+ledger marks every gate `fresh` or `reused`. The Asterisk, FreeSWITCH,
+Jambonz, SIPp, and strict-UA matrices, every performance, resiliency, and soak
+gate, the rvoip-sip unit, integration, and doctest gates, rustdoc, and the
+local fuzz and advisory scans ran fresh. The reused gates are the Kamailio and
+OpenSIPS proxy matrices, the AMR rate sweep, browser DTMF, remote libsrtp, the
+remote fuzz and advisory scans, the AMR fuzz targets, the 13 standalone
+examples, the generated and RFC 4475 parser suites, the rtp-core and
+supporting-SIP-crate tests, the per-crate gates of 30 lower crates, and the
+format, public-API, facade-bundle, and lower-crate build checks.
 
-| Evidence | Prior qualified record |
+| Evidence | Current record |
 | --- | --- |
 | Release disposition and provenance | [`docs/BETA_RELEASE_REPORT.md`](docs/BETA_RELEASE_REPORT.md) |
 | Complete accepted-gate ledger | [`docs/BETA_GATE_REPORT.md`](docs/BETA_GATE_REPORT.md) |
 | Performance observations | [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md) |
-| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.md) |
-| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.json) |
-| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-artifact-index.json) |
+| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-evaluation.md) |
+| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-evaluation.json) |
+| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-artifact-index.json) |
 | Signed report manifest | [`QUALIFICATION_REPORT_ATTESTATION.json`](docs/QUALIFICATION_REPORT_ATTESTATION.json) |
-| Immutable release archive | [`20260907T042726Z-34074372543`](docs/releases/qualification/20260907T042726Z-34074372543) |
+| Immutable release archive | [`20261012T042041Z-38195041080`](docs/releases/qualification/20261012T042041Z-38195041080) |
 
 The detailed evaluation records three clean 65,000-call canonical runs, a
 high-density media burst with full audio delivery, a 60-minute monolithic

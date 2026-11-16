@@ -41,7 +41,7 @@ pub(in crate::transport::udp) struct RxConfig {
     /// (`None` when hot state is off).
     pub(in crate::transport::udp) hot_doorbell: Option<Arc<HotDoorbell>>,
     #[cfg(feature = "dtls-webrtc")]
-    pub(in crate::transport::udp) dtls_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<Bytes>>>>,
+    pub(in crate::transport::udp) dtls_tx: DtlsSender,
     pub(in crate::transport::udp) srtp_diagnostics: bool,
     pub(in crate::transport::udp) rtp_diagnostics: bool,
     pub(in crate::transport::udp) local_rtp_addr: Option<SocketAddr>,
@@ -225,7 +225,12 @@ impl RxCore {
             let forwarded = dtls_tx
                 .lock()
                 .as_ref()
-                .map(|tx| tx.try_send(Bytes::copy_from_slice(&buffer[..size])).is_ok())
+                .map(|tx| {
+                    tx.try_send(crate::transport::dtls_bridge::DtlsDatagram::new(
+                        Bytes::copy_from_slice(&buffer[..size]),
+                    ))
+                    .is_ok()
+                })
                 .unwrap_or(false);
             if !forwarded {
                 // No handshake in flight (or its receiver is backed up) to
