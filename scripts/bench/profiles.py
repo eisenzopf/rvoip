@@ -1,0 +1,57 @@
+"""Benchmark rows and lane profiles (crates/sip/rvoip-sip/docs/RFC7502_BENCHMARK.md §1, §7)."""
+
+# E74 row numbering. `media` is the DUT's media mode; the caller sends media
+# (and validates the echo) whenever media != 'none'.
+ROWS = {
+    'R1': {'id': 'R1', 'title': 'Session Establishment Rate, no media (RFC 7502 §6.2 + §6.5)',
+           'transport': 'tls', 'media': 'none', 'hold_ms': 0},
+    'R2': {'id': 'R2', 'title': 'Session Establishment Rate, with media (RFC 7502 §6.4 + §6.5)',
+           'transport': 'tls', 'media': 'srtp', 'hold_ms': 10000},
+    'R5': {'id': 'R5', 'title': 'Session Establishment Rate, no media, UDP (RFC 7502 §6.2)',
+           'transport': 'udp', 'media': 'none', 'hold_ms': 0},
+    'R6': {'id': 'R6', 'title': 'Session Establishment Rate, with media, UDP/RTP (RFC 7502 §6.4)',
+           'transport': 'udp', 'media': 'rtp', 'hold_ms': 10000},
+}
+# R4: overload and recovery at the CPS ceiling C (admission on).
+R4 = {'id': 'R4', 'title': 'Overload at the CPS ceiling and recovery (Vapi extension, admission on)',
+      'transport': 'tls', 'media': 'srtp', 'hold_ms': 10000,
+      'stages': [(0.5, 60), (1.0, 60), (1.5, 60), (2.0, 60), (0.5, 60), (1.0, 60)],
+      'warmup_ramp_seconds': 120}
+
+TRIAL = {
+    'n': 50000,
+    'quantum': 4,
+    'minimum_trial_seconds': 180,
+    'warmup_seconds': 30,          # at r/2, not scored
+    'establishment_threshold_s': 10,
+    'invalid_streak_stop': 3,
+}
+
+PROFILES = {
+    # Every patch release: confirm the recorded R, check RFC 6076 latency.
+    'release': {'rows': ['R1', 'R5', 'R2'], 'method': 'confirm',
+                'confirm': [0.95, 0.95, 0.95], 'probe_up': 1.05, 'latency_at': 0.90,
+                'latency_tolerance': {'relative': 0.25, 'floor_ms': 10.0}, 'budget_hours': 4.5},
+    # Every minor release: bisect searches, overload, the IETF report.
+    'minor': {'rows': ['R1', 'R2', 'R5', 'R6'], 'method': 'search', 'algorithm': 'bisect',
+              'confirmations': 3, 'resolution': 0.02, 'overload': True, 'latency_at': 0.90,
+              'report': True, 'budget_hours': 13, 'max_trials': 16},
+    # Quarterly: the exact RFC 7502 §4.10 search.
+    'full': {'rows': ['R1', 'R2', 'R5', 'R6'], 'method': 'search', 'algorithm': 'rfc7502',
+             'confirmations': 10, 'overload': True, 'latency_at': 0.90, 'report': True,
+             'budget_hours': 60, 'max_trials': 40},
+    # RFC 7502 §6.1 testbed baseline: the callers against ea-uas (no DUT).
+    'baseline': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'search', 'algorithm': 'bisect',
+                 'confirmations': 3, 'resolution': 0.02, 'report': True, 'budget_hours': 5,
+                 'ea_uas': True, 'max_trials': 16},
+}
+
+TESTER_CAP_FRACTION = 0.67
+
+# On-demand us-west-2 prices (AWS Pricing API, E74 plan 2026-11-01).
+PRICE_PER_HOUR = {'c8i.4xlarge': 0.74968, 'c8i.12xlarge': 2.24904, 'c8i.16xlarge': 2.99872,
+                  'c8in.24xlarge': 6.53184, 'c8in.16xlarge': 4.35456}
+
+
+def quantize(rate, quantum=TRIAL['quantum']):
+    return max(quantum, int(rate) // quantum * quantum)
