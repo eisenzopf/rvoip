@@ -69,11 +69,14 @@ impl SetupRole {
     /// | `passive` | `active`  (we initiate) |
     /// | `holdconn`| `holdconn` (re-use existing) |
     ///
-    /// Answering `actpass` with `passive` is valid (RFC 8842 §5.1) and is
-    /// required for this stack: the committed DTLS handshake implementation is
-    /// the server for an answerer. Answering `active` there left the answerer
-    /// waiting for a ClientHello as a server while Chrome waited as the server
-    /// too, stalling media.
+    /// Answering `actpass` with `passive` is valid (RFC 8842): the offerer,
+    /// typically a browser that has already nominated an ICE pair, sends the
+    /// ClientHello and this stack waits for it as the DTLS server. The handshake
+    /// runs in either role (`active` maps to the DTLS client); the passive
+    /// answer is a choice, made for browser interop. It does mean an answerer
+    /// whose media address the offerer cannot reach first (behind NAT, no ICE)
+    /// waits for a ClientHello that may not arrive; `Config::dtls_setup_role`
+    /// only selects the role of offers this stack sends.
     pub fn complementary(self) -> Self {
         match self {
             SetupRole::Actpass => SetupRole::Passive,
