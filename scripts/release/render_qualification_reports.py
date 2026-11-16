@@ -25,6 +25,9 @@ PLAN_SCHEMA = "rvoip-release-gate-plan-v1"
 AGGREGATE_SCHEMA = "rvoip-release-qualification-v1"
 RECEIPT_SCHEMA = "rvoip-release-gate-receipt-v1"
 SUMMARY_SCHEMA = "rvoip-release-qualification-summary-v1"
+# The nightly profile and the two release profiles that add the RFC 7502
+# benchmark gate (scripts/release/build_gate_catalog.py).
+RELEASE_PROFILES = ("remote-release", "release-patch", "release-minor")
 ATTESTATION_SCHEMA = "rvoip-release-qualification-report-attestation-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -131,18 +134,19 @@ def load_bundle(
     if (
         aggregate.get("status") != "PASS"
         or aggregate.get("failures") != []
-        or aggregate.get("profile") != "remote-release"
+        or aggregate.get("profile") not in RELEASE_PROFILES
         or aggregate.get("publishing_attempted") is not False
     ):
-        raise ReportError("qualification aggregate is not a clean remote-release PASS")
+        raise ReportError("qualification aggregate is not a clean release-profile PASS")
+    profile = aggregate["profile"]
     expected_catalog_hash = sha256_bytes(canonical_bytes(catalog))
     if aggregate.get("catalog_sha256") != expected_catalog_hash:
         raise ReportError("qualification aggregate does not bind this gate catalog")
-    if plan.get("candidate_sha") != candidate or plan.get("profile") != "remote-release":
+    if plan.get("candidate_sha") != candidate or plan.get("profile") != profile:
         raise ReportError("qualification plan and aggregate identify different candidates")
 
     catalog_gates = catalog.get("gates")
-    profile_ids = catalog.get("profiles", {}).get("remote-release")
+    profile_ids = catalog.get("profiles", {}).get(profile)
     plan_gates = plan.get("gates")
     accepted = aggregate.get("accepted_gates")
     if not all(isinstance(value, list) for value in (catalog_gates, profile_ids, plan_gates, accepted)):
@@ -170,7 +174,7 @@ def load_bundle(
         or aggregate.get("gate_count") != len(expected_ids)
         or aggregate.get("fresh_count", 0) + aggregate.get("reused_count", 0) != len(expected_ids)
     ):
-        raise ReportError("qualification bundle does not cover the exact remote-release profile")
+        raise ReportError(f"qualification bundle does not cover the exact {profile} profile")
     coverage = catalog.get("remote_release_legacy_coverage", {})
     if (
         coverage.get("required_legacy_count") != 108
@@ -320,7 +324,7 @@ def load_bundle(
         "schema": SUMMARY_SCHEMA,
         "release": {"version": version, "candidate_sha": candidate},
         "qualification": {
-            "profile": "remote-release",
+            "profile": profile,
             "status": "PASS",
             "environment_id": aggregate.get("environment_id"),
             "generated_at": aggregate.get("generated_at"),
@@ -351,7 +355,7 @@ def render_release(summary: dict[str, Any], provenance: dict[str, str]) -> str:
     lines = [
         f"# RVoIP {release['version']} Release Qualification Report",
         "",
-        f"> Generated from the protected `remote-release` run [{provenance['run_id']}]({provenance['run_url']}). No gate was rerun and no measurement was edited during report generation.",
+        f"> Generated from the protected `{qualification['profile']}` run [{provenance['run_id']}]({provenance['run_url']}). No gate was rerun and no measurement was edited during report generation.",
         "",
         "## Qualification",
         "",
@@ -407,7 +411,7 @@ def render_gates(summary: dict[str, Any], rows: list[dict[str, Any]], provenance
         "",
         "## Result",
         "",
-        f"**PASS — {count}/{count} remote-release gates passed; 0 failed.** All 108 requirements inherited from the strict beta ledger are covered, and the expanded profile adds current crate, feature-bundle, security, interoperability, and remote-host checks.",
+        f"**PASS — {count}/{count} {summary['qualification']['profile']} gates passed; 0 failed.** All 108 requirements inherited from the strict beta ledger are covered, and the expanded profile adds current crate, feature-bundle, security, interoperability, and remote-host checks.",
         "",
         "| # | Gate | Category | Executor | Source | Receipt candidate | Seconds | Receipt SHA-256 | Command-log SHA-256 |",
         "|---:|---|---|---|---|---|---:|---|---|",

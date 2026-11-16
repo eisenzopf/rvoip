@@ -574,12 +574,30 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
 
-    def test_release_planner_outlives_exact_candidate_codeql_poll(self) -> None:
+    def test_exact_candidate_codeql_is_a_parallel_gate_not_a_plan_step(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         plan = workflow.split("  plan:\n", maxsplit=1)[1].split("\n  gate-hosted:\n", maxsplit=1)[0]
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        gate = next(g for g in catalog["gates"] if g["id"] == "security.codeql-exact")
 
-        self.assertIn("timeout-minutes: 75", plan)
-        self.assertIn("--timeout-seconds 3600", plan)
+        # The 23-29 minute CodeQL wait no longer sits in front of every worker.
+        self.assertNotIn("check_codeql_release_policy.py", plan)
+        self.assertIn("timeout-minutes: 20", plan)
+        self.assertEqual(gate["resource_class"], "github-evidence")
+        self.assertIn("--timeout-seconds", gate["command"])
+        self.assertIn("3600", gate["command"])
+        self.assertGreaterEqual(gate["timeout_minutes"], 61)
+        self.assertIn(gate["id"], catalog["profiles"]["remote-release"])
+        self.assertIn("GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}", workflow)
+
+    def test_release_candidate_is_any_main_commit_with_a_receipt_chain(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+
+        self.assertNotIn("must qualify the current protected main head", workflow)
+        self.assertIn("git merge-base --is-ancestor HEAD origin/main", workflow)
+        self.assertIn("### Receipt chain", workflow)
+        self.assertIn("--prior-evidence target/prior-evidence", workflow)
+        self.assertIn("fetch-depth: 0", workflow.split("  collect:\n", maxsplit=1)[1])
 
     def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
@@ -596,10 +614,16 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Upload non-reusable diagnostic evidence", workflow)
         self.assertIn("name: diagnostic-gate-evidence", workflow)
         self.assertIn("Reusable for release: no", workflow)
-        self.assertIn("at most five prior evidence runs may be combined", workflow)
-        self.assertIn('--dir "target/prior-evidence/$run_id"', workflow)
+        download = (ROOT / "scripts/release/download_prior_evidence.sh").read_text()
+        self.assertIn("bash scripts/release/download_prior_evidence.sh", workflow)
+        self.assertIn("at most five prior evidence runs may be combined", download)
+        self.assertIn('--dir "target/prior-evidence/$run_id"', download)
+        # Release profiles reuse only attested release evidence; only a
+        # diagnostic may read diagnostic evidence.
+        self.assertIn('if [[ "${PROFILE:?}" == remote-diagnostic ]]; then', download)
+        self.assertIn("--name diagnostic-gate-evidence", download)
         self.assertIn(
-            'test "$(jq -r .profile "$aggregate")" = remote-release',
+            "remote-release|release-patch|release-minor) ;;",
             publication,
         )
 
@@ -613,10 +637,12 @@ class WorkflowPolicyTests(unittest.TestCase):
             '["Render exact-candidate qualification reports"]', resume
         )
         self.assertIn('"status": "PASS"', resume)
-        self.assertIn('"gate_count": 213', resume)
-        self.assertIn('"fresh_count": 213', resume)
-        self.assertIn('"reused_count": 0', resume)
-        self.assertIn('len(aggregate.get("accepted_gates", [])) != 213', resume)
+        # The gate count is read from the candidate's catalog, never pinned.
+        self.assertNotIn("213", resume)
+        self.assertIn('git show "$candidate:scripts/release/gates.json"', resume)
+        self.assertIn('expected_ids = catalog["profiles"][profile]', resume)
+        self.assertIn('"gate_count": gate_count', resume)
+        self.assertNotIn("--version 0.3.10", resume)
         self.assertIn("git merge-base --is-ancestor", resume)
         self.assertIn("render_qualification_reports.py generate", resume)
         self.assertIn('"test_execution_repeated": False', resume)

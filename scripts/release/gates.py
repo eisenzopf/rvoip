@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import collections
 import datetime as dt
 import fnmatch
@@ -30,10 +31,57 @@ AGGREGATE_SCHEMA = "rvoip-release-qualification-v1"
 DEFAULT_CATALOG = Path("scripts/release/gates.json")
 MAX_DIAGNOSTIC_GATES = 20
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+# Release bookkeeping that Prepare writes and no gate executes: the changelog,
+# the assembled release notes and the per-PR change fragments. They are a
+# docs-only class: never part of any gate's input digest, so finishing the
+# notes or moving `## Unreleased` under the release heading cannot invalidate
+# qualified evidence. The bump PR's own PR Gate and notes-finality check cover
+# them on the exact release tree.
+RELEASE_BOOKKEEPING_PATHS = (
+    "CHANGELOG.md",
+    "changes/**",
+    "docs/release/**",
+)
 RUNTIME_EVIDENCE_NEUTRAL_PATHS = (
     "docs/**",
+    "README.md",
+    *RELEASE_BOOKKEEPING_PATHS,
     "scripts/ci/test_*.py",
     "scripts/test_release*.py",
+)
+# Input digests hash version-bearing files with the workspace version
+# normalized, so a commit that only moves the release version (Prepare's
+# bump) has the same gate inputs as its parent and reuses its receipts.
+INPUT_NORMALIZATION = "rvoip-version-normalized-v1"
+VERSION_PLACEHOLDER = "<rvoip-version>"
+SEMVER_TOKEN = re.compile(r"(?<![0-9.])[0-9]+\.[0-9]+\.[0-9]+(?![0-9])")
+QUOTED_VERSION = re.compile(r'"[^"]*"')
+MANIFEST_DEPENDENCY_SECTION = re.compile(
+    r"^(?:workspace\.dependencies|(?:target\..+\.)?"
+    r"(?:dependencies|dev-dependencies|build-dependencies))$"
+)
+MANIFEST_DEPENDENCY_TABLE = re.compile(
+    r"^(?:workspace\.dependencies|(?:target\..+\.)?"
+    r"(?:dependencies|dev-dependencies|build-dependencies))"
+    r"\.(?P<name>[A-Za-z0-9_-]+)$"
+)
+# Gates whose evidence feeds the performance reports. Their results live in
+# per-worker `_perf-results/<shard>` trees that cannot be split by gate, so
+# they are reused or rerun as one group.
+PERFORMANCE_EVIDENCE_CLASS_PREFIX = "ec2-performance"
+REUSED_EVIDENCE_EXCLUDED_TOP_LEVEL = ("_perf-results",)
+# Release-only RFC 7502 benchmark lanes (docs/release/BENCH_GATE_INTERFACE.md).
+BENCH_LANE_CLASS = "bench-lane"
+RELEASE_PROFILES = (
+    "remote-preflight",
+    "remote-diagnostic",
+    "remote-core",
+    "remote-release",
+    "bench-release",
+    "bench-minor",
+    "release-patch",
+    "release-minor",
+    "legacy-full",
 )
 
 
@@ -266,6 +314,168 @@ def matches(path: str, patterns: Iterable[str]) -> bool:
     return any(pattern == "**" or fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
 
+def internal_package(name: str) -> bool:
+    """Every rvoip workspace package, and every example dependency on one."""
+
+    return name == "rvoip" or name.startswith("rvoip-")
+
+
+def _placeholder_version_value(line: str, *, plain: bool) -> str:
+    """Replace the version requirement on one manifest line."""
+
+    table = re.sub(
+        r'(\bversion\s*=\s*)"[^"]*"', rf'\g<1>"{VERSION_PLACEHOLDER}"', line, count=1
+    )
+    if table != line or not plain:
+        return table
+    return re.sub(
+        r'^(\s*[A-Za-z0-9_-]+\s*=\s*)"[^"]*"',
+        rf'\g<1>"{VERSION_PLACEHOLDER}"',
+        line,
+        count=1,
+    )
+
+
+def normalize_manifest(text: str) -> str:
+    """Hide the workspace version and internal dependency requirements.
+
+    These are exactly the values `release.py prepare` rewrites: the
+    `[workspace.package]`/`[package]` version and the version requirement on
+    every dependency that names an rvoip package, plus version tokens in
+    comment lines (copy-paste snippets). Third-party requirements, features,
+    paths and every other key keep their bytes.
+    """
+
+    lines = text.splitlines(keepends=True)
+    section = ""
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("["):
+            section = stripped.strip("[]").strip()
+            continue
+        if stripped.startswith("#"):
+            # Copy-paste snippets in comments name the release too.
+            lines[index] = normalize_version_text(line)
+            continue
+        if not stripped or "=" not in stripped:
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if section in {"package", "workspace.package"}:
+            if key == "version":
+                lines[index] = _placeholder_version_value(line, plain=False)
+            continue
+        table = MANIFEST_DEPENDENCY_TABLE.fullmatch(section)
+        if table:
+            if internal_package(table.group("name")) and key == "version":
+                lines[index] = _placeholder_version_value(line, plain=False)
+            continue
+        if MANIFEST_DEPENDENCY_SECTION.fullmatch(section):
+            renamed = re.search(r'\bpackage\s*=\s*"([^"]+)"', line)
+            if internal_package(renamed.group(1) if renamed else key):
+                lines[index] = _placeholder_version_value(line, plain=True)
+    return "".join(lines)
+
+
+def normalize_lockfile(text: str) -> str:
+    """Hide the versions of path packages (the workspace and its examples).
+
+    Registry and git packages keep their versions and checksums, so a real
+    dependency change still changes every input that hashes the lockfile.
+    """
+
+    blocks = re.split(r"(?m)^(?=\[\[package\]\]\s*$)", text)
+    local: set[str] = set()
+    for block in blocks:
+        if not block.startswith("[[package]]"):
+            continue
+        name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', block)
+        if name and not re.search(r"(?m)^source\s*=", block):
+            local.add(name.group(1))
+    result = []
+    for block in blocks:
+        name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', block)
+        if block.startswith("[[package]]") and name and name.group(1) in local:
+            block = re.sub(
+                r'(?m)^(version\s*=\s*)"[^"]*"',
+                rf'\g<1>"{VERSION_PLACEHOLDER}"',
+                block,
+                count=1,
+            )
+        result.append(block)
+    normalized = "".join(result)
+    if local:
+        names = "|".join(re.escape(name) for name in sorted(local, key=len, reverse=True))
+        normalized = re.sub(
+            rf'"({names}) [0-9][^"\s]*"', rf'"\1 {VERSION_PLACEHOLDER}"', normalized
+        )
+    return normalized
+
+
+def normalize_version_text(text: str) -> str:
+    """Hide every X.Y.Z token in a document Prepare rewrites."""
+
+    return SEMVER_TOKEN.sub(VERSION_PLACEHOLDER, text)
+
+
+_VERSION_BEARING_DOCUMENTS: frozenset[str] | None = None
+
+
+def version_bearing_documents() -> frozenset[str]:
+    """The non-manifest files `release.py prepare` rewrites version strings in."""
+
+    global _VERSION_BEARING_DOCUMENTS
+    if _VERSION_BEARING_DOCUMENTS is None:
+        source = Path(__file__).resolve().parents[1] / "release.py"
+        tree = ast.parse(source.read_text())
+        values: list[str] = []
+        for node in tree.body:
+            if (
+                isinstance(node, ast.Assign)
+                and any(
+                    getattr(target, "id", None) == "ACTIVE_RELEASE_METADATA_FILES"
+                    for target in node.targets
+                )
+            ):
+                for element in node.value.elts:  # type: ignore[attr-defined]
+                    values.append(element.args[0].value)
+        if not values:
+            raise GateError("release.py does not declare ACTIVE_RELEASE_METADATA_FILES")
+        _VERSION_BEARING_DOCUMENTS = frozenset(
+            value for value in values if not value.endswith("Cargo.toml")
+        )
+    return _VERSION_BEARING_DOCUMENTS
+
+
+def normalization_kind(path: str) -> str | None:
+    name = path.rsplit("/", 1)[-1]
+    if name == "Cargo.toml":
+        return "manifest"
+    if name == "Cargo.lock":
+        return "lockfile"
+    if path in version_bearing_documents():
+        return "document"
+    return None
+
+
+def input_file_digest(root: Path, path: str) -> str:
+    """Hash one input file, version-normalized when Prepare rewrites it."""
+
+    kind = normalization_kind(path)
+    if kind is None:
+        return file_sha256(root / path)
+    try:
+        text = (root / path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return file_sha256(root / path)
+    normalized = {
+        "manifest": normalize_manifest,
+        "lockfile": normalize_lockfile,
+        "document": normalize_version_text,
+    }[kind](text)
+    # The prefix keeps a normalized digest from ever equalling a raw one.
+    return f"{kind}:" + sha256_bytes(normalized.encode())
+
+
 def input_record(
     *,
     root: Path,
@@ -293,9 +503,14 @@ def input_record(
     )
     if gate["resource_class"].startswith("ec2-"):
         patterns.add("infra/release-runners/aws-release-startup.sh")
-    selected = [path for path in files if matches(path, patterns)]
-    file_hashes = {path: file_sha256(root / path) for path in selected}
+    selected = [
+        path
+        for path in files
+        if matches(path, patterns) and not matches(path, RELEASE_BOOKKEEPING_PATHS)
+    ]
+    file_hashes = {path: input_file_digest(root, path) for path in selected}
     payload = {
+        "input_normalization": INPUT_NORMALIZATION,
         "gate_definition_sha256": definition_digest(gate),
         "environment_sha256": environment_digest(gate_environment_id(environment_id, gate)),
         "files": file_hashes,
@@ -352,7 +567,14 @@ def exact_reusable(
     gate: dict[str, Any],
     inputs: dict[str, Any],
     environment_id: str,
+    in_chain: Any = None,
 ) -> dict[str, Any] | None:
+    """Return the newest PASS receipt with the exact inputs, if any.
+
+    `in_chain`, when given, must accept the receipt's candidate commit: a
+    release reuses evidence only from its own ancestors (its receipt chain).
+    """
+
     if gate.get("always_fresh"):
         return None
     for receipt in reversed(receipts):
@@ -361,9 +583,86 @@ def exact_reusable(
             and receipt.get("gate_definition_sha256") == inputs["gate_definition_sha256"]
             and receipt.get("input_sha256") == inputs["input_sha256"]
             and receipt.get("environment_sha256") == inputs["environment_sha256"]
+            and (in_chain is None or in_chain(str(receipt.get("candidate_sha", ""))))
         ):
             return receipt
     return None
+
+
+def require_whole_performance_group(
+    selected: list[str],
+    by_id: dict[str, dict[str, Any]],
+    reusable: dict[str, dict[str, Any] | None],
+    prior_path: Path | None,
+) -> None:
+    """Reuse the performance gates all from one prior run, or none of them.
+
+    Performance results are staged per worker (`_perf-results/<shard>`), not
+    per gate, so the reports can only be rebuilt from one complete prior set.
+    """
+
+    group = [
+        gate_id
+        for gate_id in selected
+        if by_id[gate_id]["resource_class"].startswith(PERFORMANCE_EVIDENCE_CLASS_PREFIX)
+    ]
+    if not group:
+        return
+    sources = {
+        Path(reusable[gate_id]["_path"]).relative_to(prior_path).parts[0]
+        for gate_id in group
+        if reusable[gate_id] is not None and prior_path is not None
+    }
+    if any(reusable[gate_id] is None for gate_id in group) or len(sources) > 1:
+        for gate_id in group:
+            reusable[gate_id] = None
+
+
+def chain_checker(root: Path, candidate: str) -> Any:
+    """Accept commits that are the candidate or one of its ancestors."""
+
+    cache: dict[str, bool] = {}
+
+    def accepted(commit: str) -> bool:
+        if not COMMIT_SHA.fullmatch(commit):
+            return False
+        if commit not in cache:
+            cache[commit] = commit == candidate or (
+                run(
+                    ["git", "merge-base", "--is-ancestor", commit, candidate],
+                    root=root,
+                    check=False,
+                ).returncode
+                == 0
+            )
+        return cache[commit]
+
+    return accepted
+
+
+def receipt_chain(
+    root: Path, candidate: str, decisions: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Record, per ancestor that supplied evidence, what changed since it."""
+
+    counts = collections.Counter(
+        item["reuse_receipt"]["candidate_sha"]
+        for item in decisions
+        if item["decision"] == "REUSE"
+    )
+    chain = []
+    for commit, count in sorted(counts.items()):
+        delta = [] if commit == candidate else changed_files(root, commit, candidate)
+        chain.append(
+            {
+                "candidate_sha": commit,
+                "reused_gate_count": count,
+                "changed_file_count": len(delta),
+                # Bounded: a long chain links the full diff by commit range.
+                "changed_files": delta[:500],
+            }
+        )
+    return chain
 
 
 def parse_name_status_z(output: str) -> list[str]:
@@ -509,7 +808,7 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         shards = balance_gates(gates, min(limits.get(resource, 1), len(gates)))
         for index, shard in enumerate(shards, start=1):
             gate_ids = sorted(gate["id"] for gate in shard)
-            if resource.startswith("ec2-"):
+            if resource.startswith("ec2-") or resource == BENCH_LANE_CLASS:
                 runs_on: str | list[str] = ["self-hosted", "rvoip-release", resource]
             else:
                 runs_on = "ubuntu-latest"
@@ -518,7 +817,11 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                     "id": re.sub(r"[^A-Za-z0-9_-]", "-", f"{resource}-{index}"),
                     "resource_class": resource,
                     "runs_on": runs_on,
-                    "hosted": not resource.startswith("ec2-"),
+                    "hosted": not resource.startswith("ec2-") and resource != BENCH_LANE_CLASS,
+                    # A bench lane provisions its own DUT and callers; the
+                    # workflow runs it from a dedicated controller job rather
+                    # than an EC2 gate worker.
+                    "bench": resource == BENCH_LANE_CLASS,
                     "machine_type": (
                         "m5.large"
                         if resource == "ec2-proxy-interop"
@@ -540,6 +843,10 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
                     ),
                     "needs_chromium": any(
                         gate["id"] == "interop.browser-dtmf" for gate in shard
+                    ),
+                    # Only the CodeQL policy shard receives a GitHub token.
+                    "needs_github_token": any(
+                        gate["id"] == "security.codeql-exact" for gate in shard
                     ),
                     "estimated_seconds": sum(int(gate.get("estimated_seconds", 1)) for gate in shard),
                 }
@@ -567,6 +874,8 @@ def profile_selection(
         )
 
     diagnostic_ids = set(profiles["remote-release"]) | set(profiles["remote-preflight"])
+    for bench_profile in ("bench-release", "bench-minor"):
+        diagnostic_ids |= set(profiles.get(bench_profile, []))
     by_id = gate_map(catalog)
     unknown = sorted(set(requested) - diagnostic_ids)
     if unknown:
@@ -579,7 +888,10 @@ def profile_selection(
         for gate_id in requested
         if gate_id != "interop.remote-proxies"
         and (
-            not by_id[gate_id]["resource_class"].startswith("ec2-")
+            not (
+                by_id[gate_id]["resource_class"].startswith("ec2-")
+                or by_id[gate_id]["resource_class"] == BENCH_LANE_CLASS
+            )
             or by_id[gate_id]["executor"] != "argv"
         )
     )
@@ -617,7 +929,7 @@ def create_plan(
     only_gates: list[str] | None = None,
 ) -> dict[str, Any]:
     selected = profile_selection(catalog, profile, only_gates)
-    if profile == "remote-release":
+    if profile in {"remote-release", "release-patch", "release-minor"}:
         missing = catalog.get("remote_release_legacy_coverage", {}).get(
             "unautomated_legacy_ids", []
         )
@@ -646,12 +958,18 @@ def create_plan(
         changed, [by_id[gate_id] for gate_id in selected]
     )
     invalidated_by_change = dependent_closure(changed_gate_ids, reverse_dependencies)
+    in_chain = chain_checker(root, resolved_candidate)
     reusable_receipts = {
         gate_id: exact_reusable(
-            prior.get(gate_id, []), by_id[gate_id], inputs[gate_id], environment_id
+            prior.get(gate_id, []),
+            by_id[gate_id],
+            inputs[gate_id],
+            environment_id,
+            in_chain,
         )
         for gate_id in selected
     }
+    require_whole_performance_group(selected, by_id, reusable_receipts, prior_path)
     # A definition, environment, or selected-input mismatch must also rerun
     # every downstream gate that consumes the changed gate. Always-fresh
     # source/report gates are intentionally excluded: regenerating their
@@ -684,6 +1002,7 @@ def create_plan(
                 "decision": "RUN",
                 "reason": reason,
                 "executor": gate["executor"],
+                "resource_class": gate["resource_class"],
                 "dependencies": gate.get("dependencies", []),
                 **{key: inputs[gate_id][key] for key in ("gate_definition_sha256", "environment_sha256", "input_sha256")},
             }
@@ -693,10 +1012,16 @@ def create_plan(
                 "decision": "REUSE",
                 "reason": "exact definition, input, and environment digest match",
                 "executor": gate["executor"],
+                "resource_class": gate["resource_class"],
                 "dependencies": gate.get("dependencies", []),
                 **{key: inputs[gate_id][key] for key in ("gate_definition_sha256", "environment_sha256", "input_sha256")},
                 "reuse_receipt": {key: value for key, value in reuse.items() if not key.startswith("_")},
                 "reuse_receipt_sha256": reuse["_sha256"],
+                # Where the collector finds this gate's evidence to stage it
+                # beside the fresh evidence, relative to --prior-evidence.
+                "reuse_receipt_path": Path(reuse["_path"]).relative_to(prior_path).as_posix()
+                if prior_path is not None
+                else None,
             }
         decisions.append(decision)
     matrix = matrix_for(decisions, by_id)
@@ -714,6 +1039,8 @@ def create_plan(
         "changed_files": changed,
         "unmapped_changed_files": unknown,
         "first_candidate": first_candidate,
+        "input_normalization": INPUT_NORMALIZATION,
+        "receipt_chain": receipt_chain(root, resolved_candidate, decisions),
         "gates": decisions,
         "matrix": matrix,
     }
@@ -721,14 +1048,17 @@ def create_plan(
 
 def write_github_output(path: Path, plan: dict[str, Any]) -> None:
     hosted = [item for item in plan["matrix"] if item["hosted"]]
-    ec2 = [item for item in plan["matrix"] if not item["hosted"]]
+    bench = [item for item in plan["matrix"] if item.get("bench")]
+    ec2 = [item for item in plan["matrix"] if not item["hosted"] and not item.get("bench")]
     values = {
         "matrix": json.dumps({"include": plan["matrix"]}, separators=(",", ":")),
         "hosted_matrix": json.dumps({"include": hosted}, separators=(",", ":")),
         "aws_matrix": json.dumps({"include": ec2}, separators=(",", ":")),
+        "bench_matrix": json.dumps({"include": bench}, separators=(",", ":")),
         "shard_count": str(len(plan["matrix"])),
         "hosted_shard_count": str(len(hosted)),
         "aws_shard_count": str(len(ec2)),
+        "bench_shard_count": str(len(bench)),
         "run_count": str(sum(item["decision"] == "RUN" for item in plan["gates"])),
         "reuse_count": str(sum(item["decision"] == "REUSE" for item in plan["gates"])),
         "candidate_sha": plan["candidate_sha"],
@@ -1128,9 +1458,29 @@ def reconcile_performance_regression(root: Path, evidence_root: Path, artifact: 
 
 
 def reconcile_performance_metrics(
-    root: Path, evidence_root: Path, artifact: Path, candidate: str
+    root: Path,
+    evidence_root: Path,
+    artifact: Path,
+    candidate: str,
+    evidence_candidate: str | None = None,
 ) -> dict[str, Any]:
-    """Build one fail-closed evaluation from this candidate's perf artifacts."""
+    """Build one fail-closed evaluation from this candidate's perf artifacts.
+
+    `evidence_candidate` is the commit whose canonical 2,000-CPS receipt was
+    accepted: the candidate itself, or, when that receipt was reused, the
+    ancestor in the receipt chain that produced it. Its digests already match
+    this candidate's normalized inputs, so the evidence must be bound to that
+    commit and its tree.
+    """
+    evidence_candidate = evidence_candidate or candidate
+    if evidence_candidate != candidate and run(
+        ["git", "merge-base", "--is-ancestor", evidence_candidate, candidate],
+        root=root,
+        check=False,
+    ).returncode:
+        raise GateError(
+            "reused canonical 2,000-CPS evidence is not from an ancestor of the candidate"
+        )
     source = evidence_root / "_perf-results"
     if not source.is_dir():
         raise GateError("exact-candidate performance artifacts are missing")
@@ -1202,14 +1552,14 @@ def reconcile_performance_metrics(
         )
     canonical_payload = load_json(canonical_index, "canonical 2,000-CPS evidence")
     canonical_source = canonical_payload.get("source_at_beta_start")
-    source_tree = git(root, "rev-parse", "HEAD^{tree}")
+    source_tree = git(root, "rev-parse", f"{evidence_candidate}^{{tree}}")
     common_fingerprint = canonical_payload.get("common_source_fingerprint_sha256")
     common_executable = canonical_payload.get("common_executable_sha256")
     canonical_runs = canonical_payload.get("runs")
     if (
         canonical_payload.get("status") != "PASS"
         or not isinstance(canonical_source, dict)
-        or canonical_source.get("git_commit") != candidate
+        or canonical_source.get("git_commit") != evidence_candidate
         or canonical_source.get("git_tree") != source_tree
         or canonical_source.get("git_dirty") is not False
         or canonical_source.get("source_fingerprint_sha256") != common_fingerprint
@@ -1266,7 +1616,7 @@ def reconcile_performance_metrics(
             "--canonical-index",
             str(canonical_index),
             "--candidate-sha",
-            candidate,
+            evidence_candidate,
             "--high-density-cps",
             "160",
             "--high-density-min-asr",
@@ -1306,17 +1656,92 @@ def reconcile_performance_metrics(
     }
 
 
+def stage_reused_evidence(
+    plan: dict[str, Any], prior_root: Path, evidence_root: Path
+) -> list[str]:
+    """Copy each reused gate's evidence beside the fresh evidence.
+
+    Reports such as the performance evaluation read gate artifacts, not just
+    receipts. Staging the exact prior directories (receipt digest checked)
+    lets them render from a run that reused those gates, and carries the
+    evidence forward so the next run in the chain can reuse it again.
+    """
+
+    failures: list[str] = []
+    performance_runs: set[str] = set()
+    for item in plan["gates"]:
+        if item["decision"] != "REUSE":
+            continue
+        gate_id = item["id"]
+        relative = item.get("reuse_receipt_path")
+        if not isinstance(relative, str) or not relative:
+            failures.append(f"{gate_id}: reused receipt has no prior evidence path")
+            continue
+        parts = Path(relative).parts
+        if Path(relative).is_absolute() or ".." in parts or len(parts) < 2:
+            failures.append(f"{gate_id}: unsafe reused evidence path {relative!r}")
+            continue
+        receipt_path = prior_root / relative
+        if not receipt_path.is_file():
+            failures.append(f"{gate_id}: reused evidence is missing at {relative}")
+            continue
+        if file_sha256(receipt_path) != item.get("reuse_receipt_sha256"):
+            failures.append(f"{gate_id}: reused evidence receipt digest changed")
+            continue
+        if "release-evidence" in parts:
+            target_relative = Path(*parts[parts.index("release-evidence") + 1 : -1])
+        else:
+            target_relative = Path(parts[-2])
+        if not target_relative.parts or target_relative.parts[0] in REUSED_EVIDENCE_EXCLUDED_TOP_LEVEL:
+            failures.append(f"{gate_id}: reused evidence path {relative!r} has no gate directory")
+            continue
+        target = evidence_root / target_relative
+        if target.exists():
+            failures.append(
+                f"{gate_id}: reused evidence collides with fresh evidence at {target_relative}"
+            )
+            continue
+        shutil.copytree(receipt_path.parent, target)
+        if str(item.get("resource_class", "")).startswith(PERFORMANCE_EVIDENCE_CLASS_PREFIX):
+            performance_runs.add(parts[0])
+    if len(performance_runs) > 1:
+        failures.append(
+            "reused performance evidence spans more than one prior run: "
+            + ", ".join(sorted(performance_runs))
+        )
+    for prior_run in sorted(performance_runs):
+        source = prior_root / prior_run / "release-evidence" / "_perf-results"
+        if not source.is_dir():
+            continue
+        for shard in sorted(path for path in source.iterdir() if path.is_dir()):
+            destination = evidence_root / "_perf-results" / shard.name
+            if destination.exists():
+                failures.append(
+                    f"reused performance results collide with fresh results: {shard.name}"
+                )
+                continue
+            shutil.copytree(shard, destination)
+    return failures
+
+
 def collect(
     *,
     plan: dict[str, Any],
     evidence_root: Path,
     output: Path,
     root: Path | None = None,
+    prior_evidence: Path | None = None,
 ) -> int:
     if plan.get("schema") != PLAN_SCHEMA:
         raise GateError("unsupported or missing release gate plan")
-    receipts = receipt_index(evidence_root)
     failures = []
+    if any(item["decision"] == "REUSE" for item in plan["gates"]):
+        if prior_evidence is None or not prior_evidence.is_dir():
+            failures.append("reused gates require --prior-evidence to stage their evidence")
+        else:
+            evidence_root.mkdir(parents=True, exist_ok=True)
+            failures.extend(stage_reused_evidence(plan, prior_evidence, evidence_root))
+    receipts = receipt_index(evidence_root)
     accepted = []
     accepted_ids: set[str] = set()
     for item in plan["gates"]:
@@ -1412,8 +1837,16 @@ def collect(
                 failures.append(f"{gate_id}: collector workspace is unavailable")
                 continue
             try:
+                canonical = next(
+                    (
+                        row["receipt_candidate_sha"]
+                        for row in accepted
+                        if row["gate_id"] == "perf.canonical-2k-current"
+                    ),
+                    None,
+                )
                 specialized = reconcile_performance_metrics(
-                    root, evidence_root, artifact, plan["candidate_sha"]
+                    root, evidence_root, artifact, plan["candidate_sha"], canonical
                 )
             except GateError as error:
                 failures.append(f"{gate_id}: {error}")
@@ -1497,17 +1930,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
     plan = commands.add_parser("plan")
-    plan.add_argument(
-        "--profile",
-        choices=(
-            "remote-preflight",
-            "remote-diagnostic",
-            "remote-core",
-            "remote-release",
-            "legacy-full",
-        ),
-        required=True,
-    )
+    plan.add_argument("--profile", choices=RELEASE_PROFILES, required=True)
     plan.add_argument(
         "--only-gates",
         help="comma-separated exact EC2 gate IDs for remote-diagnostic",
@@ -1529,6 +1952,11 @@ def parser() -> argparse.ArgumentParser:
     collector.add_argument("--plan", type=Path, required=True)
     collector.add_argument("--evidence", type=Path, required=True)
     collector.add_argument("--output", type=Path, required=True)
+    collector.add_argument(
+        "--prior-evidence",
+        type=Path,
+        help="prior qualification evidence the plan reused (stages its gate evidence)",
+    )
     return result
 
 
@@ -1589,7 +2017,16 @@ def main(argv: list[str] | None = None) -> int:
         plan = load_json(args.plan if args.plan.is_absolute() else root / args.plan, "gate plan")
         evidence = args.evidence if args.evidence.is_absolute() else root / args.evidence
         output = args.output if args.output.is_absolute() else root / args.output
-        return collect(plan=plan, evidence_root=evidence, output=output, root=root)
+        prior_evidence = args.prior_evidence
+        if prior_evidence and not prior_evidence.is_absolute():
+            prior_evidence = root / prior_evidence
+        return collect(
+            plan=plan,
+            evidence_root=evidence,
+            output=output,
+            root=root,
+            prior_evidence=prior_evidence,
+        )
     except (GateError, OSError, ValueError, subprocess.SubprocessError) as error:
         print(f"release gates: FAIL: {error}", file=sys.stderr)
         return 2
