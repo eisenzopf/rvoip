@@ -179,13 +179,24 @@ chunk and whole WAV) for hosts that need them directly.
 ## Building the gRPC transport
 
 Cisco's `voicevirtualagent.proto` and `byova_common.proto` have no published
-licence, so this crate's package does not contain them. The `grpc` feature
+licence, so rvoip neither packages nor commits them. The `grpc` feature
 compiles them at build time from the directory named by
 `RVOIP_WEBEX_BYOVA_PROTO_DIR` (with a vendored `protoc`; no system `protoc`).
-Inside the rvoip workspace checkout the build falls back to the pinned copy in
-`third_party/cisco-webex-byova-proto`, so workspace builds and CI need no
-setup. A build from crates.io with `grpc` and no directory fails with a message
-that says where to get the files:
+
+In the rvoip workspace (any `--all-features` build includes `grpc`), run
+
+```sh
+python3 scripts/ci/fetch_webex_byova_protos.py
+```
+
+once. It downloads both files from Cisco's repository at the pinned commit
+into the ignored `target/third_party/cisco-webex-byova-proto/`, checks them
+against `third_party/cisco-webex-byova-proto/SHA256SUMS`, and fails closed on
+a mismatch; the build finds them there. CI runs it automatically before every
+build that needs it.
+
+A build from crates.io with `grpc` and no directory fails with a message that
+says where to get the files:
 
 ```sh
 mkdir -p webex-byova-proto && cd webex-byova-proto

@@ -1,28 +1,24 @@
-# Cisco Voice Virtual Agent protobuf contract (unpublished input)
+# Cisco Voice Virtual Agent protobuf contract (pins only)
 
-These two unmodified files are Cisco's gRPC contract for Webex Contact Center
-BYOVA. They come from <https://github.com/webex/dataSourceSchemas>, commit
+`rvoip-webex-byova`'s optional `grpc` feature compiles Cisco's gRPC contract
+for Webex Contact Center BYOVA: `voicevirtualagent.proto` and
+`byova_common.proto` from <https://github.com/webex/dataSourceSchemas>, commit
 `fca090dfa806e28695acb145e927ad0d557ce7fe`, directory
-`Services/VoiceVirtualAgent/5397013b-7920-4ffc-807c-e8a3e0a18f43/Proto`
-(retrieved 2026-10-28; re-verified byte for byte against that commit on
-2026-11-15). `SHA256SUMS` pins them.
+`Services/VoiceVirtualAgent/5397013b-7920-4ffc-807c-e8a3e0a18f43/Proto`.
 
-Cisco's repository has no top-level licence, so these files are **not part of
-any published package**. `rvoip-webex-byova` is published without them: its
-optional `grpc` feature compiles the contract at build time from the directory
-named by `RVOIP_WEBEX_BYOVA_PROTO_DIR`. Inside this workspace checkout the build
-falls back to this directory, so workspace builds, tests and CI need no setup.
-Outside the workspace, fetch the files yourself:
+Cisco's repository has no licence, so rvoip does not redistribute these files:
+they are neither committed nor packaged. This directory holds only their
+SHA-256 pins (`SHA256SUMS`, verified byte for byte against that commit on
+2026-11-15).
 
-```sh
-mkdir -p webex-byova-proto && cd webex-byova-proto
-base=https://raw.githubusercontent.com/webex/dataSourceSchemas/fca090dfa806e28695acb145e927ad0d557ce7fe/Services/VoiceVirtualAgent/5397013b-7920-4ffc-807c-e8a3e0a18f43/Proto
-curl -fsSLO "$base/voicevirtualagent.proto"
-curl -fsSLO "$base/byova_common.proto"
-sha256sum -c /path/to/rvoip/third_party/cisco-webex-byova-proto/SHA256SUMS
-export RVOIP_WEBEX_BYOVA_PROTO_DIR="$PWD"
-```
+- In the workspace, `python3 scripts/ci/fetch_webex_byova_protos.py` downloads both files at the pinned commit into
+  the ignored `target/third_party/cisco-webex-byova-proto/`, verifies the pins,
+  and fails closed on a mismatch. The build looks there.
+- Anywhere else, download the two files yourself, check them against
+  `SHA256SUMS`, and set `RVOIP_WEBEX_BYOVA_PROTO_DIR` to their directory.
+- CI (`scripts/ci/run_checks.py`, `scripts/release/gates.py` and the
+  `webex-byova.yml` workflow) runs the fetch before every command that builds
+  the `grpc` feature, including every `--all-features` workspace build.
 
-Keep the package, service names, field numbers and enum values unchanged.
-Builds use a vendored `protoc` (`protoc-bin-vendored`); no system `protoc` is
-needed.
+Changing the pinned revision means updating `SHA256SUMS`, `COMMIT` in the
+fetch script, and the build script's message together.

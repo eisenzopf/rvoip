@@ -12,7 +12,7 @@ categories.workspace = true
 keywords.workspace = true
 description = "Webex Contact Center BYOVA (Bring Your Own Virtual Agent) adapter for rvoip"
 # Cisco's protobuf contract is not packaged: the optional `grpc` feature reads
-# it at build time (see build.rs and third_party/cisco-webex-byova-proto).
+# it at build time (see build.rs and scripts/ci/fetch_webex_byova_protos.py).
 
 [features]
 default = []

@@ -5,6 +5,7 @@ on:
     paths:
       - "crates/extensions/rvoip-webex-byova/**"
       - "third_party/cisco-webex-byova-proto/**"
+      - "scripts/ci/fetch_webex_byova_protos.py"
       - "crates/media/codec-core/**"
       - "crates/extensions/rvoip-vapi/**"
       - "crates/foundation/rvoip-core/src/media_graph.rs"
@@ -39,16 +40,16 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
           shared-key: webex-byova-profiles
-      # Cisco's protobuf contract is an unpublished input (no upstream licence),
-      # pinned by commit and SHA-256. The grpc feature reads it from
-      # RVOIP_WEBEX_BYOVA_PROTO_DIR, falling back to this workspace copy.
-      - name: Verify the pinned Cisco protobuf contract
-        working-directory: third_party/cisco-webex-byova-proto
-        run: sha256sum -c SHA256SUMS
+      # Cisco's protobuf contract has no published licence, so it is neither
+      # committed nor packaged. Fetch it from webex/dataSourceSchemas at the
+      # pinned commit into the ignored target/third_party directory; the
+      # script verifies the SHA-256 pins and fails closed.
+      - name: Fetch the pinned Cisco protobuf contract
+        run: python3 scripts/ci/fetch_webex_byova_protos.py
       - name: Keep Cisco files out of the published package
         run: |
           cargo package --locked -p rvoip-webex-byova --list > "$RUNNER_TEMP/package-list.txt"
-          if grep -E 'proto$|cisco-webex-byova-proto' "$RUNNER_TEMP/package-list.txt"; then
+          if grep -E '\.proto$|cisco-webex-byova-proto' "$RUNNER_TEMP/package-list.txt"; then
             echo "rvoip-webex-byova must not package Cisco's protobuf files" >&2
             exit 1
           fi
@@ -59,7 +60,7 @@ jobs:
         run: cargo test --locked -p rvoip-webex-byova --features wav-compat
       - name: Build gRPC from an explicit contract directory, as a packaged crate does
         env:
-          RVOIP_WEBEX_BYOVA_PROTO_DIR: ${{ github.workspace }}/third_party/cisco-webex-byova-proto
+          RVOIP_WEBEX_BYOVA_PROTO_DIR: ${{ github.workspace }}/target/third_party/cisco-webex-byova-proto
         run: cargo test --locked -p rvoip-webex-byova --features grpc --test grpc
       - name: Test all profiles, the gRPC transport, and the Rustdoc examples
         run: cargo test --locked -p rvoip-webex-byova --all-features
