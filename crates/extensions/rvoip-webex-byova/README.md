@@ -10,10 +10,10 @@ any other transport. Bridge it to an agent connection, such as
 Webex through the core media graph.
 
 Status: **experimental**. Simulator and loopback tests pass; no live Cisco
-interoperability is claimed for this adapter. The crate is `publish = false`
-while redistribution terms for the vendored Cisco protobuf schemas are
-unresolved. Use it as a path or Git dependency, or through the `rvoip` facade's
-`webex-byova` feature from a workspace checkout.
+interoperability is claimed for this adapter. The default build (WebSocket
+transport, adapter, authentication) needs nothing beyond Cargo. Cisco's
+protobuf contract is not redistributed with the crate: see
+[Building the gRPC transport](#building-the-grpc-transport).
 
 ## How a conversation flows
 
@@ -175,6 +175,32 @@ ones; Cisco's 3-byte listening placeholder does not. Later audio frames that
 omit identity and format inherit them from the same RPC's first request.
 The `grpc` module keeps the protobuf types and reply framers (CHUNK, WAV
 chunk and whole WAV) for hosts that need them directly.
+
+## Building the gRPC transport
+
+Cisco's `voicevirtualagent.proto` and `byova_common.proto` have no published
+licence, so this crate's package does not contain them. The `grpc` feature
+compiles them at build time from the directory named by
+`RVOIP_WEBEX_BYOVA_PROTO_DIR` (with a vendored `protoc`; no system `protoc`).
+Inside the rvoip workspace checkout the build falls back to the pinned copy in
+`third_party/cisco-webex-byova-proto`, so workspace builds and CI need no
+setup. A build from crates.io with `grpc` and no directory fails with a message
+that says where to get the files:
+
+```sh
+mkdir -p webex-byova-proto && cd webex-byova-proto
+base=https://raw.githubusercontent.com/webex/dataSourceSchemas/fca090dfa806e28695acb145e927ad0d557ce7fe/Services/VoiceVirtualAgent/5397013b-7920-4ffc-807c-e8a3e0a18f43/Proto
+curl -fsSLO "$base/voicevirtualagent.proto"
+curl -fsSLO "$base/byova_common.proto"
+# Expected SHA-256 (the tested revision):
+#   815514908ef0c4ec417359cf7085052cde9433b4c21c7aa5e3e44ff130aca57a  voicevirtualagent.proto
+#   d65abfa0970047ab60af703395c7fda620b98f6ffb67d7822446c7f377f77bb3  byova_common.proto
+sha256sum voicevirtualagent.proto byova_common.proto
+export RVOIP_WEBEX_BYOVA_PROTO_DIR="$PWD"
+```
+
+The `rvoip` facade's `webex-byova` feature enables only the default,
+proto-free surface.
 
 ## Protocol engine
 

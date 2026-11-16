@@ -33,3 +33,13 @@ complete license texts and a provenance record.
 Upstream: <https://github.com/webrtc-rs/rtc> and
 <https://github.com/webrtc-rs/webrtc>. Qualified RTC fork:
 <https://github.com/eisenzopf/rtc>.
+
+## Cisco Voice Virtual Agent protobuf contract
+
+`third_party/cisco-webex-byova-proto/` holds two unmodified files from
+<https://github.com/webex/dataSourceSchemas> (commit
+`fca090dfa806e28695acb145e927ad0d557ce7fe`), Cisco's gRPC contract for Webex
+Contact Center BYOVA. That repository publishes no licence, so the files are
+not part of any published rvoip package: `rvoip-webex-byova` reads them at
+build time only when its optional `grpc` feature is enabled. Provenance and
+SHA-256 pins are in that directory.

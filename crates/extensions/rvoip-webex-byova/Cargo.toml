@@ -11,8 +11,8 @@ rust-version.workspace = true
 categories.workspace = true
 keywords.workspace = true
 description = "Webex Contact Center BYOVA (Bring Your Own Virtual Agent) adapter for rvoip"
-# Cisco schema redistribution terms must be resolved before a crates.io release.
-publish = false
+# Cisco's protobuf contract is not packaged: the optional `grpc` feature reads
+# it at build time (see build.rs and third_party/cisco-webex-byova-proto).
 
 [features]
 default = []

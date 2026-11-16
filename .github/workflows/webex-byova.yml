@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "crates/extensions/rvoip-webex-byova/**"
+      - "third_party/cisco-webex-byova-proto/**"
       - "crates/media/codec-core/**"
       - "crates/extensions/rvoip-vapi/**"
       - "crates/foundation/rvoip-core/src/media_graph.rs"
@@ -38,11 +39,28 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
           shared-key: webex-byova-profiles
+      # Cisco's protobuf contract is an unpublished input (no upstream licence),
+      # pinned by commit and SHA-256. The grpc feature reads it from
+      # RVOIP_WEBEX_BYOVA_PROTO_DIR, falling back to this workspace copy.
+      - name: Verify the pinned Cisco protobuf contract
+        working-directory: third_party/cisco-webex-byova-proto
+        run: sha256sum -c SHA256SUMS
+      - name: Keep Cisco files out of the published package
+        run: |
+          cargo package --locked -p rvoip-webex-byova --list > "$RUNNER_TEMP/package-list.txt"
+          if grep -E 'proto$|cisco-webex-byova-proto' "$RUNNER_TEMP/package-list.txt"; then
+            echo "rvoip-webex-byova must not package Cisco's protobuf files" >&2
+            exit 1
+          fi
       # Default-profile tests and lint also run in the normal PR crate shard.
       # The adapter tests bridge through rvoip-core to rvoip-vapi in ordered
       # mode, so changes there run this workflow too.
       - name: Test WAV compatibility without gRPC
         run: cargo test --locked -p rvoip-webex-byova --features wav-compat
+      - name: Build gRPC from an explicit contract directory, as a packaged crate does
+        env:
+          RVOIP_WEBEX_BYOVA_PROTO_DIR: ${{ github.workspace }}/third_party/cisco-webex-byova-proto
+        run: cargo test --locked -p rvoip-webex-byova --features grpc --test grpc
       - name: Test all profiles, the gRPC transport, and the Rustdoc examples
         run: cargo test --locked -p rvoip-webex-byova --all-features
       - name: Lint optional profiles
