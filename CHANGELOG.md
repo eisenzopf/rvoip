@@ -143,6 +143,11 @@ behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
 (they need a newer Rust than the 1.91 MSRV); password-hash 0.6 (argon2 0.5
 needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
 bumps (they break the test fixtures and examples built on the older APIs).
+- **`RvoipError` gains `OutboundPeerUnavailableBeforeWrite`.** The enum is
+  not `#[non_exhaustive]`. rvoip-sip returns it when an outbound call's
+  `OutboundPeerLease` refuses dispatch, before any INVITE is sent.
+  Migration: add an arm (or a wildcard) to exhaustive `match`es on
+  `RvoipError`.
 
 ### SIP
 
@@ -1056,6 +1061,19 @@ outcome unchanged, and add no configuration.
   core a terminal with a receipt
   (`AdapterLifecycleSinkSlot::queue_or_deliver_orchestrator_terminal_with_receipt`)
   and wait until core has consumed it.
+- Outbound calls can depend on a live peer connection. A contact center that
+  calls a customer back for an agent wants the call to exist only while the
+  agent's own leg is up. `Orchestrator::reserve_outbound_peer` (or
+  `reserve_outbound_peer_before`, with a deadline for the first wire write)
+  returns an `OutboundPeerLease` tied to that connection's exact lifecycle
+  generation; a connection backs one live lease at a time. The peer's
+  retirement, or `Orchestrator::revoke_outbound_peer`, revokes it. rvoip-sip
+  takes it through `SipOriginateContext::with_outbound_peer`: the adapter
+  claims the lease's single dispatch immediately before the INVITE can
+  leave, so a call whose peer has gone fails with
+  `RvoipError::OutboundPeerUnavailableBeforeWrite` and sends nothing. A
+  revocation after dispatch ends the call on the wire (CANCEL or BYE) and
+  reports `Failed`.
 - Connection admission no longer sweeps the lifecycle table when bounded
   lifecycle retention is enabled (#345). Inbound admission swept every
   retained row every 64 admissions, and outbound admission on every claim,
