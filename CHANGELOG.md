@@ -927,6 +927,26 @@ outcome unchanged, and add no configuration.
   datagram), which reaches rvoip through `quinn` 0.11 in the QUIC,
   WebTransport, UCTP and MoQ crates. Its `socket2` 0.6 requirement also
   moves `quinn` and `hyper-util` from `socket2` 0.5 to 0.6.
+- jsonwebtoken uses its `aws_lc_rs` backend in every workspace crate
+  (`rvoip-auth-core`, `rvoip-users-core`, `rvoip-vcon`, `rvoip-stir-shaken`,
+  `rvoip-uctp`, `rvoip-moq`), the backend rustls already links. With
+  `rust_crypto`, an application that also enabled `aws_lc_rs` (directly or
+  through another crate) got both features unified, so jsonwebtoken had no
+  default provider and its first encode or decode panicked; rvoip-core reaches
+  jsonwebtoken through `rvoip-vcon`, so this hit every rvoip application.
+  `rsa` is no longer used for JWT signing. `deny.toml` bans the
+  `rust_crypto` feature so the workspace stays on one backend. Applications
+  that enabled only `rust_crypto` now need `aws_lc_rs` instead, or must install
+  a jsonwebtoken `CryptoProvider` themselves.
+- `rvoip-rtp-core` uses `p256` 0.14 (elliptic-curve 0.14). DTLS ECDHE rejects
+  a private key that is not exactly 32 bytes with an error instead of
+  panicking. Key generation uses the system CSPRNG through `Generate`.
+  `webauthn-rs` moves to 0.6.2 (crypto-glue 0.2) because crypto-glue 0.1.17
+  pins a pre-release `digest` that cannot coexist with the 0.14 stack.
+  RUSTSEC-2026-0387 stays accepted: `crypto-bigint` 0.5 now arrives only
+  through `dtls` 0.17, the `rtc-*` 0.20 alphas and `aws-config`.
+- `rvoip-sip` parses YAML with `yaml_serde`, the maintained continuation of
+  the deprecated `serde_yaml`, under the same `serde_yaml` name.
 
 ## 0.4.0 — 2026-10-11
 
