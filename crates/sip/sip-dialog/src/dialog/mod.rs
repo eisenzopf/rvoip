@@ -26,6 +26,7 @@ pub mod dialog_impl;
 pub mod dialog_state;
 pub mod dialog_utils;
 pub mod subscription_state;
+pub mod tls_proxy_flow;
 
 // Re-export main types
 pub use dialog_id::DialogId;

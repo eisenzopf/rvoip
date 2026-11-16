@@ -79,7 +79,9 @@ pub use unified::{ExactResponseSendError, FinalResponseCompletionDisposition, Un
 
 // Re-export shared types
 pub use common::{CallHandle, CallInfo, DialogEvent, DialogHandle};
-pub use config::{ClientConfig, Credentials, DialogConfig, RelUsage, ServerConfig};
+pub use config::{
+    ClientConfig, Credentials, DialogConfig, RelUsage, ServerConfig, SipTlsProxyFlowPolicy,
+};
 
 // Re-export error types
 pub use errors::{ApiError, ApiResult};

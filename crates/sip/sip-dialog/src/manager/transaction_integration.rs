@@ -6167,6 +6167,94 @@ impl DialogManager {
         .map(|(transaction_id, destination, _completion)| (transaction_id, destination))
     }
 
+    /// The single candidate that sends `request` on the dialog's retained
+    /// TLS flow, or `None` when the dialog has no binding or the request's
+    /// exact next hop is not the bound one.
+    ///
+    /// A bound flow that has closed is an error: no new connection is
+    /// opened, except that a policy with a `renewal_authority` first opens
+    /// and certificate-verifies one to the fixed proxy endpoint (before any
+    /// SIP transaction exists) and rebinds the dialog to it.
+    async fn retained_tls_flow_target(
+        &self,
+        dialog_id: &DialogId,
+        request: &rvoip_sip_core::Request,
+        candidates: &[rvoip_sip_transport::resolver::ResolvedTarget],
+    ) -> DialogResult<Option<rvoip_sip_transport::resolver::ResolvedTarget>> {
+        // Clone the binding out; the map guard is never held across await.
+        let Some(binding) = self
+            .dialogs
+            .get(dialog_id)
+            .and_then(|dialog| dialog.tls_proxy_flow.clone())
+        else {
+            return Ok(None);
+        };
+        let Ok(next_hop) =
+            crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(request)
+        else {
+            return Ok(None);
+        };
+        let Some((candidate, mut route)) = candidates.iter().find_map(|candidate| {
+            binding
+                .route_for(&next_hop, candidate.addr, candidate.transport)
+                .map(|route| (candidate, route))
+        }) else {
+            return Ok(None);
+        };
+        if let Some(renewal) =
+            binding.renewal_route_for(&next_hop, candidate.addr, candidate.transport)
+        {
+            // Preparation writes no SIP bytes. Only a closed flow is renewed;
+            // any other preparation failure is reported, never retried.
+            let transport = self.transaction_manager.transport();
+            let message = rvoip_sip_core::Message::Request(request.clone());
+            match transport
+                .prepare_message_route(&message, route.clone())
+                .await
+            {
+                Ok(prepared) => route = prepared,
+                Err(rvoip_sip_transport::Error::TransportClosed) => {
+                    let prepared = transport
+                        .prepare_message_route(&message, renewal)
+                        .await
+                        .map_err(|_| {
+                            crate::errors::DialogError::routing_error(
+                                "TLS proxy flow renewal failed before request submission",
+                            )
+                        })?;
+                    let renewed = self.dialogs.get_mut(dialog_id).is_some_and(|mut dialog| {
+                        dialog.tls_proxy_flow.as_mut().is_some_and(|current| {
+                            current.retain_authenticated_renewal(&binding, &prepared)
+                        })
+                    });
+                    if !renewed {
+                        return Err(crate::errors::DialogError::routing_error(
+                            "TLS proxy flow binding changed during renewal",
+                        ));
+                    }
+                    debug!(dialog=%dialog_id, "Renewed closed TLS proxy flow");
+                    route = prepared;
+                }
+                Err(_) => {
+                    return Err(crate::errors::DialogError::routing_error(
+                        "TLS proxy flow preparation failed before request submission",
+                    ))
+                }
+            }
+        }
+        let mut target = candidate.clone();
+        target.addr = route.destination;
+        target.transport = rvoip_sip_transport::transport::TransportType::Tls;
+        // An accepted flow has no verified authority of its own; keep the
+        // next hop's, which the transport needs for a request but ignores
+        // when the exact flow is selected.
+        if route.authority.is_some() {
+            target.authority = route.authority;
+        }
+        target.flow_id = route.flow_id;
+        Ok(Some(target))
+    }
+
     async fn send_request_with_candidate_wire_plan_owned(
         &self,
         request: rvoip_sip_core::Request,
@@ -6231,6 +6319,19 @@ impl DialogManager {
             target.transport = rvoip_sip_transport::transport::TransportType::Tls;
             target.flow_id = route.flow_id;
             candidates = vec![target];
+        }
+        // Opt-in proxy/outbound TLS flow reuse (both off by default, so the
+        // dialog map is not consulted). Applies only while the request's
+        // exact next hop is the bound one; anything else routes normally.
+        if let Some(dialog_id) = tx_to_dialog {
+            if !is_initial_invite && self.tls_proxy_flow_routing_enabled() {
+                if let Some(target) = self
+                    .retained_tls_flow_target(dialog_id, &request, &candidates)
+                    .await?
+                {
+                    candidates = vec![target];
+                }
+            }
         }
 
         let total = candidates.len();
@@ -7098,6 +7199,35 @@ impl DialogManager {
     ) -> DialogResult<()> {
         info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received success response");
 
+        // Opt-in outbound TLS flow retention: read the certificate-verified
+        // route and the original request of this INVITE transaction before
+        // taking the dialog map guard. Skipped entirely when off (default).
+        let verified_outbound_tls = if transaction_id.method() == &Method::Invite
+            && response.status().is_success()
+            && self.outbound_tls_flow_retention_enabled()
+        {
+            match self
+                .transaction_manager
+                .transaction_route(transaction_id)
+                .await
+                .filter(|route| {
+                    route.transport_type == Some(rvoip_sip_transport::transport::TransportType::Tls)
+                        && route.authority.is_some()
+                        && route.flow_id.is_some()
+                }) {
+                Some(route) => self
+                    .transaction_manager
+                    .original_request(transaction_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|request| (route, request)),
+                None => None,
+            }
+        } else {
+            None
+        };
+
         // Update dialog state based on successful response
         let dialog_state_changed = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
@@ -7220,6 +7350,24 @@ impl DialogManager {
                             crate::dialog::dialog_impl::route_set_from_response_for_uac(&response);
                         if !learned.is_empty() {
                             dialog.route_set = learned;
+                        }
+
+                        // Opt-in: keep in-dialog requests of a dialog we
+                        // initiated over TLS on the INVITE's verified flow.
+                        if let (true, Some((route, original))) =
+                            (dialog.is_initiator, verified_outbound_tls.as_ref())
+                        {
+                            dialog.tls_proxy_flow =
+                                crate::dialog::tls_proxy_flow::verified_outbound_next_hop(
+                                    &dialog.route_set,
+                                    &dialog.remote_target,
+                                    original,
+                                )
+                                .and_then(|next_hop| {
+                                    crate::dialog::tls_proxy_flow::TlsProxyFlowBinding::admit_verified_outbound(
+                                        &next_hop, route,
+                                    )
+                                });
                         }
 
                         // CRITICAL FIX: Update dialog lookup now that we have both tags

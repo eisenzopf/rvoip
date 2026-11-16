@@ -115,6 +115,167 @@ use std::fmt;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+/// Maximum number of [`SipTlsProxyFlowPolicy`] entries a [`DialogConfig`]
+/// accepts.
+pub const MAX_TLS_PROXY_FLOW_POLICIES: usize = 64;
+
+/// Same-dialog TLS flow reuse for one trusted record-routing proxy.
+///
+/// A contact center or gateway that sits behind a carrier's record-routing
+/// SIP proxy usually receives the carrier's INVITE on a TLS connection the
+/// proxy opened, with a `Record-Route` naming the proxy's logical TLS
+/// listener. RFC 3261 sends every later in-dialog request (BYE, re-INVITE,
+/// UPDATE, INFO) to that Record-Route, so by default this stack dials a new
+/// TLS connection to the listener. Many carrier proxies only accept requests
+/// for a dialog on the connection they opened, and the listener's certificate
+/// is often issued for a DNS name rather than the IP address that appears in
+/// the Record-Route, so the new connection fails or the request is rejected.
+///
+/// A policy lets in-dialog requests go back on the accepted TLS flow instead.
+/// The flow is bound to an inbound dialog only when all of the following
+/// hold:
+///
+/// - the dialog-forming INVITE was admitted with an authenticated principal
+///   (see `rvoip-sip`'s `SipListenerAuthPolicy`) whose `issuer`, `tenant`
+///   and `subject` equal this policy's, and which has not expired;
+/// - the INVITE arrived over TLS, on an identified flow, from
+///   `proxy_endpoint`'s IP address;
+/// - the dialog's first route is a loose-routing (`;lr`) TLS URI whose host
+///   is an IP literal and whose host and port are exactly `proxy_endpoint`
+///   (`sip:` URIs need `transport=tls`; a `sips:` URI without a port means
+///   5061).
+///
+/// Only a request whose next hop is still exactly that route uses the flow.
+/// The flow is never inferred from a SIP header or source address alone,
+/// and this is not an RFC 5923 connection-alias table: no other dialog or
+/// request may use it. If the flow has closed, the request fails rather than
+/// dialling the proxy, unless [`Self::renewal_authority`] is set.
+///
+/// Policies are configured only through [`DialogConfig::tls_proxy_flow_policies`]
+/// (or `rvoip_sip::Config::sip_tls_proxy_flow_policies`); the default is none,
+/// which leaves routing unchanged.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_sip_dialog::api::config::SipTlsProxyFlowPolicy;
+///
+/// let policy = SipTlsProxyFlowPolicy::new(
+///     "listener-trusted-cidr",
+///     "carrier-tenant",
+///     "carrier-proxy",
+///     "192.0.2.10:5061".parse().unwrap(),
+/// )
+/// .with_renewal_authority("sip.carrier.example");
+/// assert!(policy.validate().is_ok());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct SipTlsProxyFlowPolicy {
+    /// Exact `AuthenticatedPrincipal::issuer` of the dialog-forming INVITE.
+    pub issuer: String,
+    /// Exact `AuthenticatedPrincipal::tenant` of the dialog-forming INVITE.
+    pub tenant: String,
+    /// Exact `AuthenticatedPrincipal::subject` of the dialog-forming INVITE.
+    pub subject: String,
+    /// The proxy's logical TLS listener, as it appears in Record-Route. Its
+    /// IP address must also be the source address of the accepted flow; the
+    /// flow's source port may differ.
+    pub proxy_endpoint: SocketAddr,
+    /// DNS name the proxy's certificate is verified against when the
+    /// accepted flow has closed. When set, a request for a bound dialog whose
+    /// flow has closed opens one new certificate-verified TLS connection to
+    /// `proxy_endpoint`, verified against this name, and the dialog then
+    /// keeps using that connection. `None` (the default) makes such a request
+    /// fail instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renewal_authority: Option<String>,
+}
+
+impl SipTlsProxyFlowPolicy {
+    /// Create a policy for the proxy at `proxy_endpoint`, trusted when the
+    /// dialog-forming INVITE's principal has exactly this `issuer`, `tenant`
+    /// and `subject`. Renewal is off; see [`Self::with_renewal_authority`].
+    pub fn new(
+        issuer: impl Into<String>,
+        tenant: impl Into<String>,
+        subject: impl Into<String>,
+        proxy_endpoint: SocketAddr,
+    ) -> Self {
+        Self {
+            issuer: issuer.into(),
+            tenant: tenant.into(),
+            subject: subject.into(),
+            proxy_endpoint,
+            renewal_authority: None,
+        }
+    }
+
+    /// Allow a closed flow to be replaced by a new TLS connection to
+    /// `proxy_endpoint` whose certificate is verified against `name`.
+    pub fn with_renewal_authority(mut self, name: impl Into<String>) -> Self {
+        self.renewal_authority = Some(name.into());
+        self
+    }
+
+    /// Check the policy.
+    ///
+    /// `issuer`, `tenant` and `subject` must be 1 to 128 characters with no
+    /// surrounding whitespace or control characters. `proxy_endpoint` must
+    /// have a nonzero port and a unicast, specified IP address.
+    /// `renewal_authority`, when set, must be a DNS name (not an IP
+    /// literal) of at most 253 characters made of 1 to 63 character
+    /// letter/digit/hyphen labels that neither start nor end with a hyphen.
+    pub fn validate(&self) -> Result<(), String> {
+        let valid_identity = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value.trim() == value
+                && !value.chars().any(char::is_control)
+        };
+        if !valid_identity(&self.issuer)
+            || !valid_identity(&self.tenant)
+            || !valid_identity(&self.subject)
+        {
+            return Err(
+                "TLS proxy-flow policy issuer, tenant and subject must be 1-128 characters \
+                 without surrounding whitespace or control characters"
+                    .to_string(),
+            );
+        }
+        if self.proxy_endpoint.port() == 0
+            || self.proxy_endpoint.ip().is_unspecified()
+            || self.proxy_endpoint.ip().is_multicast()
+        {
+            return Err(
+                "TLS proxy-flow policy proxy_endpoint must be a unicast address with a nonzero port"
+                    .to_string(),
+            );
+        }
+        if let Some(authority) = &self.renewal_authority {
+            let valid = !authority.is_empty()
+                && authority.len() <= 253
+                && authority.parse::<std::net::IpAddr>().is_err()
+                && authority.split('.').all(|label| {
+                    !label.is_empty()
+                        && label.len() <= 63
+                        && !label.starts_with('-')
+                        && !label.ends_with('-')
+                        && label
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                });
+            if !valid {
+                return Err(
+                    "TLS proxy-flow policy renewal_authority must be a DNS name".to_string()
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Policy for the SIP `100rel` reliable-provisional-response extension
 /// (RFC 3262).
 ///
@@ -221,6 +382,31 @@ pub struct DialogConfig {
     #[serde(default)]
     pub allow_tls_contact_on_sips: bool,
 
+    /// Trusted record-routing proxies whose accepted TLS flow carries the
+    /// in-dialog requests of the dialogs they deliver. Empty by default,
+    /// which leaves routing unchanged. At most
+    /// [`MAX_TLS_PROXY_FLOW_POLICIES`] entries. See [`SipTlsProxyFlowPolicy`].
+    #[serde(default)]
+    pub tls_proxy_flow_policies: Vec<SipTlsProxyFlowPolicy>,
+
+    /// Keep the in-dialog requests of a dialog this endpoint initiated over
+    /// TLS on the certificate-verified connection its initial INVITE used.
+    ///
+    /// When `true` and the dialog-forming INVITE was sent over TLS, later
+    /// requests whose next hop is the same loose route (or, without a route
+    /// set, the same Contact) at the same address are sent on that
+    /// connection, even when the next hop is an IP literal the peer's
+    /// certificate does not name (for example a carrier that is dialled by
+    /// DNS name but record-routes with its IP address). If that connection
+    /// has closed, the request fails instead of opening a new one. Requests
+    /// to any other next hop use normal routing.
+    ///
+    /// `false` (the default) keeps normal routing: each request is matched
+    /// to a pooled connection by address and verified name, and a closed
+    /// connection is redialled.
+    #[serde(default)]
+    pub retain_outbound_tls_flow: bool,
+
     /// User agent string to include in SIP messages
     ///
     /// This appears in the User-Agent header of outgoing SIP requests
@@ -315,6 +501,8 @@ impl Default for DialogConfig {
             tls_local_address: None,
             tls_advertised_local_address: None,
             allow_tls_contact_on_sips: false,
+            tls_proxy_flow_policies: Vec::new(),
+            retain_outbound_tls_flow: false,
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),
@@ -490,6 +678,23 @@ impl DialogConfig {
         self
     }
 
+    /// Set the trusted record-routing proxies whose accepted TLS flow
+    /// carries in-dialog requests. See [`SipTlsProxyFlowPolicy`].
+    pub fn with_tls_proxy_flow_policies(
+        mut self,
+        policies: impl IntoIterator<Item = SipTlsProxyFlowPolicy>,
+    ) -> Self {
+        self.tls_proxy_flow_policies = policies.into_iter().collect();
+        self
+    }
+
+    /// Keep in-dialog requests of locally initiated TLS dialogs on the
+    /// initial INVITE's connection. See [`Self::retain_outbound_tls_flow`].
+    pub fn with_retained_outbound_tls_flow(mut self, retain: bool) -> Self {
+        self.retain_outbound_tls_flow = retain;
+        self
+    }
+
     /// Disable automatic cleanup
     ///
     /// Turns off automatic cleanup of terminated dialogs, giving the
@@ -566,6 +771,15 @@ impl DialogConfig {
 
         if self.cleanup_interval.as_secs() == 0 {
             return Err("Cleanup interval must be greater than 0".to_string());
+        }
+
+        if self.tls_proxy_flow_policies.len() > MAX_TLS_PROXY_FLOW_POLICIES {
+            return Err(format!(
+                "At most {MAX_TLS_PROXY_FLOW_POLICIES} TLS proxy-flow policies are allowed"
+            ));
+        }
+        for policy in &self.tls_proxy_flow_policies {
+            policy.validate()?;
         }
 
         Ok(())
@@ -1091,5 +1305,106 @@ mod credential_debug_tests {
             assert!(!debug.contains(secret));
         }
         assert!(debug.contains("has_realm: true"));
+    }
+}
+
+#[cfg(test)]
+mod tls_proxy_flow_policy_tests {
+    use super::{DialogConfig, SipTlsProxyFlowPolicy, MAX_TLS_PROXY_FLOW_POLICIES};
+
+    fn policy() -> SipTlsProxyFlowPolicy {
+        SipTlsProxyFlowPolicy::new(
+            "issuer",
+            "tenant",
+            "proxy",
+            "192.0.2.10:5061".parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn policy_validation_rejects_bad_identity_endpoint_and_renewal_name() {
+        assert!(policy().validate().is_ok());
+        assert!(policy()
+            .with_renewal_authority("sip.carrier.example")
+            .validate()
+            .is_ok());
+        let long = "x".repeat(129);
+        for identity in ["", " padded", "padded ", "line\nbreak", long.as_str()] {
+            for field in 0..3 {
+                let mut changed = policy();
+                match field {
+                    0 => changed.issuer = identity.into(),
+                    1 => changed.tenant = identity.into(),
+                    _ => changed.subject = identity.into(),
+                }
+                assert!(changed.validate().is_err(), "{field}: {identity:?}");
+            }
+        }
+        for endpoint in [
+            "192.0.2.10:0",
+            "0.0.0.0:5061",
+            "224.0.0.1:5061",
+            "[::]:5061",
+        ] {
+            let mut changed = policy();
+            changed.proxy_endpoint = endpoint.parse().unwrap();
+            assert!(changed.validate().is_err(), "{endpoint}");
+        }
+        for name in [
+            "",
+            "192.0.2.10",
+            "-bad.example",
+            "bad-.example",
+            "a..b",
+            "under_score.example",
+        ] {
+            assert!(
+                policy().with_renewal_authority(name).validate().is_err(),
+                "{name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn policies_are_default_empty_bounded_validated_and_serde_round_trip() {
+        let config = DialogConfig::default();
+        assert!(config.tls_proxy_flow_policies.is_empty());
+        assert!(!config.retain_outbound_tls_flow);
+
+        let config = DialogConfig::default()
+            .with_tls_proxy_flow_policies([policy().with_renewal_authority("proxy.example")])
+            .with_retained_outbound_tls_flow(true);
+        assert!(config.validate().is_ok());
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: DialogConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored.tls_proxy_flow_policies,
+            config.tls_proxy_flow_policies
+        );
+        assert!(restored.retain_outbound_tls_flow);
+
+        // A policy without renewal omits the field and parses back to None.
+        let json = serde_json::to_string(&policy()).unwrap();
+        assert!(!json.contains("renewal_authority"));
+        assert_eq!(
+            serde_json::from_str::<SipTlsProxyFlowPolicy>(&json).unwrap(),
+            policy()
+        );
+        assert!(serde_json::from_str::<SipTlsProxyFlowPolicy>(
+            r#"{"issuer":"i","tenant":"t","subject":"s","proxy_endpoint":"192.0.2.10:5061","unknown":1}"#
+        )
+        .is_err());
+
+        let too_many = DialogConfig::default().with_tls_proxy_flow_policies(std::iter::repeat_n(
+            policy(),
+            MAX_TLS_PROXY_FLOW_POLICIES + 1,
+        ));
+        assert!(too_many.validate().is_err());
+        let mut invalid = policy();
+        invalid.subject.clear();
+        assert!(DialogConfig::default()
+            .with_tls_proxy_flow_policies([invalid])
+            .validate()
+            .is_err());
     }
 }
