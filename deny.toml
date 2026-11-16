@@ -129,6 +129,9 @@ wrappers = [
     "rvoip-identity",
     # Vapi implements the full ConnectionAdapter and drives Orchestrator.
     "rvoip-vapi",
+    # Amazon Connect A2A is an inbound ConnectionAdapter that registers with
+    # the Orchestrator and bridges through its media graph, like Vapi.
+    "rvoip-amazon-a2a",
     # The in-process AI harness is a ConnectionAdapter too: it owns the AI
     # Connection, its session medium, and its capability surface directly.
     "rvoip-harness",
