@@ -30,7 +30,7 @@ interruption ordering and provider turn fences still require deployment-specific
 qualification. Vapi speech-stop is not an authoritative audio-generation barrier.
 
 The Cisco schema repository still has no declared top-level license in the
-November 4 review. `publish = false` keeps this experimental crate out of automatic
+November 4 review. (Superseded by section 22.5: the crate now publishes without the files.) `publish = false` kept this experimental crate out of automatic
 crates.io releases until redistribution is resolved; this PR does not approve
 publication of the vendored schemas. Path/Git library evaluation is supported.
 
@@ -738,9 +738,10 @@ extension, following the pattern of `rvoip-vapi`, the in-process AI harness,
   the conversation; a late notification finds no route to resurrect), retains
   a connection permit through cleanup, rejects a duplicate live (organization,
   conversation), and writes nothing to Webex until core accepts the connection.
-- The rvoip facade exposes it as `rvoip::webex_byova` behind the
-  `webex-byova` feature, which is not part of `full` while the crate is
-  `publish = false`.
+- The crate is publishable and Cisco's protobuf files are not part of its
+  package (22.5). The rvoip facade exposes it as `rvoip::webex_byova` behind
+  the `webex-byova` feature, which is part of `full` and enables only the
+  default, proto-free surface.
 
 ### 22.2 Ordered, unpaced media through core
 
@@ -809,9 +810,35 @@ Live Cisco interoperability of the adapter; load and soak; an authoritative
 provider turn contract; BYODS registration renewal and JWKS fetching (host);
 digit collection, handoff tool and transcript policy (host application); the
 list-agents response shape (`{"virtual_agents":[{"id","name"}]}`) and gRPC
-cancellation semantics need sandbox confirmation; and publication, which
-waits on Cisco's schema terms. While the crate is unpublished, the facade's
-optional dependency on it prevents packaging `rvoip` for crates.io; resolve
-this before the 0.5 publish (publish the crate, or drop the facade feature
-from the published manifest).
+cancellation semantics need sandbox confirmation; and Cisco's licence for the
+protobuf contract, which the workspace repository still carries as an
+unpublished input (22.5).
 
+### 22.5 Build-time protobuf input
+
+Cisco's `voicevirtualagent.proto` and `byova_common.proto` (webex/dataSourceSchemas
+commit `fca090dfa806e28695acb145e927ad0d557ce7fe`, re-verified byte for byte on
+2026-11-15) have no published licence, so no published package contains them.
+They moved from the crate to `third_party/cisco-webex-byova-proto/`, outside
+every package, with provenance and a `SHA256SUMS` pin, and
+`rvoip-webex-byova` dropped `publish = false`.
+
+- Default builds (WebSocket transport, adapter, authentication) compile no
+  protobuf and need no input. The facade's `webex-byova` feature, and so
+  `full`, enables only that surface.
+- The crate's `grpc` feature reads the files from `RVOIP_WEBEX_BYOVA_PROTO_DIR`
+  (`cargo:rerun-if-env-changed`). Inside the workspace checkout it falls back
+  to `third_party/cisco-webex-byova-proto`, so `--all-features` workspace
+  builds, the rustdoc gate and release qualification need no setup. Elsewhere,
+  a missing or wrong directory fails the build with instructions to download
+  the two files from Cisco's repository at the tested commit.
+- CI: the `webex-byova.yml` workflow checks the pinned SHA-256s, fails if
+  `cargo package -p rvoip-webex-byova --list` contains a `.proto` file or the
+  third-party directory, builds and runs the gRPC tests through an explicit
+  `RVOIP_WEBEX_BYOVA_PROTO_DIR` (the packaged-crate path), and runs the
+  all-features tests and clippy through the workspace fallback.
+
+If the files must leave the repository as well, every `--all-features`
+workspace build (clippy shards, the rustdoc gate, release qualification) needs
+a pinned fetch step that sets `RVOIP_WEBEX_BYOVA_PROTO_DIR`; the build already
+supports that.

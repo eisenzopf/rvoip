@@ -1254,8 +1254,16 @@ outcome unchanged, and add no configuration.
   custom events, SESSION_END), reply completion, interruption, input events,
   handoff and metadata results. Reply boundaries are exact agent-audio
   positions, applied in band with `follow_reply_marks` or by command. Not yet
-  qualified against live Cisco traffic. `publish = false` while Cisco's schema
-  redistribution terms are unresolved.
+  qualified against live Cisco traffic.
+- `rvoip-webex-byova` publishes without Cisco's protobuf contract, which has no
+  published licence. The files moved out of the crate to the unpublished
+  `third_party/cisco-webex-byova-proto/` (pinned commit and SHA-256). The
+  optional `grpc` feature compiles them at build time from
+  `RVOIP_WEBEX_BYOVA_PROTO_DIR`, falling back to that directory inside the
+  workspace checkout; a build without them fails with download instructions.
+  Default builds need nothing. The `webex-byova.yml` workflow verifies the
+  pin, keeps `.proto` files out of the package, and builds gRPC through the
+  environment variable. The release graph now has 48 publishable packages.
 - `WebexJwsValidator` verifies Cisco BYODS JWS with host-supplied JWKS:
   signature by `kid` (RS256 by default), allowlisted issuer, audience,
   optional subject, `exp`/`nbf`/`iat`, a 24-hour maximum lifetime, the
@@ -1264,8 +1272,8 @@ outcome unchanged, and add no configuration.
   `replace_keys`. The organization, URL and schema claim names are not
   published by Cisco; the defaults are documented assumptions and
   configurable through `WebexClaimNames`.
-- New `rvoip::webex_byova` facade module behind the `webex-byova` feature. It
-  is not part of `full` because the crate is unpublished.
+- New `rvoip::webex_byova` facade module behind the `webex-byova` feature,
+  included in `full`. It enables only the crate's default, proto-free surface.
 - New `VapiMediaDelivery::Ordered` per-call option in `rvoip-vapi`
   (`VapiCallOptions::with_media_delivery`; the default stays `Paced`, with
   unchanged behaviour). Ordered calls forward each Vapi binary message
