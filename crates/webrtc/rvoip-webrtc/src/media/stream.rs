@@ -21,8 +21,34 @@ use crate::media::dtmf::{DecodedDtmfEvent, TelephoneEventCodec};
 use crate::media::outbound::OutboundAudioRtpWriter;
 use crate::media::pump::{
     spawn_inbound_pump_tracked, spawn_outbound_pump_with_writer_tracked, InboundStats,
-    WebRtcStatsSnapshot, DEFAULT_INBOUND_SEND_DEADLINE_MS, FRAME_CHANNEL_CAP,
+    WebRtcStatsSnapshot, DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY, DEFAULT_INBOUND_SEND_DEADLINE_MS,
+    FRAME_CHANNEL_CAP,
 };
+
+/// Bound and overflow deadline of a stream's inbound frame queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct InboundFrameQueue {
+    pub capacity: usize,
+    pub send_deadline_ms: u64,
+}
+
+impl Default for InboundFrameQueue {
+    fn default() -> Self {
+        Self {
+            capacity: DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY,
+            send_deadline_ms: DEFAULT_INBOUND_SEND_DEADLINE_MS,
+        }
+    }
+}
+
+impl InboundFrameQueue {
+    pub(crate) fn from_config(config: &crate::config::WebRtcConfig) -> Self {
+        Self {
+            capacity: config.inbound_frame_queue_capacity,
+            send_deadline_ms: config.inbound_send_deadline_ms,
+        }
+    }
+}
 use crate::media::stats::spawn_webrtc_stats_collector_tracked;
 
 struct WebRtcMediaStreamInner {
@@ -200,6 +226,7 @@ pub fn from_tracks_with_dtmf_codecs(
         dtmf_codecs.into_iter().collect(),
         None,
         None,
+        InboundFrameQueue::default(),
     )
 }
 
@@ -215,12 +242,13 @@ pub(crate) fn from_tracks_with_dtmf_events_and_task_counter(
     dtmf_codecs: Vec<TelephoneEventCodec>,
     task_counter: Option<Arc<AtomicUsize>>,
     outbound_writer: Option<Arc<OutboundAudioRtpWriter>>,
+    inbound_queue: InboundFrameQueue,
 ) -> Arc<WebRtcMediaStream> {
-    let (frames_in_tx, frames_in_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
+    let (frames_in_tx, frames_in_rx) = mpsc::channel(inbound_queue.capacity.max(1));
     let (frames_out_tx, frames_out_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
     let inbound_stats = Arc::new(InboundStats::default());
     let cancel = Arc::new(Notify::new());
-    let send_deadline_ms = DEFAULT_INBOUND_SEND_DEADLINE_MS;
+    let send_deadline_ms = inbound_queue.send_deadline_ms;
 
     let mut pumps = Vec::new();
     let outbound_writer = outbound_writer
@@ -375,5 +403,308 @@ mod receiver_ownership_tests {
             stream.try_frames_in(),
             Err(RvoipError::InvalidState(_))
         ));
+    }
+}
+#[cfg(test)]
+mod inbound_queue_tests {
+    use super::*;
+    use std::time::Duration;
+
+    use rvoip_core::ids::StreamId;
+
+    use rtc::media_stream::{
+        MediaStreamId, MediaStreamTrackId, MediaStreamTrackState, MediaTrackCapabilities,
+        MediaTrackConstraints, MediaTrackSettings,
+    };
+    use rtc::rtp_transceiver::rtp_sender::{
+        RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
+    };
+    use rtc::rtp_transceiver::RtpStreamId;
+    use webrtc::media_stream::track_remote::TrackRemoteEvent;
+    use webrtc::media_stream::{MediaStreamTrack, Track};
+
+    use crate::media::pump::silent_rtp_packet_for_ssrc;
+
+    /// Remote track fed by the test. Like the peer-connection driver, the
+    /// producer `try_send`s into a bounded event queue and loses packets
+    /// when the inbound pump does not keep up.
+    struct ScriptedRemoteTrack {
+        track: parking_lot::Mutex<MediaStreamTrack>,
+        events: tokio::sync::Mutex<mpsc::Receiver<TrackRemoteEvent>>,
+    }
+
+    impl ScriptedRemoteTrack {
+        fn opus(ssrc: u32, capacity: usize) -> (Arc<Self>, mpsc::Sender<TrackRemoteEvent>) {
+            let (tx, rx) = mpsc::channel(capacity);
+            let track = MediaStreamTrack::new(
+                "remote-stream".into(),
+                "remote-audio".into(),
+                "remote-audio".into(),
+                RtpCodecKind::Audio,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec: RTCRtpCodec {
+                        mime_type: "audio/opus".into(),
+                        clock_rate: 48_000,
+                        channels: 2,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+            );
+            let remote = Arc::new(Self {
+                track: parking_lot::Mutex::new(track),
+                events: tokio::sync::Mutex::new(rx),
+            });
+            (remote, tx)
+        }
+    }
+
+    #[async_trait]
+    impl Track for ScriptedRemoteTrack {
+        async fn stream_id(&self) -> MediaStreamId {
+            self.track.lock().stream_id().to_owned()
+        }
+        async fn track_id(&self) -> MediaStreamTrackId {
+            self.track.lock().track_id().to_owned()
+        }
+        async fn label(&self) -> String {
+            self.track.lock().label().to_owned()
+        }
+        async fn kind(&self) -> RtpCodecKind {
+            self.track.lock().kind()
+        }
+        async fn rid(&self, ssrc: u32) -> Option<RtpStreamId> {
+            self.track.lock().rid(ssrc).cloned()
+        }
+        async fn codec(&self, ssrc: u32) -> Option<RTCRtpCodec> {
+            self.track.lock().codec(ssrc).cloned()
+        }
+        async fn ssrcs(&self) -> Vec<u32> {
+            self.track.lock().ssrcs().collect()
+        }
+        async fn enabled(&self) -> bool {
+            self.track.lock().enabled()
+        }
+        async fn set_enabled(&self, enabled: bool) {
+            self.track.lock().set_enabled(enabled);
+        }
+        async fn muted(&self) -> bool {
+            self.track.lock().muted()
+        }
+        async fn set_muted(&self, muted: bool) {
+            self.track.lock().set_muted(muted);
+        }
+        async fn ready_state(&self) -> MediaStreamTrackState {
+            self.track.lock().ready_state()
+        }
+        async fn stop(&self) {
+            self.track.lock().stop();
+        }
+        async fn get_capabilities(&self) -> MediaTrackCapabilities {
+            self.track.lock().get_capabilities().clone()
+        }
+        async fn get_constraints(&self) -> MediaTrackConstraints {
+            self.track.lock().get_constraints().clone()
+        }
+        async fn get_settings(&self) -> MediaTrackSettings {
+            self.track.lock().get_settings().clone()
+        }
+        async fn apply_constraints(&self, constraints: Option<MediaTrackConstraints>) {
+            self.track.lock().apply_constraints(constraints);
+        }
+        async fn codings(&self) -> Vec<RTCRtpEncodingParameters> {
+            self.track.lock().codings().to_vec()
+        }
+        async fn add_coding(&self, coding: RTCRtpEncodingParameters) {
+            self.track.lock().add_coding(coding);
+        }
+    }
+
+    #[async_trait]
+    impl TrackRemote for ScriptedRemoteTrack {
+        async fn write_rtcp(
+            &self,
+            _packets: Vec<Box<dyn rtc::rtcp::Packet>>,
+        ) -> webrtc::error::Result<()> {
+            Ok(())
+        }
+
+        async fn poll(&self) -> Option<TrackRemoteEvent> {
+            self.events.lock().await.recv().await
+        }
+    }
+
+    fn local_track() -> Arc<TrackLocalStaticRTP> {
+        Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            "local-stream".into(),
+            "local-audio".into(),
+            "local-audio".into(),
+            RtpCodecKind::Audio,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(0x0102_0304),
+                    ..Default::default()
+                },
+                codec: RTCRtpCodec {
+                    mime_type: "audio/opus".into(),
+                    clock_rate: 48_000,
+                    channels: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+        )))
+    }
+
+    fn opus() -> CodecInfo {
+        CodecInfo {
+            name: "opus".into(),
+            clock_rate_hz: 48_000,
+            channels: 1,
+            fmtp: None,
+            payload_type: Some(111),
+        }
+    }
+
+    fn from_tracks_with_inbound_queue(
+        remote: Arc<ScriptedRemoteTrack>,
+        queue: InboundFrameQueue,
+    ) -> Arc<WebRtcMediaStream> {
+        from_tracks_with_dtmf_events_and_task_counter(
+            StreamId::new(),
+            opus(),
+            local_track(),
+            0x0102_0304,
+            111,
+            Some(remote),
+            None,
+            Vec::new(),
+            None,
+            None,
+            queue,
+        )
+    }
+
+    /// Driver-side event queue of the remote track (the stack uses 256).
+    const TRACK_EVENT_CAPACITY: usize = 256;
+    const REMOTE_SSRC: u32 = 0x0a0b_0c0d;
+
+    struct Run {
+        /// Packets the remote track lost because the pump fell behind.
+        lost_at_track: usize,
+        /// RTP sequence numbers delivered within 100 ms after the consumer
+        /// started reading: the queued backlog plus about five live frames.
+        burst: Vec<u16>,
+        /// Every delivered sequence number, in order.
+        delivered: Vec<u16>,
+        frames_dropped: u64,
+    }
+
+    /// 400 packets at 20 ms pacing; the consumer starts reading after 7 s.
+    async fn stalled_consumer_run(queue: InboundFrameQueue) -> Run {
+        let (remote, events) = ScriptedRemoteTrack::opus(REMOTE_SSRC, TRACK_EVENT_CAPACITY);
+        let stream = from_tracks_with_inbound_queue(remote, queue);
+        let mut frames_in = stream.try_frames_in().expect("receiver");
+
+        let started = tokio::time::Instant::now();
+        let producer = tokio::spawn(async move {
+            let mut lost = 0;
+            for index in 0..400u16 {
+                tokio::time::sleep_until(started + Duration::from_millis(u64::from(index) * 20))
+                    .await;
+                let packet = silent_rtp_packet_for_ssrc(REMOTE_SSRC, index, u32::from(index) * 960);
+                if events
+                    .try_send(TrackRemoteEvent::OnRtpPacket(packet))
+                    .is_err()
+                {
+                    lost += 1;
+                }
+            }
+            // Keep the track open: a closed event queue ends the pump.
+            (lost, events)
+        });
+
+        tokio::time::sleep_until(started + Duration::from_secs(7)).await;
+        let attached = tokio::time::Instant::now();
+        let mut burst = Vec::new();
+        let mut delivered = Vec::new();
+        while let Ok(Some(frame)) =
+            tokio::time::timeout(Duration::from_millis(500), frames_in.recv()).await
+        {
+            let sequence = u16::try_from(frame.timestamp_rtp / 960).unwrap();
+            if attached.elapsed() < Duration::from_millis(100) {
+                burst.push(sequence);
+            }
+            delivered.push(sequence);
+        }
+        let (lost_at_track, _events) = producer.await.unwrap();
+        let frames_dropped = stream.webrtc_stats_snapshot().frames_dropped;
+        stream.shutdown_background_tasks().await;
+        Run {
+            lost_at_track,
+            burst,
+            delivered,
+            frames_dropped,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_consumer_keeps_the_reader_live_and_the_backlog_bounded() {
+        let queue = InboundFrameQueue::default();
+        let run = stalled_consumer_run(queue).await;
+        assert_eq!(
+            run.lost_at_track, 0,
+            "the RTP reader fell behind the wire while the consumer was stalled"
+        );
+        assert!(run.frames_dropped > 0, "overflow was not exercised");
+        assert!(
+            run.burst.len() <= queue.capacity + 6,
+            "{} stale frames were released at once after the consumer attached: {:?}",
+            run.burst.len(),
+            run.burst
+        );
+        assert_eq!(
+            run.delivered.last(),
+            Some(&399),
+            "live audio did not recover"
+        );
+        assert!(
+            run.delivered.windows(2).all(|pair| pair[0] < pair[1]),
+            "frames were reordered"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_capacity_bounds_the_backlog() {
+        let queue = InboundFrameQueue {
+            capacity: 3,
+            send_deadline_ms: 1,
+        };
+        let run = stalled_consumer_run(queue).await;
+        assert_eq!(run.lost_at_track, 0);
+        assert!(run.burst.len() <= 3 + 6, "burst {:?}", run.burst);
+        assert_eq!(run.delivered.last(), Some(&399));
+    }
+
+    #[test]
+    fn adapter_streams_use_the_configured_queue() {
+        let mut config = crate::config::WebRtcConfig::default();
+        assert_eq!(
+            InboundFrameQueue::from_config(&config),
+            InboundFrameQueue::default()
+        );
+        config.inbound_frame_queue_capacity = 32;
+        config.inbound_send_deadline_ms = 15;
+        assert_eq!(
+            InboundFrameQueue::from_config(&config),
+            InboundFrameQueue {
+                capacity: 32,
+                send_deadline_ms: 15,
+            }
+        );
     }
 }

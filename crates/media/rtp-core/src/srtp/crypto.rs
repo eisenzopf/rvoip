@@ -134,6 +134,11 @@ impl SrtpCrypto {
         &self.suite
     }
 
+    /// The master key and salt the session keys were derived from.
+    pub(crate) fn master_key(&self) -> &SrtpCryptoKey {
+        &self.master_key
+    }
+
     /// Hot call state: the RTP session key material the packed SRTP block
     /// copies, as (encryption key, salt, keyed HMAC-SHA1 state, tag length).
     /// `None` unless the suite is AES-CM with HMAC-SHA1 and the keys are

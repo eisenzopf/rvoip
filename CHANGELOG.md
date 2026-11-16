@@ -77,6 +77,9 @@ Each item has a one-line migration.
   media driver failed" }` (#355). Migration: stop treating that failure as a
   remote hangup; for a genuine media failure the terminal is now published
   before the BYE confirmation is joined.
+- **`rvoip_webrtc::WebRtcConfig` gains the public field
+  `inbound_frame_queue_capacity`.** Migration: add it to struct literals, or
+  end the literal with `..WebRtcConfig::default()`.
 - **rvoip-core may publish terminal events of different connections in a
   different order than the adapter reported them** (#345). Per-connection
   order is unchanged, and `AdapterLifecycleSink::deliver_terminal` now returns
@@ -135,6 +138,56 @@ needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
 bumps (they break the test fixtures and examples built on the older APIs).
 
 ### SIP
+
+#### Call failure on transport loss and DTLS-SRTP keying (#311, #320)
+
+- A TLS or TCP connection that closes after an INVITE was written now fails
+  the call in about 200 ms (#311). Before, the INVITE transaction waited for
+  Timer B (32 s), or, after a provisional response, ran no timer at all, and
+  the call failed only when the 120 s setup watchdog fired. This happens, for
+  example, when a TLS 1.3 server rejects the client certificate with a
+  `certificate_required` alert just after the handshake and the INVITE write
+  wins the race. A stream response must come back on the connection that
+  carried the request, and rvoip accepts it only on that exact flow, so once
+  the flow closes no response can arrive. The transaction layer now fails
+  every client transaction still waiting on that flow with a transport error
+  (RFC 3261 §17.1.4). It waits 200 ms first, so a response the peer wrote
+  just before closing is still reported. No CANCEL is sent, because none can
+  reach the peer; the peer clears its own state when it cannot respond.
+- A written initial INVITE that ends without a final response now fails the
+  call at once, as RFC 3261 §8.1.3.1 requires: `Event::CallFailed` carries 503
+  for a transport error and 408 for Timer B. Before, the session layer
+  ignored both and waited for the 120 s setup watchdog. An INVITE whose first
+  write failed is unchanged: `send()` still returns that error.
+- A final 3xx–6xx response is no longer lost when its ACK cannot be written.
+  A peer that answered 486 and closed the connection at once used to have its
+  response replaced by a transport error; the response is now reported.
+
+- A call whose DTLS-SRTP handshake on the media (RTP) port fails is now
+  ended instead of staying up with no media. rvoip publishes the new
+  `Event::MediaSecurityFailed { call_id, keying, reason }`, where `reason` is
+  a bounded `MediaSecurityFailure` (`HandshakeTimeout`, `FingerprintMismatch`
+  or `HandshakeError`), then sends BYE for an answered call, CANCEL for an
+  unanswered outbound call, or `488 Not Acceptable Here` for an unanswered
+  inbound call (a UAS in early media can now be rejected), each carrying
+  `Reason: SIP;cause=488;text="DTLS-SRTP handshake failed"` (RFC 3326). The
+  usual `CallEnded`, `CallCancelled` or `CallFailed` follows; `CallEnded`
+  carries the reason `DTLS-SRTP handshake failed`. Through `rvoip-core` the
+  connection ends with `EndReason::Failed` and detail
+  `media-security-failed: <class>`. A failed handshake on a separate RTCP
+  port still only leaves the call without RTCP.
+- `SessionHandle::audio()` (and the `StreamPeer` and `Endpoint` audio built
+  on it) no longer stops sending for good when the application sends audio
+  before a DTLS-SRTP call's keys exist. Frames sent while the handshake is in
+  flight are dropped, as stale real-time audio would be, and media flows as
+  soon as the keys are installed; previously the first such frame ended the
+  stream and every later send failed with a generic closed-queue error.
+  The same gate in media-core covers `UnifiedCoordinator::send_audio` and the
+  `rvoip-core` SIP media stream. A failure that does end the stream (the
+  call's media is gone, or DTLS key agreement failed) now logs a warning and
+  makes later sends return `SessionError::MediaError`; the new
+  `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
+  unchanged.
 
 #### Configurable UAS capabilities
 
@@ -212,6 +265,17 @@ bumps (they break the test fixtures and examples built on the older APIs).
   `TlsTransport::client_only_with_flow_config`. Existing `TlsTransport`
   constructors use `TlsFlowConfig::default()`.
 
+#### TLS Contact compatibility
+
+- With `Config::sip_allow_tls_contact_on_sips` on, a peer's
+  `sip:...;transport=tls` Contact is now kept as the dialog's remote target
+  unchanged. It used to be rewritten to `sips:`, so BYE and other in-dialog
+  requests carried a Request-URI the peer had never advertised (RFC 3261
+  §§12.1.1, 12.2.1.1 build them from the peer's Contact), which some peers
+  reject. Requests still go over TLS, and a Contact that names more than one
+  `transport` parameter is now refused for this exception, as are cleartext
+  and non-TLS Contacts.
+
 #### Transaction layer (#339, #350)
 
 - The transaction layer no longer deadlocks against a dialog handler under
@@ -252,6 +316,17 @@ bumps (they break the test fixtures and examples built on the older APIs).
   state-entry failures, failed INVITE cancellation) are thinned to the first
   ten occurrences, then powers of two, then every 10,000th, each carrying an
   `occurrences` count (#350).
+
+- The ACK for a re-INVITE's 2xx keeps the dialog's established route set
+  (RFC 3261 §§12.2, 13.2.2.4). It was built from the 2xx's Record-Route, as
+  for a dialog-forming INVITE, so a re-INVITE answered without
+  Record-Route sent its ACK straight to the Contact, bypassing every proxy in
+  the dialog's path, and one answered with a different Record-Route followed
+  that instead. The initial INVITE's ACK still adopts the response's
+  Record-Route. When such an ACK has the same non-empty route set, target,
+  Call-ID, tags and CSeq as its re-INVITE, it is sent on the re-INVITE's TLS
+  flow even if the proxy's logical port differs from the connection's peer
+  port, instead of opening a new connection to that port.
 
 #### Stateless new-call admission (#350)
 
@@ -298,6 +373,24 @@ bumps (they break the test fixtures and examples built on the older APIs).
   rejects the still-unanswered call with `503 Signaling Event Backpressure`
   and returns `AdmissionRejected`, instead of sending 200 OK and then leaving
   the answered call without its establishment handoff or media setup.
+- `ConnectionAdapter::accept` publishes an inbound call's `Connected` only
+  once its media stream is writable. The peer's ACK establishes the call
+  independently of the stream's media bind, and `Connected` used to follow
+  the ACK alone, so a frame written as soon as it arrived could be refused
+  with `InvalidState` while the bind was still running. Accept now joins
+  that bind within the same setup deadline, as outbound activation already
+  does before its receipt, and fails without `Connected` if the bind fails,
+  the call ends or the adapter drains meanwhile.
+- An outbound call the peer refuses during `SipAdapter` activation (486
+  Busy Here, 603 Decline, 404 and so on) now fails with that final
+  response as its `AdapterEvent::Failed` detail, such as `486 Busy Here`.
+  The activation waiter saw the recorded terminal before the adapter's own
+  event translator did, so the generic `SIP outbound activation failed`
+  became the cleanup cause and replaced the peer's response. Activation now
+  stages the recorded terminal on the route before failing, waits a bounded
+  2 s for that record when the final state is committed first, and a
+  cleanup cause no longer replaces a remote terminal that was staged before
+  it.
 - New `Config::sip_adapter_call_capacity: Option<usize>` and
   `Config::with_sip_adapter_call_capacity()` (#348). The default `None` keeps
   the 256-event queue and 4096 pending inbound observations; when set, the
@@ -340,6 +433,16 @@ bumps (they break the test fixtures and examples built on the older APIs).
   confirmation that exact cleanup interrupts now counts as success only when
   the lifetime already carries a normal (`Ended`) terminal fact; any other
   terminal, or none, still fails.
+
+#### Outbound activation
+
+- `SipAdapter` outbound activation no longer cancels the first INVITE while
+  its transport is being prepared. The send, which includes DNS resolution
+  and the TCP connect and TLS handshake to a new destination, was bounded by
+  the adapter's 2 s retained-task budget, so a reachable peer whose handshake
+  took longer than 2 s failed activation (often after the INVITE had reached
+  it). The send is now bounded by the 30 s outbound activation budget; route
+  cancellation still interrupts it at once.
 
 #### Orphan sweep and RTP port admission (#360)
 
@@ -388,6 +491,19 @@ bumps (they break the test fixtures and examples built on the older APIs).
   `DialogTerminated` row, the new row runs no cleanup actions: the retained
   exact terminal release quiesces the local BYE before it cleans the dialog
   and media once.
+
+- A local hangup from `HoldPending`, `OnHold`, `Resuming`, `Muted` or
+  `Bridged` now sends BYE (RFC 3261 §15.1) and, as from `Active`, completes
+  only once the peer answers it. The default table had `HangupCall` rows only
+  for setup states and `Active`, so a hangup of a held call, or of a call
+  whose hold or resume re-INVITE was still pending, sent nothing and left the
+  dialog up at the peer.
+- A hold or resume whose re-INVITE cannot be sent (for example, a refused
+  connection to the peer's Contact) now returns the call to `Active` or
+  `OnHold`. `SendReINVITE` already rolled back the offer, but the call stayed
+  in `HoldPending` or `Resuming` with no transaction left to complete it, so
+  every later hold, resume or hangup found no row. The original error is
+  still returned.
 
 #### SIP media streams (#340, #342, #343)
 
@@ -472,6 +588,43 @@ supported yet and is rejected by `Config::validate`.
   identifier (`fe80::1%eth0`): neither the SIP host grammar nor SDP can
   carry one.
 - `parse_sdp_connection` accepts `c=IN IP6`.
+
+#### Initial INVITE that never reached the wire
+
+- An initial INVITE whose transport failed before any SIP byte was written
+  (connection refused, TLS handshake failure, other route-preparation
+  errors) is now reported as not sent. It used to be reported as
+  wire-unknown, like a failure after a write, so callers could not tell
+  that the peer never saw the request and the dialog was kept for a
+  CANCEL/BYE teardown that had nothing to tear down.
+- sip-dialog: `InitialInviteWireOutcome::ZeroWire` now covers these
+  failures and the dialog is rolled back. New
+  `transaction::Error::InitialRequestNotSent` is returned when a client
+  transaction's first request fails before its write; non-INVITE
+  candidate failover treats it like a transport error, as before.
+- rvoip-sip: new `SessionError::InviteNotSent`, returned by
+  `invite(..).send()` for any zero-wire dispatch failure (previously
+  `SessionError::DialogError`). `SipAdapter` outbound activation reports
+  it as the new `RvoipError::OutboundNotSent` (class `outbound-not-sent`)
+  in `rvoip-core-traits`, instead of `RvoipError::Adapter`, and its
+  cleanup sends no CANCEL/BYE.
+- A failure after the INVITE was handed to the transport stays
+  wire-unknown.
+#### Adapter hold and resume
+
+- `SipAdapter::hold` and `SipAdapter::resume` return the peer's answer. They
+  used to return as soon as the re-INVITE was sent, so a hold or resume the
+  peer rejected (for example with 488) was reported as success while the
+  call kept its previous direction. They now wait, bounded by the re-INVITE
+  completion timeout, for the committed 2xx and fail with
+  `AdmissionRejected` otherwise; a request for the direction the call is
+  already in still returns at once.
+- A committed hold or resume is applied to the live stream as a new media
+  generation, as `renegotiate_media` already did: the inbound playout buffer
+  restarts and a codec change in the answer is picked up. With a playout
+  buffer configured, the playout clock used to run on through the hold, so a
+  peer that paused its RTP clock while held resumed behind it and its audio
+  was dropped as late for seconds after the resume.
 
 ### Signaling performance
 
@@ -768,6 +921,33 @@ production v2 profile, measured on Xeon 6 SMT.
   destination only when it changed, instead of allocating an `Arc` and taking
   `arc_swap`'s writer path for every packet.
 
+#### SRTP crypto context across re-INVITE
+
+- A hold, resume or other re-INVITE that keeps a direction's SDES master key
+  now keeps that direction's SRTP context, with its rollover counter and
+  replay window. `UdpRtpTransport::replace_srtp_contexts` (and so
+  `set_srtp_contexts` and the SIP negotiated-media commit) keeps the installed
+  context of a direction whose replacement has the same master key, salt,
+  suite and key rotation, and drops the replacement (RFC 3711 §3.2, RFC 4568
+  §7.1.4). Each re-offer and re-answer from rvoip-sip carries a fresh local
+  key, but a peer that re-offers or answers with its unchanged key used to get
+  a new receive context: once its sequence numbers had wrapped (at most about
+  22 minutes into a 20 ms stream, as they start at a random value), the
+  context restarted at rollover counter 0 and every packet after the
+  re-INVITE failed authentication, giving one-way audio; the replay window
+  was also forgotten. A changed key still installs a new
+  context, and rollback of a replacement restores only the directions it
+  replaced.
+#### Concealment of a gap off the frame grid
+
+- `PlayoutBuffer` conceals only up to the next real frame when that frame
+  starts inside a concealment frame's span. A lost packet shorter than the
+  others, or a packet-time change at the loss, moves every later packet off
+  the old frame grid; concealing whole frames stepped over each of them, so
+  the real audio after such a gap was never played and the stream faded to
+  silence. The concealment frame now carries the missing span and its
+  duration, and playout continues with the real frame.
+
 #### Hot path (#354, #357, #373)
 
 These changes keep wire output, statistics, RTCP content and every error
@@ -807,6 +987,23 @@ outcome unchanged, and add no configuration.
   concealment template's sample buffer instead of cloning every emitted frame;
   and stopping a media session removes only that session's aliases instead of
   scanning every active call's mapping (#354).
+
+- `Config::rtcp_non_mux` now works with DTLS-SRTP keying
+  (`SrtpKeyingMode::DtlsSrtp`). When the peer declines `a=rtcp-mux`, the RTCP
+  port runs its own DTLS handshake, as RFC 5764 §4.1 requires, concurrently
+  with the RTP one: same `a=setup` role, same certificate and
+  `a=fingerprint`, and SRTCP on that port uses that handshake's keys. The
+  RTCP port sends nothing and drops everything until its keys are installed.
+  Behind NAT the RTCP handshake answers the port it arrives from on the RTP
+  peer's IP, under the symmetric-RTP policy. A failed RTCP handshake leaves
+  the call's SRTP media working without RTCP and logs a warning. Previously
+  such calls reserved no RTCP port and carried no RTCP.
+- rtp-core: `UdpRtpTransport::require_rtcp_component_keying`,
+  `install_rtcp_component_srtp_contexts`, `rtcp_component_keying_required`,
+  `rtcp_component_srtp_enabled` and (`dtls-webrtc`) `dtls_rtcp_conn_adapter`;
+  `DtlsIdentity` is now `Clone`. media-core (`dtls-srtp`):
+  `MediaSessionController::require_rtcp_component_keying` and
+  `run_rtcp_dtls_handshake_and_install`.
 
 ### Core and media graph
 
@@ -881,6 +1078,21 @@ outcome unchanged, and add no configuration.
   codec group instead of looking each one up for every frame (#349). Names,
   labels and counts are unchanged; a metrics recorder installed after a graph
   started is not seen by that graph's counters.
+- A late frame on a media graph route that changes RTP clock rate stays late.
+  The route's clock translator read a timestamp behind the previous one as an
+  unsigned delta, almost a full source-clock wrap ahead, so the frame and every
+  later frame on that route jumped far into the future (about 2^32 / 3 samples
+  on a 48 kHz to 16 kHz route). Deltas are now signed RTP serial offsets, so a
+  late frame is translated behind its predecessor and later frames keep their
+  spacing.
+- Media-pressure eviction now waits for a full `eviction_window` of steady
+  state before it judges the drop ratio. With 20 ms frames the
+  `minimum_eviction_samples` default of 50 filled one second after the
+  warm-up, so a consumer still catching up when the warm-up ended could be
+  evicted for a single burst. The observation restarts when the window empties
+  after a quiet gap and on renegotiation. Queue capacity and drop-oldest still
+  bound latency during the observation. `eviction_warmup: Duration::ZERO`
+  still arms eviction immediately, with no observation period.
 
 ### AI harness
 
@@ -892,6 +1104,74 @@ outcome unchanged, and add no configuration.
   order, and hold, resume and end behave the same. Combined with
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
+
+### WebRTC
+
+- The `rvoip-webrtc-stack` peer connection driver no longer spins on a
+  protocol deadline that is already in the past. It used to handle the
+  timeout and loop again without polling its command channel, so a queued
+  `Close` was never serviced and the task held a runtime worker after the
+  call ended; the expired deadline now goes through the driver's normal
+  timer branch. The driver also exits when its command channel closes
+  instead of looping on it.
+- `rvoip-webrtc` creates a route's audio media stream once when `accept()`
+  and `streams()`, or several `streams()` calls, reach a route that has none
+  at the same time. Each caller used to pass the empty check while the first
+  was still waiting up to 500 ms for the remote track, so the route kept one
+  stream per caller, each with its own inbound pump reading the same remote
+  RTP track, and callers received different streams. Creation is now
+  serialized per route and every caller gets the same stream.
+- The inbound frame queue between a WebRTC media stream's RTP reader and its
+  consumer is bounded by the new `WebRtcConfig::inbound_frame_queue_capacity`
+  (default 8 frames, 160 ms of 20 ms audio; was a fixed 64), and
+  `WebRtcConfig::inbound_send_deadline_ms` now applies to adapter-created
+  streams (it was documented but every stream used a fixed 200 ms). When the
+  queue is full the reader waits at most that deadline (default 5 ms, was
+  200 ms) and drops the arriving frame, counted in `frames_dropped`. With a
+  consumer that had not started reading, such as a bridge waiting for its
+  other leg to answer, the reader used to block 200 ms per packet and fall
+  behind the wire: the track's event queue filled, the stack discarded
+  packets, and once the consumer attached it received about 6.5 s of stale
+  audio at once. The reader now keeps up with the wire and the consumer
+  receives at most the queue's capacity of old frames. Streams built with
+  `from_tracks*` use the same defaults; the new constants are
+  `media::DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY` and
+  `media::DEFAULT_INBOUND_SEND_DEADLINE_MS`.
+- Short inbound Opus loss on a WebRTC stream is concealed instead of skipped.
+  When one to five 20 ms packets are missing, confirmed by both the RTP
+  sequence gap and the matching RTP clock gap, the inbound pump forwards one
+  lost-frame indication per missing packet (the previous packet's TOC byte
+  with no frame data, RFC 6716 §3.2.1) ahead of the next packet, with the
+  missing packets' RTP timestamps; libopus decodes each as 20 ms of
+  packet-loss concealment. The decoder used to jump straight from the last
+  received frame to the next one. Longer gaps, clock jumps without sequence
+  loss, other codecs and packet durations, SSRC or payload type changes and
+  telephone-event packets are not concealed. A duplicate or late packet up to
+  50 packets behind the last forwarded one of the same Opus source is now
+  dropped instead of being decoded out of order.
+- `rvoip-webrtc` binds the local audio track and its RTP writer to the
+  codec, payload type and clock the offer/answer selected. They used to be
+  Opus/48000/2 whatever was negotiated, so on a PCMU-only route, or an
+  Opus-first offer answered with G.711, the RTC sender dropped every packet
+  (its encoding matched no negotiated codec) after the media pump had been
+  told the write succeeded. Routes that contact a target over WebSocket,
+  WHIP or WHEP now commit the answered codec/PT to the route, as
+  `set_remote_answer` does, instead of keeping their offer's provisional
+  Opus. A receive-only (WHEP player) route needs no sender binding and
+  refuses outgoing frames at its writer. A renegotiation that would change
+  the codec of an audio sender already carrying media is refused, and
+  stream setup fails if the sender, payload type or clock do not match the
+  route's codec. With the default multi-codec profile, routes now record
+  the codec the final answer selected instead of a capability guess.
+### Identity
+
+- `rvoip-users-core` RS256 issuers verify the tokens they issue.
+  `JwtIssuer::new` built its verification key with
+  `DecodingKey::from_rsa_pem` from the private signing PEM, which parses but
+  cannot verify, so `validate_access_token` and `validate_refresh_token`
+  rejected every RS256 token. The verification key is now built from the
+  public modulus and exponent of the PKCS#8 or PKCS#1 signing key, the same
+  components `public_key_jwk` publishes. HS256 is unchanged.
 
 ### Release process, CI and dependencies
 
@@ -947,6 +1227,77 @@ outcome unchanged, and add no configuration.
   through `dtls` 0.17, the `rtc-*` 0.20 alphas and `aws-config`.
 - `rvoip-sip` parses YAML with `yaml_serde`, the maintained continuation of
   the deprecated `serde_yaml`, under the same `serde_yaml` name.
+
+- The PR Gate now runs the release qualification's rustdoc check (#315).
+  A new `rustdoc` specialty gate runs `RUSTDOCFLAGS=-D warnings cargo doc
+  --locked --workspace --all-features --no-deps`, the exact command of the
+  release gate `build.rustdoc`; a CI policy test fails if the two drift.
+  Before, no PR check built documentation, so a broken intra-doc link
+  passed every PR check and first failed 0.4.0 qualification (run
+  38125328677). The gate is selected when Rust sources, Cargo manifests or
+  the lockfile, the toolchain, `.cargo/` configuration, or a document pulled
+  into rustdoc with `doc = include_str!(...)` changes (the rvoip-vapi README
+  and sip-core's `builder.md` today; a policy test fails if a new include is
+  not listed). Main CI runs it unconditionally. Like the other specialty
+  gates it has a 45-minute budget, its own Rust cache key and a
+  `specialty-rustdoc` receipt that the PR Gate reconciles; the job installs
+  `libvpx-dev` because `--all-features` builds rvoip-webrtc's VP8 bindings.
+- The rvoip-sip release gates now build with the `test-hooks` feature, as
+  the PR and main lanes have since 0.4.0. The 0.4.0 RFC 4028 work gated the
+  session-timer tests and fixtures on that feature, and `test.sip-integration`
+  built without it, so in the 0.4.0 qualification it ran 0 tests in five
+  session-timer targets and 3 of 7 in a sixth (they still ran, and passed, in
+  `core.rvoip-sip`). `test.sip-unit`, `test.sip-integration`,
+  `test.sip-doctest`, `build.sip-all-targets` and `build.sip-examples` add the
+  feature, and so do the matching stages of the local `beta_gate.sh`. A new
+  release-tooling test fails when a gate selects rvoip-sip targets broadly
+  without `test-hooks`, or names a test or example whose source is gated on
+  it. The performance gates name targets that need no hooks and keep their
+  measured executables unchanged.
+- The Asterisk and FreeSWITCH PBX release gates now check 0.4.0's RTCP and
+  RFC 4028 wire behaviour against the real PBXes (#318). Four new
+  `examples/pbx` scenarios run in both matrices through the `Endpoint` API:
+  `rtcp_mux` (Asterisk UDP and SDES-SRTP, FreeSWITCH UDP), `rtcp_non_mux` and
+  `rtcp_mux_declined` (Asterisk UDP and SDES-SRTP) and `session_timer`
+  (both PBXes, UDP). Each cell requires reports both ways with `rtt_ms` and
+  `remote_*` from `media_quality()`, or no RTCP at all for the declined
+  case, and for timers a refresh in both directions plus FreeSWITCH's
+  `422`/Min-SE retry. Each cell also records a `pbx` row with the PBX's own
+  verdict from its debug output, checked by `examples/pbx/pbx_evidence.sh`.
+  A `--scenario all` run, which is what both gates execute, now fails unless
+  every one of these cells recorded a passing PBX verdict. The PBX
+  configuration is additive: Asterisk gets dedicated `rtcp_mux`/`timers`
+  endpoints (x1yy, x2yy, 2301-2302) and FreeSWITCH a `rvoip_udp_rtcp_timer`
+  profile on port 5069, so existing rows are unchanged. The cells add about
+  four minutes to the Asterisk gate and two to the FreeSWITCH gate. The
+  compatibility and RFC matrices list them as release-gated with protected
+  evidence pending the first qualification run.
+
+### Documentation
+
+- The published 0.4.0 qualification evidence is now in the repository. The
+  release, gate, and performance reports of protected run 38195041080 (PASS,
+  214/214 gates, 108/108 legacy requirements, tag `v0.4.0` at `f4d528eaa`)
+  are promoted into `crates/sip/rvoip-sip/docs/` and archived with the
+  performance evaluation under
+  `docs/releases/qualification/20261012T042041Z-38195041080`, rendered with
+  the evidence artifact's id and digest instead of `pending-upload`.
+- Documents that cited 0.3.9 or 0.3.10 evidence now cite that run: the
+  rvoip-sip README, release checklist, compatibility and RFC evidence
+  matrices, topology profiles, security posture, `docs/CARRIERS.md`, and the
+  PBX lab README. They say which 92 gates were reused from the `d89c1bc34`
+  candidate run (only the release notes changed between the two), so no
+  reused gate reads as a fresh 0.4.0 run.
+- The Jambonz OSS 0.9.14 profile, previously listed as a pending candidate, is
+  now cited as protected evidence (`interop.jambonz-matrix`, 63/63 cells).
+- New 0.4.0 behaviour appears in the matrices with its evidence: RTCP
+  multiplexing and separate-port RTCP (`RTP-5761-MUX`, `RTP-3605-NONMUX`),
+  RFC 4028 session-timer conformance (`SIP-4028-TIMER`, now covering
+  `422`/Min-SE), in-dialog Request-URIs (`SIP-3261-CORE`), OPTIONS
+  keep-alive, and the deployment profiles. Each is marked as covered by unit
+  and integration tests only: no 0.4.0 release gate ran them against an
+  independent peer. From 0.5.0 the PBX release gates do (see Release
+  process, CI and dependencies); their protected evidence is pending.
 
 ## 0.4.0 — 2026-10-11
 
@@ -2328,7 +2679,6 @@ and protected release evidence. It incorporates the previously unpublished
   A far-future `ts` produced a negative age, passed the `age > ttl` test,
   and stayed valid for as long as the sender chose. `DEFAULT_SIG_CLOCK_SKEW`
   (30 s) is the tolerated drift; `with_ttl_and_skew` makes it explicit.
-
 
 ## 0.3.8 — 2026-08-14
 

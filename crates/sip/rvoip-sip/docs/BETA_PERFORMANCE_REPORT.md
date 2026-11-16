@@ -1,138 +1,138 @@
 # RVoIP Performance Qualification Report
 
-> Exact-candidate observations archived by protected run [34074372543](https://github.com/eisenzopf/rvoip/actions/runs/34074372543). A blank cell means the scenario does not emit that metric; it does not mean zero. Measurements belonging only to an accepted prior-run receipt are not copied into this table.
+> Exact-candidate observations archived by protected run [38195041080](https://github.com/eisenzopf/rvoip/actions/runs/38195041080). A blank cell means the scenario does not emit that metric; it does not mean zero. Measurements belonging only to an accepted prior-run receipt are not copied into this table.
 
-Release: `0.3.10` · commit: `77a99cd38a07641294cf7dc547146b115b135dc7` · qualification: **PASS**.
+Release: `0.4.0` · commit: `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f` · qualification: **PASS**.
 
 ## Archived measurements
 
 | Scenario | Kind | Target CPS | Achieved CPS | ASR | Calls | Setup p99 ms | Peak RSS MB | Duration s | Evidence SHA-256 |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `perf_mass_teardown_stress` | `point` | 30 | — | — | — | — | 225.59 | 0 | `043df657335f74b730466e94a49470b96df722f620df369b3b8ecf948243641d` |
-| `perf_mid_call_signal_under_media` | `point` | 30 | — | 1 | —/30 | 16.794 | 70.94 | 0 | `a5dca1b8db5c2a4ae73c42b86b9809172ebe866f9097bfa665cfc99bb5dc0002` |
-| `perf_mixed_workload` | `point` | 50 | 50 | 1 | — | 2.195 | 112.66 | 0 | `9991f7791eca124266a959f3671dface10b06c3b5b4f70525413d8762a5ae107` |
-| `perf_call_setup_cps_endpoint` | `point` | 30 | 27.86 | 1 | 975/975 | 2.198 | 116.32 | 0 | `1234c1419f4316784422dea158ca45bf565178a82fb6ca18deb8f45c04ac4419` |
-| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 100 | 92.85 | 1 | 3250/3250 | 1.652 | 314.66 | 0 | `d4a2bb70947ec36929f646baea73b30f56cb99a7cf8cffdcde49419002b4717a` |
-| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 1000 | 928.57 | 1 | 32500/32500 | 1.785 | 1071.29 | 0 | `a7c1f1c0e20033d2f35eff26ce185d91c52bf8d842bedd2169cf7b33b7f775d1` |
-| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 2000 | 1857.1 | 1 | 65000/65000 | 3.24 | 2006.62 | 0 | `070658f674eb5835ab1720b92518985b082d068a776a53743cf57434d2474391` |
-| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 30 | 27.86 | 1 | 975/975 | 1.905 | 218.22 | 0 | `6dd1d4cfafc2873b5c4c4c8a442b1c442b9c20f00dd7e0c7fdd5bcdf94c60a9b` |
-| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 300 | 278.56 | 1 | 9750/9750 | 1.452 | 507.48 | 0 | `1a8571ad1a6342f9b421bcd919c4345fcfa48f68cea1d28aa98ee8298685bbd3` |
-| `perf_call_setup_cps_signaling-only-server-high-performance` | `sweep` | 2000 | 1857.1 | 1 | — | — | — | — | `b888d97029fdd7ce44d0fff345bd08e878ab977d4c64135840e6dd464e6b0863` |
-| `perf_concurrent_active_calls` | `point` | 500 | — | 1 | —/500 | 190.579 | 211.71 | 0 | `39d0c4c7f6a4ae1c57dcd5b974cdb09477d0312a65f713087dee5620377dd5e6` |
-| `perf_ai_agent_load` | `point` | 30 | — | 1 | — | 16.925 | 63.21 | 0 | `cbae00e10e2ff04cf5170d9dad35bea3c6332f7bddcfa7214590c641ebde7ef3` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.85 | 1 | 3250/3250 | 1.91 | 327.85 | 0 | `72027eb52929361e35082be4e237db93975edc5c42a587a103062cc9658d9f1d` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.54 | 1 | 32500/32500 | 2.087 | 1081.57 | 0 | `05abc41fa268cc1645e81851e53bdab07fd7b9e0eed23f5eccb4a4df2a0c8453` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.1 | 1 | 65000/65000 | 4.174 | 2005.08 | 0 | `672a619859e41863f504eba1126a0fb80ee9cfb5fcf2ea663c597ebe200f97d7` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 2.21 | 227.45 | 0 | `8baf61d41a01fd16810e990a42aa7d344bd7645e401c90a7ae3eb16f93d0f356` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.56 | 1 | 9750/9750 | 1.737 | 523.66 | 0 | `21af093de8ce796e4430c8d8ef43b12acf6d53f269a2dd06f85b888c4ab8843e` |
-| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.1 | 1 | — | — | — | — | `d5a1ab960e8bcbd7ea0503972ccf67e58fdf0abf0d672cf79da1a7f13fd66958` |
-| `perf_session_churn_leak` | `point` | 0 | — | — | 250/250 | 1.838 | 82.12 | 0 | `e52c0b99e50fc27aba38581c4da3920deeb28be8f5f7ef1e2d3e62a7063583bc` |
-| `perf_transport_recovery` | `point` | 5 | — | — | — | — | 83.04 | 0 | `9fdde02ca403a4713488e30ccd7edcdcd7befe7bb77cbcc6c21ed634659acb53` |
-| `perf_pdd_with_180_first` | `point` | 50 | 46.43 | 1 | 1625/1625 | 2.212 | 151.27 | 0 | `bd9e819baae57e36fa56be91015f714c492ccefa2102d10c206c9017809dc097` |
-| `perf_registrar_binding_scale` | `point` | 100 | — | — | — | — | 80.66 | 0 | `ce1554bbd9475edfa97a6c4fc79b8e4677fa6e76d292f1ac629d3da62cc4d2be` |
-| `perf_registration_throughput` | `point` | 100 | — | — | — | — | 81.54 | 0 | `8be69d0e462112a6775e2a57fa76341d0c15c22ecd2e5f119427a12726234ec6` |
-| `perf_sustained_long_duration_calls` | `point` | 30 | 28.85 | 1 | 1875/1875 | 2.318 | 266.95 | 0 | `02c85cb080ab778618d1eee479bae2858c57f8db239e51d409674468b49b7b31` |
-| `perf_backpressure_step` | `point` | 200 | — | — | 13851/13851 | — | 376.99 | 0 | `bd1578cab0511de968bac9b227fa5b8a027357a5d68ea3ee7d7387364437de3c` |
-| `perf_contact_center_transfers` | `point` | 20 | — | 1 | —/20 | 9.814 | 61.02 | 0 | `7f1b3bf9f32dbaff83eb1484e749d62ff7f093350714cf208ac362ce54cb2942` |
-| `perf_srtp_overhead` | `point` | 50 | — | 1 | —/50 | 26.034 | 71.18 | 0 | `a571cf59574a0a0940e406170c7e8f03868d515885213da8b2c5536a5d26857d` |
-| `perf_tls_overhead` | `point` | 100 | 92.85 | 1 | 3250/3250 | 20.578 | 178.73 | 0 | `d5ac49da78853d016f113aea612fc5992a30ee44a3080bcec1b0e46a6b153d98` |
-| `perf_b2bua_forwarding` | `point` | 30 | 27.86 | 1 | 975/975 | 2.439 | 319.04 | 0 | `d9abfc06a5cf6ae7551c1e258854c3548ae67db704932e2365e222c83494d256` |
-| `perf_media_churn` | `point` | 0 | — | — | — | — | — | 0 | `03b517b0e473345249124c9283880c3fab737076175d2784bcfb1eb576b839a2` |
-| `perf_rtp_steady_state` | `point` | 50 | — | 1 | —/50 | 26.149 | 71.29 | 0 | `1b358d5586b496a3bb59982bcbc41571b3c9d3352473555d88767f2d1d743b60` |
-| `perf_sipp_parity` | `point` | 20 | — | — | — | 0 | 46.17 | 0 | `5ff260681fd212c8cf5d16156110fd5488061b51024b2c6067bc3d0a47b93703` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.86 | 1 | 3250/3250 | 1.836 | 329.16 | 0 | `200c1f655e98df2e08aa2ccf7da8b97e64ec4d6f88370f780b438eeee85d2f00` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.56 | 1 | 32500/32500 | 1.947 | 1079.04 | 0 | `235e8ac07106eecb9b610442d3dead1788e3e1826dba32b2137747863b7bf2cd` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 4.01 | 2011.39 | 0 | `31f68b1996bd11b12e372ce143d39f07a57896df99291958c40bf1a19f21df1a` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 2.107 | 226.62 | 0 | `dfddee00f5f80fd1f8bebe9f2923319391795c1dc6d3c89c9a8e0aaafe326c1a` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.56 | 1 | 9750/9750 | 1.65 | 523.67 | 0 | `eedca2b2dd43273101f0727c8533ab1c8c2dde14299c63706add50232f8b591d` |
-| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.13 | 1 | — | — | — | — | `c72291df377c223b572df58129f6722d05ec4137613fefde1de8d3ef0b39f90b` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 4.01 | 2011.39 | 0 | `31f68b1996bd11b12e372ce143d39f07a57896df99291958c40bf1a19f21df1a` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 4.01 | 2011.39 | 0 | `31f68b1996bd11b12e372ce143d39f07a57896df99291958c40bf1a19f21df1a` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.86 | 1 | 3250/3250 | 1.731 | 327.9 | 0 | `add9342978312750a58668e90c5986235021af66ea1cb531a096970817d5f51b` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.56 | 1 | 32500/32500 | 1.945 | 1078.34 | 0 | `89afdc5f1abb8451462e1a78a6ad354609e1fa14e927c698ce98bfae07d95f27` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.12 | 1 | 65000/65000 | 3.463 | 2015.45 | 0 | `6150dbf016ae49422a148f6ceee4778dfe18b9e257813ad543977e3dd14945f7` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 1.921 | 226.43 | 0 | `46971b1c9d7c041487fceb97635eff677007feb17bc46acfccb930bddf2b4175` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.57 | 1 | 9750/9750 | 1.53 | 521.95 | 0 | `b5a1d3b9b038b27549d57589e6fb47a0eb24d33ab9daf7d98a7907ae79a6d5a5` |
-| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.12 | 1 | — | — | — | — | `b58e8e9ec88085a205f88a0b28367dd6b0e71a5e48d4d2d26bd8fcdf07958f05` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.12 | 1 | 65000/65000 | 3.463 | 2015.45 | 0 | `6150dbf016ae49422a148f6ceee4778dfe18b9e257813ad543977e3dd14945f7` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.12 | 1 | 65000/65000 | 3.463 | 2015.45 | 0 | `6150dbf016ae49422a148f6ceee4778dfe18b9e257813ad543977e3dd14945f7` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.85 | 1 | 3250/3250 | 1.858 | 328.21 | 0 | `8940b1e908730752acab062d55bf2b5eb316c37da2f71ed2a5dc36bc7c39c69b` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.57 | 1 | 32500/32500 | 1.973 | 1084.91 | 0 | `8b61d56e87795e38475d230af318814afc9de921a865301df59e2343ea38eb4b` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 3.86 | 2025.25 | 0 | `680ceedc6cc87b50d8076526071ce380db930af0c8296a383eb4459903732ab3` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 1.966 | 226.53 | 0 | `718f66980efa4385d506aed3d875afeef9cc2efbde09672c87ba2daed9ee294e` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.57 | 1 | 9750/9750 | 1.71 | 520.41 | 0 | `6e27d1e3a8dd4a43039b429128e6db9c00b253cc0d906c5b4680923e8d14d099` |
-| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.13 | 1 | — | — | — | — | `d5371222bf3bd7be29ed9d5a62289d5696d6a2dbfad1a359547a1fc8925d744a` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 3.86 | 2025.25 | 0 | `680ceedc6cc87b50d8076526071ce380db930af0c8296a383eb4459903732ab3` |
-| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 3.86 | 2025.25 | 0 | `680ceedc6cc87b50d8076526071ce380db930af0c8296a383eb4459903732ab3` |
-| `perf_soak_30min` | `point` | 0 | — | 1 | 587/587 | 15.737 | 101.63 | 0 | `e7e8781c5fef58e31f1bb609dd34d4fcb2be37586afd915d2ec03e4de213adce` |
-| `perf_soak_caller` | `point` | 0 | — | 1 | 9904/9904 | 175.636 | 139.65 | 0 | `5cf5e043f6c5994eb4b28cd6c67056237c4770d4aba32ef0cea993579be919b2` |
-| `perf_soak_receiver` | `point` | 0 | — | — | — | — | 154.05 | 0 | `8e16951ba332c2478d895cc74596781d465bf203a59456094052efa48817a2a6` |
+| `perf_mass_teardown_stress` | `point` | 30 | — | — | — | — | 271.93 | 0 | `6fe96f1277fcc8e3bcbbd7e189608aacc00754d5a7c4fc3eea23036038f2624c` |
+| `perf_mid_call_signal_under_media` | `point` | 30 | — | 1 | —/30 | 16.572 | 91.86 | 0 | `96ed67993a5aeea8530bf2f98c377b567e74647193e049ae8cba25e9523f2fe5` |
+| `perf_mixed_workload` | `point` | 50 | 50 | 1 | — | 2.061 | 130.21 | 0 | `e1556c9d2a9cd44d103fbae477a0181bacbebb060f9abd07eb8c128a47d3fd59` |
+| `perf_call_setup_cps_endpoint` | `point` | 30 | 27.86 | 1 | 975/975 | 2.101 | 133.17 | 0 | `98de7668328090dd3a0e9da80c175e8046f21330f97fa2db3f82be6f7ceb86ee` |
+| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 100 | 92.85 | 1 | 3250/3250 | 1.587 | 360.93 | 0 | `2b330d38b0f20a7c53c55fc549acc01e5edf5efcfa0785d5a79074c3df51e5d2` |
+| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 1000 | 928.56 | 1 | 32500/32500 | 1.863 | 1148.4 | 0 | `5981661e4ed80328b38d9bf733421525929486a7f877db89216bf8d76c92c86e` |
+| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 2000 | 1857.12 | 1 | 65000/65000 | 2.654 | 2070.03 | 0 | `6211c8525e269df01fac4c38637c8dd320e7adb4d8ef00bbb05de5121e951277` |
+| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 30 | 27.86 | 1 | 975/975 | 1.751 | 259 | 0 | `4f54bbee81007da110a1f7aefcbd177d176ebceb64656baf21951ad36fa00d83` |
+| `perf_call_setup_cps_signaling-only-server-high-performance` | `point` | 300 | 278.57 | 1 | 9750/9750 | 1.431 | 559.23 | 0 | `1ce2a28c4d49dd91dd42f7232288cec34f8154630d5339c0ac217c8cf9cfe059` |
+| `perf_call_setup_cps_signaling-only-server-high-performance` | `sweep` | 2000 | 1857.12 | 1 | — | — | — | — | `1b3956f1d5bcdf7d101660a32c6c14baaa0934152fdd057621830b34f089fbc0` |
+| `perf_concurrent_active_calls` | `point` | 500 | — | 1 | —/500 | 213.778 | 253.96 | 0 | `8c26f523349bf90f6d897bd796b2e5bb26da2d2d050ba045c2910630d96d606e` |
+| `perf_ai_agent_load` | `point` | 30 | — | 1 | — | 16.728 | 84.95 | 0 | `1463069144737cb9a80ce9d5a30bd2638a80694e3ec59e100cabb9fa18c5fce8` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.85 | 1 | 3250/3250 | 1.806 | 376.33 | 0 | `ae7ea2a940ccc67dae508c39f316eb78636cebe5ff25337b2e66ef907eccfbf8` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.55 | 1 | 32500/32500 | 2.114 | 1167.38 | 0 | `95ef8ee3115d6c32a516620d82ac6f6cbd20828db4739cdbfc0e4be505bfeb6d` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.8 | 2083.2 | 0 | `ab3b196ddd5b2f6393a315dad35c7cb27ee3484908e5a8028552a331be3525f5` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 1.923 | 267.36 | 0 | `035e98fd4513c7500c99d4c9ff5d1e348b6c9fd39e37e823b7ab4d13e4f34771` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.57 | 1 | 9750/9750 | 1.627 | 575.07 | 0 | `951b9018f4406fbb40d8a8562ba55fbd2b824a4220da5efd703f6c4c37034d0b` |
+| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.13 | 1 | — | — | — | — | `ec564cf145309718f6308614c330fcec772cec1eef3d8a7d735eaaa6ef88f72d` |
+| `perf_session_churn_leak` | `point` | 0 | — | — | 250/250 | 1.792 | 98.5 | 0 | `87d2462a4d385b2b31c30dfa8b7614f8b8a655d517200583a7846a3776070ffb` |
+| `perf_transport_recovery` | `point` | 5 | — | — | — | — | 113.29 | 0 | `43ecf9b0466f6b01fecb2cc5b54e2bc1897095d7548a4fb262ce69c26ccdd021` |
+| `perf_pdd_with_180_first` | `point` | 50 | 46.43 | 1 | 1625/1625 | 1.759 | 171.5 | 0 | `4fd2a3a7ee4967d3df8615b5c2214347c96b215d76ad438112fdfc79cdc32b73` |
+| `perf_registrar_binding_scale` | `point` | 100 | — | — | — | — | 89.08 | 0 | `f91283630d9bd3ff09494d30cff47351a9a4f26a92f99edd6f0aea7c3b5c76e7` |
+| `perf_registration_throughput` | `point` | 100 | — | — | — | — | 90.61 | 0 | `691ef17652c378b7968ea44dc07380f7995070e75c3daea67f7a9b5ffffb6aff` |
+| `perf_sustained_long_duration_calls` | `point` | 30 | 28.85 | 1 | 1875/1875 | 2.087 | 336.54 | 0 | `6e8f7b4f16bc5664b2e0915e5c058a77b9c3be1e6cad64a678e33b2a9d43dd76` |
+| `perf_backpressure_step` | `point` | 200 | — | — | 13912/13912 | — | 396.28 | 0 | `a887fd3aa89d268dd38955fc6265fe87dc41a101a4595e880b51d8dc6084ca25` |
+| `perf_contact_center_transfers` | `point` | 20 | — | 1 | —/20 | 9.273 | 82.5 | 0 | `4551854f33d4091eccc3abadf206922aa434e3a7f6733c6e332d33410f033b84` |
+| `perf_srtp_overhead` | `point` | 50 | — | 1 | —/50 | 24.789 | 93.75 | 0 | `a5eb4ebede2f4381b756687953a842dc0dc95d68c7b3ae6c00a455ac09fd280f` |
+| `perf_tls_overhead` | `point` | 100 | 92.85 | 1 | 3250/3250 | 20.726 | 197.97 | 0 | `a8212547160d0a9bec865d7df17a62fa81c136509d6d205958e7e5d5b0833adb` |
+| `perf_b2bua_forwarding` | `point` | 30 | 27.86 | 1 | 975/975 | 2.079 | 409.11 | 0 | `57b401989da543f45084c339d9378df6c8c4a00bc852e70fdaaa16aded902bf2` |
+| `perf_media_churn` | `point` | 0 | — | — | — | — | — | 0 | `58708efad33cb5f22bd5751ab62650313e8dd84789cd40d9aac1a4e9289a1b74` |
+| `perf_rtp_steady_state` | `point` | 50 | — | 1 | —/50 | 26.116 | 93.61 | 0 | `d5deffdc081e801a52ad5ec707d639823a382ed9c1a65c218a88d6940984c924` |
+| `perf_sipp_parity` | `point` | 20 | — | — | — | 0 | 54.96 | 0 | `4880410a9e9060f22c0990a29af0486fc5d2c1aee597a189381116c80886cb64` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.86 | 1 | 3250/3250 | 1.576 | 375.98 | 0 | `0c09ccb96224d92c47cbe81c61203b94c9950f32cc334a4b8f9158d9d33caae8` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.55 | 1 | 32500/32500 | 1.855 | 1161.65 | 0 | `094c78a8b2f1f74823675eb946808355a14fb34a7b5c821458d504957cd131b5` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.1 | 1 | 65000/65000 | 2.568 | 2082.1 | 0 | `d80d565854c617ef7689d7b77b8838ea027b2f007d6cc9558867b33815379439` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 1.906 | 266.59 | 0 | `5498932e83657d7a985c27d0fe1d86a5f34d56231f89e59e219af101cd8e9858` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.56 | 1 | 9750/9750 | 1.461 | 573.4 | 0 | `aa80f03ecb936c6001d047976b42b600d2dd52e2de5bf650fff1b5a2ea2c97c6` |
+| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.1 | 1 | — | — | — | — | `8f1533b981c5208ba5c722a83cfa3a4f37dbf65ce044c3e792798b5e024ffd9c` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.1 | 1 | 65000/65000 | 2.568 | 2082.1 | 0 | `d80d565854c617ef7689d7b77b8838ea027b2f007d6cc9558867b33815379439` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.1 | 1 | 65000/65000 | 2.568 | 2082.1 | 0 | `d80d565854c617ef7689d7b77b8838ea027b2f007d6cc9558867b33815379439` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.86 | 1 | 3250/3250 | 1.522 | 375.22 | 0 | `e2604ecd472a6092ec37e97841a8c35d66c9b498bcff074f16f5129d9d86064d` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.56 | 1 | 32500/32500 | 1.9 | 1172.65 | 0 | `cae244bba1db9ebbd8ffd55947cb06b8b02ed9517d5243fddbbdc7c654dad579` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.605 | 2083.6 | 0 | `df40d056592ae01ac44ff0385bdc34dbdac3d0ac63980b8c3120a731aa240605` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 1.742 | 267.58 | 0 | `9e72c6ddb033ccaed203b55167593bcfe4ef7b0b653425a1fd2aeac685441047` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.57 | 1 | 9750/9750 | 1.448 | 575.27 | 0 | `a4b49128bd6e6824861e4a81050aa2045f522a555a9d3813107a3120c7c8314e` |
+| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.13 | 1 | — | — | — | — | `65772e8d7574116e684c761c79887c7ce97a76c009186712cb0b1b252654bb32` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.605 | 2083.6 | 0 | `df40d056592ae01ac44ff0385bdc34dbdac3d0ac63980b8c3120a731aa240605` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.605 | 2083.6 | 0 | `df40d056592ae01ac44ff0385bdc34dbdac3d0ac63980b8c3120a731aa240605` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 100 | 92.85 | 1 | 3250/3250 | 1.551 | 375.83 | 0 | `d7fcd2a901cd265f87cbe7a762dc62d4e9aa92d8a3513b8f1ab21f2c69f312d1` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 1000 | 928.54 | 1 | 32500/32500 | 2.084 | 1164 | 0 | `bfb3910a2387a609ef7197663e88362ef1026de1d6515dce34e4389f316ac0a9` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.683 | 2082.64 | 0 | `35fe9d75e632aab2ec8980568fe7f345d08d40530b1cb983dd10ad6021a90f9f` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 30 | 27.86 | 1 | 975/975 | 1.753 | 267.14 | 0 | `16556a495b103c5da95b930bd2448f1c308f23ef0f64af51190cd95b6cc1b423` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 300 | 278.57 | 1 | 9750/9750 | 1.509 | 574.4 | 0 | `e3eb384141f2375c683cdf19952d27175367257241e515e41ed3c83f2b2b6cf0` |
+| `perf_call_setup_cps_pbx-media-server` | `sweep` | 2000 | 1857.13 | 1 | — | — | — | — | `9a9e17eeb4feaaa7307f118c30efac8ca9f98cb8577cb615cdca75216947c6d0` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.683 | 2082.64 | 0 | `35fe9d75e632aab2ec8980568fe7f345d08d40530b1cb983dd10ad6021a90f9f` |
+| `perf_call_setup_cps_pbx-media-server` | `point` | 2000 | 1857.13 | 1 | 65000/65000 | 2.683 | 2082.64 | 0 | `35fe9d75e632aab2ec8980568fe7f345d08d40530b1cb983dd10ad6021a90f9f` |
+| `perf_soak_caller` | `point` | 0 | — | 1 | 9904/9904 | 166.986 | 169.45 | 0 | `33ac89cef9d63494f390f34642d7dd19bf759ea3d8e489e81b1a06830f45549b` |
+| `perf_soak_receiver` | `point` | 0 | — | — | — | — | 183.79 | 0 | `a66ef092258a893984e5e70104d2c215ecf04b970a2e45ae3aec77d27aa57a21` |
+| `perf_soak_30min` | `point` | 0 | — | 1 | 587/587 | 15.032 | 119.53 | 0 | `e0efe862aa8e22267ec7b54b94b1142854b5f33cbfbf5237f1d9bbf5288877dc` |
 
 ## Interpretation
 
 - The rows are observations, not individually invented PASS verdicts. Their governing performance, soak, regression, cleanup, and evidence-integrity gates are PASS in the complete gate report.
 - The supported general full-media beta claim remains up to 2,000 CPS with media enabled. Results above 2,000 CPS remain tuned or experimental and require their own topology, hardware, and qualification evidence.
-- Call-setup sweeps use loopback networking on the recorded GCP qualification host. They establish repeatable release regression evidence, not public-network latency or carrier capacity.
+- Call-setup sweeps use loopback networking on the recorded EC2 qualification host. They establish repeatable release regression evidence, not public-network latency or carrier capacity.
 - Full JSON, resource windows, diagnostics, and scenario-specific counters remain in the GitHub evidence artifact; this report intentionally avoids flattening non-equivalent metrics into one score.
 
 ## Evidence paths
 
-- `_perf-results/gcp-performance-1/perf_mass_teardown_stress.json` — `043df657335f74b730466e94a49470b96df722f620df369b3b8ecf948243641d`
-- `_perf-results/gcp-performance-1/perf_mid_call_signal_under_media.json` — `a5dca1b8db5c2a4ae73c42b86b9809172ebe866f9097bfa665cfc99bb5dc0002`
-- `_perf-results/gcp-performance-1/perf_mixed_workload.json` — `9991f7791eca124266a959f3671dface10b06c3b5b4f70525413d8762a5ae107`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_endpoint.json` — `1234c1419f4316784422dea158ca45bf565178a82fb6ca18deb8f45c04ac4419`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/100.json` — `d4a2bb70947ec36929f646baea73b30f56cb99a7cf8cffdcde49419002b4717a`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/1000.json` — `a7c1f1c0e20033d2f35eff26ce185d91c52bf8d842bedd2169cf7b33b7f775d1`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/2000.json` — `070658f674eb5835ab1720b92518985b082d068a776a53743cf57434d2474391`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/30.json` — `6dd1d4cfafc2873b5c4c4c8a442b1c442b9c20f00dd7e0c7fdd5bcdf94c60a9b`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/300.json` — `1a8571ad1a6342f9b421bcd919c4345fcfa48f68cea1d28aa98ee8298685bbd3`
-- `_perf-results/gcp-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/_sweep.json` — `b888d97029fdd7ce44d0fff345bd08e878ab977d4c64135840e6dd464e6b0863`
-- `_perf-results/gcp-performance-2/perf_concurrent_active_calls.json` — `39d0c4c7f6a4ae1c57dcd5b974cdb09477d0312a65f713087dee5620377dd5e6`
-- `_perf-results/gcp-performance-3/perf_ai_agent_load.json` — `cbae00e10e2ff04cf5170d9dad35bea3c6332f7bddcfa7214590c641ebde7ef3`
-- `_perf-results/gcp-performance-3/perf_call_setup_cps_pbx-media-server/100.json` — `72027eb52929361e35082be4e237db93975edc5c42a587a103062cc9658d9f1d`
-- `_perf-results/gcp-performance-3/perf_call_setup_cps_pbx-media-server/1000.json` — `05abc41fa268cc1645e81851e53bdab07fd7b9e0eed23f5eccb4a4df2a0c8453`
-- `_perf-results/gcp-performance-3/perf_call_setup_cps_pbx-media-server/2000.json` — `672a619859e41863f504eba1126a0fb80ee9cfb5fcf2ea663c597ebe200f97d7`
-- `_perf-results/gcp-performance-3/perf_call_setup_cps_pbx-media-server/30.json` — `8baf61d41a01fd16810e990a42aa7d344bd7645e401c90a7ae3eb16f93d0f356`
-- `_perf-results/gcp-performance-3/perf_call_setup_cps_pbx-media-server/300.json` — `21af093de8ce796e4430c8d8ef43b12acf6d53f269a2dd06f85b888c4ab8843e`
-- `_perf-results/gcp-performance-3/perf_call_setup_cps_pbx-media-server/_sweep.json` — `d5a1ab960e8bcbd7ea0503972ccf67e58fdf0abf0d672cf79da1a7f13fd66958`
-- `_perf-results/gcp-performance-3/perf_session_churn_leak.json` — `e52c0b99e50fc27aba38581c4da3920deeb28be8f5f7ef1e2d3e62a7063583bc`
-- `_perf-results/gcp-performance-3/perf_transport_recovery.json` — `9fdde02ca403a4713488e30ccd7edcdcd7befe7bb77cbcc6c21ed634659acb53`
-- `_perf-results/gcp-performance-4/perf_pdd_with_180_first.json` — `bd9e819baae57e36fa56be91015f714c492ccefa2102d10c206c9017809dc097`
-- `_perf-results/gcp-performance-4/perf_registrar_binding_scale.json` — `ce1554bbd9475edfa97a6c4fc79b8e4677fa6e76d292f1ac629d3da62cc4d2be`
-- `_perf-results/gcp-performance-4/perf_registration_throughput.json` — `8be69d0e462112a6775e2a57fa76341d0c15c22ecd2e5f119427a12726234ec6`
-- `_perf-results/gcp-performance-4/perf_sustained_long_duration_calls.json` — `02c85cb080ab778618d1eee479bae2858c57f8db239e51d409674468b49b7b31`
-- `_perf-results/gcp-performance-5/perf_backpressure_step.json` — `bd1578cab0511de968bac9b227fa5b8a027357a5d68ea3ee7d7387364437de3c`
-- `_perf-results/gcp-performance-5/perf_contact_center_transfers.json` — `7f1b3bf9f32dbaff83eb1484e749d62ff7f093350714cf208ac362ce54cb2942`
-- `_perf-results/gcp-performance-5/perf_srtp_overhead.json` — `a571cf59574a0a0940e406170c7e8f03868d515885213da8b2c5536a5d26857d`
-- `_perf-results/gcp-performance-5/perf_tls_overhead.json` — `d5ac49da78853d016f113aea612fc5992a30ee44a3080bcec1b0e46a6b153d98`
-- `_perf-results/gcp-performance-6/perf_b2bua_forwarding.json` — `d9abfc06a5cf6ae7551c1e258854c3548ae67db704932e2365e222c83494d256`
-- `_perf-results/gcp-performance-6/perf_media_churn.json` — `03b517b0e473345249124c9283880c3fab737076175d2784bcfb1eb576b839a2`
-- `_perf-results/gcp-performance-6/perf_rtp_steady_state.json` — `1b358d5586b496a3bb59982bcbc41571b3c9d3352473555d88767f2d1d743b60`
-- `_perf-results/gcp-performance-6/perf_sipp_parity.json` — `5ff260681fd212c8cf5d16156110fd5488061b51024b2c6067bc3d0a47b93703`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/output-target/perf-results/perf_call_setup_cps_pbx-media-server/100.json` — `200c1f655e98df2e08aa2ccf7da8b97e64ec4d6f88370f780b438eeee85d2f00`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/output-target/perf-results/perf_call_setup_cps_pbx-media-server/1000.json` — `235e8ac07106eecb9b610442d3dead1788e3e1826dba32b2137747863b7bf2cd`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/output-target/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `31f68b1996bd11b12e372ce143d39f07a57896df99291958c40bf1a19f21df1a`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/output-target/perf-results/perf_call_setup_cps_pbx-media-server/30.json` — `dfddee00f5f80fd1f8bebe9f2923319391795c1dc6d3c89c9a8e0aaafe326c1a`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/output-target/perf-results/perf_call_setup_cps_pbx-media-server/300.json` — `eedca2b2dd43273101f0727c8533ab1c8c2dde14299c63706add50232f8b591d`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/output-target/perf-results/perf_call_setup_cps_pbx-media-server/_sweep.json` — `c72291df377c223b572df58129f6722d05ec4137613fefde1de8d3ef0b39f90b`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `31f68b1996bd11b12e372ce143d39f07a57896df99291958c40bf1a19f21df1a`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T021744Z_clean_Rvz6yI/report.json` — `31f68b1996bd11b12e372ce143d39f07a57896df99291958c40bf1a19f21df1a`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/output-target/perf-results/perf_call_setup_cps_pbx-media-server/100.json` — `add9342978312750a58668e90c5986235021af66ea1cb531a096970817d5f51b`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/output-target/perf-results/perf_call_setup_cps_pbx-media-server/1000.json` — `89afdc5f1abb8451462e1a78a6ad354609e1fa14e927c698ce98bfae07d95f27`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/output-target/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `6150dbf016ae49422a148f6ceee4778dfe18b9e257813ad543977e3dd14945f7`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/output-target/perf-results/perf_call_setup_cps_pbx-media-server/30.json` — `46971b1c9d7c041487fceb97635eff677007feb17bc46acfccb930bddf2b4175`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/output-target/perf-results/perf_call_setup_cps_pbx-media-server/300.json` — `b5a1d3b9b038b27549d57589e6fb47a0eb24d33ab9daf7d98a7907ae79a6d5a5`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/output-target/perf-results/perf_call_setup_cps_pbx-media-server/_sweep.json` — `b58e8e9ec88085a205f88a0b28367dd6b0e71a5e48d4d2d26bd8fcdf07958f05`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `6150dbf016ae49422a148f6ceee4778dfe18b9e257813ad543977e3dd14945f7`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T023255Z_clean_hTjCfU/report.json` — `6150dbf016ae49422a148f6ceee4778dfe18b9e257813ad543977e3dd14945f7`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/output-target/perf-results/perf_call_setup_cps_pbx-media-server/100.json` — `8940b1e908730752acab062d55bf2b5eb316c37da2f71ed2a5dc36bc7c39c69b`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/output-target/perf-results/perf_call_setup_cps_pbx-media-server/1000.json` — `8b61d56e87795e38475d230af318814afc9de921a865301df59e2343ea38eb4b`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/output-target/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `680ceedc6cc87b50d8076526071ce380db930af0c8296a383eb4459903732ab3`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/output-target/perf-results/perf_call_setup_cps_pbx-media-server/30.json` — `718f66980efa4385d506aed3d875afeef9cc2efbde09672c87ba2daed9ee294e`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/output-target/perf-results/perf_call_setup_cps_pbx-media-server/300.json` — `6e27d1e3a8dd4a43039b429128e6db9c00b253cc0d906c5b4680923e8d14d099`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/output-target/perf-results/perf_call_setup_cps_pbx-media-server/_sweep.json` — `d5371222bf3bd7be29ed9d5a62289d5696d6a2dbfad1a359547a1fc8925d744a`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `680ceedc6cc87b50d8076526071ce380db930af0c8296a383eb4459903732ab3`
-- `_perf-results/gcp-performance-soak-long-1/profiles/20260907T024805Z_clean_Gl0kwb/report.json` — `680ceedc6cc87b50d8076526071ce380db930af0c8296a383eb4459903732ab3`
-- `_perf-results/gcp-performance-soak-long-2/perf_soak_30min.json` — `e7e8781c5fef58e31f1bb609dd34d4fcb2be37586afd915d2ec03e4de213adce`
-- `_perf-results/gcp-performance-soak-long-2/perf_soak_caller.json` — `5cf5e043f6c5994eb4b28cd6c67056237c4770d4aba32ef0cea993579be919b2`
-- `_perf-results/gcp-performance-soak-long-2/perf_soak_receiver.json` — `8e16951ba332c2478d895cc74596781d465bf203a59456094052efa48817a2a6`
+- `_perf-results/ec2-performance-1/perf_mass_teardown_stress.json` — `6fe96f1277fcc8e3bcbbd7e189608aacc00754d5a7c4fc3eea23036038f2624c`
+- `_perf-results/ec2-performance-1/perf_mid_call_signal_under_media.json` — `96ed67993a5aeea8530bf2f98c377b567e74647193e049ae8cba25e9523f2fe5`
+- `_perf-results/ec2-performance-1/perf_mixed_workload.json` — `e1556c9d2a9cd44d103fbae477a0181bacbebb060f9abd07eb8c128a47d3fd59`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_endpoint.json` — `98de7668328090dd3a0e9da80c175e8046f21330f97fa2db3f82be6f7ceb86ee`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/100.json` — `2b330d38b0f20a7c53c55fc549acc01e5edf5efcfa0785d5a79074c3df51e5d2`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/1000.json` — `5981661e4ed80328b38d9bf733421525929486a7f877db89216bf8d76c92c86e`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/2000.json` — `6211c8525e269df01fac4c38637c8dd320e7adb4d8ef00bbb05de5121e951277`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/30.json` — `4f54bbee81007da110a1f7aefcbd177d176ebceb64656baf21951ad36fa00d83`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/300.json` — `1ce2a28c4d49dd91dd42f7232288cec34f8154630d5339c0ac217c8cf9cfe059`
+- `_perf-results/ec2-performance-2/perf_call_setup_cps_signaling-only-server-high-performance/_sweep.json` — `1b3956f1d5bcdf7d101660a32c6c14baaa0934152fdd057621830b34f089fbc0`
+- `_perf-results/ec2-performance-2/perf_concurrent_active_calls.json` — `8c26f523349bf90f6d897bd796b2e5bb26da2d2d050ba045c2910630d96d606e`
+- `_perf-results/ec2-performance-3/perf_ai_agent_load.json` — `1463069144737cb9a80ce9d5a30bd2638a80694e3ec59e100cabb9fa18c5fce8`
+- `_perf-results/ec2-performance-3/perf_call_setup_cps_pbx-media-server/100.json` — `ae7ea2a940ccc67dae508c39f316eb78636cebe5ff25337b2e66ef907eccfbf8`
+- `_perf-results/ec2-performance-3/perf_call_setup_cps_pbx-media-server/1000.json` — `95ef8ee3115d6c32a516620d82ac6f6cbd20828db4739cdbfc0e4be505bfeb6d`
+- `_perf-results/ec2-performance-3/perf_call_setup_cps_pbx-media-server/2000.json` — `ab3b196ddd5b2f6393a315dad35c7cb27ee3484908e5a8028552a331be3525f5`
+- `_perf-results/ec2-performance-3/perf_call_setup_cps_pbx-media-server/30.json` — `035e98fd4513c7500c99d4c9ff5d1e348b6c9fd39e37e823b7ab4d13e4f34771`
+- `_perf-results/ec2-performance-3/perf_call_setup_cps_pbx-media-server/300.json` — `951b9018f4406fbb40d8a8562ba55fbd2b824a4220da5efd703f6c4c37034d0b`
+- `_perf-results/ec2-performance-3/perf_call_setup_cps_pbx-media-server/_sweep.json` — `ec564cf145309718f6308614c330fcec772cec1eef3d8a7d735eaaa6ef88f72d`
+- `_perf-results/ec2-performance-3/perf_session_churn_leak.json` — `87d2462a4d385b2b31c30dfa8b7614f8b8a655d517200583a7846a3776070ffb`
+- `_perf-results/ec2-performance-3/perf_transport_recovery.json` — `43ecf9b0466f6b01fecb2cc5b54e2bc1897095d7548a4fb262ce69c26ccdd021`
+- `_perf-results/ec2-performance-4/perf_pdd_with_180_first.json` — `4fd2a3a7ee4967d3df8615b5c2214347c96b215d76ad438112fdfc79cdc32b73`
+- `_perf-results/ec2-performance-4/perf_registrar_binding_scale.json` — `f91283630d9bd3ff09494d30cff47351a9a4f26a92f99edd6f0aea7c3b5c76e7`
+- `_perf-results/ec2-performance-4/perf_registration_throughput.json` — `691ef17652c378b7968ea44dc07380f7995070e75c3daea67f7a9b5ffffb6aff`
+- `_perf-results/ec2-performance-4/perf_sustained_long_duration_calls.json` — `6e8f7b4f16bc5664b2e0915e5c058a77b9c3be1e6cad64a678e33b2a9d43dd76`
+- `_perf-results/ec2-performance-5/perf_backpressure_step.json` — `a887fd3aa89d268dd38955fc6265fe87dc41a101a4595e880b51d8dc6084ca25`
+- `_perf-results/ec2-performance-5/perf_contact_center_transfers.json` — `4551854f33d4091eccc3abadf206922aa434e3a7f6733c6e332d33410f033b84`
+- `_perf-results/ec2-performance-5/perf_srtp_overhead.json` — `a5eb4ebede2f4381b756687953a842dc0dc95d68c7b3ae6c00a455ac09fd280f`
+- `_perf-results/ec2-performance-5/perf_tls_overhead.json` — `a8212547160d0a9bec865d7df17a62fa81c136509d6d205958e7e5d5b0833adb`
+- `_perf-results/ec2-performance-6/perf_b2bua_forwarding.json` — `57b401989da543f45084c339d9378df6c8c4a00bc852e70fdaaa16aded902bf2`
+- `_perf-results/ec2-performance-6/perf_media_churn.json` — `58708efad33cb5f22bd5751ab62650313e8dd84789cd40d9aac1a4e9289a1b74`
+- `_perf-results/ec2-performance-6/perf_rtp_steady_state.json` — `d5deffdc081e801a52ad5ec707d639823a382ed9c1a65c218a88d6940984c924`
+- `_perf-results/ec2-performance-6/perf_sipp_parity.json` — `4880410a9e9060f22c0990a29af0486fc5d2c1aee597a189381116c80886cb64`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/output-target/perf-results/perf_call_setup_cps_pbx-media-server/100.json` — `0c09ccb96224d92c47cbe81c61203b94c9950f32cc334a4b8f9158d9d33caae8`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/output-target/perf-results/perf_call_setup_cps_pbx-media-server/1000.json` — `094c78a8b2f1f74823675eb946808355a14fb34a7b5c821458d504957cd131b5`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/output-target/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `d80d565854c617ef7689d7b77b8838ea027b2f007d6cc9558867b33815379439`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/output-target/perf-results/perf_call_setup_cps_pbx-media-server/30.json` — `5498932e83657d7a985c27d0fe1d86a5f34d56231f89e59e219af101cd8e9858`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/output-target/perf-results/perf_call_setup_cps_pbx-media-server/300.json` — `aa80f03ecb936c6001d047976b42b600d2dd52e2de5bf650fff1b5a2ea2c97c6`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/output-target/perf-results/perf_call_setup_cps_pbx-media-server/_sweep.json` — `8f1533b981c5208ba5c722a83cfa3a4f37dbf65ce044c3e792798b5e024ffd9c`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `d80d565854c617ef7689d7b77b8838ea027b2f007d6cc9558867b33815379439`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T031437Z_clean_fDfXCe/report.json` — `d80d565854c617ef7689d7b77b8838ea027b2f007d6cc9558867b33815379439`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/output-target/perf-results/perf_call_setup_cps_pbx-media-server/100.json` — `e2604ecd472a6092ec37e97841a8c35d66c9b498bcff074f16f5129d9d86064d`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/output-target/perf-results/perf_call_setup_cps_pbx-media-server/1000.json` — `cae244bba1db9ebbd8ffd55947cb06b8b02ed9517d5243fddbbdc7c654dad579`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/output-target/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `df40d056592ae01ac44ff0385bdc34dbdac3d0ac63980b8c3120a731aa240605`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/output-target/perf-results/perf_call_setup_cps_pbx-media-server/30.json` — `9e72c6ddb033ccaed203b55167593bcfe4ef7b0b653425a1fd2aeac685441047`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/output-target/perf-results/perf_call_setup_cps_pbx-media-server/300.json` — `a4b49128bd6e6824861e4a81050aa2045f522a555a9d3813107a3120c7c8314e`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/output-target/perf-results/perf_call_setup_cps_pbx-media-server/_sweep.json` — `65772e8d7574116e684c761c79887c7ce97a76c009186712cb0b1b252654bb32`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `df40d056592ae01ac44ff0385bdc34dbdac3d0ac63980b8c3120a731aa240605`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T032949Z_clean_g3cKtc/report.json` — `df40d056592ae01ac44ff0385bdc34dbdac3d0ac63980b8c3120a731aa240605`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/output-target/perf-results/perf_call_setup_cps_pbx-media-server/100.json` — `d7fcd2a901cd265f87cbe7a762dc62d4e9aa92d8a3513b8f1ab21f2c69f312d1`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/output-target/perf-results/perf_call_setup_cps_pbx-media-server/1000.json` — `bfb3910a2387a609ef7197663e88362ef1026de1d6515dce34e4389f316ac0a9`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/output-target/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `35fe9d75e632aab2ec8980568fe7f345d08d40530b1cb983dd10ad6021a90f9f`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/output-target/perf-results/perf_call_setup_cps_pbx-media-server/30.json` — `16556a495b103c5da95b930bd2448f1c308f23ef0f64af51190cd95b6cc1b423`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/output-target/perf-results/perf_call_setup_cps_pbx-media-server/300.json` — `e3eb384141f2375c683cdf19952d27175367257241e515e41ed3c83f2b2b6cf0`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/output-target/perf-results/perf_call_setup_cps_pbx-media-server/_sweep.json` — `9a9e17eeb4feaaa7307f118c30efac8ca9f98cb8577cb615cdca75216947c6d0`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/perf-results/perf_call_setup_cps_pbx-media-server/2000.json` — `35fe9d75e632aab2ec8980568fe7f345d08d40530b1cb983dd10ad6021a90f9f`
+- `_perf-results/ec2-performance-soak-long-1/profiles/20261012T034459Z_clean_tsjDf7/report.json` — `35fe9d75e632aab2ec8980568fe7f345d08d40530b1cb983dd10ad6021a90f9f`
+- `_perf-results/ec2-performance-soak-long-2/perf_soak_caller.json` — `33ac89cef9d63494f390f34642d7dd19bf759ea3d8e489e81b1a06830f45549b`
+- `_perf-results/ec2-performance-soak-long-2/perf_soak_receiver.json` — `a66ef092258a893984e5e70104d2c215ecf04b970a2e45ae3aec77d27aa57a21`
+- `_perf-results/ec2-performance-soak-long-3/perf_soak_30min.json` — `e0efe862aa8e22267ec7b54b94b1142854b5f33cbfbf5237f1d9bbf5288877dc`

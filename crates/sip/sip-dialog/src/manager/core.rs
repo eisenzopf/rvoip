@@ -4289,8 +4289,8 @@ impl DialogManager {
 
     /// Store dialog mapping for incoming call
     ///
-    /// The request is not used; [`Self::store_incoming_call_mapping`] stores
-    /// the same mapping without requiring the caller to copy it.
+    /// The request is not used; the crate-internal `store_incoming_call_mapping`
+    /// stores the same mapping without requiring the caller to copy it.
     pub fn store_dialog_mapping(
         &self,
         session_id: &str,
@@ -7970,11 +7970,11 @@ mod outbound_flow_handler_tests {
     /// The plan marks an INVITE wire-unknown as soon as it hands it to the
     /// transaction layer, but the transaction layer retains it only once the
     /// wire boundary is crossed. A TLS peer that rejects the handshake during
-    /// route preparation leaves a wire-unknown plan whose INVITE the
-    /// transaction layer has forgotten: no response or CANCEL can ever match
-    /// it, so the supervisor must treat it as settled rather than wait.
+    /// route preparation is proven to fail before that boundary: the plan is
+    /// settled as never sent, its INVITE is not retained for CANCEL, and the
+    /// supervisor treats the dialog as settled rather than wait.
     #[tokio::test]
-    async fn wire_unknown_plan_for_a_forgotten_invite_is_terminal() {
+    async fn route_preparation_failure_settles_plan_as_not_sent() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
 
         let manager = make_manager_with_transport_and_setup_timeout(
@@ -8011,16 +8011,20 @@ mod outbound_flow_handler_tests {
             .invite_failover_plans
             .iter()
             .next()
-            .expect("wire-unknown plan retained")
+            .expect("closed plan retained")
             .value()
             .clone();
         let invite = {
             let plan = plan.lock().await;
-            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
-            plan.current_transaction
-                .clone()
-                .expect("wire-unknown INVITE transaction retained")
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::Closed);
+            assert!(!plan.wire_attempted, "no INVITE byte reached the wire");
+            assert!(plan.current_transaction.is_none());
+            plan.retained_attempts
+                .first()
+                .cloned()
+                .expect("the one attempt is recorded")
         };
+        assert!(!manager.invite_failover_attempts.contains_key(&*invite));
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while !manager
@@ -8031,7 +8035,7 @@ mod outbound_flow_handler_tests {
             }
         })
         .await
-        .expect("a forgotten wire-unknown INVITE settles");
+        .expect("a never-sent INVITE is settled");
         assert!(manager
             .transaction_manager
             .transaction_route(&invite)
@@ -8107,6 +8111,79 @@ mod outbound_flow_handler_tests {
                 .await,
             "a plan closed by the INVITE's transport error is terminal"
         );
+    }
+
+    /// RFC 3261 §8.1.3.1: a written INVITE that ends on Timer B is a 408 and
+    /// one whose transport failed (for example its stream flow closed, #311)
+    /// is a 503. Both reach the session layer as the call's failure instead
+    /// of leaving it to the setup watchdog.
+    #[tokio::test]
+    async fn unanswered_written_invite_reports_408_or_503_to_the_session() {
+        use crate::manager::transaction_integration::CandidateWirePlan;
+
+        for (index, (event_is_timeout, expected)) in
+            [(true, 408u16), (false, 503u16)].into_iter().enumerate()
+        {
+            let (manager, mut session_rx) = make_manager().await;
+            let dialog_id = DialogId::new();
+            manager
+                .dialog_to_session
+                .insert(dialog_id.clone(), format!("session-unanswered-{index}"));
+            let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+                .unwrap()
+                .from("Alice", "sip:alice@example.com", Some("alice-unanswered"))
+                .to("Bob", "sip:bob@example.com", None)
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id(&format!("unanswered-written-invite-{index}"))
+                .cseq(1)
+                .via(
+                    "127.0.0.1:5060",
+                    "UDP",
+                    Some(&format!("z9hG4bK-unanswered-{index}")),
+                )
+                .max_forwards(70)
+                .build();
+            let (transaction, _) = manager
+                .send_request_with_candidate_wire_plan(
+                    request,
+                    vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
+                        dest_addr(5104),
+                        rvoip_sip_transport::transport::TransportType::Udp,
+                    )],
+                    Some(&dialog_id),
+                    CandidateWirePlan::default(),
+                )
+                .await
+                .expect("initial INVITE written");
+            let event = if event_is_timeout {
+                TransactionEvent::TransactionTimeout {
+                    transaction_id: transaction.clone(),
+                }
+            } else {
+                TransactionEvent::TransportError {
+                    transaction_id: transaction.clone(),
+                }
+            };
+            manager.process_global_transaction_event(event).await;
+
+            let failure = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    match session_rx.recv().await {
+                        Some(SessionCoordinationEvent::RequestFailed {
+                            dialog_id: Some(failed_dialog),
+                            status_code,
+                            method,
+                            ..
+                        }) if failed_dialog == dialog_id => return (status_code, method),
+                        Some(_) => {}
+                        None => panic!("session coordination closed"),
+                    }
+                }
+            })
+            .await
+            .expect("the unanswered INVITE fails the call");
+            assert_eq!(failure, (expected, "INVITE".to_string()));
+        }
     }
 
     #[tokio::test]

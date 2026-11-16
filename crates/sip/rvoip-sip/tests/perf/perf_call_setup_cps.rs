@@ -266,6 +266,7 @@ fn classify_bye_failure(error: &rvoip_sip::SessionError) -> (&'static str, &'sta
         SessionError::SessionNotFound(_) => ("session_not_found", "dispatch"),
         SessionError::InvalidTransition(_) => ("invalid_transition_other", "dispatch"),
         SessionError::DialogError(_) => ("dialog_other", "dispatch"),
+        SessionError::InviteNotSent(_) => ("invite_not_sent", "dispatch"),
         SessionError::ProtocolError(_) => ("protocol_other", "confirmation"),
         SessionError::NetworkError(_) | SessionError::IoError(_) => {
             ("transport_failed", "dispatch")

@@ -336,10 +336,10 @@ pub use unified::{
 pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
 pub use dialog_subscription::DialogSubscriptionHandle;
 pub use events::{
-    CallAuthRetryDetails, CallId, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityKeying,
-    MediaSecurityProfile, MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure,
-    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
-    TransferTargetEvidence,
+    CallAuthRetryDetails, CallId, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityFailure,
+    MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, RenegotiationFailure,
+    SdesNegotiationFailure, SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState,
+    TransferKind, TransferTargetEvidence,
 };
 
 // Re-export builder

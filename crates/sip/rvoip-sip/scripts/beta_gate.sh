@@ -1066,10 +1066,10 @@ attestation_features() {
   local feature
   case "$MODE" in
     local)
-      automatic="generated-validation,dev-insecure-tls"
+      automatic="generated-validation,dev-insecure-tls,test-hooks"
       ;;
     full)
-      automatic="generated-validation,dev-insecure-tls,$(perf_features)"
+      automatic="generated-validation,dev-insecure-tls,test-hooks,$(perf_features)"
       ;;
     interop)
       automatic="dev-insecure-tls"
@@ -1889,7 +1889,7 @@ run_local_gates() {
     crates/sip/rvoip-sip/scripts/test_docker_peer_snapshot.py \
     crates/sip/sip-proxy/tests/interop/scripts/test_state_snapshot.py
   run_gate_continue "public API compatibility" "$SCRIPT_DIR/check_public_api.sh"
-  run_gate_continue "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls
+  run_gate_continue "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls,test-hooks
   run_gate_continue "claimed lower-crate check" cargo check \
     -p rvoip-sip-core \
     -p rvoip-sip-transport \
@@ -1916,10 +1916,12 @@ run_local_gates() {
   run_gate_continue "workspace unit tests" cargo test --workspace --exclude rvoip-sip --lib
   run_gate_continue "workspace target and integration tests" cargo test --workspace --exclude rvoip-sip --bins --examples --tests
   run_gate_continue "workspace doctests" cargo test --workspace --exclude rvoip-sip --doc
-  run_gate_continue "rvoip-sip unit tests" cargo test -p rvoip-sip --lib
-  run_gate_continue "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls
-  run_gate_continue "rvoip-sip doctests" cargo test -p rvoip-sip --doc
-  run_gate_continue "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls
+  # rvoip-sip stages build with test-hooks, as the release catalog does:
+  # the RFC 4028 session-timer targets compile to nothing without it.
+  run_gate_continue "rvoip-sip unit tests" cargo test -p rvoip-sip --lib --features test-hooks
+  run_gate_continue "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls,test-hooks
+  run_gate_continue "rvoip-sip doctests" cargo test -p rvoip-sip --doc --features test-hooks
+  run_gate_continue "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls,test-hooks
   run_downstream_compatibility_gates
   run_standalone_example_gates
   run_gate_continue "PBX analyzer unit tests" cargo test -p rvoip-sip --example pbx_analyze --features dev-insecure-tls

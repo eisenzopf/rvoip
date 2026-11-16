@@ -1002,9 +1002,11 @@ pub(crate) struct InviteFailoverPlan {
     /// never infer the reservation from the live vector length.
     pub reserved_attempt_slots: usize,
     pub current_transaction: Option<std::sync::Arc<TransactionKey>>,
-    /// Monotonic proof that this logical INVITE crossed the transaction
-    /// layer's wire-attempt boundary. Once true, an error can no longer be
-    /// treated as a local-only rollback.
+    /// Proof that this logical INVITE crossed the transaction layer's
+    /// wire-attempt boundary. Once true, an error can no longer be treated as
+    /// a local-only rollback, unless the transaction layer later proves that
+    /// the plan's first and only attempt failed before its write
+    /// (`settle_not_sent_invite_candidate`).
     pub wire_attempted: bool,
     pub phase: InviteFailoverPlanPhase,
     /// Compact terminal ownership needed to remove exact attempt indexes at
@@ -3908,6 +3910,22 @@ impl DialogManager {
         dialog_id: DialogId,
         transaction_id: TransactionKey,
     ) {
+        self.emit_invite_failure(
+            dialog_id,
+            transaction_id,
+            500,
+            "Local transaction processing failed",
+        )
+        .await;
+    }
+
+    async fn emit_invite_failure(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: TransactionKey,
+        status_code: u16,
+        reason_phrase: &str,
+    ) {
         if self.get_session_id(&dialog_id).is_none() {
             return;
         }
@@ -3915,17 +3933,50 @@ impl DialogManager {
             .notify_session_layer(SessionCoordinationEvent::RequestFailed {
                 dialog_id: Some(dialog_id),
                 transaction_id,
-                status_code: 500,
-                reason_phrase: "Local transaction processing failed".to_string(),
+                status_code,
+                reason_phrase: reason_phrase.to_string(),
                 method: Method::Invite.to_string(),
             })
             .await
         {
             warn!(
                 error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error),
-                "Failed to deliver exact initial-INVITE internal failure"
+                status_code,
+                "Failed to deliver exact initial-INVITE failure"
             );
         }
+    }
+
+    /// Report a written INVITE that ended without a final response.
+    ///
+    /// RFC 3261 §8.1.3.1: a transaction timeout (Timer B) is treated as a 408
+    /// and a transport error as a 503 received by the TU. Without this the
+    /// call learned of either only from the session layer's setup watchdog.
+    /// An INVITE whose first write failed is skipped: its sender has already
+    /// returned the error to the caller, which owns that rollback.
+    async fn emit_unanswered_invite_failure(
+        &self,
+        dialog_id: DialogId,
+        transaction_id: &TransactionKey,
+        outcome: InviteFailoverAttemptOutcome,
+    ) {
+        if !self
+            .transaction_manager
+            .client_initial_send_succeeded(transaction_id)
+        {
+            return;
+        }
+        let (status_code, reason_phrase) = match outcome {
+            InviteFailoverAttemptOutcome::TransactionTimeout => (408, "Request Timeout"),
+            _ => (503, "Service Unavailable (transport failure)"),
+        };
+        self.emit_invite_failure(
+            dialog_id,
+            transaction_id.clone(),
+            status_code,
+            reason_phrase,
+        )
+        .await;
     }
 
     fn close_active_invite_failover_plan(
@@ -4595,6 +4646,21 @@ impl DialogManager {
                     {
                         InviteFailoverEventDisposition::Consumed
                     } else {
+                        // The replacement could not be dispatched and closed
+                        // the plan: this attempt's outcome ends the call.
+                        let terminal_dialog = {
+                            let plan = plan_arc.lock().await;
+                            matches!(
+                                plan.phase,
+                                InviteFailoverPlanPhase::Closed
+                                    | InviteFailoverPlanPhase::Exhausted
+                            )
+                            .then(|| plan.dialog_id.clone())
+                        };
+                        if let Some(dialog_id) = terminal_dialog {
+                            self.emit_unanswered_invite_failure(dialog_id, transaction_id, outcome)
+                                .await;
+                        }
                         InviteFailoverEventDisposition::Continue
                     }
                 } else {
@@ -4603,6 +4669,10 @@ impl DialogManager {
                         &mut plan,
                         InviteFailoverPlanPhase::Closed,
                     );
+                    let dialog_id = plan.dialog_id.clone();
+                    drop(plan);
+                    self.emit_unanswered_invite_failure(dialog_id, transaction_id, outcome)
+                        .await;
                     InviteFailoverEventDisposition::Continue
                 }
             }
@@ -5541,6 +5611,47 @@ impl DialogManager {
         true
     }
 
+    /// Settle an INVITE attempt that the transaction layer proved was never
+    /// offered to the transport, rewinding the plan's wire boundary. Only the
+    /// plan's first and only attempt qualifies: a concurrent failover to
+    /// another candidate, or any earlier attempt, may have reached the wire,
+    /// which keeps the logical INVITE wire-unknown.
+    async fn settle_not_sent_invite_candidate(
+        &self,
+        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
+        lease: &InviteCandidateSendLease,
+        transaction_id: &TransactionKey,
+    ) -> bool {
+        let mut plan = plan.lock().await;
+        let attempts = plan.attempt_transaction_ids();
+        let only_attempt = attempts.len() == 1 && attempts[0].as_ref() == transaction_id;
+        let no_later_candidate = plan.active_payload.as_ref().is_none_or(|active| {
+            active.next_send_generation == lease.generation && active.pending_candidate.is_none()
+        });
+        if plan.id != lease.plan_id
+            || !matches!(
+                plan.phase,
+                InviteFailoverPlanPhase::Active
+                    | InviteFailoverPlanPhase::Closed
+                    | InviteFailoverPlanPhase::Exhausted
+            )
+            || !only_attempt
+            || !no_later_candidate
+        {
+            return false;
+        }
+        Self::set_invite_attempt_outcome(
+            &mut plan,
+            transaction_id,
+            InviteFailoverAttemptOutcome::ImmediateTransportFailure,
+        );
+        plan.wire_attempted = false;
+        if plan.phase == InviteFailoverPlanPhase::Active {
+            self.close_active_invite_failover_plan(&mut plan, InviteFailoverPlanPhase::Closed);
+        }
+        true
+    }
+
     async fn send_invite_failover_candidate(
         &self,
         plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
@@ -5812,6 +5923,7 @@ impl DialogManager {
             ));
         }
 
+        let mut first_wire_attempt = false;
         let stale_before_wire = {
             let mut plan = plan.lock().await;
             if !plan
@@ -5841,7 +5953,9 @@ impl DialogManager {
                 true
             } else {
                 // Monotonic boundary: after this store, even an immediate
-                // transport error is conservatively wire-unknown.
+                // transport error is conservatively wire-unknown, unless the
+                // transaction layer proves the request was never written.
+                first_wire_attempt = !plan.wire_attempted;
                 plan.wire_attempted = true;
                 false
             }
@@ -5912,7 +6026,28 @@ impl DialogManager {
                     }
                 }
             }
-            Ok(Err(_error)) => {
+            Ok(Err(error)) => {
+                if matches!(
+                    error,
+                    crate::transaction::error::Error::InitialRequestNotSent
+                ) && first_wire_attempt
+                    && self
+                        .settle_not_sent_invite_candidate(plan, &lease, &transaction_id)
+                        .await
+                {
+                    // Route preparation (connect, TLS handshake) failed before
+                    // the INVITE was offered to the transport. The peer never
+                    // saw it: release the attempt instead of retaining it for
+                    // CANCEL/BYE teardown.
+                    self.compensate_invite_candidate_transaction(&transaction_id, true)
+                        .await;
+                    cancellation_guard.disarm();
+                    return Err(InviteCandidateSendError::Fatal(
+                        crate::errors::DialogError::TransactionError {
+                            message: safe_operation_failure("invite_candidate_send", "not_sent"),
+                        },
+                    ));
+                }
                 self.retain_wire_unknown_invite_candidate(
                     plan,
                     lease.generation,
@@ -6167,8 +6302,11 @@ impl DialogManager {
                     return Ok((tx_id, target.addr, Some(completion)));
                 }
                 Err(e) => {
-                    let is_transport_failure =
-                        matches!(&e, crate::transaction::error::Error::TransportError { .. });
+                    let is_transport_failure = matches!(
+                        &e,
+                        crate::transaction::error::Error::TransportError { .. }
+                            | crate::transaction::error::Error::InitialRequestNotSent
+                    );
                     if is_transport_failure && idx + 1 < total {
                         debug!(
                             attempt,

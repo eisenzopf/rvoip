@@ -108,6 +108,99 @@ pub fn negotiated_single_audio_payload(
     }
 }
 
+/// Primary codecs of the first audio section of an offer, in format
+/// order, including static G.711 mappings. Formats this crate cannot send
+/// (an unsupported codec, or a static payload type without an rtpmap) are
+/// skipped: an offer may list codecs the answer will not select.
+pub(crate) fn primary_audio_codecs(sdp: &str) -> Result<Vec<CodecInfo>> {
+    primary_audio_codecs_inner(sdp, true)
+}
+
+/// As [`primary_audio_codecs`]; with `allow_unsupported == false` (an answer)
+/// any primary format this crate cannot send is an error.
+fn primary_audio_codecs_inner(sdp: &str, allow_unsupported: bool) -> Result<Vec<CodecInfo>> {
+    let session =
+        SdpSession::from_str(sdp).map_err(|_| WebRtcError::Sdp("invalid audio SDP".into()))?;
+    let audio =
+        first_audio_section(&session).ok_or_else(|| WebRtcError::Sdp("no audio section".into()))?;
+    let mut codecs = Vec::new();
+    for format in &audio.formats {
+        let pt = format
+            .parse::<u8>()
+            .map_err(|_| WebRtcError::Sdp("invalid audio payload type".into()))?;
+        match codec_for_payload(&session, audio, pt) {
+            Ok(Some(codec)) => codecs.push(codec),
+            Ok(None) => {}
+            Err(_) if allow_unsupported => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(codecs)
+}
+
+/// The primary audio codec/PT a completed offer/answer selects, shared by
+/// the route's stream metadata and the local RTP sender.
+///
+/// Every answered primary mapping must appear unchanged in the offer. The
+/// first answered format (the answer's preference order, which both
+/// endpoints see) that `capabilities` supports is selected, so endpoints with
+/// different local capability orders still agree.
+pub(crate) fn selected_audio_payload(
+    offer: &str,
+    answer: &str,
+    capabilities: &[CodecInfo],
+) -> Result<NegotiatedAudioPayload> {
+    let offered = primary_audio_codecs(offer)?;
+    let answered = primary_audio_codecs_inner(answer, false)?;
+    for codec in &answered {
+        if !offered.iter().any(|original| {
+            original.payload_type == codec.payload_type && same_rtp_codec(original, codec)
+        }) {
+            return Err(WebRtcError::Sdp(
+                "audio answer changed an offered RTP payload mapping".into(),
+            ));
+        }
+    }
+    // A final answer's format preference is shared by both endpoints. Do not
+    // independently pick each endpoint's local capability order.
+    for codec in &answered {
+        if capabilities.iter().any(|local| {
+            normalize_codec_name(&local.name).eq_ignore_ascii_case(&codec.name)
+                && local.clock_rate_hz == codec.clock_rate_hz
+                && (local.name.eq_ignore_ascii_case("opus") || local.channels == codec.channels)
+        }) {
+            return Ok(NegotiatedAudioPayload {
+                codec: codec.clone(),
+                payload_type: codec
+                    .payload_type
+                    .ok_or_else(|| WebRtcError::Sdp("missing audio payload type".into()))?,
+            });
+        }
+    }
+    Err(WebRtcError::IncompatibleCapabilities)
+}
+
+/// Whether `sdp` parses and has an audio section.
+pub(crate) fn has_audio_section(sdp: &str) -> bool {
+    SdpSession::from_str(sdp).is_ok_and(|session| first_audio_section(&session).is_some())
+}
+
+/// The audio section the local audio track is bound to: the first one with a
+/// non-zero port, as in `negotiated_single_audio_payload`, or else the first
+/// audio section at all. The WebRTC engine can itself describe a usable
+/// audio section with port 0 (for example in an answer generated before any
+/// local candidate exists), so port 0 alone does not mean the codec list is
+/// meaningless here; a rejected section leaves the transceiver without a
+/// send direction, which the sender binding already tolerates.
+fn first_audio_section(session: &SdpSession) -> Option<&MediaDescription> {
+    first_active_audio(session).or_else(|| {
+        session
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+    })
+}
+
 fn first_active_audio(session: &SdpSession) -> Option<&MediaDescription> {
     session
         .media_descriptions
