@@ -44,13 +44,13 @@
 //! | `webrtc` | | WebRTC interop adapter (`rvoip::webrtc`) — developer preview |
 //! | `uctp` | | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) — developer preview |
 //! | `amazon-a2a` | | Amazon Connect A2A external-agent transport (`rvoip::amazon_a2a`) — developer preview |
-//! | `webex-byova` | | Webex Contact Center BYOVA virtual-agent transport (`rvoip::webex_byova`) — experimental, not in `full` |
+//! | `webex-byova` | | Webex Contact Center BYOVA virtual-agent transport (`rvoip::webex_byova`) — experimental |
 //! | `vapi` | | Vapi bidirectional WebSocket agent adapter (`rvoip::vapi`) — developer preview |
 //! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — developer preview |
 //! | `voip-3` | | SIP + WebRTC + UCTP **+** vCon / identity / AI-harness extensions — developer preview |
 //! | `client` | | Cross-transport client SDK (`rvoip::client`) — developer preview |
 //! | `app` | | High-level gateway builder (`rvoip::app`) — developer preview |
-//! | `full` | | `voip-3` + `vapi` + `amazon-a2a` + `sip-stir-shaken` + `client` + `app` |
+//! | `full` | | `voip-3` + `vapi` + `amazon-a2a` + `webex-byova` + `sip-stir-shaken` + `client` + `app` |
 //!
 //! Deployment-oriented `bundle-*` features group these flags into tested
 //! starting points. See the repository's `docs/FEATURE_BUNDLES.md` for the
@@ -163,7 +163,8 @@ pub mod amazon_a2a {
 }
 
 /// Webex Contact Center BYOVA (Bring Your Own Virtual Agent) transport
-/// (experimental). Not part of `full`.
+/// (experimental). The facade enables the WebSocket adapter; the crate's
+/// optional `grpc` feature needs Cisco's protobuf files at build time.
 #[cfg(feature = "webex-byova")]
 pub mod webex_byova {
     pub use rvoip_webex_byova::*;
