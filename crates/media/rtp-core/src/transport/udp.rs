@@ -941,10 +941,13 @@ impl Drop for PortAllocationCancellationGuard {
 /// Move-only authority to restore the exact SRTP state replaced by one
 /// successful context installation. Dropping it commits the replacement.
 pub struct SrtpContextRollback {
-    previous_send: Option<crate::srtp::SrtpContext>,
+    /// The displaced outbound context; `None` when the installed one was
+    /// kept because the replacement had the same master keys.
+    previous_send: Option<Option<crate::srtp::SrtpContext>>,
     /// The displaced inbound context, or the identity of the one the
-    /// owning receive loop held, which it gives back unchanged.
-    previous_recv: PreviousRecv,
+    /// owning receive loop held, which it gives back unchanged, with its
+    /// master keys; `None` when the installed one was kept.
+    previous_recv: Option<(PreviousRecv, Option<crate::srtp::SrtpMasterKeys>)>,
     previous_secure_media_required: bool,
     installed_generation: u64,
 }
@@ -1916,8 +1919,9 @@ impl UdpRtpTransport {
     /// validation fails, so ignoring its error cannot downgrade subsequent
     /// traffic to plaintext. Only enabled contexts using one of the four exact
     /// reviewed AES-CM/HMAC suites are installed. A successful second call
-    /// replaces the contexts (used today only in tests; mid-call rekeying is
-    /// out of scope for this step).
+    /// replaces the contexts, except that a direction whose replacement has
+    /// the same master keys keeps its installed context (see
+    /// [`Self::replace_srtp_contexts`]).
     pub async fn set_srtp_contexts(
         &self,
         send: crate::srtp::SrtpContext,
@@ -1930,6 +1934,15 @@ impl UdpRtpTransport {
     /// Install a validated directional pair and return move-only authority to
     /// restore the immediately preceding pair. This is used across a SIP
     /// zero-wire commit boundary; dropping the token commits the replacement.
+    ///
+    /// A direction whose replacement was built from the same master keys,
+    /// suite and key rotation as its installed context keeps the installed
+    /// context, and the replacement is dropped. Equal master keys are the same
+    /// RFC 3711 crypto context (RFC 4568 section 7.1.4: an unchanged key in a
+    /// re-offer continues the session): restarting it would reset the
+    /// rollover counter and replay window, so a receiver would reject every
+    /// packet after a sequence wrap and accept replays, and a sender would
+    /// reuse keystream.
     pub async fn replace_srtp_contexts(
         &self,
         send: crate::srtp::SrtpContext,
@@ -1969,10 +1982,25 @@ impl UdpRtpTransport {
                 ));
             }
             let installed_generation = current_generation + 1;
-            let previous_send = std::mem::replace(&mut *send_guard, Some(send));
-            // An owning receive loop adopts the new context before its next
-            // datagram and gives the old one back unchanged.
-            let previous_recv = self.srtp_recv.install(&mut recv_slot, recv);
+            let previous_send = if send_guard
+                .as_ref()
+                .is_some_and(|current| current.master_keys() == send.master_keys())
+            {
+                None
+            } else {
+                Some(std::mem::replace(&mut *send_guard, Some(send)))
+            };
+            let previous_recv = if recv_slot
+                .installed_keys()
+                .is_some_and(|current| *current == recv.master_keys())
+            {
+                None
+            } else {
+                let previous_keys = recv_slot.installed_keys().cloned();
+                // An owning receive loop adopts the new context before its
+                // next datagram and gives the old one back unchanged.
+                Some((self.srtp_recv.install(&mut recv_slot, recv), previous_keys))
+            };
             // Hot call state: after the epoch moved, so the receive loop
             // re-checks it.
             self.ring_hot_doorbell();
@@ -2010,9 +2038,10 @@ impl UdpRtpTransport {
             .installed_generation
             .checked_add(1)
             .ok_or_else(|| Error::InvalidState("SRTP context generation exhausted".to_string()))?;
-        if !self
-            .srtp_recv
-            .can_restore(&recv_slot, &rollback.previous_recv)
+        if rollback
+            .previous_recv
+            .as_ref()
+            .is_some_and(|(previous, _)| !self.srtp_recv.can_restore(&recv_slot, previous))
         {
             // Unreachable for a current token (the owning receive loop keeps
             // or gives back the context it held); fail without changing state.
@@ -2021,9 +2050,12 @@ impl UdpRtpTransport {
                     .to_string(),
             ));
         }
-        *send_guard = rollback.previous_send;
-        self.srtp_recv
-            .restore(&mut recv_slot, rollback.previous_recv);
+        if let Some(previous_send) = rollback.previous_send {
+            *send_guard = previous_send;
+        }
+        if let Some((previous_recv, keys)) = rollback.previous_recv {
+            self.srtp_recv.restore(&mut recv_slot, previous_recv, keys);
+        }
         self.ring_hot_doorbell();
         self.srtp_context_generation
             .store(retired_generation, Ordering::Release);
@@ -4762,6 +4794,101 @@ mod tests {
             }
             other => panic!("expected MediaReceived, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn replacing_srtp_contexts_with_unchanged_keys_keeps_rollover_and_replay_state() {
+        let config = |name: &str| RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some(name.to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        };
+        let sender = UdpRtpTransport::new(config("srtp-same-key-a"))
+            .await
+            .unwrap();
+        let receiver = UdpRtpTransport::new(config("srtp-same-key-b"))
+            .await
+            .unwrap();
+        let (a_send, b_recv) = make_srtp_ctx_pair();
+        let (b_send, a_recv) = make_srtp_ctx_pair();
+        sender.set_srtp_contexts(a_send, a_recv).await.unwrap();
+        receiver.set_srtp_contexts(b_send, b_recv).await.unwrap();
+        let mut events = receiver.subscribe();
+        let destination = receiver.local_rtp_addr().unwrap();
+
+        async fn delivered(events: &mut broadcast::Receiver<RtpEvent>, sequence: u16) -> bool {
+            tokio::time::timeout(tokio::time::Duration::from_millis(300), async {
+                loop {
+                    if let Ok(RtpEvent::MediaReceived {
+                        sequence_number: seq,
+                        ..
+                    }) = events.recv().await
+                    {
+                        if seq == sequence {
+                            break;
+                        }
+                    }
+                }
+            })
+            .await
+            .is_ok()
+        }
+        let packet = |sequence: u16| {
+            RtpPacket::new(
+                RtpHeader::new(0, sequence, u32::from(sequence), 0x0bad_cafe),
+                Bytes::from_static(b"same master key"),
+            )
+        };
+
+        sender.send_rtp(&packet(65_535), destination).await.unwrap();
+        assert!(delivered(&mut events, 65_535).await);
+
+        // A re-INVITE that keeps both master keys installs equal contexts,
+        // and this token restores nothing when rolled back.
+        let (b_send, b_recv) = make_srtp_ctx_pair();
+        let rollback = receiver
+            .replace_srtp_contexts(b_send, b_recv)
+            .await
+            .unwrap();
+        receiver.rollback_srtp_contexts(rollback).await.unwrap();
+        let (b_send, b_recv) = make_srtp_ctx_pair();
+        receiver.set_srtp_contexts(b_send, b_recv).await.unwrap();
+        assert!(receiver.srtp_enabled().await);
+
+        // Rollover counter 1: only the continuing context authenticates it.
+        sender.send_rtp(&packet(0), destination).await.unwrap();
+        assert!(
+            delivered(&mut events, 0).await,
+            "the packet after the sequence wrap must authenticate"
+        );
+        // The sender's own context also continued: its index did not restart.
+        let (a_send, a_recv) = make_srtp_ctx_pair();
+        sender.set_srtp_contexts(a_send, a_recv).await.unwrap();
+        sender.send_rtp(&packet(1), destination).await.unwrap();
+        assert!(delivered(&mut events, 1).await);
+
+        let (replay_send, _) = make_srtp_ctx_pair();
+        let mut replay_send = replay_send;
+        let replayed = replay_send
+            .protect(&packet(65_535))
+            .unwrap()
+            .serialize()
+            .unwrap();
+        sender
+            .get_socket()
+            .send_to(&replayed, destination)
+            .await
+            .unwrap();
+        assert!(
+            !delivered(&mut events, 65_535).await,
+            "the replay window must survive the replacement"
+        );
+        sender.close().await.unwrap();
+        receiver.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -918,6 +918,24 @@ production v2 profile, measured on Xeon 6 SMT.
   destination only when it changed, instead of allocating an `Arc` and taking
   `arc_swap`'s writer path for every packet.
 
+#### SRTP crypto context across re-INVITE
+
+- A hold, resume or other re-INVITE that keeps a direction's SDES master key
+  now keeps that direction's SRTP context, with its rollover counter and
+  replay window. `UdpRtpTransport::replace_srtp_contexts` (and so
+  `set_srtp_contexts` and the SIP negotiated-media commit) keeps the installed
+  context of a direction whose replacement has the same master key, salt,
+  suite and key rotation, and drops the replacement (RFC 3711 §3.2, RFC 4568
+  §7.1.4). Each re-offer and re-answer from rvoip-sip carries a fresh local
+  key, but a peer that re-offers or answers with its unchanged key used to get
+  a new receive context: once its sequence numbers had wrapped (at most about
+  22 minutes into a 20 ms stream, as they start at a random value), the
+  context restarted at rollover counter 0 and every packet after the
+  re-INVITE failed authentication, giving one-way audio; the replay window
+  was also forgotten. A changed key still installs a new
+  context, and rollback of a replacement restores only the directions it
+  replaced.
+
 #### Hot path (#354, #357, #373)
 
 These changes keep wire output, statistics, RTCP content and every error
