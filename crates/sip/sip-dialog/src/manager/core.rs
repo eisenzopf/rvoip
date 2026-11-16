@@ -4163,6 +4163,47 @@ impl DialogManager {
             .unwrap_or(false)
     }
 
+    /// Configured trusted TLS proxy-flow policies; empty when none.
+    pub(crate) fn tls_proxy_flow_policies(&self) -> Vec<crate::api::config::SipTlsProxyFlowPolicy> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.as_ref()
+                    .map(|c| c.dialog_config().tls_proxy_flow_policies.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether locally initiated TLS dialogs keep their initial INVITE's flow.
+    pub(crate) fn outbound_tls_flow_retention_enabled(&self) -> bool {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.as_ref()
+                    .map(|c| c.dialog_config().retain_outbound_tls_flow)
+            })
+            .unwrap_or(false)
+    }
+
+    /// Whether any dialog can carry a [`TlsProxyFlowBinding`]. Both opt-ins
+    /// are off by default, so the send path skips the dialog lookup.
+    ///
+    /// [`TlsProxyFlowBinding`]: crate::dialog::tls_proxy_flow::TlsProxyFlowBinding
+    pub(crate) fn tls_proxy_flow_routing_enabled(&self) -> bool {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| {
+                g.as_ref().map(|c| {
+                    let dialog = c.dialog_config();
+                    dialog.retain_outbound_tls_flow || !dialog.tls_proxy_flow_policies.is_empty()
+                })
+            })
+            .unwrap_or(false)
+    }
+
     /// Check if auto-response to OPTIONS requests is enabled
     pub fn should_auto_respond_to_options(&self) -> bool {
         self.config

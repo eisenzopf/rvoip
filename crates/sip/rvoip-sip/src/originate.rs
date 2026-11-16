@@ -336,6 +336,7 @@ pub struct SipOriginateContext {
     auth: Option<SipClientAuth>,
     initial_headers: SipInitialHeaders,
     registered_flow_routes: Vec<rvoip_sip_registrar::RegisteredFlowRoute>,
+    outbound_peer: Option<rvoip_core::OutboundPeerLease>,
 }
 
 impl SipOriginateContext {
@@ -352,6 +353,25 @@ impl SipOriginateContext {
     pub fn with_profile_revision(mut self, revision: SipProfileRevision) -> Self {
         self.profile_revision = Some(revision);
         self
+    }
+
+    /// Make this call depend on one live peer connection, for example the
+    /// agent leg a callback is placed for.
+    ///
+    /// The adapter claims the lease's single dispatch immediately before the
+    /// INVITE can leave. If the peer has retired, the lease was revoked, or
+    /// its dispatch deadline passed, activation fails with
+    /// `RvoipError::OutboundPeerUnavailableBeforeWrite` and nothing is sent.
+    /// If the peer retires after dispatch, the adapter ends the call (CANCEL
+    /// before an answer, BYE after) and reports
+    /// `Failed { "joined outbound peer retired" }`.
+    pub fn with_outbound_peer(mut self, peer: rvoip_core::OutboundPeerLease) -> Self {
+        self.outbound_peer = Some(peer);
+        self
+    }
+
+    pub(crate) fn outbound_peer(&self) -> Option<&rvoip_core::OutboundPeerLease> {
+        self.outbound_peer.as_ref()
     }
 
     /// Override the From URI for this outbound SIP call.
@@ -526,6 +546,7 @@ impl SipOriginateContext {
             outbound_proxy_uri: None,
             auth,
             registered_flow_routes: Vec::new(),
+            outbound_peer: None,
             initial_headers: SipInitialHeaders {
                 entries: initial_headers
                     .into_iter()
@@ -541,6 +562,7 @@ impl fmt::Debug for SipOriginateContext {
         formatter
             .debug_struct("SipOriginateContext")
             .field("has_profile_revision", &self.profile_revision.is_some())
+            .field("has_outbound_peer", &self.outbound_peer.is_some())
             .field("has_from_uri", &self.from_uri.is_some())
             .field("has_outbound_proxy", &self.outbound_proxy_uri.is_some())
             .field("has_auth", &self.auth.is_some())

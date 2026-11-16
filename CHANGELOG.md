@@ -54,6 +54,10 @@ Each item has a one-line migration.
   the public fields `tls_flow` (#338) and `new_call_admission` (#350).**
   Migration: add them to struct literals, or end the literal with
   `..Default::default()`.
+- **`rvoip_sip_dialog::dialog::Dialog` gains the public field
+  `tls_proxy_flow`**, a process-local `Option<TlsProxyFlowBinding>` that is
+  never serialized. Migration: add `tls_proxy_flow: None` to struct
+  literals, or construct dialogs with `Dialog::new`.
 - **`rvoip_harness::InProcessAiConfig` is `#[non_exhaustive]`** and gains
   `gated_input` (#349). Code outside the crate can no longer build it with a
   struct literal, `..Default::default()` included. Migration: start from
@@ -87,6 +91,13 @@ Each item has a one-line migration.
   after media cleanup. Migration: do not rely on terminal ordering across
   connections, or on media cleanup having finished when `deliver_terminal`
   returns.
+- **`RvoipError` gains `OutboundTerminalPublishedDuringActivation`.** The
+  enum is not `#[non_exhaustive]`. rvoip-sip returns it from outbound
+  activation (and so from `PreparedOutboundConnection::commit` and
+  `originate_connection`) when the call ended during activation and its own
+  terminal event was already published. Migration: add an arm (or a
+  wildcard) to exhaustive `match`es on `RvoipError`, and do not report a
+  second failure for that connection.
 
 ### Dependencies
 
@@ -136,6 +147,11 @@ behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
 (they need a newer Rust than the 1.91 MSRV); password-hash 0.6 (argon2 0.5
 needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
 bumps (they break the test fixtures and examples built on the older APIs).
+- **`RvoipError` gains `OutboundPeerUnavailableBeforeWrite`.** The enum is
+  not `#[non_exhaustive]`. rvoip-sip returns it when an outbound call's
+  `OutboundPeerLease` refuses dispatch, before any INVITE is sent.
+  Migration: add an arm (or a wildcard) to exhaustive `match`es on
+  `RvoipError`.
 
 ### SIP
 
@@ -188,6 +204,23 @@ bumps (they break the test fixtures and examples built on the older APIs).
   makes later sends return `SessionError::MediaError`; the new
   `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
   unchanged.
+#### Observed peer address and caller number on inbound contexts
+
+- `InboundConnectionContext` carries two typed, adapter-observed facts for
+  ingress policy and presentation: `observed_peer_address()`, the source IP
+  of the transport flow or datagram that carried the request (never a
+  header), and `observed_caller_number()`, an `ObservedCallerNumber` (E.164
+  number plus `ObservedCallerSource`). Adapters attach them with
+  `with_observed_peer_address` / `with_observed_caller_number`; both are
+  redacted from `Debug`.
+- rvoip-sip fills the peer address for every captured inbound context. For
+  a peer admitted by trusted-trunk policy it also fills the caller number:
+  the first E.164 `P-Asserted-Identity` URI (`TrustedAssertedIdentity`),
+  else an E.164 `From` user (`AdmittedFrom`). Non-E.164 forms are not
+  normalized, and untrusted peers get no caller number. A contact-center
+  gateway can use them to check a carrier's source address against the
+  trunk of the dialed number and to show the caller's number, without
+  parsing identity headers itself.
 
 #### Configurable UAS capabilities
 
@@ -275,6 +308,42 @@ bumps (they break the test fixtures and examples built on the older APIs).
   reject. Requests still go over TLS, and a Contact that names more than one
   `transport` parameter is now refused for this exception, as are cleartext
   and non-TLS Contacts.
+#### TLS flow reuse for record-routing proxies
+
+- New opt-in `Config::sip_tls_proxy_flow_policies` (rvoip-sip, also
+  `with_sip_tls_proxy_flow_policies`) and
+  `DialogConfig::tls_proxy_flow_policies` (sip-dialog, also
+  `with_tls_proxy_flow_policies`), a list of `SipTlsProxyFlowPolicy`. A
+  gateway behind a carrier's record-routing TLS proxy receives the INVITE on
+  a connection the proxy opened, and its in-dialog requests (BYE,
+  re-INVITE for hold and resume, UPDATE) were sent by dialling the proxy's
+  logical listener named in Record-Route. Proxies that accept a dialog's
+  requests only on their own connection, or whose certificate does not name
+  the Record-Route IP address, then rejected them or the connection failed.
+  With a matching policy those requests go back on the accepted TLS
+  connection. A policy matches only when the INVITE's authenticated
+  principal (from `SipListenerAuthPolicy`, for example a trusted CIDR) has
+  the policy's `issuer`, `tenant` and `subject`, arrived over TLS from the
+  policy's `proxy_endpoint` IP address, and record-routes through exactly
+  that endpoint as a loose-routing TLS URI. Only requests whose next hop is
+  still that route use the connection. If it has closed the request fails;
+  setting `renewal_authority` instead allows one new connection to the fixed
+  `proxy_endpoint`, verified against that DNS name, which the dialog then
+  keeps. `SipTlsProxyFlowPolicy` is `#[non_exhaustive]` and serde
+  (de)serializable; build it with `SipTlsProxyFlowPolicy::new` and
+  `with_renewal_authority`, and check it with `validate`, which
+  `Config::validate` and `DialogConfig::validate` also run (at most 64
+  policies). With no policy configured routing is unchanged.
+- New opt-in `Config::sip_retain_outbound_tls_flow` (rvoip-sip, also
+  `with_sip_retain_outbound_tls_flow`) and
+  `DialogConfig::retain_outbound_tls_flow` (sip-dialog, also
+  `with_retained_outbound_tls_flow`). When set, in-dialog requests of a call
+  placed over TLS stay on the certificate-verified connection the INVITE
+  used while their next hop is the same loose route (or Contact) at the same
+  address, so a peer dialled by DNS name that record-routes with an IP
+  address its certificate does not name can still be reached. A closed
+  connection then fails the request instead of being redialled. Default
+  `false`.
 
 #### Transaction layer (#339, #350)
 
@@ -1007,6 +1076,44 @@ outcome unchanged, and add no configuration.
 
 ### Core and media graph
 
+- The operational event stream reports each connection's committed audio
+  format. `OperationalEventKind::MediaCommitted { media }` carries a
+  `CommittedAudioMedia`: a monotonic per-connection `revision`, codec,
+  payload type, clock rate, channels, and the agreed media profile, keying
+  and SRTP suite. It never carries SDP, addresses or keys. Adapters report it
+  with `AdapterEvent::MediaCommitted`, and core forwards only values inside the
+  bounded vocabulary of `CommittedAudioMedia::valid`, after `Connected`.
+  rvoip-sip publishes it when a call is established, after an adapter-driven
+  renegotiation commits, and when SRTP is negotiated. It is the
+  transport-neutral push counterpart of the SIP-level negotiated media read
+  API.
+- The operational event stream reports a SIP call's final failure status.
+  `OperationalFailureReason` gains `SipResponse { status_code,
+  network_blocked }`: a SIP connection that fails with a final non-2xx
+  response (300-699) publishes the numeric status and whether it was `603
+  Network Blocked`, the response carriers send when call analytics blocked
+  the call. The reason phrase and every other peer-controlled text are still
+  dropped; other failures stay `AdapterReported`. rvoip-sip now keeps the
+  peer's final response as an outbound call's terminal when it arrives
+  during activation, instead of replacing it with a generic activation
+  failure, and publishes that terminal before activation fails. Before, core
+  won that race and published `CoreReported`. For that, an adapter can hand
+  core a terminal with a receipt
+  (`AdapterLifecycleSinkSlot::queue_or_deliver_orchestrator_terminal_with_receipt`)
+  and wait until core has consumed it.
+- Outbound calls can depend on a live peer connection. A contact center that
+  calls a customer back for an agent wants the call to exist only while the
+  agent's own leg is up. `Orchestrator::reserve_outbound_peer` (or
+  `reserve_outbound_peer_before`, with a deadline for the first wire write)
+  returns an `OutboundPeerLease` tied to that connection's exact lifecycle
+  generation; a connection backs one live lease at a time. The peer's
+  retirement, or `Orchestrator::revoke_outbound_peer`, revokes it. rvoip-sip
+  takes it through `SipOriginateContext::with_outbound_peer`: the adapter
+  claims the lease's single dispatch immediately before the INVITE can
+  leave, so a call whose peer has gone fails with
+  `RvoipError::OutboundPeerUnavailableBeforeWrite` and sends nothing. A
+  revocation after dispatch ends the call on the wire (CANCEL or BYE) and
+  reports `Failed`.
 - Connection admission no longer sweeps the lifecycle table when bounded
   lifecycle retention is enabled (#345). Inbound admission swept every
   retained row every 64 admissions, and outbound admission on every claim,
@@ -1298,6 +1405,11 @@ outcome unchanged, and add no configuration.
   and integration tests only: no 0.4.0 release gate ran them against an
   independent peer. From 0.5.0 the PBX release gates do (see Release
   process, CI and dependencies); their protected evidence is pending.
+- Add the developer-preview `rvoip-amazon-a2a` Connect external-agent adapter,
+  with native rvoip media bridging, bounded A2A WebSocket framing, turn traces,
+  interruption, and hand-back. Exposed by the optional `amazon-a2a` facade
+  feature. Adds `Transport::AmazonA2a`; downstream exhaustive transport matches
+  must handle the new variant. Live Connect qualification remains pending.
 
 ## 0.4.0 — 2026-10-11
 

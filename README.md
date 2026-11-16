@@ -95,7 +95,7 @@ IVR, a B2BUA, then browser and voice-AI gateways.
 
 ## You need one crate
 
-The workspace publishes 46 crates. You import **one** of them; it pulls in
+The workspace contains 47 crates. You import **one** of them; it pulls in
 everything it needs. The rest are internal layers you never name in your own
 `Cargo.toml`.
 
@@ -106,6 +106,7 @@ everything it needs. The rest are internal layers you never name in your own
 | A SIP or WebRTC caller talking to a hosted voice agent (Vapi) | [`rvoip`](crates/rvoip) | `features = ["app", "vapi"]` |
 | Your own ASR / TTS / dialog pipeline, with recordings and signed vCons | [`rvoip`](crates/rvoip) | `features = ["voip-3"]` |
 | A native, mobile, or embedded client SDK | [`rvoip-client`](crates/rvoip-client) | pick transports |
+| Amazon Connect A2A callers bridged to an external agent | [`rvoip-amazon-a2a`](crates/extensions/rvoip-amazon-a2a) | — |
 | SIP calls delivered to Amazon Connect agents | [`rvoip-amazon-connect`](crates/webrtc/rvoip-amazon-connect) | — |
 | Media fan-out over Media over QUIC | [`rvoip-moq`](crates/moq/rvoip-moq) | — |
 

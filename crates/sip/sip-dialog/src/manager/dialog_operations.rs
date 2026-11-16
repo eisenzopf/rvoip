@@ -572,11 +572,36 @@ impl DialogLookup for DialogManager {
         // Opt-in direct-peer interop only. Do not bypass proxies or a Contact
         // claiming a different host. Retain the opaque accepted flow.
         if dialog.allow_tls_contact_on_sips && dialog.route_set.is_empty() {
-            if let Some(route) = ingress_route.filter(|route| route.flow_id.is_some()) {
+            if let Some(route) = ingress_route
+                .clone()
+                .filter(|route| route.flow_id.is_some())
+            {
                 if matches!(dialog.remote_target.host,
                     rvoip_sip_core::Host::Address(ip) if ip == route.destination.ip())
                 {
                     dialog.tls_contact_flow = Some((dialog.remote_target.clone(), route));
+                }
+            }
+        }
+        // Opt-in trusted-proxy flow reuse: only for an INVITE whose
+        // authenticated principal, TLS ingress flow and loose Record-Route
+        // all match one configured policy. Never inferred from headers alone.
+        if let (Some(first_route), Some(ingress)) =
+            (dialog.route_set.first(), ingress_route.as_ref())
+        {
+            let policies = self.tls_proxy_flow_policies();
+            if !policies.is_empty() {
+                let principal = crate::transaction::TransactionKey::from_request(request)
+                    .and_then(|key| self.transaction_manager().peek_inbound_principal(&key));
+                if let Some(principal) = principal {
+                    dialog.tls_proxy_flow = policies.iter().find_map(|policy| {
+                        crate::dialog::tls_proxy_flow::TlsProxyFlowBinding::admit(
+                            policy,
+                            &principal,
+                            first_route,
+                            ingress,
+                        )
+                    });
                 }
             }
         }

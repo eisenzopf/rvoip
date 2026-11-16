@@ -17,6 +17,16 @@ pub enum RvoipError {
     /// handshake failed). The peer never saw the request: no teardown is
     /// owed and a retry cannot create a duplicate call.
     OutboundNotSent,
+    /// Outbound activation failed because the call ended (for example a
+    /// remote final non-2xx response) and the adapter's own terminal event
+    /// was already published to the Orchestrator before this error returned.
+    /// That terminal, not this error, is the authoritative outcome; a caller
+    /// must not report a second failure for the connection.
+    OutboundTerminalPublishedDuringActivation,
+    /// Outbound activation stopped before any wire write because the peer
+    /// connection its `OutboundPeerLease` depends on retired, was revoked,
+    /// or missed its dispatch deadline. Nothing was sent.
+    OutboundPeerUnavailableBeforeWrite,
 
     /// Lifecycle precondition violated — e.g. start_session on a Closed
     /// Conversation, join_session on an Ended Session, end_session on an
@@ -46,6 +56,8 @@ impl RvoipError {
             Self::BridgeNotFound(_) => "bridge-not-found",
             Self::AdmissionRejected(_) => "admission-rejected",
             Self::OutboundNotSent => "outbound-not-sent",
+            Self::OutboundTerminalPublishedDuringActivation => "outbound-terminal-published",
+            Self::OutboundPeerUnavailableBeforeWrite => "outbound-peer-unavailable-before-write",
             Self::InvalidState(_) => "invalid-state",
             Self::UnsupportedCodec(_) => "unsupported-codec",
             Self::Adapter(_) => "adapter",

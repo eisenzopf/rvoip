@@ -23,10 +23,10 @@ use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, InboundAssertedIdentity, InboundConnectionContext,
-    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OrchestratorAdapterEvent,
-    OriginateRequest, OutboundActivation, RejectReason, SignatureHeaders, TerminalDelivery,
-    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
-    TrustedSignalingProvenance,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, ObservedCallerNumber,
+    ObservedCallerSource, OrchestratorAdapterEvent, OriginateRequest, OutboundActivation,
+    RejectReason, SignatureHeaders, TerminalDelivery, TransferAttemptId, TransferStatus,
+    TransferTarget, TrustedSignalingMetadata, TrustedSignalingProvenance,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -65,7 +65,7 @@ const SIP_INBOUND_REJECTION_CONCURRENCY: usize = 256;
 const DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET: usize = 262_144;
 const SIP_OUTBOUND_EVENT_STAGE_CAPACITY: usize = 32;
 const MAX_SIP_OUTBOUND_TARGET_BYTES: usize = 4_096;
-const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
 const SIP_OUTBOUND_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 const SIP_CONFIRMED_HANGUP_TIMEOUT: Duration = Duration::from_secs(3);
 const SIP_ADAPTER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -270,12 +270,17 @@ enum SipActivationFailure {
     InviteFailed,
     /// The INVITE failed before any of it reached the network.
     InviteNotSent,
+    /// The outbound peer lease refused dispatch; no INVITE was sent.
+    PeerRevokedBeforeDispatch,
     MediaFailed,
 }
 
 impl SipActivationFailure {
     fn into_error(self) -> RvoipError {
         let detail = match self {
+            Self::PeerRevokedBeforeDispatch => {
+                return RvoipError::OutboundPeerUnavailableBeforeWrite;
+            }
             Self::RouteEnded => "SIP outbound route ended during activation",
             Self::EventOverflow => "SIP outbound lifecycle event stage overflowed",
             Self::EventPublication => "SIP outbound lifecycle event publication was unavailable",
@@ -332,6 +337,9 @@ struct SipOutboundRoute {
     activation: watch::Sender<Option<SipActivationCompletion>>,
     cleanup: watch::Sender<Option<bool>>,
     cancel: watch::Sender<bool>,
+    /// Set by retained cleanup once the route's terminal event has been
+    /// consumed by the Orchestrator (or its direct lifecycle sink).
+    terminal_published: AtomicBool,
 }
 
 impl SipOutboundRoute {
@@ -374,6 +382,7 @@ impl SipOutboundRoute {
             activation,
             cleanup,
             cancel,
+            terminal_published: AtomicBool::new(false),
         })
     }
 
@@ -649,6 +658,35 @@ impl SipOutboundRoute {
         }
     }
 
+    /// Wait for the activation outcome. A failed activation first waits for
+    /// retained cleanup, which publishes the route's own terminal event, so
+    /// that terminal (for example the peer's final non-2xx response) reaches
+    /// the Orchestrator before core sees the failed receipt and runs its own
+    /// abort. When that terminal was consumed, report
+    /// [`RvoipError::OutboundTerminalPublishedDuringActivation`] so callers do
+    /// not publish a second failure.
+    ///
+    /// The exception is a failure that proves nothing reached the wire
+    /// ([`RvoipError::OutboundNotSent`],
+    /// [`RvoipError::OutboundPeerUnavailableBeforeWrite`]): that error is
+    /// kept, because it is what tells the caller a retry cannot duplicate the
+    /// call and no teardown is owed. Cleanup has still completed first, so the
+    /// route's terminal is already ordered ahead of the failed receipt.
+    async fn wait_activation_receipt(&self) -> CoreResult<OutboundActivation> {
+        let result = self.wait_activation().await;
+        if let Err(error) = &result {
+            self.wait_cleanup().await?;
+            let never_sent = matches!(
+                error,
+                RvoipError::OutboundNotSent | RvoipError::OutboundPeerUnavailableBeforeWrite
+            );
+            if !never_sent && self.terminal_published.load(Ordering::Acquire) {
+                return Err(RvoipError::OutboundTerminalPublishedDuringActivation);
+            }
+        }
+        result
+    }
+
     fn request_cleanup(&self, event: Option<AdapterEvent>) -> bool {
         let start = {
             let mut state = self
@@ -657,9 +695,10 @@ impl SipOutboundRoute {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // An explicit cause wins over the signaling terminal its own
             // cleanup produces, but not over a remote terminal (such as the
-            // peer's final response) that was already staged before it.
+            // peer's final non-2xx response) staged before cleanup began:
+            // that terminal is the cause, not an effect, of the cleanup.
             if let Some(event) = event {
-                if state.cleanup_event.is_none() && state.terminal.is_none() {
+                if state.cleanup_event.is_none() && !state.remote_terminal_seen {
                     state.cleanup_event = Some(event);
                 }
             }
@@ -887,6 +926,7 @@ impl SipInboundContextPolicy {
         if observation.principal.is_none() {
             return Ok(None);
         }
+        let mut observed_caller_number = None;
         let (routing_hint, metadata, asserted_identity, trusted_signaling) =
             if let Some(request) = observation.request.as_ref() {
                 let routing_hint = request
@@ -940,6 +980,9 @@ impl SipInboundContextPolicy {
                 } else {
                     None
                 };
+                if trusted_peer {
+                    observed_caller_number = observed_caller_number_of(request);
+                }
                 let trusted_signaling = if trusted_peer {
                     let fields = request
                         .headers
@@ -987,6 +1030,8 @@ impl SipInboundContextPolicy {
             metadata,
             asserted_identity,
             trusted_signaling,
+            observed_peer_address: observation.observed_peer_address,
+            observed_caller_number,
         }))
     }
 }
@@ -1211,6 +1256,44 @@ struct PendingSipInboundContext {
     metadata: InboundSignalingMetadata,
     asserted_identity: Option<InboundAssertedIdentity>,
     trusted_signaling: Option<TrustedSignalingMetadata>,
+    observed_peer_address: Option<std::net::IpAddr>,
+    observed_caller_number: Option<ObservedCallerNumber>,
+}
+
+/// An E.164 number from a SIP URI user part: `+` (or `%2B`) and 7 to 15
+/// digits without a leading zero. Anything else, including national or
+/// dial-string forms, yields `None` rather than a guessed normalization.
+fn observed_e164_user(user: Option<&str>) -> Option<String> {
+    let user = user?;
+    let digits = user
+        .strip_prefix('+')
+        .or_else(|| user.strip_prefix("%2B"))
+        .or_else(|| user.strip_prefix("%2b"))?;
+    (digits.len() >= 7
+        && digits.len() <= 15
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit()))
+    .then(|| format!("+{digits}"))
+}
+
+/// Caller number of an INVITE from a peer admitted by trusted-trunk policy:
+/// the first E.164 `P-Asserted-Identity` URI, otherwise an E.164 `From` user.
+fn observed_caller_number_of(request: &rvoip_sip_core::Request) -> Option<ObservedCallerNumber> {
+    let asserted = request.headers.iter().find_map(|header| match header {
+        TypedHeader::PAssertedIdentity(identity) => identity
+            .iter()
+            .find_map(|address| observed_e164_user(address.uri().username())),
+        _ => None,
+    });
+    let (number, source) = asserted
+        .map(|number| (number, ObservedCallerSource::TrustedAssertedIdentity))
+        .or_else(|| {
+            request
+                .from()
+                .and_then(|from| observed_e164_user(from.uri().username()))
+                .map(|number| (number, ObservedCallerSource::AdmittedFrom))
+        })?;
+    ObservedCallerNumber::new(number, source).ok()
 }
 
 struct PendingSipInboundObservation {
@@ -1447,10 +1530,13 @@ impl SipInboundContextStore {
                     pending.metadata,
                 )
                 .map(|context| {
-                    context.with_trusted_signaling(
-                        pending.asserted_identity,
-                        pending.trusted_signaling,
-                    )
+                    context
+                        .with_trusted_signaling(
+                            pending.asserted_identity,
+                            pending.trusted_signaling,
+                        )
+                        .with_observed_peer_address(pending.observed_peer_address)
+                        .with_observed_caller_number(pending.observed_caller_number)
                 }) {
                     Ok(context) => SipInboundContextState::Available(Box::new(context)),
                     Err(error) => {
@@ -2484,6 +2570,7 @@ impl SipAdapter {
             | AdapterEvent::Failed { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -3956,6 +4043,14 @@ impl SipAdapter {
                         connection_id: epoch.connection_id.clone(),
                     },
                 );
+                self.publish_committed_media(&epoch);
+            }
+            ApiEvent::MediaSecurityNegotiated { call_id, .. } => {
+                // A wake-up only: the exact committed snapshot is re-read, so
+                // security set up before an inbound ACK publishes nothing.
+                if let Some(epoch) = self.existing_mapped_epoch(&call_id) {
+                    self.publish_committed_media(&epoch);
+                }
             }
             ApiEvent::CallProgress {
                 call_id,
@@ -4303,6 +4398,33 @@ impl SipAdapter {
     /// The nonblocking channel write occurs under `mapping_lock`, so terminal
     /// retirement cannot linearize between the liveness check and enqueue.
     /// Stale supervisors are treated as successfully discarded.
+    /// Publish the epoch's current committed audio selection, if any. Safe
+    /// to call on every wake-up: it reads the exact session snapshot.
+    fn publish_committed_media(&self, epoch: &SipRouteEpoch) {
+        let Some(handle) = epoch.admitted_handle() else {
+            return;
+        };
+        let Ok(snapshot) = self
+            .coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session_snapshot_exact(handle)
+        else {
+            return;
+        };
+        let Some(media) = committed_audio_media(snapshot.state(), snapshot.revision()) else {
+            return;
+        };
+        self.try_send_for_epoch(
+            epoch,
+            AdapterEvent::MediaCommitted {
+                connection_id: epoch.connection_id.clone(),
+                media,
+            },
+        );
+    }
+
     fn try_send_for_epoch(&self, epoch: &SipRouteEpoch, event: AdapterEvent) -> bool {
         let _mapping = self
             .mapping_lock
@@ -4460,6 +4582,88 @@ impl SipAdapter {
     fn map_session_err(err: crate::errors::SessionError) -> RvoipError {
         RvoipError::Adapter(format!("rvoip-sip: {}", err))
     }
+}
+
+/// The committed audio selection of one SIP session, or `None` while no
+/// offer/answer is complete (or one is pending) or the dialog is not
+/// established. Reads the same session-store values the media layer encodes
+/// with; the session revision orders successive selections.
+fn committed_audio_media(
+    session: &crate::session_store::state::SessionState,
+    revision: u64,
+) -> Option<rvoip_core::adapter::CommittedAudioMedia> {
+    if !session.sdp_negotiated
+        || session.pending_offer_answer.is_some()
+        || !matches!(
+            session.call_state,
+            CallState::Active | CallState::Bridged | CallState::OnHold
+        )
+    {
+        return None;
+    }
+    let config = session.negotiated_config.as_ref()?;
+    let media = rvoip_core::adapter::CommittedAudioMedia::new(
+        revision,
+        config.codec.to_ascii_uppercase(),
+        session.committed_negotiated_payload_type()?,
+        config.sample_rate,
+        config.channels,
+    );
+    let profile = committed_audio_profile(session);
+    let media = match session.media_security.as_ref() {
+        None => match profile {
+            Some(profile) if matches!(profile.as_str(), "RTP/AVP" | "RTP/AVPF") => {
+                media.with_media_profile(profile)
+            }
+            _ => media,
+        },
+        Some(security) => {
+            use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile};
+            // A secured selection always names its profile; one that does not
+            // match the negotiated security is not reported at all.
+            let profile = profile.filter(|profile| match security.profile {
+                MediaSecurityProfile::RtpSavp => {
+                    matches!(profile.as_str(), "RTP/SAVP" | "RTP/SAVPF")
+                }
+                MediaSecurityProfile::UdpTlsRtpSavp => {
+                    matches!(profile.as_str(), "UDP/TLS/RTP/SAVP" | "UDP/TLS/RTP/SAVPF")
+                }
+            })?;
+            let keying = match security.keying {
+                MediaSecurityKeying::Sdes => "sdes",
+                MediaSecurityKeying::DtlsSrtp => "dtls_srtp",
+            };
+            media.with_security(
+                profile,
+                keying,
+                security.suite.as_str(),
+                security.contexts_installed,
+            )
+        }
+    };
+    media.valid().then_some(media)
+}
+
+/// The audio transport profile both completed descriptions agree on for the
+/// committed payload type. Unknown or mismatched profiles yield `None`; they
+/// never imply plaintext.
+fn committed_audio_profile(session: &crate::session_store::state::SessionState) -> Option<String> {
+    fn profile(sdp: &str, payload: u8) -> Option<String> {
+        let parsed = rvoip_sip_core::types::sdp::SdpSession::from_str(sdp).ok()?;
+        let audio = parsed
+            .media_descriptions
+            .iter()
+            .find(|m| m.media.eq_ignore_ascii_case("audio") && m.port != 0)?;
+        audio
+            .formats
+            .iter()
+            .any(|p| p.parse::<u8>().ok() == Some(payload))
+            .then(|| audio.protocol.to_ascii_uppercase())
+    }
+    let payload = session.committed_negotiated_payload_type()?;
+    let local = profile(session.local_sdp.as_deref()?, payload)?;
+    let remote = profile(session.remote_sdp.as_deref()?, payload)?;
+    (local == remote).then_some(local)
 }
 
 async fn wait_for_route_cancel(cancel: &mut watch::Receiver<bool>) {
@@ -4727,13 +4931,37 @@ async fn run_outbound_activation(
     events: mpsc::Sender<OrchestratorAdapterEvent>,
     retained_tasks: Arc<RetainedTasks>,
 ) {
-    let result = activate_outbound_route(
-        weak_adapter.clone(),
-        Arc::clone(&coordinator),
-        Arc::clone(&route),
-        events.clone(),
-    )
-    .await;
+    let result = {
+        let activation = activate_outbound_route(
+            weak_adapter.clone(),
+            Arc::clone(&coordinator),
+            Arc::clone(&route),
+            events.clone(),
+        );
+        tokio::pin!(activation);
+        if let Some(peer) = route.context.outbound_peer() {
+            let mut revoked = peer.revocation();
+            tokio::select! {
+                biased;
+                _ = wait_for_route_cancel(&mut revoked) => {
+                    if route.cleanup_snapshot().0 == SipOutboundWireState::NotStarted {
+                        Err(SipActivationFailure::PeerRevokedBeforeDispatch)
+                    } else {
+                        // The INVITE may have left. Capture its exact admitted
+                        // lifetime so retained cleanup can CANCEL or BYE it;
+                        // never report this as zero-wire.
+                        if let Some(adapter) = weak_adapter.upgrade() {
+                            adapter.promote_outbound_route_if_admitted(&route);
+                        }
+                        Err(SipActivationFailure::RouteEnded)
+                    }
+                }
+                result = &mut activation => result,
+            }
+        } else {
+            activation.await
+        }
+    };
     match result {
         Ok(receipt) => {
             let media_weak_adapter = weak_adapter.clone();
@@ -4774,7 +5002,12 @@ async fn run_outbound_activation(
                 events,
                 Some(AdapterEvent::Failed {
                     connection_id: route.connection_id.clone(),
-                    detail: "SIP outbound activation failed".to_string(),
+                    detail: if failure == SipActivationFailure::PeerRevokedBeforeDispatch {
+                        "joined outbound peer unavailable before INVITE"
+                    } else {
+                        "SIP outbound activation failed"
+                    }
+                    .to_string(),
                 }),
                 "activation-failed",
             );
@@ -4848,6 +5081,13 @@ async fn activate_outbound_route(
         .with_headers(headers)
         .map_err(|_| SipActivationFailure::InvalidPlan)?;
 
+    // A peer-bound call claims its single dispatch at the last moment before
+    // the wire becomes possible; a refusal here sent nothing.
+    if let Some(peer) = route.context.outbound_peer() {
+        if !peer.try_begin_dispatch() {
+            return Err(SipActivationFailure::PeerRevokedBeforeDispatch);
+        }
+    }
     // `Possible` begins immediately before the first poll of `send`: cleanup
     // must assume a packet escaped if this future is subsequently cancelled.
     route.begin_wire_send()?;
@@ -4973,6 +5213,7 @@ async fn monitor_outbound_media(
     events: mpsc::Sender<OrchestratorAdapterEvent>,
 ) {
     let mut media = route.stream.subscribe_lifecycle();
+    let mut peer_revoked = route.context.outbound_peer().map(|peer| peer.revocation());
     loop {
         // Copy the state out of the watch guard before an arm can request
         // cleanup. Cleanup closes the same stream and publishes a new
@@ -5001,8 +5242,36 @@ async fn monitor_outbound_media(
             | crate::media_stream::SipMediaLifecycle::Binding
             | crate::media_stream::SipMediaLifecycle::Bound => {}
         }
-        if media.changed().await.is_err() {
-            return;
+        let revoked = async {
+            match peer_revoked.as_mut() {
+                Some(signal) => wait_for_route_cancel(signal).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = revoked => {
+                // The peer this call depends on retired after dispatch:
+                // retained cleanup ends the call on the wire.
+                begin_outbound_cleanup(
+                    weak_adapter,
+                    coordinator,
+                    Arc::clone(&route),
+                    lifecycle,
+                    events,
+                    Some(AdapterEvent::Failed {
+                        connection_id: route.connection_id.clone(),
+                        detail: "joined outbound peer retired".to_string(),
+                    }),
+                    "outbound-peer-retired",
+                );
+                return;
+            }
+            changed = media.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
         }
     }
 }
@@ -5151,10 +5420,33 @@ async fn run_outbound_cleanup(
     if let Some(adapter) = weak_adapter.upgrade() {
         adapter.retire_outbound_route(&route);
     }
-    if let Some(event) = terminal {
-        SipAdapter::deliver_terminal_event_to(&lifecycle, &events, event, source).await;
-    }
-    route.complete_cleanup(wire_teardown_success && local_release_success && media_success);
+    let terminal_delivered = if let Some(event) = terminal {
+        // Wait for core consumption, not queue admission: a failed
+        // activation receipt is released only after this, so the route's
+        // own terminal wins over core's fallback abort.
+        let delivery = tokio::time::timeout(
+            SIP_RETAINED_TASK_TIMEOUT,
+            lifecycle.queue_or_deliver_orchestrator_terminal_with_receipt(&events, event),
+        )
+        .await;
+        let delivered = matches!(
+            delivery,
+            Ok(TerminalDelivery::Queued | TerminalDelivery::Fallback)
+        );
+        if !delivered {
+            warn!(
+                source,
+                "SipAdapter outbound terminal event was undeliverable"
+            );
+        }
+        route.terminal_published.store(delivered, Ordering::Release);
+        delivered
+    } else {
+        true
+    };
+    route.complete_cleanup(
+        wire_teardown_success && local_release_success && media_success && terminal_delivered,
+    );
 }
 
 impl Drop for SipAdapter {
@@ -5318,7 +5610,7 @@ impl ConnectionAdapter for SipAdapter {
             Ok(false) => {}
             Err(error) => return Err(error.into_error()),
         }
-        route.wait_activation().await
+        route.wait_activation_receipt().await
     }
 
     async fn start_inbound_early_media(&self, conn: ConnectionId) -> CoreResult<()> {
@@ -5520,7 +5812,7 @@ impl ConnectionAdapter for SipAdapter {
                     // As in `try_send_for_epoch`, the epoch check and the
                     // enqueue share `mapping_lock`, so retirement cannot slip
                     // between them. The reserved slot cannot be full.
-                    let _mapping = self
+                    let mapping = self
                         .mapping_lock
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -5532,6 +5824,8 @@ impl ConnectionAdapter for SipAdapter {
                             connection_id: conn.clone(),
                         },
                     ));
+                    drop(mapping);
+                    self.publish_committed_media(&epoch);
                     return Ok(());
                 }
                 Some(state) if state.is_final() || state == CallState::Terminating => {
@@ -5962,6 +6256,7 @@ impl ConnectionAdapter for SipAdapter {
                     "SIP re-INVITE selected a codec unavailable to the media graph".into(),
                 )
             })?;
+        self.publish_committed_media(&epoch);
         Ok(NegotiatedCodecs {
             audio: Some(chosen),
             video: None,
@@ -7050,6 +7345,7 @@ Signal=5\r\nDuration=160\r\n";
         let trusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
+                observed_peer_address: None,
                 request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from(TRUSTED_TRUNK_ISSUER)),
             })
@@ -7102,6 +7398,7 @@ Signal=5\r\nDuration=160\r\n";
         let untrusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
+                observed_peer_address: None,
                 request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from("some-other-issuer")),
             })
@@ -7114,6 +7411,64 @@ Signal=5\r\nDuration=160\r\n";
         assert!(untrusted.trusted_signaling.is_none());
     }
 
+    #[test]
+    fn observed_caller_number_requires_a_trusted_trunk_and_an_e164_user() {
+        let policy = SipInboundContextPolicy::new(Vec::<String>::new()).expect("policy");
+        let capture = |issuer: &str, asserted: &str| {
+            policy
+                .capture(&InboundInviteObservation {
+                    session_id: SessionId::new(),
+                    observed_peer_address: Some("192.0.2.7".parse().unwrap()),
+                    request: Some(request_with_private_identity("bridge", asserted)),
+                    principal: Some(principal_from(issuer)),
+                })
+                .expect("capture")
+                .expect("context")
+        };
+
+        let trusted = capture(TRUSTED_TRUNK_ISSUER, "<sip:+14085551212@carrier.example>");
+        let caller = trusted.observed_caller_number.expect("asserted caller");
+        assert_eq!(caller.number(), "+14085551212");
+        assert_eq!(
+            caller.source(),
+            ObservedCallerSource::TrustedAssertedIdentity
+        );
+        assert_eq!(
+            trusted.observed_peer_address,
+            Some("192.0.2.7".parse().unwrap())
+        );
+
+        // The fixture's From user (`spoofed`) is not E.164, and a non-E.164
+        // assertion is not normalized, so nothing is observed.
+        let national = capture(TRUSTED_TRUNK_ISSUER, "<sip:4085551212@carrier.example>");
+        assert!(national.observed_caller_number.is_none());
+
+        let untrusted = capture("some-other-issuer", "<sip:+14085551212@carrier.example>");
+        assert!(untrusted.observed_caller_number.is_none());
+        assert_eq!(
+            untrusted.observed_peer_address,
+            Some("192.0.2.7".parse().unwrap()),
+            "the transport-observed address is a fact for every principal"
+        );
+    }
+
+    #[test]
+    fn observed_e164_user_rejects_non_e164_forms() {
+        for (user, expected) in [
+            (Some("+14085551212"), Some("+14085551212")),
+            (Some("%2B14085551212"), Some("+14085551212")),
+            (Some("%2b14085551212"), Some("+14085551212")),
+            (Some("14085551212"), None),
+            (Some("+04085551212"), None),
+            (Some("+140855"), None),
+            (Some("+1408555121212345"), None),
+            (Some("+1408555;cpc=x"), None),
+            (None, None),
+        ] {
+            assert_eq!(observed_e164_user(user).as_deref(), expected, "{user:?}");
+        }
+    }
+
     fn observation(
         session_id: SessionId,
         route: &str,
@@ -7122,6 +7477,7 @@ Signal=5\r\nDuration=160\r\n";
     ) -> InboundInviteObservation {
         InboundInviteObservation {
             session_id,
+            observed_peer_address: None,
             request: Some(request(route, correlation_values)),
             principal,
         }
@@ -7359,7 +7715,7 @@ Signal=5\r\nDuration=160\r\n";
         assert!(context.initial_headers().is_empty());
         assert_eq!(
             format!("{context:?}"),
-            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
+            "SipOriginateContext { has_profile_revision: false, has_outbound_peer: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
         );
     }
 

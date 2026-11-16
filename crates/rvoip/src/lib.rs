@@ -43,12 +43,13 @@
 //! | `sip` | ✅ | SIP interop adapter (`rvoip::sip`) — **beta** |
 //! | `webrtc` | | WebRTC interop adapter (`rvoip::webrtc`) — developer preview |
 //! | `uctp` | | UCTP substrate adapters — QUIC / WebTransport / WebSocket (`rvoip::uctp`) — developer preview |
+//! | `amazon-a2a` | | Amazon Connect A2A external-agent transport (`rvoip::amazon_a2a`) — developer preview |
 //! | `vapi` | | Vapi bidirectional WebSocket agent adapter (`rvoip::vapi`) — developer preview |
 //! | `sip-stir-shaken` | | RFC 8224 caller-ID attestation; requires `sip` (`rvoip::stir_shaken`) — developer preview |
 //! | `voip-3` | | SIP + WebRTC + UCTP **+** vCon / identity / AI-harness extensions — developer preview |
 //! | `client` | | Cross-transport client SDK (`rvoip::client`) — developer preview |
 //! | `app` | | High-level gateway builder (`rvoip::app`) — developer preview |
-//! | `full` | | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` |
+//! | `full` | | `voip-3` + `vapi` + `amazon-a2a` + `sip-stir-shaken` + `client` + `app` |
 //!
 //! Deployment-oriented `bundle-*` features group these flags into tested
 //! starting points. See the repository's `docs/FEATURE_BUNDLES.md` for the
@@ -152,6 +153,12 @@ pub mod uctp {
 #[cfg(feature = "vapi")]
 pub mod vapi {
     pub use rvoip_vapi::*;
+}
+
+/// Amazon Connect A2A external-agent transport (developer preview).
+#[cfg(feature = "amazon-a2a")]
+pub mod amazon_a2a {
+    pub use rvoip_amazon_a2a::*;
 }
 
 // ---------------------------------------------------------------------------

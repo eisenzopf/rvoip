@@ -149,6 +149,7 @@ observer through `SipConfig::source_rate_limit(SipSourceRateLimit)` and
 | `rvoip::webrtc` | `webrtc` | [`rvoip-webrtc`](../webrtc/rvoip-webrtc) |
 | `rvoip::auth` | `webrtc` | [`rvoip-auth-core`](../identity/auth-core) |
 | `rvoip::uctp::{protocol, quic, webtransport, websocket}` | `uctp` | UCTP and substrate crates |
+| `rvoip::amazon_a2a` | `amazon-a2a` | [`rvoip-amazon-a2a`](../extensions/rvoip-amazon-a2a) |
 | `rvoip::vapi` | `vapi` | [`rvoip-vapi`](../extensions/rvoip-vapi) |
 | `rvoip::{vcon, identity, harness}` | `voip-3` | Conversation-model extension crates |
 | `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |

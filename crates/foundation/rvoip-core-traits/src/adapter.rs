@@ -342,6 +342,210 @@ const fn is_metadata_name_byte(byte: u8) -> bool {
         )
 }
 
+/// The audio format an adapter committed for one live connection, after an
+/// offer/answer exchange completed.
+///
+/// It carries only the negotiated shape and security posture: no SDP, no
+/// addresses and no key material. `codec`, `payload_type`, `clock_rate` and
+/// `channels` name what the answer selected (in SIP, the same session-store
+/// values the media layer encodes with); `media_profile`, `keying` and
+/// `crypto_suite` use the fixed vocabulary accepted by [`Self::valid`].
+///
+/// `revision` increases monotonically for one connection's lifetime. An
+/// adapter publishes this when media is first committed and again when a
+/// renegotiation or security setup changes it; consumers keep the highest
+/// revision they have seen. A repeated revision carries the same value.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
+pub struct CommittedAudioMedia {
+    /// Monotonic per-connection revision, starting at 1.
+    pub revision: u64,
+    /// Codec name, upper case (for example `PCMU`, `OPUS`).
+    pub codec: String,
+    /// Negotiated RTP payload type (0-127).
+    pub payload_type: u8,
+    /// RTP clock rate in hertz.
+    pub clock_rate: u32,
+    /// Channel count.
+    pub channels: u8,
+    /// Transport profile both sides agreed for the audio stream, for example
+    /// `RTP/AVP` or `RTP/SAVP`. `None` when the adapter cannot state one.
+    #[serde(default)]
+    pub media_profile: Option<String>,
+    /// Media key exchange: `sdes` or `dtls_srtp`. `None` for plaintext RTP.
+    #[serde(default)]
+    pub keying: Option<String>,
+    /// SRTP crypto suite, for example `AES_CM_128_HMAC_SHA1_80`.
+    #[serde(default)]
+    pub crypto_suite: Option<String>,
+    /// Whether the SRTP contexts for this selection are installed.
+    #[serde(default)]
+    pub security_contexts_installed: bool,
+}
+
+impl CommittedAudioMedia {
+    /// A plaintext selection with no stated media profile.
+    pub fn new(
+        revision: u64,
+        codec: impl Into<String>,
+        payload_type: u8,
+        clock_rate: u32,
+        channels: u8,
+    ) -> Self {
+        Self {
+            revision,
+            codec: codec.into(),
+            payload_type,
+            clock_rate,
+            channels,
+            media_profile: None,
+            keying: None,
+            crypto_suite: None,
+            security_contexts_installed: false,
+        }
+    }
+
+    /// State the agreed transport profile (`RTP/AVP` or `RTP/AVPF` for
+    /// plaintext).
+    pub fn with_media_profile(mut self, profile: impl Into<String>) -> Self {
+        self.media_profile = Some(profile.into());
+        self
+    }
+
+    /// State an SRTP selection: its profile, keying (`sdes` or `dtls_srtp`),
+    /// crypto suite, and whether its contexts are installed.
+    pub fn with_security(
+        mut self,
+        profile: impl Into<String>,
+        keying: impl Into<String>,
+        crypto_suite: impl Into<String>,
+        contexts_installed: bool,
+    ) -> Self {
+        self.media_profile = Some(profile.into());
+        self.keying = Some(keying.into());
+        self.crypto_suite = Some(crypto_suite.into());
+        self.security_contexts_installed = contexts_installed;
+        self
+    }
+
+    /// Whether every field is inside the bounded public vocabulary. Adapters
+    /// publish and core forwards only valid values.
+    ///
+    /// Security fields are all absent (plaintext), a plaintext profile alone
+    /// (`RTP/AVP`, `RTP/AVPF`), or a profile, keying and suite that belong
+    /// together (`RTP/SAVP[F]` with `sdes`, `UDP/TLS/RTP/SAVP[F]` with
+    /// `dtls_srtp`). Installed contexts require an SRTP selection.
+    pub fn valid(&self) -> bool {
+        self.revision > 0
+            && self.revision <= i64::MAX.unsigned_abs()
+            && self.payload_type <= 127
+            && (1..=192_000).contains(&self.clock_rate)
+            && (1..=8).contains(&self.channels)
+            && !self.codec.is_empty()
+            && self.codec.len() <= 32
+            && self
+                .codec
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+            && match (&self.media_profile, &self.keying, &self.crypto_suite) {
+                (None, None, None) => !self.security_contexts_installed,
+                (Some(profile), None, None) => {
+                    matches!(profile.as_str(), "RTP/AVP" | "RTP/AVPF")
+                        && !self.security_contexts_installed
+                }
+                (Some(profile), Some(keying), Some(suite)) => {
+                    matches!(
+                        (profile.as_str(), keying.as_str()),
+                        ("RTP/SAVP" | "RTP/SAVPF", "sdes")
+                            | ("UDP/TLS/RTP/SAVP" | "UDP/TLS/RTP/SAVPF", "dtls_srtp")
+                    ) && matches!(
+                        suite.as_str(),
+                        "AES_CM_128_HMAC_SHA1_80"
+                            | "AES_CM_128_HMAC_SHA1_32"
+                            | "AES_256_CM_HMAC_SHA1_80"
+                            | "AES_256_CM_HMAC_SHA1_32"
+                    )
+                }
+                _ => false,
+            }
+    }
+}
+
+/// Where an adapter observed an [`ObservedCallerNumber`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ObservedCallerSource {
+    /// The identity a trusted peer asserted for the caller (in SIP, the
+    /// `P-Asserted-Identity` of a peer admitted by trusted-trunk policy).
+    TrustedAssertedIdentity,
+    /// The caller-supplied originator (in SIP, the `From` URI) of a request
+    /// from an admitted trusted peer that asserted no usable identity.
+    AdmittedFrom,
+}
+
+impl ObservedCallerSource {
+    /// Stable lowercase name, suitable for logs and records.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TrustedAssertedIdentity => "trusted_asserted_identity",
+            Self::AdmittedFrom => "admitted_from",
+        }
+    }
+}
+
+/// The caller number an adapter observed on an inbound connection, in E.164
+/// form (`+` and 7 to 15 digits, no leading zero).
+///
+/// This is a presentation hint, for example the number to show an agent or
+/// to record as the caller. It is never an authenticated identity or a
+/// routing selector: [`ObservedCallerSource`] says how much it can be
+/// relied on, and adapters only produce it for peers their own policy
+/// admitted. The number is redacted from `Debug`.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ObservedCallerNumber {
+    number: String,
+    source: ObservedCallerSource,
+}
+
+impl ObservedCallerNumber {
+    /// Accepts only an E.164 number: `+` followed by 7 to 15 ASCII digits,
+    /// the first of which is not `0`.
+    pub fn new(
+        number: impl Into<String>,
+        source: ObservedCallerSource,
+    ) -> Result<Self, InboundContextError> {
+        let number = number.into();
+        let valid = number.strip_prefix('+').is_some_and(|digits| {
+            (7..=15).contains(&digits.len())
+                && !digits.starts_with('0')
+                && digits.bytes().all(|byte| byte.is_ascii_digit())
+        });
+        if !valid {
+            return Err(InboundContextError::InvalidMetadataValue);
+        }
+        Ok(Self { number, source })
+    }
+
+    /// The E.164 number, including its leading `+`.
+    pub fn number(&self) -> &str {
+        &self.number
+    }
+
+    pub const fn source(&self) -> ObservedCallerSource {
+        self.source
+    }
+}
+
+impl fmt::Debug for ObservedCallerNumber {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ObservedCallerNumber")
+            .field("source", &self.source)
+            .field("number", &"[redacted]")
+            .finish()
+    }
+}
+
 /// Principal- and transport-bound context for one inbound connection.
 ///
 /// Adapters may expose this exactly once. The Orchestrator retains it until
@@ -354,6 +558,8 @@ pub struct InboundConnectionContext {
     metadata: InboundSignalingMetadata,
     asserted_identity: Option<InboundAssertedIdentity>,
     trusted_signaling: Option<TrustedSignalingMetadata>,
+    observed_peer_address: Option<std::net::IpAddr>,
+    observed_caller_number: Option<ObservedCallerNumber>,
 }
 
 impl InboundConnectionContext {
@@ -378,6 +584,8 @@ impl InboundConnectionContext {
             metadata,
             asserted_identity: None,
             trusted_signaling: None,
+            observed_peer_address: None,
+            observed_caller_number: None,
         })
     }
 
@@ -391,6 +599,34 @@ impl InboundConnectionContext {
         self.asserted_identity = asserted_identity;
         self.trusted_signaling = trusted_signaling;
         self
+    }
+
+    /// Attach the network address the adapter's transport observed the
+    /// peer at, for example the source IP of the connection or datagram
+    /// that carried the request. Never take it from a signaling header.
+    ///
+    /// The address is evidence for policy that already trusts this
+    /// transport (such as matching a carrier's address against the trunk
+    /// its dialed number belongs to), not an identity.
+    pub fn with_observed_peer_address(mut self, address: Option<std::net::IpAddr>) -> Self {
+        self.observed_peer_address = address;
+        self
+    }
+
+    /// The transport-observed peer address, if the adapter attached one.
+    pub const fn observed_peer_address(&self) -> Option<std::net::IpAddr> {
+        self.observed_peer_address
+    }
+
+    /// Attach the caller number the adapter observed for presentation.
+    pub fn with_observed_caller_number(mut self, number: Option<ObservedCallerNumber>) -> Self {
+        self.observed_caller_number = number;
+        self
+    }
+
+    /// The observed caller number, if the adapter attached one.
+    pub fn observed_caller_number(&self) -> Option<&ObservedCallerNumber> {
+        self.observed_caller_number.as_ref()
     }
 
     pub fn connection_id(&self) -> &ConnectionId {
@@ -448,6 +684,14 @@ impl fmt::Debug for InboundConnectionContext {
             .field(
                 "asserted_identity_present",
                 &self.asserted_identity.is_some(),
+            )
+            .field(
+                "observed_peer_address_present",
+                &self.observed_peer_address.is_some(),
+            )
+            .field(
+                "observed_caller_number",
+                &self.observed_caller_number.as_ref().map(|n| n.source()),
             )
             .field(
                 "trusted_signaling_field_count",
@@ -1111,6 +1355,13 @@ pub enum AdapterEvent {
         connection_id: ConnectionId,
         snapshot: QualitySnapshot,
     },
+    /// The connection's audio offer/answer has committed (or changed). Core
+    /// forwards valid values to the operational stream as
+    /// `OperationalEventKind::MediaCommitted`.
+    MediaCommitted {
+        connection_id: ConnectionId,
+        media: CommittedAudioMedia,
+    },
     Message {
         connection_id: ConnectionId,
         text: String,
@@ -1174,6 +1425,10 @@ impl fmt::Debug for AdapterEvent {
                 .field("duration_ms", duration_ms)
                 .finish(),
             Self::Quality { .. } => formatter.write_str("Quality"),
+            Self::MediaCommitted { media, .. } => formatter
+                .debug_struct("MediaCommitted")
+                .field("media", media)
+                .finish(),
             Self::Message { text, .. } => formatter
                 .debug_struct("Message")
                 .field("text_present", &!text.is_empty())
@@ -1213,6 +1468,132 @@ impl fmt::Debug for AdapterEvent {
 mod tests {
     use super::*;
     use crate::identity::{AuthenticationMethod, IdentityAssurance};
+
+    #[test]
+    fn committed_audio_media_vocabulary_is_bounded() {
+        let plain = CommittedAudioMedia::new(1, "PCMU", 0, 8000, 1);
+        assert!(plain.valid());
+        assert!(plain.clone().with_media_profile("RTP/AVP").valid());
+        assert!(plain.clone().with_media_profile("RTP/AVPF").valid());
+        assert!(!plain.clone().with_media_profile("RTP/SAVP").valid());
+        let sdes = plain
+            .clone()
+            .with_security("RTP/SAVP", "sdes", "AES_CM_128_HMAC_SHA1_80", true);
+        assert!(sdes.valid());
+        assert!(CommittedAudioMedia::new(2, "OPUS", 111, 48_000, 2)
+            .with_security(
+                "UDP/TLS/RTP/SAVPF",
+                "dtls_srtp",
+                "AES_256_CM_HMAC_SHA1_32",
+                false
+            )
+            .valid());
+        for invalid in [
+            CommittedAudioMedia::new(0, "PCMU", 0, 8000, 1),
+            CommittedAudioMedia::new(1, "", 0, 8000, 1),
+            CommittedAudioMedia::new(1, "PC MU", 0, 8000, 1),
+            CommittedAudioMedia::new(1, "x".repeat(33), 0, 8000, 1),
+            CommittedAudioMedia::new(1, "PCMU", 128, 8000, 1),
+            CommittedAudioMedia::new(1, "PCMU", 0, 0, 1),
+            CommittedAudioMedia::new(1, "PCMU", 0, 8000, 0),
+            CommittedAudioMedia::new(1, "PCMU", 0, 8000, 9),
+            plain
+                .clone()
+                .with_security("RTP/SAVP", "dtls_srtp", "AES_CM_128_HMAC_SHA1_80", true),
+            plain
+                .clone()
+                .with_security("RTP/SAVP", "sdes", "NULL_HMAC_SHA1_80", true),
+            CommittedAudioMedia {
+                security_contexts_installed: true,
+                ..plain.clone()
+            },
+        ] {
+            assert!(!invalid.valid(), "{invalid:?}");
+        }
+        let wire = serde_json::to_value(&sdes).unwrap();
+        assert_eq!(wire["keying"], "sdes");
+        assert_eq!(
+            serde_json::from_value::<CommittedAudioMedia>(wire).unwrap(),
+            sdes
+        );
+    }
+
+    #[test]
+    fn observed_caller_number_accepts_only_e164() {
+        for valid in [
+            "+1408555",
+            "+14085551212",
+            "+442071838750",
+            "+123456789012345",
+        ] {
+            let number =
+                ObservedCallerNumber::new(valid, ObservedCallerSource::AdmittedFrom).unwrap();
+            assert_eq!(number.number(), valid);
+            assert_eq!(number.source(), ObservedCallerSource::AdmittedFrom);
+            assert!(!format!("{number:?}").contains(&valid[1..]));
+        }
+        for invalid in [
+            "",
+            "+",
+            "14085551212",
+            "+0408555121",
+            "+140855",
+            "+1234567890123456",
+            "+1408555121a",
+            "+1 408 555 1212",
+            "%2B14085551212",
+        ] {
+            assert!(
+                ObservedCallerNumber::new(invalid, ObservedCallerSource::AdmittedFrom).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert_eq!(
+            ObservedCallerSource::TrustedAssertedIdentity.as_str(),
+            "trusted_asserted_identity"
+        );
+        assert_eq!(ObservedCallerSource::AdmittedFrom.as_str(), "admitted_from");
+    }
+
+    #[test]
+    fn observed_peer_and_caller_stay_connection_bound_and_out_of_debug() {
+        let connection = ConnectionId::new();
+        let owner = AuthenticatedPrincipal {
+            subject: "owner".into(),
+            tenant: Some("tenant".into()),
+            scopes: Vec::new(),
+            issuer: None,
+            expires_at: None,
+            method: AuthenticationMethod::ApiKey,
+            assurance: IdentityAssurance::Anonymous,
+        };
+        let address: std::net::IpAddr = "192.0.2.24".parse().unwrap();
+        let caller = ObservedCallerNumber::new(
+            "+14085551212",
+            ObservedCallerSource::TrustedAssertedIdentity,
+        )
+        .unwrap();
+        let context = InboundConnectionContext::new(
+            connection.clone(),
+            Transport::Sip,
+            &owner,
+            None,
+            InboundSignalingMetadata::default(),
+        )
+        .unwrap();
+        assert_eq!(context.observed_peer_address(), None);
+        assert!(context.observed_caller_number().is_none());
+        let context = context
+            .with_observed_peer_address(Some(address))
+            .with_observed_caller_number(Some(caller.clone()));
+        assert_eq!(context.observed_peer_address(), Some(address));
+        assert_eq!(context.observed_caller_number(), Some(&caller));
+        assert!(context.is_bound_to(&connection, Transport::Sip, &owner));
+        assert!(!context.is_bound_to(&ConnectionId::new(), Transport::Sip, &owner));
+        let debug = format!("{context:?}");
+        assert!(!debug.contains("192.0.2.24") && !debug.contains("14085551212"));
+        assert!(debug.contains("TrustedAssertedIdentity"));
+    }
 
     fn principal(tenant: Option<&str>) -> AuthenticatedPrincipal {
         AuthenticatedPrincipal {

@@ -351,6 +351,11 @@ enum AtomicPublishedDuplicateDecision {
     Reject(ClaimedInboundRejection),
 }
 
+#[path = "outbound_peer.rs"]
+mod outbound_peer;
+pub use outbound_peer::OutboundPeerLease;
+use outbound_peer::OutboundPeerLeaseState;
+
 #[derive(Debug)]
 struct ConnectionLifecycleState {
     generation: u64,
@@ -358,6 +363,9 @@ struct ConnectionLifecycleState {
     retired: bool,
     admission_outcomes_notified: HashSet<(u64, Transport)>,
     operational_connected_emitted: bool,
+    /// The live outbound lease that depends on this connection, revoked when
+    /// the connection retires.
+    outbound_peer_dependency: Option<Weak<OutboundPeerLeaseState>>,
 }
 
 #[derive(Clone)]
@@ -4158,6 +4166,7 @@ impl Orchestrator {
                     retired: false,
                     admission_outcomes_notified: HashSet::new(),
                     operational_connected_emitted: false,
+                    outbound_peer_dependency: None,
                 }))
             })
             .clone();
@@ -4194,6 +4203,7 @@ impl Orchestrator {
                 retired: true,
                 admission_outcomes_notified: HashSet::new(),
                 operational_connected_emitted: false,
+                outbound_peer_dependency: None,
             })),
         );
     }
@@ -4292,6 +4302,7 @@ impl Orchestrator {
                 retired: true,
                 admission_outcomes_notified: HashSet::new(),
                 operational_connected_emitted: false,
+                outbound_peer_dependency: None,
             }));
             self.connection_lifecycles
                 .insert(connection_id.clone(), Arc::clone(&lifecycle));
@@ -4373,6 +4384,7 @@ impl Orchestrator {
             retired: false,
             admission_outcomes_notified: HashSet::new(),
             operational_connected_emitted: false,
+            outbound_peer_dependency: None,
         }));
         self.connection_lifecycles
             .insert(connection_id.clone(), Arc::clone(&state));
@@ -4641,6 +4653,7 @@ impl Orchestrator {
             if self.bounded_connection_lifecycles_enabled() {
                 current.key().retire_lifecycle();
             }
+            lifecycle.revoke_outbound_peer_dependency();
             lifecycle.active = false;
             lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
@@ -5443,6 +5456,7 @@ impl Orchestrator {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let lifecycle_generation = state.generation;
+                state.revoke_outbound_peer_dependency();
                 state.active = false;
                 state.retired = true;
                 if let Some(entry) = self.connections.get(conn) {
@@ -5471,6 +5485,7 @@ impl Orchestrator {
                         retired: true,
                         admission_outcomes_notified: HashSet::new(),
                         operational_connected_emitted: false,
+                        outbound_peer_dependency: None,
                     })),
                 );
             } else {
@@ -5540,6 +5555,7 @@ impl Orchestrator {
             if self.bounded_connection_lifecycles_enabled() {
                 current.key().retire_lifecycle();
             }
+            lifecycle.revoke_outbound_peer_dependency();
             lifecycle.active = false;
             lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
@@ -8105,6 +8121,10 @@ impl Orchestrator {
             OrchestratorAdapterEvent::Public(event) => {
                 self.handle_adapter_event(transport, event).await;
             }
+            OrchestratorAdapterEvent::TerminalReceipt { event, consumed } => {
+                self.handle_adapter_event(transport, event).await;
+                consumed.send_replace(true);
+            }
             OrchestratorAdapterEvent::AuthenticatedInboundConnection {
                 connection,
                 participant_id,
@@ -8473,7 +8493,7 @@ impl Orchestrator {
                         transport,
                         at,
                         OperationalEventKind::Failed {
-                            reason: OperationalFailureReason::AdapterReported,
+                            reason: OperationalFailureReason::from_adapter(transport, &detail),
                         },
                     )
                     .await;
@@ -8495,6 +8515,7 @@ impl Orchestrator {
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -8525,6 +8546,7 @@ impl Orchestrator {
         let needs_authoritative_order = matches!(
             &event,
             AdapterEvent::Connected { .. }
+                | AdapterEvent::MediaCommitted { .. }
                 | AdapterEvent::Progress { .. }
                 | AdapterEvent::Ended { .. }
                 | AdapterEvent::Failed { .. }
@@ -8546,6 +8568,7 @@ impl Orchestrator {
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
+            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -8683,6 +8706,7 @@ impl Orchestrator {
                 | AdapterEvent::Progress { .. }
                 | AdapterEvent::Dtmf { .. }
                 | AdapterEvent::Quality { .. }
+                | AdapterEvent::MediaCommitted { .. }
                 | AdapterEvent::Message { .. }
                 | AdapterEvent::DataMessage { .. }
                 | AdapterEvent::TransferStatus { .. }
@@ -8992,6 +9016,24 @@ impl Orchestrator {
                         }
                     }
                 }
+            }
+            AdapterEvent::MediaCommitted {
+                connection_id,
+                media,
+            } => {
+                // Only the bounded vocabulary reaches the authoritative
+                // stream; an adapter bug cannot smuggle free text through.
+                if !media.valid() {
+                    warn!(?transport, "adapter reported invalid committed media");
+                    return;
+                }
+                self.emit_operational(
+                    connection_id,
+                    transport,
+                    Utc::now(),
+                    OperationalEventKind::MediaCommitted { media },
+                )
+                .await;
             }
             AdapterEvent::Quality {
                 connection_id,
@@ -13816,6 +13858,7 @@ mod cross_crate_publisher_tests {
                 retired: false,
                 admission_outcomes_notified: HashSet::new(),
                 operational_connected_emitted: false,
+                outbound_peer_dependency: None,
             })),
         );
 

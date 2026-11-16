@@ -4217,7 +4217,7 @@ impl SessionCrossCrateEventHandler {
         sdp: Option<String>,
         headers: &std::collections::HashMap<String, String>,
         transaction_id: &str,
-        _source_addr: &str,
+        source_addr: &str,
         raw_request: Option<bytes::Bytes>,
         transport: Option<rvoip_infra_common::events::cross_crate::SipTransportContext>,
     ) -> Result<()> {
@@ -4543,6 +4543,12 @@ impl SessionCrossCrateEventHandler {
                 coordinator.notify_inbound_invite_observers(
                     crate::api::unified::InboundInviteObservation {
                         session_id: session_id.clone(),
+                        // The transport event's socket source, not anything
+                        // the request itself claims.
+                        observed_peer_address: source_addr
+                            .parse::<std::net::SocketAddr>()
+                            .ok()
+                            .map(|address| address.ip()),
                         request: observed_request.clone(),
                         principal: authenticated_principal.clone(),
                     },
