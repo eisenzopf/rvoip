@@ -229,7 +229,7 @@ async fn tls_contact_compatibility_preserves_transport_and_bidirectional_rtp() {
             let (ended, ()) = tokio::time::timeout(DEADLINE, async {
                 tokio::join!(receiver.hangup(&call_id), async {
                     let request = wire.until("BYE ").await;
-                    assert!(request.starts_with("BYE sips:undefined@127.0.0.1:5061;transport=tls SIP/2.0"));
+                    assert!(request.starts_with("BYE sip:undefined@127.0.0.1:5061;transport=tls SIP/2.0"), "BYE targets the peer's exact Contact");
                     assert!(header(&request, "Via").starts_with("SIP/2.0/TLS "));
                     let reply = format!(
                         "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n",
@@ -253,7 +253,7 @@ async fn tls_contact_compatibility_preserves_transport_and_bidirectional_rtp() {
 }
 
 #[test]
-fn compatible_contact_keeps_secure_remote_target_and_rejects_downgrades() {
+fn compatible_contact_preserves_original_uri_and_rejects_downgrades() {
     use rvoip_sip_dialog::dialog::Dialog;
     let mut dialog = Dialog::new_early(
         "compatibility-target".into(),
@@ -267,18 +267,56 @@ fn compatible_contact_keeps_secure_remote_target_and_rejects_downgrades() {
     assert!(!dialog.update_remote_target(remote.parse().unwrap()));
     dialog.allow_tls_contact_on_sips = true;
     assert!(dialog.update_remote_target(remote.parse().unwrap()));
-    assert_eq!(
-        dialog.remote_target.to_string(),
-        "sips:undefined@peer.example.test:5061;transport=tls"
-    );
+    assert_eq!(dialog.remote_target.to_string(), remote);
     assert!(dialog.secure_transport_required);
     let pinned = dialog.remote_target.clone();
     for bad in [
         "sip:peer@other.example.test",
         "sip:peer@other.example.test;transport=udp",
         "sip:peer@other.example.test;transport=tcp",
+        "sip:peer@other.example.test;transport=tls;transport=udp",
+        "sip:peer@other.example.test;transport=tls;transport=tls",
     ] {
         assert!(!dialog.update_remote_target(bad.parse().unwrap()));
         assert_eq!(dialog.remote_target, pinned);
     }
+}
+
+#[test]
+fn compatible_contact_preserves_original_uri_on_confirming_response() {
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo},
+    };
+    use rvoip_sip_core::{Response, StatusCode, TypedHeader};
+    use rvoip_sip_dialog::dialog::Dialog;
+    let mut dialog = Dialog::new_early(
+        "compatibility-response".into(),
+        "sips:appliance@example.test".parse().unwrap(),
+        "sips:peer@example.test".parse().unwrap(),
+        Some("local".into()),
+        Some("remote".into()),
+        true,
+    );
+    dialog.allow_tls_contact_on_sips = true;
+    let remote = "sip:opaque@peer.example.test:5061;transport=tls;token=keep";
+    let mut response = Response::new(StatusCode::Ok);
+    response
+        .headers
+        .push(TypedHeader::Contact(Contact::new_params(vec![
+            ContactParamInfo {
+                address: Address::new(remote.parse().unwrap()),
+            },
+        ])));
+    assert!(dialog.update_from_2xx(&response));
+    assert!(dialog.secure_transport_required);
+    assert_eq!(dialog.remote_target.to_string(), remote);
+    assert_eq!(
+        dialog
+            .create_request_template(rvoip_sip_core::Method::Bye)
+            .target_uri
+            .to_string(),
+        remote,
+        "in-dialog requests target the peer's exact Contact"
+    );
 }

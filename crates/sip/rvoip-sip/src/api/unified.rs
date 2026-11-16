@@ -2527,7 +2527,9 @@ pub struct Config {
     pub sip_contact_mode: SipContactMode,
 
     /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
-    /// Requires an observed TLS transaction and preserves SIPS remote routing.
+    /// Requires an observed TLS transaction. The peer's `sip:...;transport=tls`
+    /// Contact (exactly one transport parameter, `tls`) is kept unchanged as
+    /// the remote target, so in-dialog requests stay on TLS.
     /// Defaults to `false`. This field is the only switch: the library reads no
     /// environment variable for it, so embedders map deployment settings here.
     pub sip_allow_tls_contact_on_sips: bool,
