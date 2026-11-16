@@ -410,6 +410,7 @@
     {
       "affected_crates": [
         "rvoip",
+        "rvoip-amazon-a2a",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
         "rvoip-audio-send-queue",
@@ -498,6 +499,7 @@
     {
       "affected_crates": [
         "rvoip",
+        "rvoip-amazon-a2a",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
         "rvoip-audio-send-queue",
@@ -588,6 +590,7 @@
     {
       "affected_crates": [
         "rvoip",
+        "rvoip-amazon-a2a",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
         "rvoip-audio-send-queue",
@@ -1959,6 +1962,7 @@
     {
       "affected_crates": [
         "rvoip",
+        "rvoip-amazon-a2a",
         "rvoip-amazon-connect",
         "rvoip-audio-device",
         "rvoip-audio-send-queue",
@@ -5474,7 +5478,7 @@
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "46-package release inventory audit",
+      "name": "47-package release inventory audit",
       "resource_class": "github-evidence",
       "retry_on_exit_codes": [
         75
@@ -8081,7 +8085,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8118,6 +8122,50 @@
     },
     {
       "affected_crates": [
+        "rvoip-amazon-a2a"
+      ],
+      "affected_paths": [
+        "crates/extensions/rvoip-amazon-a2a/**",
+        "scripts/ci/run_checks.py"
+      ],
+      "always_fresh": false,
+      "category": "Parallel 47-crate core",
+      "command": [
+        "python3",
+        "scripts/ci/run_checks.py",
+        "shard",
+        "--name",
+        "release-rvoip-amazon-a2a",
+        "--packages",
+        "rvoip-amazon-a2a",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "test and lint rvoip-amazon-a2a",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log",
+        "nested-ci-receipt.json"
+      ],
+      "id": "core.rvoip-amazon-a2a",
+      "kind": "cargo",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "rvoip-amazon-a2a unit, integration, example, and Clippy checks",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [
         "rvoip-amazon-connect"
       ],
       "affected_paths": [
@@ -8125,7 +8173,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8169,7 +8217,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8213,7 +8261,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8257,7 +8305,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8301,7 +8349,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8345,7 +8393,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8389,7 +8437,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8433,7 +8481,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8477,7 +8525,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8521,7 +8569,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8565,7 +8613,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8609,7 +8657,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8653,7 +8701,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8697,7 +8745,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8741,7 +8789,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8785,7 +8833,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8829,7 +8877,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8873,7 +8921,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8917,7 +8965,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -8961,7 +9009,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9005,7 +9053,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9049,7 +9097,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9093,7 +9141,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9137,7 +9185,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9181,7 +9229,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9225,7 +9273,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9269,7 +9317,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9313,7 +9361,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9357,7 +9405,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9401,7 +9449,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9445,7 +9493,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9489,7 +9537,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9533,7 +9581,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9577,7 +9625,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9621,7 +9669,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9665,7 +9713,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9709,7 +9757,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9753,7 +9801,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9797,7 +9845,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9841,7 +9889,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9885,7 +9933,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9929,7 +9977,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -9973,7 +10021,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10017,7 +10065,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10061,7 +10109,7 @@
         "scripts/ci/run_checks.py"
       ],
       "always_fresh": false,
-      "category": "Parallel 46-crate core",
+      "category": "Parallel 47-crate core",
       "command": [
         "python3",
         "scripts/ci/run_checks.py",
@@ -10587,6 +10635,7 @@
       "dependencies": [
         "build.facade-feature-bundles",
         "core.rvoip",
+        "core.rvoip-amazon-a2a",
         "core.rvoip-amazon-connect",
         "core.rvoip-audio-device",
         "core.rvoip-audio-send-queue",
@@ -10900,6 +10949,7 @@
       "build.sip-all-targets",
       "build.sip-examples",
       "core.rvoip",
+      "core.rvoip-amazon-a2a",
       "core.rvoip-amazon-connect",
       "core.rvoip-audio-device",
       "core.rvoip-audio-send-queue",
@@ -11029,6 +11079,7 @@
       "build.sip-all-targets",
       "build.sip-examples",
       "core.rvoip",
+      "core.rvoip-amazon-a2a",
       "core.rvoip-amazon-connect",
       "core.rvoip-audio-device",
       "core.rvoip-audio-send-queue",
@@ -11230,5 +11281,5 @@
     "unautomated_legacy_ids": []
   },
   "schema": "rvoip-release-gate-catalog-v1",
-  "workspace_package_count": 46
+  "workspace_package_count": 47
 }

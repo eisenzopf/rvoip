@@ -154,8 +154,8 @@ publishable = [
     for package in metadata["packages"]
     if package["id"] in members and package.get("publish") != []
 ]
-if len(publishable) != 46:
-    raise SystemExit(f"expected 46 publishable workspace packages, found {len(publishable)}")
+if len(publishable) != 47:
+    raise SystemExit(f"expected 47 publishable workspace packages, found {len(publishable)}")
 PY
 
 # Opening thousands of descriptors catches the stock systemd soft-limit bug

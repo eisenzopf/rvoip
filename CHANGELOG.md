@@ -1405,6 +1405,11 @@ outcome unchanged, and add no configuration.
   and integration tests only: no 0.4.0 release gate ran them against an
   independent peer. From 0.5.0 the PBX release gates do (see Release
   process, CI and dependencies); their protected evidence is pending.
+- Add the developer-preview `rvoip-amazon-a2a` Connect external-agent adapter,
+  with native rvoip media bridging, bounded A2A WebSocket framing, turn traces,
+  interruption, and hand-back. Exposed by the optional `amazon-a2a` facade
+  feature. Adds `Transport::AmazonA2a`; downstream exhaustive transport matches
+  must handle the new variant. Live Connect qualification remains pending.
 
 ## 0.4.0 — 2026-10-11
 
