@@ -7380,6 +7380,7 @@ dependencies = [
  "rvoip-uctp",
  "rvoip-vapi",
  "rvoip-vcon",
+ "rvoip-webex-byova",
  "rvoip-webrtc",
  "rvoip-websocket",
  "rvoip-webtransport",
@@ -8389,17 +8390,32 @@ dependencies = [
 name = "rvoip-webex-byova"
 version = "0.4.0"
 dependencies = [
+ "async-trait",
  "base64 0.23.1",
+ "bytes",
  "chrono",
+ "dashmap",
+ "futures",
+ "jsonwebtoken",
+ "parking_lot",
  "prost 0.13.5",
  "prost-types 0.13.5",
  "protoc-bin-vendored",
  "rvoip-codec-core",
+ "rvoip-core",
+ "rvoip-vapi",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.19",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
  "tonic 0.12.3",
  "tonic-build",
+ "tracing",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
