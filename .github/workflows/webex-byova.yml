@@ -1,0 +1,68 @@
+name: Webex BYOVA optional profiles
+
+on:
+  pull_request:
+    paths:
+      - "crates/extensions/rvoip-webex-byova/**"
+      - "third_party/cisco-webex-byova-proto/**"
+      - "scripts/ci/fetch_webex_byova_protos.py"
+      - "crates/media/codec-core/**"
+      - "crates/extensions/rvoip-vapi/**"
+      - "crates/foundation/rvoip-core/src/media_graph.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/webex-byova.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: webex-byova-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  optional-profiles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+          components: clippy
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+        with:
+          shared-key: webex-byova-profiles
+      # Cisco's protobuf contract has no published licence, so it is neither
+      # committed nor packaged. Fetch it from webex/dataSourceSchemas at the
+      # pinned commit into the ignored target/third_party directory; the
+      # script verifies the SHA-256 pins and fails closed.
+      - name: Fetch the pinned Cisco protobuf contract
+        run: python3 scripts/ci/fetch_webex_byova_protos.py
+      - name: Keep Cisco files out of the published package
+        run: |
+          cargo package --locked -p rvoip-webex-byova --list > "$RUNNER_TEMP/package-list.txt"
+          if grep -E '\.proto$|cisco-webex-byova-proto' "$RUNNER_TEMP/package-list.txt"; then
+            echo "rvoip-webex-byova must not package Cisco's protobuf files" >&2
+            exit 1
+          fi
+      # Default-profile tests and lint also run in the normal PR crate shard.
+      # The adapter tests bridge through rvoip-core to rvoip-vapi in ordered
+      # mode, so changes there run this workflow too.
+      - name: Test WAV compatibility without gRPC
+        run: cargo test --locked -p rvoip-webex-byova --features wav-compat
+      - name: Build gRPC from an explicit contract directory, as a packaged crate does
+        env:
+          RVOIP_WEBEX_BYOVA_PROTO_DIR: ${{ github.workspace }}/target/third_party/cisco-webex-byova-proto
+        run: cargo test --locked -p rvoip-webex-byova --features grpc --test grpc
+      - name: Test all profiles, the gRPC transport, and the Rustdoc examples
+        run: cargo test --locked -p rvoip-webex-byova --all-features
+      - name: Lint optional profiles
+        run: cargo clippy --locked -p rvoip-webex-byova --all-targets --all-features -- -D warnings

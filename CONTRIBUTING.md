@@ -43,6 +43,13 @@ change. Main runs it unconditionally. If you include a new document into
 rustdoc, add its path to the gate's patterns in `scripts/ci/policy.json`; the
 CI policy tests fail until you do.
 
+Before a local `--all-features` build (workspace rustdoc, clippy or tests, or
+`rvoip-webex-byova`'s `grpc` feature), run `python3 scripts/ci/fetch_webex_byova_protos.py` once.
+Cisco's Webex BYOVA protobuf contract has no published licence, so it is not
+committed; the script downloads it at a pinned commit into the ignored
+`target/third_party/` directory and verifies its SHA-256 pins. CI and release
+qualification run it automatically before every command that needs it.
+
 ## Pull request expectations
 
 Complete the pull request template, including:

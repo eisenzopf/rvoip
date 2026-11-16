@@ -16,6 +16,9 @@ import time
 import tomllib
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import fetch_webex_byova_protos as webex_byova_protos  # noqa: E402
+
 
 SCHEMA = "rvoip-ci-command-receipt-v1"
 PACKAGE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -900,6 +903,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.gate == "vcon-postgres":
                 postgres_name = start_postgres(root, records)
             commands = specialty_commands(args.gate, root)
+        # Cisco's Webex BYOVA protobuf contract is not committed. Any command
+        # that builds `rvoip-webex-byova/grpc` (every `--all-features`
+        # workspace build, including the rustdoc gate) first fetches the
+        # pinned, checksum-verified files; the fetch is recorded like any
+        # other command and fails the run closed.
+        if any(webex_byova_protos.needed(command) for command, _, _ in commands):
+            commands = [
+                ([sys.executable, "scripts/ci/fetch_webex_byova_protos.py"], None, None),
+                *commands,
+            ]
         for command, cwd, env in commands:
             records.append(command_record(command, root=root, cwd=cwd, env=env))
     except (CheckError, OSError, ValueError) as error:

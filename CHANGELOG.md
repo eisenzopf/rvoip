@@ -98,6 +98,24 @@ Each item has a one-line migration.
   terminal event was already published. Migration: add an arm (or a
   wildcard) to exhaustive `match`es on `RvoipError`, and do not report a
   second failure for that connection.
+- **`Transport` gains `WebexByova`** for the new Webex Contact Center BYOVA
+  adapter. `rvoip-core-traits`' `Transport` is not `#[non_exhaustive]`.
+  Migration: add an arm (or a wildcard) to exhaustive `match`es on
+  `Transport`.
+- **`rvoip_vapi::raw_session` is removed** (`RawVapiSession`,
+  `RawVapiItem`). It opened an ordered, unpaced Vapi socket outside the
+  Orchestrator. Migration: originate or attach the call through
+  `VapiAdapter` with `VapiCallOptions::with_media_delivery(VapiMediaDelivery::Ordered)`,
+  bridge it through the Orchestrator, and read `VapiOrderedEvent`s from
+  `VapiAdapter::take_ordered_events` (or `VapiAgentCall::take_ordered_events`);
+  audio arrives unpaced and in order on the bridged media path.
+- **`rvoip_core::MediaGraphPolicy` gains the public field
+  `backpressure_stall_timeout`** (default `None`, unchanged behaviour).
+  Migration: add `backpressure_stall_timeout: None` to struct literals, or end
+  them with `..Default::default()`.
+- The unreleased `rvoip-webex-byob` prototype crate is renamed
+  `rvoip-webex-byova` (Cisco's term) before its first release. Migration for
+  path or Git users: rename the dependency and `rvoip_webex_byob` paths.
 
 ### Dependencies
 
@@ -1076,6 +1094,14 @@ outcome unchanged, and add no configuration.
 
 ### Core and media graph
 
+- Lossless, ordered delivery for unpaced application bridges. New
+  `MediaGraphPolicy::backpressure_stall_timeout` (default `None`): when set,
+  the graph stops reading its source while any sink queue is full instead of
+  dropping the oldest frame, and evicts a sink that stays full for the budget
+  (`rvoip_media_graph_evictions_total{reason="lossless-stall"}`). Streams opt
+  in through the new provided `MediaStream::lossless_delivery_stall_timeout`
+  (default `None`); a directional bridge uses the shorter budget either side
+  declares. Existing streams and bridges keep drop-oldest behaviour.
 - The operational event stream reports each connection's committed audio
   format. `OperationalEventKind::MediaCommitted { media }` carries a
   `CommittedAudioMedia`: a monotonic per-connection `revision`, codec,
@@ -1211,6 +1237,58 @@ outcome unchanged, and add no configuration.
   order, and hold, resume and end behave the same. Combined with
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
+
+### Webex BYOVA and Vapi
+
+- New experimental `rvoip-webex-byova` adapter for Webex Contact Center BYOVA
+  (Bring Your Own Virtual Agent), built on the prototype protocol engine from
+  #332. `WebexByovaAdapter` implements `ConnectionAdapter` as
+  `Transport::WebexByova` over Cisco's WebSocket protocol and, with the
+  `grpc` feature, its gRPC protocol (one connection per conversation across
+  RPCs). Every connection is authenticated before it is read and published
+  atomically with its principal (`AuthenticatedInboundConnection`, tenant =
+  Webex organization); it supports the fail-closed inbound admission gate,
+  `notify_inbound_admission_outcome`, terminal fallback and authoritative
+  liveness, mints local connection IDs, and writes nothing to Webex until core
+  accepts it. `WebexByovaCall` exposes caller inputs (digits, NO_INPUT,
+  custom events, SESSION_END), reply completion, interruption, input events,
+  handoff and metadata results. Reply boundaries are exact agent-audio
+  positions, applied in band with `follow_reply_marks` or by command. Not yet
+  qualified against live Cisco traffic.
+- `rvoip-webex-byova` is publishable and rvoip no longer redistributes Cisco's
+  protobuf contract, which has no published licence: the two `.proto` files
+  are removed from the repository and the package.
+  `third_party/cisco-webex-byova-proto/` keeps only SHA-256 pins. The optional
+  `grpc` feature compiles the files at build time from
+  `RVOIP_WEBEX_BYOVA_PROTO_DIR` or, in the workspace, from the ignored
+  `target/third_party/cisco-webex-byova-proto/`, which
+  `python3 scripts/ci/fetch_webex_byova_protos.py` fills from webex/dataSourceSchemas at the pinned commit,
+  failing closed on a checksum mismatch. A build without the files fails with
+  instructions. Default builds need nothing. `run_checks.py`, the release gate
+  runner and the `webex-byova.yml` workflow fetch automatically before every
+  command that builds `grpc`, including `--all-features` workspace builds such
+  as the rustdoc gate; run the script once before a local `--all-features`
+  build. The release graph now has 48 publishable packages.
+- `WebexJwsValidator` verifies Cisco BYODS JWS with host-supplied JWKS:
+  signature by `kid` (RS256 by default), allowlisted issuer, audience,
+  optional subject, `exp`/`nbf`/`iat`, a 24-hour maximum lifetime, the
+  registration nonce in `jti`, and the organization, data source URL and
+  schema ID per transport. Keys older than one hour fail closed until
+  `replace_keys`. The organization, URL and schema claim names are not
+  published by Cisco; the defaults are documented assumptions and
+  configurable through `WebexClaimNames`.
+- New `rvoip::webex_byova` facade module behind the `webex-byova` feature,
+  included in `full`. It enables only the crate's default, proto-free surface.
+- New `VapiMediaDelivery::Ordered` per-call option in `rvoip-vapi`
+  (`VapiCallOptions::with_media_delivery`; the default stays `Paced`, with
+  unchanged behaviour). Ordered calls forward each Vapi binary message
+  unchanged and without a media clock, never drop audio (backpressure up to
+  `VapiConfig::ordered_inbound_buffer_bytes`, 256 KiB, then a failure after
+  `VapiConfig::ordered_media_stall_timeout`, 5 s), write caller audio
+  unpaced, skip the barge-in flush, ask bridges for lossless delivery, and
+  publish every event on an exclusive ordered channel stamped with the audio
+  bytes forwarded before it (`VapiOrderedEvent::audio_offset`). This replaces
+  the removed `raw_session` bypass.
 
 ### WebRTC
 
@@ -1405,6 +1483,9 @@ outcome unchanged, and add no configuration.
   and integration tests only: no 0.4.0 release gate ran them against an
   independent peer. From 0.5.0 the PBX release gates do (see Release
   process, CI and dependencies); their protected evidence is pending.
+- The Webex BYOVA implementation specification moves to
+  `docs/WEBEX_BYOVA_IMPLEMENTATION_SPEC.md` and records the 0.5 adapter
+  integration, its JWS assumptions and the remaining gates.
 - Add the developer-preview `rvoip-amazon-a2a` Connect external-agent adapter,
   with native rvoip media bridging, bounded A2A WebSocket framing, turn traces,
   interruption, and hand-back. Exposed by the optional `amazon-a2a` facade

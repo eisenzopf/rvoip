@@ -75,11 +75,12 @@ This table mirrors `crates/rvoip/Cargo.toml`.
 | `webrtc` |  | Developer preview | WebRTC interop adapter under `rvoip::webrtc` |
 | `uctp` |  | Developer preview | UCTP protocol plus QUIC, WebTransport, and WebSocket adapters under `rvoip::uctp` |
 | `vapi` |  | Developer preview | Vapi bidirectional WebSocket agent adapter under `rvoip::vapi` |
+| `webex-byova` |  | Experimental | Webex Contact Center BYOVA virtual-agent transport under `rvoip::webex_byova` (WebSocket). gRPC is the crate's own `grpc` feature, which compiles Cisco's protobuf contract supplied at build time |
 | `sip-stir-shaken` |  | Developer preview | STIR/SHAKEN signing/verification under `rvoip::stir_shaken`; implies `sip` |
 | `voip-3` |  | Developer preview | `sip` + `webrtc` + `uctp` + vCon + identity + AI harness |
 | `client` |  | Developer preview | Cross-transport SDK under `rvoip::client` |
 | `app` |  | Developer preview | High-level SIP/WebRTC/UCTP gateway builder under `rvoip::app` |
-| `full` |  | Developer preview | `voip-3` + `vapi` + `sip-stir-shaken` + `client` + `app` + `dtls-srtp` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
+| `full` |  | Developer preview | `voip-3` + `vapi` + `amazon-a2a` + `webex-byova` + `sip-stir-shaken` + `client` + `app` + `dtls-srtp` + `g729` + `amr`. Excludes `opus`, which needs libopus on the build host — use `all-codecs` for that |
 
 ### Deployment bundles
 
@@ -150,6 +151,7 @@ observer through `SipConfig::source_rate_limit(SipSourceRateLimit)` and
 | `rvoip::auth` | `webrtc` | [`rvoip-auth-core`](../identity/auth-core) |
 | `rvoip::uctp::{protocol, quic, webtransport, websocket}` | `uctp` | UCTP and substrate crates |
 | `rvoip::amazon_a2a` | `amazon-a2a` | [`rvoip-amazon-a2a`](../extensions/rvoip-amazon-a2a) |
+| `rvoip::webex_byova` | `webex-byova` | [`rvoip-webex-byova`](../extensions/rvoip-webex-byova) |
 | `rvoip::vapi` | `vapi` | [`rvoip-vapi`](../extensions/rvoip-vapi) |
 | `rvoip::{vcon, identity, harness}` | `voip-3` | Conversation-model extension crates |
 | `rvoip::client` | `client` | [`rvoip-client`](../rvoip-client) |

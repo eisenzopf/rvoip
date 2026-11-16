@@ -178,6 +178,29 @@ impl fmt::Debug for VapiEventEnvelope {
     }
 }
 
+/// One Vapi event placed exactly in the call's audio stream
+/// ([`crate::VapiMediaDelivery::Ordered`] only).
+///
+/// `audio_offset` is the number of Vapi audio bytes the adapter had forwarded
+/// into the call's media stream before this event arrived on the socket. A
+/// consumer that has received `audio_offset` bytes has seen every byte that
+/// preceded the event and none that followed it.
+#[derive(Clone)]
+pub struct VapiOrderedEvent {
+    pub audio_offset: u64,
+    pub event: VapiEvent,
+}
+
+impl fmt::Debug for VapiOrderedEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VapiOrderedEvent")
+            .field("audio_offset", &self.audio_offset)
+            .field("event", &self.event)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

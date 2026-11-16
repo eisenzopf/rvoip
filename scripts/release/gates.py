@@ -19,6 +19,9 @@ import sys
 import time
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ci"))
+from fetch_webex_byova_protos import needed as webex_byova_protos_needed  # noqa: E402
+
 
 CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
 PLAN_SCHEMA = "rvoip-release-gate-plan-v1"
@@ -190,8 +193,8 @@ def validate_catalog(root: Path, catalog: dict[str, Any]) -> None:
     ):
         raise GateError("remote-release legacy coverage ledger is inconsistent")
     core = [gate for gate in gates if gate["id"].startswith("core.")]
-    if len(core) != catalog.get("workspace_package_count") or len(core) != 47:
-        raise GateError("catalog must contain one core gate for each of 47 workspace crates")
+    if not core or len(core) != catalog.get("workspace_package_count"):
+        raise GateError("catalog must contain one core gate for each workspace crate")
 
 
 def tracked_files(root: Path) -> list[str]:
@@ -926,12 +929,26 @@ def execute_gate(
                 candidate=candidate,
                 environment_id=environment_id,
             ) or expand_command(gate["command"], root, artifact, candidate)
-            final_code = run_to_log(
-                argv,
-                cwd=root / gate.get("working_directory", "."),
-                log_path=log_path,
-                timeout_seconds=timeout_seconds,
-            )
+            # Cisco's Webex BYOVA protobuf contract is not committed: a gate
+            # that builds `rvoip-webex-byova/grpc` (the workspace rustdoc gate)
+            # first fetches the pinned, checksum-verified files into the
+            # ignored target/third_party directory and fails closed if it
+            # cannot.
+            final_code = 0
+            if webex_byova_protos_needed(argv):
+                final_code = run_to_log(
+                    [sys.executable, "scripts/ci/fetch_webex_byova_protos.py"],
+                    cwd=root,
+                    log_path=log_path,
+                    timeout_seconds=timeout_seconds,
+                )
+            if final_code == 0:
+                final_code = run_to_log(
+                    argv,
+                    cwd=root / gate.get("working_directory", "."),
+                    log_path=log_path,
+                    timeout_seconds=timeout_seconds,
+                )
         attempts.append(
             {
                 "attempt": attempt,
@@ -1523,7 +1540,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "validate":
             print(
                 f"catalog valid: {len(catalog['gates'])} gates, "
-                "108 legacy mappings, 47 crate gates"
+                f"108 legacy mappings, {catalog['workspace_package_count']} crate gates"
             )
             return 0
         if args.command == "plan":

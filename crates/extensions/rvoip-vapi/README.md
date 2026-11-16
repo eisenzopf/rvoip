@@ -85,3 +85,46 @@ The live smoke test is ignored by default. Run it explicitly with
 ```sh
 cargo test -p rvoip-vapi --test live_smoke -- --ignored
 ```
+
+## Ordered, unpaced media for protocol gateways
+
+The default `VapiMediaDelivery::Paced` mode suits paced RTP legs: Vapi audio
+is reframed into 20 ms frames, released on a real-time clock through a bounded
+drop-oldest jitter buffer, and flushed on caller barge-in. Application-protocol
+gateways that frame replies themselves, such as the
+[Webex BYOVA adapter](../rvoip-webex-byova), need every byte in wire order
+instead. Select it per call:
+
+```no_run
+use rvoip_vapi::{VapiAssistant, VapiAudioFormat, VapiCallOptions, VapiMediaDelivery};
+
+let options = VapiCallOptions::new(VapiAssistant::saved("assistant-id"))
+    .with_audio_format(VapiAudioFormat::MuLaw8Khz)
+    .with_media_delivery(VapiMediaDelivery::Ordered);
+```
+
+In ordered mode the call still registers with the `Orchestrator` and bridges
+through the core media graph, but:
+
+- each Vapi binary message is forwarded immediately and unchanged; nothing is
+  paced, reframed or dropped. A slow consumer applies backpressure, buffered up
+  to `VapiConfig::ordered_inbound_buffer_bytes` (256 KiB), after which the
+  adapter stops reading the socket. No progress for
+  `VapiConfig::ordered_media_stall_timeout` (5 s) fails the call;
+- the media stream asks bridges for lossless delivery, so the core media graph
+  holds its source instead of dropping frames;
+- `VapiAdapter::take_ordered_events` (or `VapiAgentCall::take_ordered_events`)
+  returns the call's exclusive event stream. Each `VapiOrderedEvent` carries
+  `audio_offset`, the number of audio bytes forwarded before the event, so a
+  consumer can tell exactly which audio preceded a speech or status update;
+- caller barge-in does not flush queued audio; the consumer fences stale audio
+  by position;
+- caller audio toward Vapi is written unpaced; a stalled socket fails the call
+  instead of dropping caller speech.
+
+Positions count bytes in the call's audio format, so pair ordered mode with a
+consumer using the same codec (PCMU/8 kHz for Webex) to avoid transcoding.
+Vapi's own speech events remain provider signals, not guaranteed audio
+completion barriers; the position tells a consumer where an event sits in the
+stream, not that the provider has finished generating audio.
+
