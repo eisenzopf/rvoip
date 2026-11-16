@@ -33,10 +33,12 @@ use tracing::{warn, Instrument};
 use crate::client::{connect_websocket, CreatedCall, VapiHttpClient, VapiSocket};
 use crate::config::VapiConfig;
 use crate::error::{Result, VapiError};
-use crate::events::{VapiEvent, VapiEventEnvelope};
+use crate::events::{VapiEvent, VapiEventEnvelope, VapiOrderedEvent};
 use crate::health::VapiMediaHealth;
 use crate::media::{AudioFramer, VapiMediaStream};
-use crate::types::{AddedMessage, VapiCallOptions, VapiCommand, VapiExistingCall};
+use crate::types::{
+    AddedMessage, VapiCallOptions, VapiCommand, VapiExistingCall, VapiMediaDelivery,
+};
 
 pub const ADAPTER_EVENT_CAPACITY: usize = 256;
 pub const VAPI_CALL_REFERENCE_KIND: &str = "vapi-call-id";
@@ -79,6 +81,11 @@ struct Route {
     initial_events: Mutex<Option<broadcast::Receiver<VapiEvent>>>,
     finished: tokio_util::sync::CancellationToken,
     health: crate::health::MediaHealthState,
+    /// Ordered mode only: events stamped with their audio position. The
+    /// sender lives here so the session loop owns the only producer; the
+    /// receiver is taken once by the consumer.
+    ordered_events_tx: Mutex<Option<mpsc::Sender<VapiOrderedEvent>>>,
+    ordered_events_rx: Mutex<Option<mpsc::Receiver<VapiOrderedEvent>>>,
 }
 
 impl Route {
@@ -104,13 +111,27 @@ impl Route {
         //
         // Sized to `max_catchup_frames_per_tick + 1` so the drain can always
         // deliver the frames the valve decides to release.
-        let incoming_capacity = config.max_catchup_frames_per_tick.saturating_add(1).max(2);
+        let ordered = options.media_delivery == VapiMediaDelivery::Ordered;
+        // Ordered mode has no drain clock to size against: the stream queue is
+        // an ordinary bounded buffer and backpressure does the rest.
+        let incoming_capacity = if ordered {
+            config.media_queue_capacity
+        } else {
+            config.max_catchup_frames_per_tick.saturating_add(1).max(2)
+        };
         let stream = VapiMediaStream::new(
             options.audio_format,
             incoming_capacity,
             config.media_queue_capacity,
             cancel.clone(),
+            ordered.then_some(config.ordered_media_stall_timeout),
         );
+        let (ordered_events_tx, ordered_events_rx) = if ordered {
+            let (tx, rx) = mpsc::channel(config.event_queue_capacity);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
         let (events, initial_events) = broadcast::channel(config.event_queue_capacity);
         let (activation_result, _) = watch::channel(None);
         Arc::new(Self {
@@ -133,6 +154,8 @@ impl Route {
             initial_events: Mutex::new(Some(initial_events)),
             finished: tokio_util::sync::CancellationToken::new(),
             health: crate::health::MediaHealthState::default(),
+            ordered_events_tx: Mutex::new(ordered_events_tx),
+            ordered_events_rx: Mutex::new(ordered_events_rx),
         })
     }
 
@@ -235,6 +258,31 @@ impl VapiAdapter {
             .get(connection_id)
             .map(|route| route.take_event_receiver())
             .ok_or_else(|| RvoipError::ConnectionNotFound(connection_id.clone()))
+    }
+
+    /// Take the exclusive ordered event stream of a call that uses
+    /// [`VapiMediaDelivery::Ordered`].
+    ///
+    /// Each [`VapiOrderedEvent`] carries the number of audio bytes forwarded
+    /// before it. Events are queued from the moment the route exists, so a
+    /// greeting's events are not missed; the queue holds
+    /// [`VapiConfig::event_queue_capacity`] events and a consumer that falls
+    /// that far behind fails the call instead of losing an event. Dropping
+    /// the receiver stops ordered publication only. The receiver closes when
+    /// the call ends. Fails for a paced call or a second take.
+    pub fn take_ordered_events(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Result<mpsc::Receiver<VapiOrderedEvent>> {
+        let route = self
+            .routes
+            .get(connection_id)
+            .map(|entry| Arc::clone(entry.value()))
+            .ok_or(VapiError::NotActive)?;
+        let receiver = route.ordered_events_rx.lock().take();
+        receiver.ok_or(VapiError::InvalidCallOptions(
+            "the call does not use ordered media delivery or its events were already taken",
+        ))
     }
 
     pub(crate) fn call_event_sender(
@@ -1028,6 +1076,14 @@ async fn run_socket_writer(
     config: VapiConfig,
     route: Arc<Route>,
 ) -> futures::stream::SplitSink<VapiSocket, WebSocketMessage> {
+    // Ordered mode never discards caller audio to recover from a slow socket:
+    // one write may take the whole stall budget, and missing it fails the call.
+    let ordered = route.options.media_delivery == VapiMediaDelivery::Ordered;
+    let media_write_timeout = if ordered {
+        config.ordered_media_stall_timeout
+    } else {
+        config.media_write_timeout
+    };
     use futures::SinkExt;
     let mut consecutive_media_timeouts: u32 = 0;
     let started = tokio::time::Instant::now();
@@ -1065,11 +1121,11 @@ async fn run_socket_writer(
                 delivery_guard = Some(guard);
                 (
                     WebSocketMessage::Binary(frame.payload),
-                    config.media_write_timeout,
+                    media_write_timeout,
                     true,
                 )
             }
-            WriteRequest::Media(message) => (message, config.media_write_timeout, true),
+            WriteRequest::Media(message) => (message, media_write_timeout, true),
             WriteRequest::Control(message) => (message, config.websocket_io_timeout, false),
         };
         let message_bytes = message.len();
@@ -1117,6 +1173,17 @@ async fn run_socket_writer(
                         "Vapi WebSocket control write exceeded its deadline"
                     );
                     let _ = faults.send(WriterFault::ControlFailed).await;
+                    break;
+                }
+                if ordered {
+                    tracing::warn!(
+                        connection_id = %route.connection_id,
+                        timeout_ms = media_write_timeout.as_millis() as u64,
+                        message_bytes,
+                        completed_media_messages,
+                        "an ordered Vapi audio write stalled; failing rather than dropping audio"
+                    );
+                    let _ = faults.send(WriterFault::MediaStalled).await;
                     break;
                 }
                 // A media frame that missed its deadline is stale. Drop it and
@@ -1218,6 +1285,21 @@ async fn run_websocket_session(
     tokio::pin!(heartbeat_deadline);
     let mut awaiting_heartbeat_response = false;
 
+    // Ordered, unpaced delivery (see `VapiMediaDelivery::Ordered`). Vapi
+    // audio waits in `ordered_pending` only while the consumer applies
+    // backpressure; positions count every byte forwarded in arrival order.
+    let ordered = route.options.media_delivery == VapiMediaDelivery::Ordered;
+    let ordered_incoming = route.stream.incoming_sender();
+    let ordered_events = route.ordered_events_tx.lock().clone();
+    let mut ordered_pending = VecDeque::<Bytes>::new();
+    let mut ordered_pending_bytes = 0usize;
+    let mut ordered_offset = 0u64;
+    let mut ordered_progress = tokio::time::Instant::now();
+    let bytes_per_sample = match route.options.audio_format {
+        crate::types::VapiAudioFormat::MuLaw8Khz => 1,
+        crate::types::VapiAudioFormat::PcmS16Le16Khz => 2,
+    };
+
     let outcome = loop {
         tokio::select! {
             _ = route.cancel.cancelled() => {
@@ -1234,10 +1316,34 @@ async fn run_websocket_session(
             _ = &mut heartbeat_deadline, if awaiting_heartbeat_response => {
                 break SessionOutcome::Failed("Vapi WebSocket heartbeat response timed out");
             }
-            // Deliberately unguarded: the RTP clock must advance with wall
-            // time even when no audio is available. The agent is silent
-            // whenever it is not speaking, which is most of a call.
-            _ = incoming_tick.tick() => {
+            permit = ordered_incoming.reserve(), if ordered && !ordered_pending.is_empty() => {
+                let Ok(permit) = permit else {
+                    break SessionOutcome::Local(EndReason::BridgeTorn);
+                };
+                if let Some(payload) = ordered_pending.pop_front() {
+                    ordered_pending_bytes = ordered_pending_bytes.saturating_sub(payload.len());
+                    let samples = (payload.len() / bytes_per_sample) as u32;
+                    permit.send(route.stream.frame(payload, timestamp_rtp));
+                    // The timestamp counts samples forwarded, not wall time:
+                    // ordered mode has no media clock.
+                    timestamp_rtp = timestamp_rtp.wrapping_add(samples);
+                    route.health.add_inbound_frames(1);
+                    route.health.set_inbound_depth(ordered_pending.len());
+                    metrics::counter!(
+                        "rvoip_vapi_audio_frames_total", "direction" => "in"
+                    ).increment(1);
+                    ordered_progress = tokio::time::Instant::now();
+                }
+            }
+            _ = tokio::time::sleep_until(ordered_progress + config.ordered_media_stall_timeout),
+                if ordered && !ordered_pending.is_empty() => {
+                break SessionOutcome::Failed("Vapi ordered media consumer stalled");
+            }
+            // Deliberately unguarded in paced mode: the RTP clock must advance
+            // with wall time even when no audio is available. The agent is
+            // silent whenever it is not speaking, which is most of a call.
+            // Ordered mode has no media clock.
+            _ = incoming_tick.tick(), if !ordered => {
                 if route.stream.incoming_is_closed() {
                     break SessionOutcome::Local(EndReason::BridgeTorn);
                 }
@@ -1382,7 +1488,9 @@ async fn run_websocket_session(
                     .reset(tokio::time::Instant::now() + config.websocket_io_timeout);
                 awaiting_heartbeat_response = true;
             }
-            Some(media) = peer_outgoing.recv() => {
+            // Ordered mode reads caller audio only when the writer can take
+            // it, so backpressure reaches the media graph instead of a drop.
+            Some(media) = peer_outgoing.recv(), if !ordered || write_tx.capacity() > 0 => {
                 // Keep the generation ticket through every queue and validate
                 // only at the socket writer, holding its guard through send.
                 match write_tx.try_send(WriteRequest::Peer(media)) {
@@ -1390,7 +1498,7 @@ async fn run_websocket_session(
                     Err(mpsc::error::TrySendError::Closed(_)) => break SessionOutcome::Failed("Vapi WebSocket writer stopped"),
                 }
             }
-            media = outgoing.recv() => {
+            media = outgoing.recv(), if !ordered || write_tx.capacity() > 0 => {
                 let Some(media) = media else {
                     break SessionOutcome::Local(EndReason::BridgeTorn);
                 };
@@ -1400,6 +1508,22 @@ async fn run_websocket_session(
                 }
                 if media.payload.len() > config.max_message_bytes {
                     break SessionOutcome::Failed("Vapi outbound audio frame exceeded size limit");
+                }
+                if ordered {
+                    // Unpaced and unframed: forward each caller payload as
+                    // one binary message, in order.
+                    match write_tx.try_send(WriteRequest::Media(WebSocketMessage::Binary(
+                        media.payload,
+                    ))) {
+                        Ok(()) => {
+                            route.health.add_outbound_frames(1);
+                            metrics::counter!(
+                                "rvoip_vapi_audio_frames_total", "direction" => "out"
+                            ).increment(1);
+                        }
+                        Err(_) => break SessionOutcome::Failed("Vapi WebSocket writer stopped"),
+                    }
+                    continue;
                 }
                 // Symmetric with the inbound path: a transient backlog must
                 // degrade, not end the call. Caller RTP keeps arriving while
@@ -1438,7 +1562,10 @@ async fn run_websocket_session(
                     break SessionOutcome::Failed("Vapi WebSocket control write failed");
                 }
             }
-            message = futures::StreamExt::next(&mut stream) => {
+            // In ordered mode a full backpressure buffer stops socket reads so
+            // TCP flow control reaches Vapi; the stall deadline above bounds it.
+            message = futures::StreamExt::next(&mut stream),
+                if !ordered || ordered_pending_bytes < config.ordered_inbound_buffer_bytes => {
                 if matches!(message.as_ref(), Some(Ok(_))) {
                     awaiting_heartbeat_response = false;
                 }
@@ -1446,6 +1573,21 @@ async fn run_websocket_session(
                     Some(Ok(WebSocketMessage::Binary(payload))) => {
                         if payload.len() > config.max_message_bytes {
                             break SessionOutcome::Failed("Vapi audio message exceeded size limit");
+                        }
+                        if ordered {
+                            if payload.is_empty() {
+                                continue;
+                            }
+                            route.health.record_inbound_chunk(payload.len());
+                            if ordered_pending.is_empty() {
+                                ordered_progress = tokio::time::Instant::now();
+                            }
+                            ordered_offset = ordered_offset.saturating_add(payload.len() as u64);
+                            ordered_pending_bytes =
+                                ordered_pending_bytes.saturating_add(payload.len());
+                            ordered_pending.push_back(payload);
+                            route.health.set_inbound_depth(ordered_pending.len());
+                            continue;
                         }
                         // Vapi's transport is a raw byte stream with no framing
                         // or pacing guarantee, and it delivers coalesced bursts.
@@ -1490,7 +1632,23 @@ async fn run_websocket_session(
                         }
                         let event = VapiEvent::parse(text.as_str());
                         let terminal = event.is_terminal_status();
-                        if event.is_user_speech_start() {
+                        if let Some(ordered_events) = ordered_events.as_ref() {
+                            match ordered_events.try_send(VapiOrderedEvent {
+                                audio_offset: ordered_offset,
+                                event: event.clone(),
+                            }) {
+                                Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+                                Err(mpsc::error::TrySendError::Full(_)) => {
+                                    break SessionOutcome::Failed(
+                                        "Vapi ordered event consumer stalled",
+                                    );
+                                }
+                            }
+                        }
+                        // Ordered mode never flushes on barge-in: the consumer
+                        // fences stale audio by position, which needs every
+                        // byte to arrive.
+                        if !ordered && event.is_user_speech_start() {
                             // Barge-in. Everything queued toward the caller is
                             // stale: without dropping it, the jitter buffer's
                             // depth becomes the barge-in latency floor and the
@@ -1730,6 +1888,8 @@ async fn finish_route(
     route.cancel.cancel();
     route.command_tx.lock().take();
     route.call_id.lock().take();
+    // Close the ordered event stream with the call.
+    route.ordered_events_tx.lock().take();
 
     let remove = environment
         .routes

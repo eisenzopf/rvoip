@@ -36,7 +36,8 @@ use rvoip_core::stream::{
 };
 use rvoip_vapi::{
     VapiAdapter, VapiAgentOutcome, VapiApiKey, VapiAssistant, VapiAudioFormat, VapiCallOptions,
-    VapiConfig, VapiError, VapiEvent, VapiExistingCall, VAPI_CALL_REFERENCE_KIND,
+    VapiConfig, VapiError, VapiEvent, VapiExistingCall, VapiMediaDelivery,
+    VAPI_CALL_REFERENCE_KIND,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -2009,4 +2010,153 @@ async fn attach_agent_for_participant_rejects_existing_human() {
         .expect_err("human cannot be the AI participant");
     assert!(matches!(error, RvoipError::InvalidState(_)));
     server.abort();
+}
+
+async fn next_ordered_audio(receiver: &mut mpsc::Receiver<MediaFrame>) -> MediaFrame {
+    tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("ordered audio arrived")
+        .expect("ordered audio open")
+}
+
+/// Ordered mode forwards Vapi audio unchanged and without a media clock, and
+/// stamps each event with the audio bytes forwarded before it. Caller audio
+/// toward Vapi is written as it arrives, without reframing.
+#[tokio::test]
+async fn ordered_mode_forwards_unpaced_audio_with_event_positions() {
+    let (api_base, state, mut observed, server) = start_mock(Duration::ZERO).await;
+    let mut config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"))
+        .with_api_base(api_base)
+        .with_loopback_test_transport();
+    config.heartbeat_interval = Duration::from_secs(60);
+    let adapter = VapiAdapter::new(config).expect("adapter");
+    let _events = adapter.subscribe_events();
+    let options = VapiCallOptions::new(VapiAssistant::saved("assistant-mock"))
+        .with_media_delivery(VapiMediaDelivery::Ordered);
+    let request = OriginateRequest::new(
+        SessionId::new(),
+        ParticipantId::new(),
+        "vapi.websocket",
+        Direction::Outbound,
+        VapiAudioFormat::MuLaw8Khz.capabilities(),
+    )
+    .with_transport(Transport::Vapi)
+    .with_context(options);
+    let connection_id = adapter
+        .originate(request)
+        .await
+        .expect("prepare route")
+        .connection
+        .id;
+    let mut ordered = adapter
+        .take_ordered_events(&connection_id)
+        .expect("ordered events");
+    assert!(adapter.take_ordered_events(&connection_id).is_err());
+    adapter
+        .activate_outbound_with_receipt(connection_id.clone())
+        .await
+        .expect("activate route");
+    let stream = adapter
+        .streams(connection_id.clone())
+        .await
+        .expect("streams")
+        .remove(0);
+    assert!(stream.lossless_delivery_stall_timeout().is_some());
+    let mut audio = stream.try_frames_in().expect("ordered audio receiver");
+    // The mock's opening chunks arrive unframed (79 and 241 bytes), in order.
+    let first = next_ordered_audio(&mut audio).await;
+    assert_eq!(first.payload.len(), 79);
+    let second = next_ordered_audio(&mut audio).await;
+    assert_eq!(second.payload.len(), 241);
+    assert_eq!(second.timestamp_rtp.wrapping_sub(first.timestamp_rtp), 79);
+    for _ in 0..2 {
+        let event = tokio::time::timeout(Duration::from_secs(2), ordered.recv())
+            .await
+            .expect("ordered event")
+            .expect("ordered events open");
+        assert_eq!(event.audio_offset, 320);
+    }
+
+    // Ten seconds of audio in one burst, then an event. Paced delivery would
+    // take ten seconds; ordered delivery is limited only by the consumer.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let started = Instant::now();
+    for value in 0..10u8 {
+        state
+            .injected
+            .send(Injected::Binary(vec![value; 8_000]))
+            .expect("inject audio");
+    }
+    state
+        .injected
+        .send(Injected::Text(
+            json!({"type":"speech-update","role":"assistant","status":"stopped"}).to_string(),
+        ))
+        .expect("inject event");
+    for value in 0..10u8 {
+        let frame = next_ordered_audio(&mut audio).await;
+        assert_eq!(frame.payload.len(), 8_000);
+        assert!(frame.payload.iter().all(|byte| *byte == value));
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "ordered audio was paced"
+    );
+    let stop = tokio::time::timeout(Duration::from_secs(2), ordered.recv())
+        .await
+        .expect("speech event")
+        .expect("ordered events open");
+    assert_eq!(stop.audio_offset, 320 + 80_000);
+    assert!(matches!(stop.event, VapiEvent::SpeechUpdate { .. }));
+
+    // Caller audio is written as it arrives, one message per payload.
+    let caller = stream.try_frames_out().expect("caller audio sender");
+    for value in 0..5u8 {
+        caller
+            .send(MediaFrame {
+                stream_id: StreamId::new(),
+                kind: StreamKind::Audio,
+                payload: Bytes::from(vec![value; 333]),
+                timestamp_rtp: u32::from(value) * 333,
+                captured_at: Utc::now(),
+                payload_type: Some(0),
+            })
+            .await
+            .expect("send caller audio");
+    }
+    let mut written = Vec::new();
+    while written.len() < 5 {
+        match tokio::time::timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .expect("caller audio written")
+            .expect("observer open")
+        {
+            Observed::Binary(payload, _) => written.push(payload),
+            Observed::Json(_) => {}
+        }
+    }
+    for (value, payload) in written.iter().enumerate() {
+        assert_eq!(payload.len(), 333);
+        assert!(payload.iter().all(|byte| usize::from(*byte) == value));
+    }
+
+    adapter
+        .end(connection_id, EndReason::Normal)
+        .await
+        .expect("end ordered call");
+    assert!(tokio::time::timeout(Duration::from_secs(3), async {
+        while ordered.recv().await.is_some() {}
+    })
+    .await
+    .is_ok());
+    server.abort();
+}
+
+#[test]
+fn paced_delivery_remains_the_default() {
+    let options = VapiCallOptions::new(VapiAssistant::saved("assistant"));
+    assert_eq!(options.media_delivery, VapiMediaDelivery::Paced);
+    let config = VapiConfig::new(VapiApiKey::new("mock-api-key").expect("mock key"));
+    assert!(config.ordered_media_stall_timeout > Duration::ZERO);
+    assert_eq!(config.ordered_inbound_buffer_bytes, 256 * 1024);
 }

@@ -67,6 +67,15 @@ impl VapiAgentCall {
             .unwrap_or_else(|| self.events.subscribe())
     }
 
+    /// Take this call's exclusive ordered event stream. Only calls created
+    /// with [`crate::VapiMediaDelivery::Ordered`] have one; see
+    /// [`VapiAdapter::take_ordered_events`].
+    pub fn take_ordered_events(
+        &self,
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::events::VapiOrderedEvent>> {
+        self.adapter.take_ordered_events(&self.vapi_connection_id)
+    }
+
     pub async fn say(
         &self,
         content: impl Into<String>,
