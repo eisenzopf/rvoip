@@ -638,6 +638,55 @@ transitions:
       - type: "SendBYE"
     description: "Hangup active call; terminal confirmation or the coordinator fallback owns cleanup"
 
+  # A local direction change (hold/resume in flight or committed), mute or
+  # bridge does not end the established dialog, so a local hangup in these
+  # states sends BYE exactly as from Active (RFC 3261 §15.1). A BYE may be
+  # sent while a re-INVITE transaction is still pending.
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+    description: "Hangup established HoldPending call; exact BYE confirmation owns cleanup"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+    description: "Hangup established OnHold call; exact BYE confirmation owns cleanup"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+    description: "Hangup established Resuming call; exact BYE confirmation owns cleanup"
+
+  - role: "Both"
+    state: "Muted"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+    description: "Hangup established Muted call; exact BYE confirmation owns cleanup"
+
+  - role: "Both"
+    state: "Bridged"
+    event:
+      type: "HangupCall"
+    next_state: "Terminating"
+    actions:
+      - type: "SendBYE"
+    description: "Hangup established Bridged call; exact BYE confirmation owns cleanup"
+
   # Remote BYE arrives while we're in any active-call state. dialog-
   # core has already sent 200 OK on the wire; the state machine just
   # finalises resource cleanup. See the long comment above the
