@@ -28,8 +28,22 @@ async fn concurrent_first_stream_requests_create_exactly_one_stream() {
         .expect("originate");
     let conn = originate.connection.id.clone();
 
-    // No answer is applied, so no remote track arrives and every first
-    // caller is still inside stream creation while the others start.
+    // Negotiate against a second loopback peer so the route has a bound
+    // audio sender (stream setup needs the negotiated codec and its RTP
+    // writer). The answerer never sends media, so no remote track arrives:
+    // every first caller is still inside stream creation, waiting for that
+    // track, while the others start.
+    let answerer = WebRtcAdapter::new(WebRtcConfig::loopback());
+    let offer_sdp = adapter.local_sdp(&conn).expect("offer sdp");
+    let inbound = answerer
+        .apply_remote_offer(&offer_sdp)
+        .await
+        .expect("answerer applies offer");
+    let answer_sdp = answerer.local_sdp(&inbound).expect("answer sdp");
+    adapter
+        .apply_remote_answer(conn.clone(), &answer_sdp)
+        .await
+        .expect("offerer applies answer");
     let callers = 4;
     let barrier = Arc::new(tokio::sync::Barrier::new(callers));
     let tasks = (0..callers)
