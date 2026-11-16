@@ -720,7 +720,8 @@ impl TranscodeDirection {
     /// Map a source RTP timestamp into the destination clock.
     fn map_timestamp(&mut self, src_ts: u32) -> u32 {
         let ts0 = *self.src_ts0.get_or_insert(src_ts);
-        let delta = (i64::from(src_ts).wrapping_sub(i64::from(ts0))) * i64::from(self.dst_clock_rate);
+        let delta =
+            (i64::from(src_ts).wrapping_sub(i64::from(ts0))) * i64::from(self.dst_clock_rate);
         let scaled = delta / i64::from(self.src_clock_rate);
         (i64::from(ts0) + scaled) as u32
     }
@@ -771,16 +772,12 @@ async fn forward_rtp_transcode(
                 // Resolve/refresh the destination runtime. A generation change
                 // (re-INVITE) also resets the converter and timestamp anchor so
                 // the new rate is applied from a clean state.
-                let Some(dst_runtime) = codec_runtimes
-                    .get(&dst)
-                    .map(|entry| entry.value().clone())
+                let Some(dst_runtime) = codec_runtimes.get(&dst).map(|entry| entry.value().clone())
                 else {
                     debug!("🔗 transcode forward {src}->{dst}: destination runtime gone");
                     break;
                 };
-                let Some(src_runtime) = codec_runtimes
-                    .get(&src)
-                    .map(|entry| entry.value().clone())
+                let Some(src_runtime) = codec_runtimes.get(&src).map(|entry| entry.value().clone())
                 else {
                     debug!("🔗 transcode forward {src}->{dst}: source runtime gone");
                     break;
@@ -795,17 +792,24 @@ async fn forward_rtp_transcode(
                 );
                 let rebuild = match &direction {
                     Some(existing) => {
-                        (existing.dst_clock_rate,
-                         existing.dst_channels,
-                         existing.src_payload_type,
-                         existing.src_clock_rate,
-                         existing.src_channels) != shape
+                        (
+                            existing.dst_clock_rate,
+                            existing.dst_channels,
+                            existing.src_payload_type,
+                            existing.src_clock_rate,
+                            existing.src_channels,
+                        ) != shape
                     }
                     None => true,
                 };
                 if rebuild {
-                    let (dst_clock_rate, dst_channels, src_payload_type, src_clock_rate, src_channels) =
-                        shape;
+                    let (
+                        dst_clock_rate,
+                        dst_channels,
+                        src_payload_type,
+                        src_clock_rate,
+                        src_channels,
+                    ) = shape;
                     direction = Some(TranscodeDirection {
                         converter: FormatConverter::new(),
                         dst_clock_rate,
@@ -817,8 +821,12 @@ async fn forward_rtp_transcode(
                     });
                     debug!(
                         "🔗 transcode forward {src}->{dst}: {}Hz/{}ch (PT {}) -> {}Hz/{}ch (PT {})",
-                        src_clock_rate, src_channels, src_payload_type,
-                        dst_clock_rate, dst_channels, dst_runtime.format.payload_type
+                        src_clock_rate,
+                        src_channels,
+                        src_payload_type,
+                        dst_clock_rate,
+                        dst_channels,
+                        dst_runtime.format.payload_type
                     );
                 }
                 let Some(direction_state) = direction.as_mut() else {
@@ -903,11 +911,7 @@ async fn forward_rtp_transcode(
                     };
                     let payload_bytes = bytes::Bytes::from(encoded_packet.payload);
                     let send_result = match &dst_send_handle {
-                        Some(handle) => {
-                            handle
-                                .send_packet(packet_ts, payload_bytes, marker)
-                                .await
-                        }
+                        Some(handle) => handle.send_packet(packet_ts, payload_bytes, marker).await,
                         None => {
                             let dst_guard = dst_session.lock().await;
                             dst_guard
@@ -1043,10 +1047,23 @@ mod tests {
             let info = controller.get_session_info(dialog).await.unwrap();
             let mut config = info.config.clone();
             config.remote_addr = Some(peer.local_addr().unwrap());
-            controller.update_media(dialog.clone(), config).await.unwrap();
+            controller
+                .update_media(dialog.clone(), config)
+                .await
+                .unwrap();
         }
-        let a_port = controller.get_session_info(&a).await.unwrap().rtp_port.unwrap();
-        let b_port = controller.get_session_info(&b).await.unwrap().rtp_port.unwrap();
+        let a_port = controller
+            .get_session_info(&a)
+            .await
+            .unwrap()
+            .rtp_port
+            .unwrap();
+        let b_port = controller
+            .get_session_info(&b)
+            .await
+            .unwrap()
+            .rtp_port
+            .unwrap();
 
         // Relay refuses the pair; transcode accepts it.
         let relay_error = expect_err(controller.bridge_sessions(a.clone(), b.clone()).await);
@@ -1065,18 +1082,23 @@ mod tests {
         let send_a = {
             let peer_a = Arc::clone(&peer_a);
             tokio::spawn(async move {
-            for i in 0..40u16 {
-                let payload = vec![0xD5u8; 160]; // mid-range A-law-adjacent pattern
-                let packet =
-                    RtpPacket::new_with_payload(0, i, u32::from(i) * 160, 0x1234_5678, Bytes::from(payload));
-                let bytes = packet.serialize().expect("serialize PCMU packet");
-                peer_a
-                    .send_to(&bytes, format!("127.0.0.1:{a_port}"))
-                    .await
-                    .expect("send PCMU toward leg A");
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
+                for i in 0..40u16 {
+                    let payload = vec![0xD5u8; 160]; // mid-range A-law-adjacent pattern
+                    let packet = RtpPacket::new_with_payload(
+                        0,
+                        i,
+                        u32::from(i) * 160,
+                        0x1234_5678,
+                        Bytes::from(payload),
+                    );
+                    let bytes = packet.serialize().expect("serialize PCMU packet");
+                    peer_a
+                        .send_to(&bytes, format!("127.0.0.1:{a_port}"))
+                        .await
+                        .expect("send PCMU toward leg A");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
         };
 
         // Expect PCMA (PT 8) payloads on B's peer.
@@ -1084,11 +1106,13 @@ mod tests {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline && received_pt8 < 5 {
             let mut buf = vec![0u8; 2048];
-            let (len, _) =
-                tokio::time::timeout(std::time::Duration::from_millis(500), peer_b.recv_from(&mut buf))
-                    .await
-                    .expect("timed out waiting for transcoded RTP on leg B")
-                    .expect("recv_from leg B peer");
+            let (len, _) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                peer_b.recv_from(&mut buf),
+            )
+            .await
+            .expect("timed out waiting for transcoded RTP on leg B")
+            .expect("recv_from leg B peer");
             let packet = RtpPacket::parse(&buf[..len]).expect("parse RTP from leg B");
             if packet.header.payload_type == 8 {
                 received_pt8 += 1;
@@ -1098,7 +1122,10 @@ mod tests {
                     "transcoded PCMA payload must stay 20 ms at 8 kHz"
                 );
             } else {
-                panic!("unexpected payload type {} on leg B", packet.header.payload_type);
+                panic!(
+                    "unexpected payload type {} on leg B",
+                    packet.header.payload_type
+                );
             }
         }
         assert!(
@@ -1111,34 +1138,36 @@ mod tests {
         let send_b = {
             let peer_b = Arc::clone(&peer_b);
             tokio::spawn(async move {
-            for i in 0..40u16 {
-                let payload = vec![0xD5u8; 160];
-                let packet = RtpPacket::new_with_payload(
-                    8,
-                    i,
-                    u32::from(i) * 160,
-                    0x8765_4321,
-                    Bytes::from(payload),
-                );
-                let bytes = packet.serialize().expect("serialize PCMA packet");
-                peer_b
-                    .send_to(&bytes, format!("127.0.0.1:{b_port}"))
-                    .await
-                    .expect("send PCMA toward leg B");
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
+                for i in 0..40u16 {
+                    let payload = vec![0xD5u8; 160];
+                    let packet = RtpPacket::new_with_payload(
+                        8,
+                        i,
+                        u32::from(i) * 160,
+                        0x8765_4321,
+                        Bytes::from(payload),
+                    );
+                    let bytes = packet.serialize().expect("serialize PCMA packet");
+                    peer_b
+                        .send_to(&bytes, format!("127.0.0.1:{b_port}"))
+                        .await
+                        .expect("send PCMA toward leg B");
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
         };
 
         let mut received_pt0 = 0usize;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline && received_pt0 < 5 {
             let mut buf = vec![0u8; 2048];
-            let (len, _) =
-                tokio::time::timeout(std::time::Duration::from_millis(500), peer_a.recv_from(&mut buf))
-                    .await
-                    .expect("timed out waiting for transcoded RTP on leg A")
-                    .expect("recv_from leg A peer");
+            let (len, _) = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                peer_a.recv_from(&mut buf),
+            )
+            .await
+            .expect("timed out waiting for transcoded RTP on leg A")
+            .expect("recv_from leg A peer");
             let packet = RtpPacket::parse(&buf[..len]).expect("parse RTP from leg A");
             assert_eq!(
                 packet.header.payload_type, 0,

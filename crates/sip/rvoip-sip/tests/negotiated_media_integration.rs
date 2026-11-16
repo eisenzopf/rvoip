@@ -73,25 +73,31 @@ async fn negotiated_media_reports_the_committed_format_on_both_legs() {
         .expect("alice invite.send()");
     let alice_handle = alice.session(&alice_call);
 
-    let bob_call = wait_for(&mut bob_events, Duration::from_secs(8), |event| {
-        match event {
+    let bob_call = wait_for(
+        &mut bob_events,
+        Duration::from_secs(8),
+        |event| match event {
             Event::IncomingCall { call_id, .. } => Some(call_id.clone()),
             _ => None,
-        }
-    })
+        },
+    )
     .await
     .expect("bob did not see the INVITE");
     bob.accept_call(&bob_call).await.expect("bob accepts");
 
-    wait_for(&mut alice_events, Duration::from_secs(8), |event| match event {
-        Event::CallAnswered { call_id, .. } if call_id == &alice_call => Some(()),
-        Event::CallFailed {
-            status_code,
-            reason,
-            ..
-        } => panic!("call failed: {status_code} {reason}"),
-        _ => None,
-    })
+    wait_for(
+        &mut alice_events,
+        Duration::from_secs(8),
+        |event| match event {
+            Event::CallAnswered { call_id, .. } if call_id == &alice_call => Some(()),
+            Event::CallFailed {
+                status_code,
+                reason,
+                ..
+            } => panic!("call failed: {status_code} {reason}"),
+            _ => None,
+        },
+    )
     .await
     .expect("alice saw no answer");
 
@@ -100,7 +106,10 @@ async fn negotiated_media_reports_the_committed_format_on_both_legs() {
         .await
         .expect("alice negotiated media");
     assert!(!waited.codec.is_empty(), "codec name is reported");
-    assert!(waited.payload_type < 128, "payload type is an RTP payload type");
+    assert!(
+        waited.payload_type < 128,
+        "payload type is an RTP payload type"
+    );
     assert!(waited.clock_rate > 0, "clock rate is reported");
     assert!(waited.channels >= 1, "channel count is reported");
 
@@ -133,7 +142,11 @@ async fn negotiated_media_reports_the_committed_format_on_both_legs() {
         "legs disagree on the codec: {bob_media:?} vs {waited:?}"
     );
     assert_eq!(
-        (bob_media.payload_type, bob_media.clock_rate, bob_media.channels),
+        (
+            bob_media.payload_type,
+            bob_media.clock_rate,
+            bob_media.channels
+        ),
         (waited.payload_type, waited.clock_rate, waited.channels)
     );
 

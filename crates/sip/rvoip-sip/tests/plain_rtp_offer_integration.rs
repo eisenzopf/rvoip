@@ -85,16 +85,21 @@ async fn plain_rtp_per_call_offer_reaches_a_plain_peer_and_answers() {
         .await
         .expect("alice invite.send()");
 
-    let (bob_session, offer_sdp) = wait_for(&mut bob_events, Duration::from_secs(8), |event| {
-        match event {
-            Event::IncomingCall {
-                call_id, sdp: Some(sdp), ..
-            } => Some((call_id.clone(), sdp.clone())),
-            _ => None,
-        }
-    })
-    .await
-    .expect("bob did not see the INVITE with SDP");
+    let (bob_session, offer_sdp) =
+        wait_for(
+            &mut bob_events,
+            Duration::from_secs(8),
+            |event| match event {
+                Event::IncomingCall {
+                    call_id,
+                    sdp: Some(sdp),
+                    ..
+                } => Some((call_id.clone(), sdp.clone())),
+                _ => None,
+            },
+        )
+        .await
+        .expect("bob did not see the INVITE with SDP");
 
     let media_line = offer_sdp
         .lines()
@@ -119,8 +124,10 @@ async fn plain_rtp_per_call_offer_reaches_a_plain_peer_and_answers() {
 
     bob.accept_call(&bob_session).await.expect("bob accepts");
 
-    let answered = wait_for(&mut alice_events, Duration::from_secs(8), |event| {
-        match event {
+    let answered = wait_for(
+        &mut alice_events,
+        Duration::from_secs(8),
+        |event| match event {
             Event::CallAnswered { call_id, .. } => Some(Ok(call_id.clone())),
             Event::CallFailed {
                 status_code,
@@ -128,12 +135,12 @@ async fn plain_rtp_per_call_offer_reaches_a_plain_peer_and_answers() {
                 ..
             } => Some(Err((*status_code, reason.clone()))),
             _ => None,
-        }
-    })
+        },
+    )
     .await
     .expect("alice saw no terminal signaling event");
-    let alice_session =
-        answered.unwrap_or_else(|(status, reason)| panic!("plain-RTP call failed: {status} {reason}"));
+    let alice_session = answered
+        .unwrap_or_else(|(status, reason)| panic!("plain-RTP call failed: {status} {reason}"));
 
     alice.hangup(&alice_session).await.expect("alice hangup");
 }

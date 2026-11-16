@@ -3224,9 +3224,18 @@ mod tests {
         );
 
         // First header of that name wins, whatever the case of either name.
-        assert_eq!(incoming.header("X-Trunk-Id").as_deref(), Some("first-trunk"));
-        assert_eq!(incoming.header("x-trunk-id").as_deref(), Some("first-trunk"));
-        assert_eq!(incoming.header("X-TRUNK-ID").as_deref(), Some("first-trunk"));
+        assert_eq!(
+            incoming.header("X-Trunk-Id").as_deref(),
+            Some("first-trunk")
+        );
+        assert_eq!(
+            incoming.header("x-trunk-id").as_deref(),
+            Some("first-trunk")
+        );
+        assert_eq!(
+            incoming.header("X-TRUNK-ID").as_deref(),
+            Some("first-trunk")
+        );
         // A standard header sip-core types is found by name too.
         assert_eq!(
             incoming.header("p-asserted-identity").as_deref(),

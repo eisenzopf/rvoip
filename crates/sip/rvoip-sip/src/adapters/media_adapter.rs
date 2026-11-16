@@ -917,10 +917,7 @@ fn validate_uac_audio_answer(
             // offer (commonly telephone-event, sometimes CN). Ignore those
             // unknown formats instead of failing the call: the primary audio
             // format still has to come from the offer (checked below).
-            tracing::debug!(
-                payload_type,
-                "ignoring answer format that was not offered"
-            );
+            tracing::debug!(payload_type, "ignoring answer format that was not offered");
             continue;
         }
         if !sdp_payload_codec_available(answer, payload_type) {
@@ -4445,11 +4442,7 @@ impl MediaAdapter {
 
         let handle = self
             .controller
-            .bridge_sessions_with_mode(
-                exact_a.dialog_id.clone(),
-                exact_b.dialog_id.clone(),
-                mode,
-            )
+            .bridge_sessions_with_mode(exact_a.dialog_id.clone(), exact_b.dialog_id.clone(), mode)
             .await?;
         if !self.media_is_still_exact(&exact_a) || !self.media_is_still_exact(&exact_b) {
             drop(handle);
@@ -5171,34 +5164,35 @@ impl MediaAdapter {
         // advertise ICE/DTLS-SRTP/SDES even when the endpoint is configured for
         // WebRTC; the answer is validated against this offer.
         let plain_rtp = session.plain_rtp_offer;
-        let ice_material =
-            if !plain_rtp && self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
-                let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
-                let host_addr = SocketAddr::new(self.local_ip, local_port);
-                let public_sock = public.map(|sa| {
-                    SocketAddr::new(
-                        sa.ip(),
-                        if sa.port() != 0 {
-                            sa.port()
-                        } else {
-                            local_port
-                        },
-                    )
-                });
-                self.ice
-                    .ensure_local(
-                        &session_id,
-                        dialog_id,
-                        &self.controller,
-                        self.ice_policy,
-                        true,
-                        host_addr,
-                        public_sock,
-                    )
-                    .await
-            } else {
-                None
-            };
+        let ice_material = if !plain_rtp
+            && self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled
+        {
+            let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+            let host_addr = SocketAddr::new(self.local_ip, local_port);
+            let public_sock = public.map(|sa| {
+                SocketAddr::new(
+                    sa.ip(),
+                    if sa.port() != 0 {
+                        sa.port()
+                    } else {
+                        local_port
+                    },
+                )
+            });
+            self.ice
+                .ensure_local(
+                    &session_id,
+                    dialog_id,
+                    &self.controller,
+                    self.ice_policy,
+                    true,
+                    host_addr,
+                    public_sock,
+                )
+                .await
+        } else {
+            None
+        };
 
         // Profile + keying. DTLS-SRTP carries a certificate fingerprint and
         // setup role; SDES carries a=crypto key material. They are mutually
@@ -10710,7 +10704,10 @@ a=fmtp:101 0-15\r\n";
             .unwrap();
         let (payload_type, codec, clock_rate, channels) =
             validate_uac_audio_answer(&offer, &carrier_answer, true).expect("carrier answer");
-        assert_eq!((payload_type, codec.as_str(), clock_rate, channels), (0, "PCMU", 8_000, 1));
+        assert_eq!(
+            (payload_type, codec.as_str(), clock_rate, channels),
+            (0, "PCMU", 8_000, 1)
+        );
 
         let changed = SdpBuilder::new("Session")
             .origin("-", "3", "3", "IN", "IP4", "127.0.0.1")
