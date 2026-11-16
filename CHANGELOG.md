@@ -1102,6 +1102,16 @@ outcome unchanged, and add no configuration.
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
 
+### WebRTC
+
+- The `rvoip-webrtc-stack` peer connection driver no longer spins on a
+  protocol deadline that is already in the past. It used to handle the
+  timeout and loop again without polling its command channel, so a queued
+  `Close` was never serviced and the task held a runtime worker after the
+  call ended; the expired deadline now goes through the driver's normal
+  timer branch. The driver also exits when its command channel closes
+  instead of looping on it.
+
 ### Release process, CI and dependencies
 
 - Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,

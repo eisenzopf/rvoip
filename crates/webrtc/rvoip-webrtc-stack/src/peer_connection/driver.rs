@@ -68,6 +68,10 @@ where
     sockets: HashMap<SocketAddr, Arc<dyn AsyncUdpSocket>>,
     advertised_to_socket: HashMap<SocketAddr, SocketAddr>,
     socket_to_advertised: HashMap<SocketAddr, SocketAddr>,
+    /// Test hook: pins the next protocol deadline (for example to an instant
+    /// that is already in the past) regardless of what the core reports.
+    #[cfg(test)]
+    deadline_override: Option<Instant>,
 }
 
 impl<I> PeerConnectionDriver<I>
@@ -95,6 +99,8 @@ where
             sockets,
             advertised_to_socket,
             socket_to_advertised,
+            #[cfg(test)]
+            deadline_override: None,
         })
     }
 
@@ -193,20 +199,21 @@ where
                     timeout = ice_gatherer_timeout;
                 }
             }
+            #[cfg(test)]
+            if let Some(deadline) = self.deadline_override {
+                timeout = deadline;
+            }
 
             let delay_from_now = timeout
                 .checked_duration_since(Instant::now())
                 .unwrap_or(Duration::from_secs(0));
 
-            // 4.b handle immediate timeout
-            if delay_from_now.is_zero() {
-                let now = Instant::now();
-                self.ice_gatherer.handle_timeout(now)?;
-                let mut core = self.inner.core.lock().await;
-                core.handle_timeout(now)?;
-                continue;
-            }
-
+            // 4.b An already-expired deadline still goes through the timer in
+            // the select below rather than a synchronous handle_timeout and
+            // `continue`. A deadline that stays in the past would otherwise spin
+            // this loop on a runtime worker without ever polling the command
+            // channel (so a queued Close is never seen), yielding only when
+            // Tokio's cooperative budget happens to run out.
             let timer = crate::runtime::sleep(delay_from_now);
             futures::pin_mut!(timer);
 
@@ -222,11 +229,15 @@ where
 
                 // Driver events (RTP, RTCP, or ICE candidate)
                 evt = driver_event_rx.recv().fuse() => {
-                    if let Some(evt) = evt {
-                        let is_closed = self.handle_driver_event(evt).await;
-                        if is_closed {
-                            return Ok(());
-                        }
+                    // Every sender is gone: nothing can command or close this
+                    // driver any more, and recv() would resolve immediately on
+                    // each pass.
+                    let Some(evt) = evt else {
+                        return Ok(());
+                    };
+                    let is_closed = self.handle_driver_event(evt).await;
+                    if is_closed {
+                        return Ok(());
                     }
                 }
 
@@ -658,5 +669,147 @@ where
         }
 
         false
+    }
+}
+
+#[cfg(test)]
+mod event_loop_tests {
+    use super::*;
+    use crate::peer_connection::PeerConnectionEventHandler;
+    use crate::runtime::{Mutex, Runtime, TokioRuntime};
+    use rtc::peer_connection::RTCPeerConnectionBuilder;
+
+    struct NoopHandler;
+
+    #[async_trait::async_trait]
+    impl PeerConnectionEventHandler for NoopHandler {}
+
+    /// Builds a driver over a fresh core and one loopback socket. Returns the
+    /// driver and the receiver of the command channel its `inner` sends on.
+    async fn driver(
+        deadline_override: Option<Instant>,
+    ) -> (PeerConnectionDriver, Receiver<PeerConnectionDriverEvent>) {
+        let runtime: Arc<dyn Runtime> = Arc::new(TokioRuntime);
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let local = socket.local_addr().unwrap();
+        let socket = runtime.wrap_udp_socket(socket).unwrap();
+        // Negotiate first so the core's transports exist and handle_timeout
+        // succeeds; a fresh core fails it and would end the loop early.
+        let mut core = RTCPeerConnectionBuilder::new().build().unwrap();
+        let mut remote = RTCPeerConnectionBuilder::new().build().unwrap();
+        core.create_data_channel("event-loop-regression", None)
+            .unwrap();
+        let offer = core.create_offer(None).unwrap();
+        core.set_local_description(offer.clone()).unwrap();
+        remote.set_remote_description(offer).unwrap();
+        let answer = remote.create_answer(None).unwrap();
+        remote.set_local_description(answer.clone()).unwrap();
+        core.set_remote_description(answer).unwrap();
+        core.handle_timeout(Instant::now()).unwrap();
+        let (driver_event_tx, driver_event_rx) =
+            channel(PEER_CONNECTION_DRIVER_EVENT_CHANNEL_CAPACITY);
+        let inner = Arc::new(PeerConnectionRef {
+            core: Mutex::new(core),
+            runtime,
+            handler: Arc::new(NoopHandler),
+            rtp_transceivers: Mutex::new(HashMap::new()),
+            driver_event_tx,
+            data_channel_events_tx: Mutex::new(HashMap::new()),
+            track_remote_events_tx: Mutex::new(HashMap::new()),
+        });
+        let gatherer = RTCIceGatherer::new(vec![local], vec![local], Default::default());
+        let mut driver = PeerConnectionDriver::new(
+            inner,
+            gatherer,
+            HashMap::from([(local, socket)]),
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+        driver.deadline_override = deadline_override;
+        (driver, driver_event_rx)
+    }
+
+    fn expired() -> Option<Instant> {
+        Some(Instant::now() - Duration::from_secs(1))
+    }
+
+    /// Two workers and a bounded shutdown keep a regression from hanging the
+    /// test binary if the driver loop stops yielding again.
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn expired_deadline_still_services_a_queued_close() {
+        let runtime = runtime();
+        let closed = runtime.block_on(async {
+            let (mut driver, events) = driver(expired()).await;
+            driver
+                .inner
+                .driver_event_tx
+                .try_send(PeerConnectionDriverEvent::Close)
+                .unwrap();
+            let mut task = tokio::spawn(async move { driver.event_loop(events).await });
+            let closed = matches!(
+                tokio::time::timeout(Duration::from_millis(500), &mut task).await,
+                Ok(Ok(Ok(())))
+            );
+            task.abort();
+            closed
+        });
+        runtime.shutdown_timeout(Duration::from_millis(20));
+        assert!(
+            closed,
+            "an expired protocol deadline starved the queued Close"
+        );
+    }
+
+    #[test]
+    fn expired_deadline_keeps_the_driver_cancellable() {
+        let runtime = runtime();
+        let cancelled = runtime.block_on(async {
+            let (mut driver, events) = driver(expired()).await;
+            let mut task = tokio::spawn(async move { driver.event_loop(events).await });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(!task.is_finished(), "the driver loop ended on its own");
+            task.abort();
+            matches!(
+                tokio::time::timeout(Duration::from_millis(500), &mut task).await,
+                Ok(Err(error)) if error.is_cancelled()
+            )
+        });
+        runtime.shutdown_timeout(Duration::from_millis(20));
+        assert!(
+            cancelled,
+            "an expired protocol deadline kept the driver from being aborted"
+        );
+    }
+
+    #[test]
+    fn closed_command_channel_terminates_the_driver() {
+        let runtime = runtime();
+        let terminated = runtime.block_on(async {
+            let (mut driver, _inner_events) = driver(None).await;
+            // A command channel whose senders are all gone.
+            let (events_tx, events) = channel(1);
+            drop(events_tx);
+            let mut task = tokio::spawn(async move { driver.event_loop(events).await });
+            let terminated = matches!(
+                tokio::time::timeout(Duration::from_millis(500), &mut task).await,
+                Ok(Ok(Ok(())))
+            );
+            task.abort();
+            terminated
+        });
+        runtime.shutdown_timeout(Duration::from_millis(20));
+        assert!(
+            terminated,
+            "the driver kept running after its command channel closed"
+        );
     }
 }

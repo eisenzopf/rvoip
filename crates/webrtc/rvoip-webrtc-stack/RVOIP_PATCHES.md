@@ -25,3 +25,20 @@ name remains as a source-compatible no-op for existing Tokio manifests.
 
 The underlying `rvoip-rtc` protocol crate remains Sans-I/O and can still be
 driven by applications using other executors.
+
+## Peer connection driver: expired deadlines and a closed command channel
+
+Upstream's driver loop handled an already-expired protocol deadline by calling
+`handle_timeout` synchronously and `continue`-ing, so a deadline that stayed in
+the past (for example a DTLS retransmit timer after a call ended) spun a Tokio
+worker without ever polling the command channel; a queued `Close` was never
+serviced. It also ignored `None` from the command channel, so once every
+sender was gone `recv()` resolved immediately on each pass and the loop never
+ended.
+
+rvoip's driver sends an expired deadline through the same timer branch of the
+`select!` as any other deadline (a zero-length sleep), so the command channel
+and sockets are polled and the task yields on every pass, and it returns when
+the command channel closes. Private regressions in `peer_connection::driver`
+cover a repeatedly expired deadline with a queued `Close`, abort of a driver
+whose deadline stays expired, and a closed command channel.
