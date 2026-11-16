@@ -12829,10 +12829,20 @@ impl Orchestrator {
         media_plan: DirectionalMediaBridgePlan,
         replacement_context: Option<&ReplacementPreparationContext>,
     ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
-        let bridge_policy = directional_bridge_media_graph_policy(
+        let mut bridge_policy = directional_bridge_media_graph_policy(
             self.connection_transport(&a)?,
             self.connection_transport(&b)?,
         );
+        // An unpaced application stream (for example Webex BYOVA or Vapi in
+        // ordered mode) needs every frame in order: hold the source instead
+        // of dropping. The shorter declared stall budget wins.
+        bridge_policy.backpressure_stall_timeout = [
+            a_stream.lossless_delivery_stall_timeout(),
+            b_stream.lossless_delivery_stall_timeout(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         let a_lane = a_stream.media_lane();
         let b_lane = b_stream.media_lane();
         let lane_inline = bridge_lane_inline_delivery(
