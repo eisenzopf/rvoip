@@ -195,6 +195,23 @@ bumps (they break the test fixtures and examples built on the older APIs).
   makes later sends return `SessionError::MediaError`; the new
   `AudioSender::failure_reason` says why. SDES-SRTP and plain RTP calls are
   unchanged.
+#### Observed peer address and caller number on inbound contexts
+
+- `InboundConnectionContext` carries two typed, adapter-observed facts for
+  ingress policy and presentation: `observed_peer_address()`, the source IP
+  of the transport flow or datagram that carried the request (never a
+  header), and `observed_caller_number()`, an `ObservedCallerNumber` (E.164
+  number plus `ObservedCallerSource`). Adapters attach them with
+  `with_observed_peer_address` / `with_observed_caller_number`; both are
+  redacted from `Debug`.
+- rvoip-sip fills the peer address for every captured inbound context. For
+  a peer admitted by trusted-trunk policy it also fills the caller number:
+  the first E.164 `P-Asserted-Identity` URI (`TrustedAssertedIdentity`),
+  else an E.164 `From` user (`AdmittedFrom`). Non-E.164 forms are not
+  normalized, and untrusted peers get no caller number. A contact-center
+  gateway can use them to check a carrier's source address against the
+  trunk of the dialed number and to show the caller's number, without
+  parsing identity headers itself.
 
 #### Configurable UAS capabilities
 

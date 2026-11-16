@@ -23,10 +23,10 @@ use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, InboundAssertedIdentity, InboundConnectionContext,
-    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OrchestratorAdapterEvent,
-    OriginateRequest, OutboundActivation, RejectReason, SignatureHeaders, TerminalDelivery,
-    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
-    TrustedSignalingProvenance,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, ObservedCallerNumber,
+    ObservedCallerSource, OrchestratorAdapterEvent, OriginateRequest, OutboundActivation,
+    RejectReason, SignatureHeaders, TerminalDelivery, TransferAttemptId, TransferStatus,
+    TransferTarget, TrustedSignalingMetadata, TrustedSignalingProvenance,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -910,6 +910,7 @@ impl SipInboundContextPolicy {
         if observation.principal.is_none() {
             return Ok(None);
         }
+        let mut observed_caller_number = None;
         let (routing_hint, metadata, asserted_identity, trusted_signaling) =
             if let Some(request) = observation.request.as_ref() {
                 let routing_hint = request
@@ -963,6 +964,9 @@ impl SipInboundContextPolicy {
                 } else {
                     None
                 };
+                if trusted_peer {
+                    observed_caller_number = observed_caller_number_of(request);
+                }
                 let trusted_signaling = if trusted_peer {
                     let fields = request
                         .headers
@@ -1010,6 +1014,8 @@ impl SipInboundContextPolicy {
             metadata,
             asserted_identity,
             trusted_signaling,
+            observed_peer_address: observation.observed_peer_address,
+            observed_caller_number,
         }))
     }
 }
@@ -1234,6 +1240,44 @@ struct PendingSipInboundContext {
     metadata: InboundSignalingMetadata,
     asserted_identity: Option<InboundAssertedIdentity>,
     trusted_signaling: Option<TrustedSignalingMetadata>,
+    observed_peer_address: Option<std::net::IpAddr>,
+    observed_caller_number: Option<ObservedCallerNumber>,
+}
+
+/// An E.164 number from a SIP URI user part: `+` (or `%2B`) and 7 to 15
+/// digits without a leading zero. Anything else, including national or
+/// dial-string forms, yields `None` rather than a guessed normalization.
+fn observed_e164_user(user: Option<&str>) -> Option<String> {
+    let user = user?;
+    let digits = user
+        .strip_prefix('+')
+        .or_else(|| user.strip_prefix("%2B"))
+        .or_else(|| user.strip_prefix("%2b"))?;
+    (digits.len() >= 7
+        && digits.len() <= 15
+        && !digits.starts_with('0')
+        && digits.bytes().all(|byte| byte.is_ascii_digit()))
+    .then(|| format!("+{digits}"))
+}
+
+/// Caller number of an INVITE from a peer admitted by trusted-trunk policy:
+/// the first E.164 `P-Asserted-Identity` URI, otherwise an E.164 `From` user.
+fn observed_caller_number_of(request: &rvoip_sip_core::Request) -> Option<ObservedCallerNumber> {
+    let asserted = request.headers.iter().find_map(|header| match header {
+        TypedHeader::PAssertedIdentity(identity) => identity
+            .iter()
+            .find_map(|address| observed_e164_user(address.uri().username())),
+        _ => None,
+    });
+    let (number, source) = asserted
+        .map(|number| (number, ObservedCallerSource::TrustedAssertedIdentity))
+        .or_else(|| {
+            request
+                .from()
+                .and_then(|from| observed_e164_user(from.uri().username()))
+                .map(|number| (number, ObservedCallerSource::AdmittedFrom))
+        })?;
+    ObservedCallerNumber::new(number, source).ok()
 }
 
 struct PendingSipInboundObservation {
@@ -1470,10 +1514,13 @@ impl SipInboundContextStore {
                     pending.metadata,
                 )
                 .map(|context| {
-                    context.with_trusted_signaling(
-                        pending.asserted_identity,
-                        pending.trusted_signaling,
-                    )
+                    context
+                        .with_trusted_signaling(
+                            pending.asserted_identity,
+                            pending.trusted_signaling,
+                        )
+                        .with_observed_peer_address(pending.observed_peer_address)
+                        .with_observed_caller_number(pending.observed_caller_number)
                 }) {
                     Ok(context) => SipInboundContextState::Available(Box::new(context)),
                     Err(error) => {
@@ -7217,6 +7264,7 @@ Signal=5\r\nDuration=160\r\n";
         let trusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
+                observed_peer_address: None,
                 request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from(TRUSTED_TRUNK_ISSUER)),
             })
@@ -7269,6 +7317,7 @@ Signal=5\r\nDuration=160\r\n";
         let untrusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
+                observed_peer_address: None,
                 request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from("some-other-issuer")),
             })
@@ -7281,6 +7330,64 @@ Signal=5\r\nDuration=160\r\n";
         assert!(untrusted.trusted_signaling.is_none());
     }
 
+    #[test]
+    fn observed_caller_number_requires_a_trusted_trunk_and_an_e164_user() {
+        let policy = SipInboundContextPolicy::new(Vec::<String>::new()).expect("policy");
+        let capture = |issuer: &str, asserted: &str| {
+            policy
+                .capture(&InboundInviteObservation {
+                    session_id: SessionId::new(),
+                    observed_peer_address: Some("192.0.2.7".parse().unwrap()),
+                    request: Some(request_with_private_identity("bridge", asserted)),
+                    principal: Some(principal_from(issuer)),
+                })
+                .expect("capture")
+                .expect("context")
+        };
+
+        let trusted = capture(TRUSTED_TRUNK_ISSUER, "<sip:+14085551212@carrier.example>");
+        let caller = trusted.observed_caller_number.expect("asserted caller");
+        assert_eq!(caller.number(), "+14085551212");
+        assert_eq!(
+            caller.source(),
+            ObservedCallerSource::TrustedAssertedIdentity
+        );
+        assert_eq!(
+            trusted.observed_peer_address,
+            Some("192.0.2.7".parse().unwrap())
+        );
+
+        // The fixture's From user (`spoofed`) is not E.164, and a non-E.164
+        // assertion is not normalized, so nothing is observed.
+        let national = capture(TRUSTED_TRUNK_ISSUER, "<sip:4085551212@carrier.example>");
+        assert!(national.observed_caller_number.is_none());
+
+        let untrusted = capture("some-other-issuer", "<sip:+14085551212@carrier.example>");
+        assert!(untrusted.observed_caller_number.is_none());
+        assert_eq!(
+            untrusted.observed_peer_address,
+            Some("192.0.2.7".parse().unwrap()),
+            "the transport-observed address is a fact for every principal"
+        );
+    }
+
+    #[test]
+    fn observed_e164_user_rejects_non_e164_forms() {
+        for (user, expected) in [
+            (Some("+14085551212"), Some("+14085551212")),
+            (Some("%2B14085551212"), Some("+14085551212")),
+            (Some("%2b14085551212"), Some("+14085551212")),
+            (Some("14085551212"), None),
+            (Some("+04085551212"), None),
+            (Some("+140855"), None),
+            (Some("+1408555121212345"), None),
+            (Some("+1408555;cpc=x"), None),
+            (None, None),
+        ] {
+            assert_eq!(observed_e164_user(user).as_deref(), expected, "{user:?}");
+        }
+    }
+
     fn observation(
         session_id: SessionId,
         route: &str,
@@ -7289,6 +7396,7 @@ Signal=5\r\nDuration=160\r\n";
     ) -> InboundInviteObservation {
         InboundInviteObservation {
             session_id,
+            observed_peer_address: None,
             request: Some(request(route, correlation_values)),
             principal,
         }
