@@ -1163,6 +1163,15 @@ outcome unchanged, and add no configuration.
   stream setup fails if the sender, payload type or clock do not match the
   route's codec. With the default multi-codec profile, routes now record
   the codec the final answer selected instead of a capability guess.
+### Identity
+
+- `rvoip-users-core` RS256 issuers verify the tokens they issue.
+  `JwtIssuer::new` built its verification key with
+  `DecodingKey::from_rsa_pem` from the private signing PEM, which parses but
+  cannot verify, so `validate_access_token` and `validate_refresh_token`
+  rejected every RS256 token. The verification key is now built from the
+  public modulus and exponent of the PKCS#8 or PKCS#1 signing key, the same
+  components `public_key_jwk` publishes. HS256 is unchanged.
 
 ### Release process, CI and dependencies
 

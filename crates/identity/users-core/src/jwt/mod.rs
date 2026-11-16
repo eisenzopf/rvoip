@@ -8,6 +8,20 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
+/// Derive the base64url RSA public modulus and exponent from a PKCS#8 or
+/// PKCS#1 private-key PEM. JWT verification and JWKS publication both need
+/// the public key; the private PEM is not a usable verification key.
+fn rsa_public_components(signing_key: &str) -> Result<(String, String)> {
+    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(signing_key)
+        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(signing_key))
+        .map_err(|err| Error::Config(format!("invalid RSA signing key: {err}")))?;
+    let public_key = private_key.to_public_key();
+    Ok((
+        URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
+        URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+    ))
+}
+
 /// JWT issuer
 pub struct JwtIssuer {
     pub(crate) config: JwtConfig,
@@ -270,8 +284,13 @@ impl JwtIssuer {
         };
 
         let decoding_key = match config.algorithm.as_str() {
-            "RS256" => DecodingKey::from_rsa_pem(signing_key.as_bytes())
-                .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?,
+            // `DecodingKey::from_rsa_pem` accepts the private PEM but cannot
+            // verify with it, so every issued token would be rejected.
+            "RS256" => {
+                let (modulus, exponent) = rsa_public_components(signing_key)?;
+                DecodingKey::from_rsa_components(&modulus, &exponent)
+                    .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?
+            }
             "HS256" => DecodingKey::from_secret(signing_key.as_bytes()),
             _ => unreachable!(),
         };
@@ -408,18 +427,15 @@ impl JwtIssuer {
         let signing_key = self.config.signing_key.as_ref().ok_or_else(|| {
             Error::Config("RS256 public JWK requires the configured signing key".to_string())
         })?;
-        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(signing_key)
-            .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(signing_key))
-            .map_err(|err| Error::Config(format!("invalid RSA signing key for JWK: {err}")))?;
-        let public_key = private_key.to_public_key();
+        let (modulus, exponent) = rsa_public_components(signing_key)?;
 
         Ok(serde_json::json!({
             "kty": "RSA",
             "use": "sig",
             "kid": self.header.kid.as_ref().unwrap(),
             "alg": self.config.algorithm,
-            "n": URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
-            "e": URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+            "n": modulus,
+            "e": exponent,
         }))
     }
 
