@@ -935,6 +935,15 @@ production v2 profile, measured on Xeon 6 SMT.
   was also forgotten. A changed key still installs a new
   context, and rollback of a replacement restores only the directions it
   replaced.
+#### Concealment of a gap off the frame grid
+
+- `PlayoutBuffer` conceals only up to the next real frame when that frame
+  starts inside a concealment frame's span. A lost packet shorter than the
+  others, or a packet-time change at the loss, moves every later packet off
+  the old frame grid; concealing whole frames stepped over each of them, so
+  the real audio after such a gap was never played and the stream faded to
+  silence. The concealment frame now carries the missing span and its
+  duration, and playout continues with the real frame.
 
 #### Hot path (#354, #357, #373)
 
