@@ -55,7 +55,8 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_pr_gate_has_no_secret_or_write_permission_surface(self) -> None:
         text = (ROOT / ".github/workflows/pr-gate.yml").read_text()
         self.assertNotIn("secrets.", text)
-        self.assertNotIn("contents: write", text)
+        # GITHUB_TOKEN itself stays read-only; only the App token writes.
+        self.assertIsNone(re.search(r"(?m)^  contents: write", text))
         self.assertNotIn("pull_request_target", text)
 
     def test_pr_gate_reuses_each_shard_build_for_tests_and_lint(self) -> None:
@@ -288,7 +289,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         helper_test = text.index(
             "crates/sip/rvoip-sip/scripts/test_beta_attestation.py", prepare_step
         )
-        commit_step = text.index("Commit release preparation")
+        commit_step = text.index("Commit and push the version bump")
 
         self.assertLess(prepare_step, helper_test)
         self.assertLess(helper_test, commit_step)
@@ -300,7 +301,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             if rule["gate"] == "release-tooling"
         )
         for path in (
-            "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "docs/release/RELEASE_NOTES_NEXT.md",
             "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
         ):
             with self.subTest(path=path):
@@ -624,7 +625,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--name diagnostic-gate-evidence", download)
         self.assertIn(
             "remote-release|release-patch|release-minor) ;;",
-            publication,
+            (ROOT / "scripts/release/resolve_qualified_candidate.sh").read_text(),
         )
 
     def test_release_resume_only_finishes_a_proven_post_gate_failure(self) -> None:
@@ -651,14 +652,60 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("scripts/release/gates.py run", resume)
         self.assertNotIn("cargo test", resume)
 
+    def test_release_prepare_opens_the_pr_as_the_release_app(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+
+        # Events caused by GITHUB_TOKEN start no workflows; the App token lets
+        # the bump PR's PR Gate start by itself, with no dispatched copy and
+        # no held run approval.
+        self.assertIn("actions/create-github-app-token@", text)
+        self.assertIn("client-id: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID }}", text)
+        self.assertIn("private-key: ${{ secrets.RVOIP_RELEASE_APP_PRIVATE_KEY }}", text)
+        self.assertIn("token: ${{ steps.app-token.outputs.token }}", text)
+        self.assertIn("GH_TOKEN: ${{ steps.app-token.outputs.token }}", text.split("Open the release pull request", 1)[1])
+        self.assertNotIn("gh workflow run pr-gate.yml", text)
+        # GITHUB_TOKEN itself stays read-only; only the App token writes.
+        self.assertIsNone(re.search(r"(?m)^  contents: write", text))
+        self.assertIn("git merge-base --is-ancestor HEAD origin/main", text)
+        self.assertLess(
+            text.index("python3 scripts/release/notes.py"),
+            text.index("python3 scripts/release.py prepare"),
+        )
+
+    def test_pr_gate_checks_fragments_and_bump_notes_finality(self) -> None:
+        text = (ROOT / ".github/workflows/pr-gate.yml").read_text()
+        policy = text.split("\n  policy:\n", maxsplit=1)[1].split("\n  crate-tests:\n", maxsplit=1)[0]
+
+        self.assertIn("python3 scripts/release/notes.py check", policy)
+        self.assertIn('notes-final --if-version-changed-since "$base"', policy)
+
+    def test_release_publish_needs_one_approval_and_packages_once(self) -> None:
+        text = (ROOT / ".github/workflows/release-publish.yml").read_text()
+        package = text.split("\n  package:\n", maxsplit=1)[1].split("\n  publish:\n", maxsplit=1)[0]
+        publish = text.split("\n  publish:\n", maxsplit=1)[1]
+
+        self.assertNotIn("environment:", package)
+        self.assertNotIn("CARGO_REGISTRY_TOKEN", package)
+        self.assertIn('python3 "$RELEASE_TOOL" package', package)
+        self.assertIn("name: release-packages", package)
+        self.assertIn("environment: release-publish", publish)
+        self.assertIn("if: inputs.execute", publish)
+        self.assertIn("needs: package", publish)
+        self.assertIn("--packages target/release-packages", publish)
+        self.assertIn("--execute", publish)
+        # The protected job neither verifies nor builds again.
+        self.assertNotIn('"$RELEASE_TOOL" verify', publish)
+        self.assertNotIn("Swatinem/rust-cache", publish)
+        self.assertNotIn("apt-get", publish)
+        self.assertIn('test "$PACKAGED_CANDIDATE" = "$QUALIFIED_CANDIDATE"', publish)
+
     def test_release_publish_consumes_exact_attested_candidate(self) -> None:
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
-        preflight = publication.split(
-            "      - name: Resolve, verify, and check out qualified candidate\n",
-            maxsplit=1,
-        )[1].split("      - name: Fresh package and source verification\n", maxsplit=1)[0]
-
-        self.assertIn("GH_TOKEN: ${{ github.token }}", preflight)
+        preflight = (ROOT / "scripts/release/resolve_qualified_candidate.sh").read_text()
+        self.assertEqual(
+            publication.count("run: bash scripts/release/resolve_qualified_candidate.sh"), 2
+        )
+        self.assertIn("GH_TOKEN: ${{ github.token }}", publication)
         self.assertIn('gh attestation verify "$aggregate"', preflight)
         self.assertIn('candidate="$(jq -r .candidate_sha "$aggregate")"', preflight)
         self.assertIn('git merge-base --is-ancestor "$candidate" origin/main', preflight)
@@ -671,7 +718,6 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertIn('python3 "$RELEASE_TOOL" verify', publication)
         self.assertIn('--qualified-head "$QUALIFIED_CANDIDATE"', publication)
-        self.assertIn('python3 "$RELEASE_TOOL" "${args[@]}"', publication)
 
     def test_release_publish_retains_qualification_reports_as_release_assets(self) -> None:
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()

@@ -114,7 +114,6 @@
       "affected_paths": [
         ".github/workflows/release-prepare.yml",
         "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
-        "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
         "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
         "crates/sip/rvoip-sip/scripts/test_beta_attestation.py",
         "crates/sip/rvoip-sip/scripts/test_beta_gate_source.py",
@@ -126,6 +125,7 @@
         "crates/sip/rvoip-sip/scripts/test_perf_audit.py",
         "crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py",
         "crates/sip/rvoip-sip/scripts/test_perf_regression_baseline.py",
+        "docs/release/RELEASE_NOTES_NEXT.md",
         "scripts/release.py",
         "scripts/test_release.py"
       ],

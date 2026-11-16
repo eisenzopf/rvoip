@@ -279,7 +279,7 @@ AFFECTED_PATH_ADDITIONS = {
     "build.evidence-helper-tests": [
         ".github/workflows/release-prepare.yml",
         "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
-        "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+        "docs/release/RELEASE_NOTES_NEXT.md",
         "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
         "scripts/release.py",
         "scripts/test_release.py",

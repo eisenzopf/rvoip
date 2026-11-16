@@ -347,6 +347,7 @@ def specialty_commands(
                     "scripts/test_release_exception_attestation.py",
                     "scripts/test_release_aws_fanout.py",
                     "scripts/test_release_gates.py",
+                    "scripts/test_release_notes.py",
                     "scripts/test_release_prebuilt_performance.py",
                     "scripts/test_render_qualification_reports.py",
                 ],

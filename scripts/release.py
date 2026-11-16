@@ -14,7 +14,9 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
+import threading
 import time
 import tomllib
 from typing import Any
@@ -29,6 +31,13 @@ COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 USER_AGENT = "rvoip-unified-release/1.0"
 DEFAULT_POLL_SECONDS = 15
 DEFAULT_TIMEOUT_SECONDS = 900
+# Crates uploaded at once within one topological level. crates.io throttles
+# bursts of new versions with HTTP 429; uploads back off and retry.
+DEFAULT_PUBLISH_JOBS = 4
+PUBLISH_RETRY_ATTEMPTS = 6
+RATE_LIMIT_MARKERS = ("429", "too many requests", "rate limit", "published too many")
+PACKAGE_MANIFEST_SCHEMA = "rvoip-release-packages-v1"
+PACKAGE_MANIFEST_NAME = "release-packages.json"
 # Files whose rvoip version references preparation rewrites. A file that
 # mentions an unrelated version string that could equal a release (the vCon
 # wire format's `vcon: "0.4.0"`, for example) must not be listed: preparation
@@ -54,7 +63,7 @@ ACTIVE_RELEASE_METADATA_FILES = (
     Path("crates/sip/rvoip-sip/README.md"),
     Path("crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"),
     Path("crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md"),
-    Path("crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"),
+    Path("docs/release/RELEASE_NOTES_NEXT.md"),
     Path("crates/sip/rvoip-sip/docs/TOPOLOGY_PROFILES.md"),
     Path("crates/sip/sip-core/DEVELOPER_GUIDE.md"),
     Path("crates/sip/sip-core/README.md"),
@@ -451,6 +460,25 @@ def topological_order(packages: dict[str, dict[str, Any]]) -> list[str]:
         cycle = sorted(name for name, degree in indegree.items() if degree)
         raise ReleaseError(f"publishable workspace dependency cycle: {cycle}")
     return ordered
+
+
+def topological_levels(packages: dict[str, dict[str, Any]]) -> list[list[str]]:
+    """Group packages so each level depends only on earlier levels."""
+
+    names = set(packages)
+    dependencies = {
+        name: internal_dependencies(package, names) for name, package in packages.items()
+    }
+    levels: list[list[str]] = []
+    placed: set[str] = set()
+    while len(placed) < len(names):
+        level = sorted(name for name in names - placed if dependencies[name] <= placed)
+        if not level:
+            cycle = sorted(names - placed)
+            raise ReleaseError(f"publishable workspace dependency cycle: {cycle}")
+        levels.append(level)
+        placed.update(level)
+    return levels
 
 
 def require_version(value: str) -> str:
@@ -871,7 +899,7 @@ def validate_changelog_release(root: Path, version: str) -> None:
 
 def validate_release_notes_final(root: Path, version: str) -> None:
     """Reject publication while candidate-only documentation is unresolved."""
-    path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+    path = root / "docs/release/RELEASE_NOTES_NEXT.md"
     text = path.read_text(encoding="utf-8")
     required = (
         version,
@@ -890,6 +918,33 @@ def validate_release_notes_final(root: Path, version: str) -> None:
             "release notes still contain candidate-only qualification markers: "
             f"{present}"
         )
+
+
+def workspace_version_at(root: Path, revision: str) -> str:
+    text = run(["git", "show", f"{revision}:Cargo.toml"], cwd=root).stdout
+    return tomllib.loads(text)["workspace"]["package"]["version"]
+
+
+def notes_final(root: Path, version: str | None, since: str | None) -> None:
+    """Fail a version-bump pull request whose changelog or notes are not final.
+
+    This is the check publication runs, moved to the bump PR's PR Gate, so
+    "notes not final" is found before qualification instead of after it.
+    A PR that does not change the workspace version is skipped.
+    """
+
+    current = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))[
+        "workspace"
+    ]["package"]["version"]
+    if since is not None and workspace_version_at(root, since) == current:
+        print(f"workspace version {current} is unchanged since {since}; not a release bump")
+        return
+    target = version or current
+    if target != current:
+        raise ReleaseError(f"workspace version is {current}, not {target}")
+    validate_changelog_release(root, target)
+    validate_release_notes_final(root, target)
+    print(f"changelog and release notes are final for {target}")
 
 
 def write_atomic(path: Path, payload: bytes) -> None:
@@ -1085,16 +1140,20 @@ class ReleaseLog:
         self.directory.mkdir(parents=True, exist_ok=False)
         self.text_path = self.directory / "commands.log"
         self.events_path = self.directory / "events.jsonl"
+        # Publication uploads one topological level concurrently.
+        self.lock = threading.Lock()
 
     def message(self, value: str) -> None:
-        print(value, flush=True)
-        with self.text_path.open("a") as stream:
-            stream.write(value + "\n")
+        with self.lock:
+            print(value, flush=True)
+            with self.text_path.open("a") as stream:
+                stream.write(value + "\n")
 
     def event(self, kind: str, **values: Any) -> None:
         payload = {"at": utc_now(), "kind": kind, **values}
-        with self.events_path.open("a") as stream:
-            stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+        with self.lock:
+            with self.events_path.open("a") as stream:
+                stream.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
 
     def command(self, argv: list[str], cwd: Path) -> None:
         self.message(f"$ {' '.join(argv)}")
@@ -1109,8 +1168,9 @@ class ReleaseLog:
             )
             assert process.stdout is not None
             for line in process.stdout:
-                print(line, end="", flush=True)
-                stream.write(line)
+                with self.lock:
+                    print(line, end="", flush=True)
+                    stream.write(line)
             code = process.wait()
         self.event("command-result", argv=argv, exit_status=code)
         if code:
@@ -1128,9 +1188,10 @@ class ReleaseLog:
             check=False,
         )
         output = completed.stdout or ""
-        print(output, end="", flush=True)
-        with self.text_path.open("a") as stream:
-            stream.write(output)
+        with self.lock:
+            print(output, end="", flush=True)
+            with self.text_path.open("a") as stream:
+                stream.write(output)
         self.event(
             "command-result",
             argv=argv,
@@ -2194,6 +2255,201 @@ def read_verification_receipt(
     return receipt
 
 
+def file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def package_release(
+    root: Path,
+    version: str,
+    *,
+    qualified_head: str | None,
+    output: Path,
+) -> None:
+    """Package and build-verify every crate once, for the protected publish.
+
+    One `cargo package` invocation over every publishable package uses
+    Cargo's local registry overlay, so dependents package and verify against
+    the target-version archives of their workspace dependencies before any
+    of them is on crates.io. The archives, their SHA-256 and the topological
+    levels go to `output`; `publish --execute --packages output` uploads
+    exactly these bytes and nothing it has not seen here.
+    """
+
+    head = ensure_release_state(
+        root, version, require_no_tag=True, qualified_head=qualified_head
+    )
+    packages, ordered = validate_workspace(root, version, locked=True)
+    receipt = read_verification_receipt(root, version, head, ordered)
+    log = ReleaseLog(root, version, "package")
+    log.event("start", operation="package", version=version, git_commit=head)
+    log.command(
+        ["cargo", "package", "--locked", *[arg for name in ordered for arg in ("-p", name)]],
+        root,
+    )
+    output.mkdir(parents=True, exist_ok=True)
+    hashes: dict[str, str] = {}
+    pre_verified = receipt.get("package_sha256") or {}
+    for name in ordered:
+        artifact = root / "target/package" / f"{name}-{version}.crate"
+        if not artifact.is_file():
+            raise ReleaseError(f"cargo package did not create {artifact}")
+        digest = file_sha256(artifact)
+        if name in pre_verified and pre_verified[name] != digest:
+            raise ReleaseError(
+                f"package {name} differs from its verified archive "
+                f"({pre_verified[name]} != {digest})"
+            )
+        shutil.copy2(artifact, output / artifact.name)
+        hashes[name] = digest
+        log.event("package", crate=name, version=version, sha256=digest)
+    verification = root / "target/release-logs" / version / "verification.json"
+    shutil.copy2(verification, output / "verification.json")
+    manifest = {
+        "schema": PACKAGE_MANIFEST_SCHEMA,
+        "version": version,
+        "git_commit": head,
+        "ordered_packages": ordered,
+        "levels": topological_levels(packages),
+        "package_sha256": hashes,
+        "package_file_manifest_sha256": receipt["package_file_manifest_sha256"],
+        "verification_receipt_sha256": file_sha256(verification),
+        "packaged_at": utc_now(),
+    }
+    write_atomic(
+        output / PACKAGE_MANIFEST_NAME,
+        (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode(),
+    )
+    (output / "SHA256SUMS").write_text(
+        "".join(f"{hashes[name]}  {name}-{version}.crate\n" for name in ordered)
+    )
+    log.event("complete", operation="package", package_count=len(ordered))
+    log.message(
+        f"packaged and verified {len(ordered)} crates at {version} in "
+        f"{len(manifest['levels'])} topological levels"
+    )
+
+
+def load_package_manifest(
+    root: Path,
+    packages_dir: Path,
+    version: str,
+    head: str,
+    ordered: list[str],
+) -> dict[str, Any]:
+    """Load the dry run's archives and refuse anything that does not match."""
+
+    manifest = load_json_object(packages_dir / PACKAGE_MANIFEST_NAME, "release package manifest")
+    hashes = manifest.get("package_sha256")
+    levels = manifest.get("levels")
+    if not (
+        manifest.get("schema") == PACKAGE_MANIFEST_SCHEMA
+        and manifest.get("version") == version
+        and manifest.get("git_commit") == head
+        and manifest.get("ordered_packages") == ordered
+        and isinstance(hashes, dict)
+        and set(hashes) == set(ordered)
+        and isinstance(levels, list)
+        and sorted(name for level in levels for name in level) == sorted(ordered)
+    ):
+        raise ReleaseError("packaged archives do not belong to this release commit")
+    for name in ordered:
+        archive = packages_dir / f"{name}-{version}.crate"
+        if not archive.is_file() or file_sha256(archive) != hashes[name]:
+            raise ReleaseError(f"packaged archive for {name} is missing or altered")
+    return manifest
+
+
+def install_packaged_verification(
+    root: Path, version: str, packages_dir: Path
+) -> None:
+    """Use the dry run's verification receipt instead of verifying again."""
+
+    manifest = load_json_object(packages_dir / PACKAGE_MANIFEST_NAME, "release package manifest")
+    source = packages_dir / "verification.json"
+    if not source.is_file() or file_sha256(source) != manifest.get("verification_receipt_sha256"):
+        raise ReleaseError("packaged verification receipt is missing or altered")
+    destination = root / "target/release-logs" / version / "verification.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_file() and file_sha256(destination) != file_sha256(source):
+        raise ReleaseError("a different verification receipt already exists for this version")
+    shutil.copy2(source, destination)
+
+
+def cargo_publish(root: Path, name: str, log: ReleaseLog) -> None:
+    """Upload one crate without rebuilding it, backing off on rate limits."""
+
+    argv = ["cargo", "publish", "-p", name, "--locked", "--no-verify", "--registry", "crates-io"]
+    for attempt in range(1, PUBLISH_RETRY_ATTEMPTS + 1):
+        log.message(f"$ {' '.join(argv)}")
+        log.event("command", argv=argv, attempt=attempt)
+        completed = subprocess.run(
+            argv, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False
+        )
+        output = completed.stdout or ""
+        log.message(output.rstrip())
+        log.event("command-result", argv=argv, exit_status=completed.returncode, attempt=attempt)
+        if completed.returncode == 0:
+            return
+        if attempt < PUBLISH_RETRY_ATTEMPTS and any(
+            marker in output.lower() for marker in RATE_LIMIT_MARKERS
+        ):
+            delay = min(600, 60 * attempt)
+            log.message(f"crates.io rate limit for {name}; retrying in {delay} s")
+            time.sleep(delay)
+            continue
+        raise ReleaseError(f"command failed ({completed.returncode}): {' '.join(argv)}")
+
+
+def publish_packaged_level(
+    root: Path,
+    version: str,
+    level: list[str],
+    hashes: dict[str, str],
+    log: ReleaseLog,
+    jobs: int,
+) -> None:
+    """Publish one topological level concurrently and wait for all of it."""
+
+    def publish_one(name: str) -> None:
+        expected = hashes[name]
+        remote = crates_io_version(name, version)
+        if remote is not None:
+            assert_existing_checksum(name, version, expected, remote)
+            log.message(f"resume: verified existing {name}@{version}")
+            log.event("resume", crate=name, version=version, sha256=expected)
+            return
+        # Packaging is deterministic: re-creating the archive now must give
+        # the dry run's bytes, or nothing is uploaded.
+        _, local = package_artifact(root, name, version, log)
+        if local != expected:
+            raise ReleaseError(
+                f"{name} would not publish the dry-run archive ({expected} != {local})"
+            )
+        cargo_publish(root, name, log)
+        wait_for_version(
+            name,
+            version,
+            local_sha256=expected,
+            poll_seconds=int(os.environ.get("RVOIP_RELEASE_POLL_SECONDS", DEFAULT_POLL_SECONDS)),
+            timeout_seconds=int(
+                os.environ.get("RVOIP_RELEASE_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS)
+            ),
+            log=log,
+        )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(jobs, len(level)))) as pool:
+        futures = {pool.submit(publish_one, name): name for name in level}
+        errors = []
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                future.result()
+            except ReleaseError as error:
+                errors.append(f"{futures[future]}: {error}")
+    if errors:
+        raise ReleaseError("publication failed: " + "; ".join(sorted(errors)))
+
+
 def assert_existing_checksum(
     name: str, version: str, local_sha256: str, remote: dict[str, Any]
 ) -> None:
@@ -2269,6 +2525,8 @@ def publish(
     *,
     execute: bool,
     qualified_head: str | None = None,
+    packages_dir: Path | None = None,
+    jobs: int = DEFAULT_PUBLISH_JOBS,
 ) -> None:
     head = ensure_release_state(
         root,
@@ -2279,6 +2537,13 @@ def publish(
     packages, ordered = validate_workspace(root, version, locked=True)
     if execute:
         validate_release_notes_final(root, version)
+        if packages_dir is None:
+            raise ReleaseError(
+                "--execute publishes only archives a dry run packaged and verified; "
+                "pass --packages from `release.py package`"
+            )
+    if packages_dir is not None:
+        install_packaged_verification(root, version, packages_dir)
     receipt = read_verification_receipt(root, version, head, ordered)
     if qualified_head is not None:
         qualification = receipt.get("beta_qualification")
@@ -2307,8 +2572,43 @@ def publish(
         version=version,
         git_commit=head,
     )
-    if execute:
+    if packages_dir is not None:
+        manifest = load_package_manifest(root, packages_dir, version, head, ordered)
+        if manifest["package_file_manifest_sha256"] != verified_file_hashes:
+            raise ReleaseError("packaged file manifests differ from verification")
+        levels = manifest["levels"]
+        for number, level in enumerate(levels, 1):
+            log.message(f"level {number}/{len(levels)}: {', '.join(level)}")
+        if not execute:
+            log.message(f"publication plan: {len(ordered)} crates in {len(levels)} levels")
+            return
         credential_preflight(root, ordered, log)
+        published: set[str] = set()
+        for number, level in enumerate(levels, 1):
+            missing = sorted(
+                {
+                    dependency
+                    for name in level
+                    for dependency in internal_dependencies(packages[name], set(packages))
+                }
+                - published
+            )
+            if missing:
+                raise ReleaseError(f"topological publish invariant failed: {missing}")
+            log.message(f"== level {number}/{len(levels)}: {', '.join(level)}")
+            publish_packaged_level(
+                root, version, level, manifest["package_sha256"], log, jobs
+            )
+            published.update(level)
+        log.event(
+            "complete",
+            operation="publish",
+            mode="execute",
+            package_count=len(ordered),
+            visible_count=len(published),
+        )
+        log.message(f"published and verified all {len(ordered)} packages at {version}")
+        return
     visible: set[str] = set()
     for index, name in enumerate(ordered, 1):
         log.message(f"== {index}/{len(ordered)} {name}@{version}")
@@ -2422,10 +2722,18 @@ def parser() -> argparse.ArgumentParser:
     )
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("audit", help="read-only local/crates.io version audit")
-    for name in ("prepare", "verify", "publish"):
+    notes = commands.add_parser(
+        "notes-final", help="require final changelog and release notes on a version bump"
+    )
+    notes.add_argument("--version", help="defaults to the workspace version")
+    notes.add_argument(
+        "--if-version-changed-since",
+        help="skip unless the workspace version differs from this revision",
+    )
+    for name in ("prepare", "verify", "package", "publish"):
         command = commands.add_parser(name)
         command.add_argument("--version", required=True)
-        if name in ("verify", "publish"):
+        if name in ("verify", "package", "publish"):
             command.add_argument(
                 "--qualified-head",
                 default=os.environ.get("RVOIP_RELEASE_QUALIFIED_HEAD"),
@@ -2456,11 +2764,29 @@ def parser() -> argparse.ArgumentParser:
                 "--remote-qualification",
                 default=os.environ.get("RVOIP_REMOTE_QUALIFICATION"),
             )
+        if name == "package":
+            command.add_argument(
+                "--output",
+                type=Path,
+                required=True,
+                help="directory for the archives, their SHA-256 and the publication plan",
+            )
         if name == "publish":
             command.add_argument(
                 "--execute",
                 action="store_true",
                 help="publish irreversibly; default is dry-run",
+            )
+            command.add_argument(
+                "--packages",
+                type=Path,
+                help="archives from `release.py package`; required with --execute",
+            )
+            command.add_argument(
+                "--jobs",
+                type=int,
+                default=DEFAULT_PUBLISH_JOBS,
+                help="crates uploaded concurrently within one topological level",
             )
     return result
 
@@ -2471,6 +2797,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "audit":
             audit(root)
+        elif args.command == "notes-final":
+            notes_final(root, args.version, args.if_version_changed_since)
         else:
             version = require_version(args.version)
             if args.command == "prepare":
@@ -2486,12 +2814,24 @@ def main(argv: list[str] | None = None) -> int:
                     args.remote_qualification,
                     args.qualified_head,
                 )
+            elif args.command == "package":
+                package_release(
+                    root,
+                    version,
+                    qualified_head=args.qualified_head,
+                    output=args.output if args.output.is_absolute() else root / args.output,
+                )
             elif args.command == "publish":
+                packages_dir = args.packages
+                if packages_dir is not None and not packages_dir.is_absolute():
+                    packages_dir = root / packages_dir
                 publish(
                     root,
                     version,
                     execute=args.execute,
                     qualified_head=args.qualified_head,
+                    packages_dir=packages_dir,
+                    jobs=args.jobs,
                 )
     except ReleaseError as error:
         print(f"release: FAIL: {error}", file=sys.stderr)

@@ -9,15 +9,77 @@ Feature maturity remains independent of package version. In particular, the
 SIP surface has release-gated beta evidence while other optional surfaces may
 remain experimental.
 
+## Release day
+
+A patch release takes about four hours of machine time and one human
+approval:
+
+1. Pick a `main` commit `C` whose nightly `remote-release` qualification
+   passed.
+2. Dispatch **Release qualification** with `profile=bench-release` (or
+   `bench-minor` for a minor release) on `C`, and at the same time **Prepare
+   release PR** with `candidate=C` and `qualification_run_id=<C's nightly run>`.
+3. The bump PR's PR Gate starts by itself and also checks that the changelog
+   and release notes are final. Merge it with a merge commit once it and the
+   benchmark are green.
+4. Dispatch **Release qualification** with `profile=release-patch` (or
+   `release-minor`), `candidate=<the bump PR's head commit>`,
+   `first_candidate=false` and `prior_run_id=<nightly run>,<bench run>`. It
+   reuses every receipt and runs only the bookkeeping gates.
+5. Dispatch **Publish protected release** with that run and `execute=true`,
+   and approve the `release-publish` environment once.
+
+## Change fragments
+
+Each pull request that changes behaviour adds `changes/<pr>.md`
+(`changes/README.md` has the format). The PR Gate validates every fragment.
+Prepare appends them to `## Unreleased` in `CHANGELOG.md`, renders them into
+the generated block of `docs/release/RELEASE_NOTES_NEXT.md`, fills the notes'
+qualification record from the candidate's qualification run, and deletes
+them. Hand-written changelog and notes prose stays as it is.
+
 ## Prepare
 
 Use the **Prepare release PR** workflow with the next version, for example
-`0.4.0`. It checks out the current `main`, runs the unified preparation and
-release-tooling tests, runs the evidence-helper suite against the generated
-tree, and opens a draft release pull request. Atomic preparation preserves
-existing file permission modes, including executable release wrappers. The
-release PR must pass the normal `PR Gate`; it is never pushed directly to
-`main`.
+`0.4.0`, and the candidate commit (default: the head of `main`). It branches
+from the candidate, assembles the change fragments, runs the unified
+preparation and release-tooling tests, runs the evidence-helper suite against
+the generated tree, and opens the release pull request. Atomic preparation
+preserves existing file permission modes, including executable release
+wrappers. The release PR must pass the normal `PR Gate`; it is never pushed
+directly to `main`.
+
+The branch and pull request are created with the release GitHub App's
+installation token, so the PR Gate starts on the PR by itself. (A pull
+request opened with `GITHUB_TOKEN` starts no workflows: 0.4.0's needed a
+dispatched copy of the gate and waited six hours for a run approval.) On a
+pull request that changes the workspace version, the PR Gate's policy job
+runs `scripts/release.py notes-final`, the same changelog and release-notes
+finality check publication runs, so unfinished notes are found before
+qualification rather than after it.
+
+### Release App
+
+The workflow needs a GitHub App installed on this repository, configured once
+by a repository admin:
+
+1. GitHub, **Settings → Developer settings → GitHub Apps → New GitHub App**
+   (under the account that owns the repository). Name it, for example,
+   `rvoip-release`. Homepage URL: the repository URL. Uncheck **Webhook →
+   Active**.
+2. **Repository permissions**: *Contents* Read and write, *Pull requests*
+   Read and write. *Metadata* Read-only is added automatically. Nothing else.
+3. **Where can this GitHub App be installed?** Only on this account. Create
+   it.
+4. On the App's page, note the **Client ID**, then **Generate a private key**
+   (a `.pem` file downloads).
+5. **Install App** → this account → **Only select repositories** →
+   `rvoip`.
+6. In the repository, **Settings → Secrets and variables → Actions**:
+   add the variable `RVOIP_RELEASE_APP_CLIENT_ID` (the Client ID) and the
+   secret `RVOIP_RELEASE_APP_PRIVATE_KEY` (the whole `.pem` file).
+7. If a branch ruleset restricts who may push `release/**` branches or open
+   pull requests, add the App to its bypass or actor list.
 
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
@@ -336,11 +398,30 @@ checks that did run.
 ## Publish
 
 Use the protected **Publish protected release** workflow and provide the
-successful remote-release qualification run ID. Its default is a
-non-publishing dry run:
+successful release-profile qualification run ID. One dispatch needs one
+approval. Its `package` job runs without the protected environment: it
+verifies the qualified commit, checks the release notes are final, and runs
+one `cargo package` over every publishable crate, which builds each archive
+against Cargo's local registry overlay before any of them is on crates.io.
+The archives, their SHA-256 (`SHA256SUMS`) and the topological publication
+plan are uploaded as the `release-packages` artifact. With `execute=false`
+the run stops there; that is the dry run.
+
+With `execute=true` the `publish` job then waits for the `release-publish`
+approval and publishes exactly those archives: it neither verifies nor
+compiles again. Packaging is deterministic, so each crate is re-packaged
+immediately before upload and must reproduce the dry run's bytes, or nothing
+is uploaded; after upload, crates.io's checksum must equal the same SHA-256.
+Crates are uploaded one topological level at a time, up to four at once
+(`--jobs`), and an upload that crates.io rate-limits (HTTP 429) backs off and
+retries. (Packaging all 46 `v0.4.0` crates this way reproduced crates.io's
+recorded checksums for every one.)
+
+The underlying commands:
 
 ```sh
-scripts/release.sh publish --version X.Y.Z
+scripts/release.sh package --version X.Y.Z --output target/release-packages
+scripts/release.sh publish --version X.Y.Z --packages target/release-packages --execute
 ```
 
 The workflow resolves and verifies the signed aggregate before trusting its
@@ -354,20 +435,14 @@ qualified. The crates.io token exists only in the approval-protected
 `release-publish` environment and is never available to PR, nightly, or
 performance runners.
 
-After environment approval, set `execute=true` in the workflow to publish:
-
-```sh
-scripts/release.sh publish --version X.Y.Z --execute
-```
-
 Publication normally requires a clean `main` equal to `origin/main`. The
 protected workflow may instead supply the exact signed qualification SHA; in
 that mode the clean local `main` must equal that full SHA and it must be an
 ancestor of live `origin/main`. Both modes require the matching verification
-receipt and an unused `vX.Y.Z` tag. Each crate is packaged and dry-run
-immediately before publication, and its file manifest must match the verified
-receipt. The tool records the final archive hash, waits for each version to
-become visible on crates.io, and only then packages and publishes dependents.
+receipt and an unused `vX.Y.Z` tag. Each archive's file manifest must match
+the verified receipt. The tool waits for every version in a level to become
+visible on crates.io, with the dry run's checksum, before it publishes the
+next level.
 
 An interrupted run is resumable. A version already on crates.io is skipped
 only when its registry checksum matches the locally verified `.crate` artifact;
