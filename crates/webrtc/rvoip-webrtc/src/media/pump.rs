@@ -27,9 +27,15 @@ use crate::media::outbound::OutboundAudioRtpWriter;
 
 pub const FRAME_CHANNEL_CAP: usize = 64;
 
-/// Default deadline applied when a caller of `spawn_inbound_pump` does not
-/// provide one. Keep in sync with `WebRtcConfig::inbound_send_deadline_ms`.
-pub const DEFAULT_INBOUND_SEND_DEADLINE_MS: u64 = 200;
+/// Default for `WebRtcConfig::inbound_send_deadline_ms`: how long the inbound
+/// pump waits for room in a full inbound frame queue before it drops the
+/// arriving frame. It is kept below one 10 ms packet period so that a stalled
+/// consumer never slows the RTP reader below the wire rate.
+pub const DEFAULT_INBOUND_SEND_DEADLINE_MS: u64 = 5;
+
+/// Default for `WebRtcConfig::inbound_frame_queue_capacity`: frames held for
+/// a consumer that is not reading (160 ms of 20 ms audio).
+pub const DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY: usize = 8;
 
 /// Default Opus payload type registered in the media engine.
 pub const OPUS_PT_DEFAULT: u8 = 111;
@@ -128,7 +134,8 @@ pub struct WebRtcStatsSnapshot {
     /// MOS estimate (1.0–4.5) derived from jitter + packet loss.
     pub mos: f32,
     /// Frames that the inbound pump had to drop because the downstream
-    /// consumer was too slow (see `WebRtcConfig::inbound_send_deadline_ms`).
+    /// consumer was too slow (see `WebRtcConfig::inbound_frame_queue_capacity`
+    /// and `WebRtcConfig::inbound_send_deadline_ms`).
     pub frames_dropped: u64,
     /// G4 — outbound RTP aggregates (sender side). Always present;
     /// fields are zero until the first outbound stat poll completes.
@@ -364,9 +371,10 @@ fn estimate_mos(jitter_ms: f32, packet_loss_pct: f32) -> f32 {
 
 /// Spawn a task that reads RTP from a remote track into `frames_in`.
 ///
-/// `send_deadline_ms`: bounded send timeout. A slow downstream consumer no
-/// longer stalls the inbound RTP task forever — exceeding the deadline drops
-/// the frame and bumps `InboundStats::frames_dropped`.
+/// `send_deadline_ms`: bounded send timeout. When `frames_in` is full the
+/// pump waits at most this long for room, then drops the arriving frame and
+/// bumps `InboundStats::frames_dropped`, so a slow downstream consumer
+/// cannot stall the inbound RTP task.
 ///
 /// `cancel`: if provided, fires `notify_waiters()` to exit the pump cleanly.
 /// Channel close still exits as before.
