@@ -116,8 +116,35 @@ Each item has a one-line migration.
 - The unreleased `rvoip-webex-byob` prototype crate is renamed
   `rvoip-webex-byova` (Cisco's term) before its first release. Migration for
   path or Git users: rename the dependency and `rvoip_webex_byob` paths.
+- **The minimum supported Rust version is 1.95** (was 1.91). The toolchain
+  file, every CI and release workflow, and the AWS release workers move to
+  Rust 1.95.0. Migration: build with Rust 1.95 or newer.
+- **`rvoip-users-core` and `rvoip-vcon-postgres` move to sqlx 0.9.**
+  `SqliteUserStore::pool`/`from_pool`, `PostgresUserStore::pool`,
+  `AuthenticationService::set_pool`, `PostgresVconStore::new`/`pool` and
+  `users_core::Error::Database` now carry sqlx 0.9 types. Migration: move
+  your own sqlx dependency to 0.9 when you pass pools in or match on the
+  database error.
+- **parking_lot 0.12 → 0.13 in public fields.** `rvoip-media-core`'s
+  relay-controller `vad`/`agc`/`aec` handles, `rvoip-websocket`'s adapter
+  `bridge` and `rvoip-webrtc`'s media-source `last_payload` are
+  `parking_lot` 0.13 locks. Migration: depend on parking_lot 0.13 where you
+  name those types.
+- **`rvoip-amazon-connect`'s `aws-control` feature moves to aws-config
+  1.13 / aws-sdk-connect 1.226 / aws-smithy-types 1.9** (still exact pins).
+  `AwsConnectStarter::new` takes an aws-config 1.13 `SdkConfig`.
+  Migration: load your `SdkConfig` with aws-config 1.13.
 
 ### Dependencies
+
+Unlocked by the Rust 1.95 minimum: **sqlx** 0.8 → 0.9 (runtime SQL built from
+fixed fragments is now marked with `AssertSqlSafe`; vcon-postgres keeps the
+ring rustls provider through `tls-rustls-ring-webpki`), **serial_test** 3 → 4
+(dev only), **parking_lot** 0.12 → 0.13, **sysinfo** 0.31 → 0.40 (perf
+harness only), and the AWS SDK pins above, which take `aws-config` off the
+`crypto-bigint` 0.5 path (RUSTSEC-2026-0387). New Rust 1.95 Clippy lints are
+fixed in `rvoip-codec-core` and the perf harness.
+
 
 The low-risk part of the grouped dependabot update (#298). No public API
 changes: none of the crates below has a type in a published rvoip API.
@@ -161,8 +188,7 @@ and axum 0.8 / tower 0.5, as planned. Also held back:
 jsonwebtoken 11, validator 0.21, ordered-float 5, prost 0.14, redis 1.x,
 quick-xml 0.42 and web-transport 0.13 (their types are in rvoip's public
 API); opus 0.4 and cpal 0.18 (bundled libopus 1.6 and changed audio-device
-behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
-(they need a newer Rust than the 1.91 MSRV); password-hash 0.6 (argon2 0.5
+behavior); password-hash 0.6 (argon2 0.5
 needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
 bumps (they break the test fixtures and examples built on the older APIs).
 - **`RvoipError` gains `OutboundPeerUnavailableBeforeWrite`.** The enum is

@@ -556,7 +556,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         # proxy interop) before the prebuild, one for performance workers after.
         self.assertEqual(workflow.count("aws ec2 run-instances"), 3)
         self.assertIn(
-            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
             workflow,
         )
         self.assertIn("expected 48 publishable workspace packages", probe)

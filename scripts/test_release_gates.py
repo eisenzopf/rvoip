@@ -544,7 +544,7 @@ class GateFrameworkTests(unittest.TestCase):
                 manifest = ROOT / command[manifest_index].replace("{workspace}/", "")
                 lockfile = ROOT / "examples/Cargo.lock"
                 self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
-                self.assertIn('rust-version = "1.91"', manifest.read_text())
+                self.assertIn('rust-version = "1.95"', manifest.read_text())
 
     def test_rvoip_sip_gates_build_the_test_hooks_their_targets_need(self) -> None:
         # Since 0.4.0 the RFC 4028 session-timer tests and their process
@@ -631,8 +631,8 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(gate["command"][:2], ["cargo", "fmt"])
         self.assertNotIn("--locked", gate["command"])
         self.assertEqual(
-            builder.insert_locked(["cargo", "+1.91.0", "fmt", "--all"]),
-            ["cargo", "+1.91.0", "fmt", "--all"],
+            builder.insert_locked(["cargo", "+1.95.0", "fmt", "--all"]),
+            ["cargo", "+1.95.0", "fmt", "--all"],
         )
 
     def test_ec2_gates_allow_for_cold_release_builds(self) -> None:
