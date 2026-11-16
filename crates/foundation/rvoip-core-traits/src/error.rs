@@ -12,6 +12,11 @@ pub enum RvoipError {
     ParticipantNotFound(crate::ids::ParticipantId),
     BridgeNotFound(crate::ids::BridgeId),
     AdmissionRejected(&'static str),
+    /// An outbound connection failed before any of its signaling reached the
+    /// network (for example its transport connection was refused or its TLS
+    /// handshake failed). The peer never saw the request: no teardown is
+    /// owed and a retry cannot create a duplicate call.
+    OutboundNotSent,
 
     /// Lifecycle precondition violated — e.g. start_session on a Closed
     /// Conversation, join_session on an Ended Session, end_session on an
@@ -40,6 +45,7 @@ impl RvoipError {
             Self::ParticipantNotFound(_) => "participant-not-found",
             Self::BridgeNotFound(_) => "bridge-not-found",
             Self::AdmissionRejected(_) => "admission-rejected",
+            Self::OutboundNotSent => "outbound-not-sent",
             Self::InvalidState(_) => "invalid-state",
             Self::UnsupportedCodec(_) => "unsupported-codec",
             Self::Adapter(_) => "adapter",

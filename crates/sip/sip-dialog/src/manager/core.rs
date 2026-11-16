@@ -7970,11 +7970,11 @@ mod outbound_flow_handler_tests {
     /// The plan marks an INVITE wire-unknown as soon as it hands it to the
     /// transaction layer, but the transaction layer retains it only once the
     /// wire boundary is crossed. A TLS peer that rejects the handshake during
-    /// route preparation leaves a wire-unknown plan whose INVITE the
-    /// transaction layer has forgotten: no response or CANCEL can ever match
-    /// it, so the supervisor must treat it as settled rather than wait.
+    /// route preparation is proven to fail before that boundary: the plan is
+    /// settled as never sent, its INVITE is not retained for CANCEL, and the
+    /// supervisor treats the dialog as settled rather than wait.
     #[tokio::test]
-    async fn wire_unknown_plan_for_a_forgotten_invite_is_terminal() {
+    async fn route_preparation_failure_settles_plan_as_not_sent() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
 
         let manager = make_manager_with_transport_and_setup_timeout(
@@ -8011,16 +8011,20 @@ mod outbound_flow_handler_tests {
             .invite_failover_plans
             .iter()
             .next()
-            .expect("wire-unknown plan retained")
+            .expect("closed plan retained")
             .value()
             .clone();
         let invite = {
             let plan = plan.lock().await;
-            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
-            plan.current_transaction
-                .clone()
-                .expect("wire-unknown INVITE transaction retained")
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::Closed);
+            assert!(!plan.wire_attempted, "no INVITE byte reached the wire");
+            assert!(plan.current_transaction.is_none());
+            plan.retained_attempts
+                .first()
+                .cloned()
+                .expect("the one attempt is recorded")
         };
+        assert!(!manager.invite_failover_attempts.contains_key(&*invite));
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while !manager
@@ -8031,7 +8035,7 @@ mod outbound_flow_handler_tests {
             }
         })
         .await
-        .expect("a forgotten wire-unknown INVITE settles");
+        .expect("a never-sent INVITE is settled");
         assert!(manager
             .transaction_manager
             .transaction_route(&invite)
