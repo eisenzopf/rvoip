@@ -12285,17 +12285,24 @@ impl UnifiedCoordinator {
     }
 
     pub(crate) async fn lifecycle_snapshot(&self, id: &SessionId) -> CallLifecycleSnapshot {
-        let (state, media_security) = self
+        let (state, media_security, media) = self
             .helpers
             .state_machine
             .store
             .with_session(id, |session| {
-                (Some(session.call_state), session.media_security.clone())
+                (
+                    Some(session.call_state),
+                    session.media_security.clone(),
+                    Self::negotiated_media_from_session(session),
+                )
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         let mut snapshot = self.lifecycle.snapshot(id, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
+        }
+        if snapshot.media.is_none() {
+            snapshot.media = media;
         }
         snapshot
     }
@@ -12318,14 +12325,21 @@ impl UnifiedCoordinator {
         let media_security = current
             .as_ref()
             .and_then(|session| session.media_security.clone());
+        let media = current
+            .as_ref()
+            .and_then(|snapshot| Self::negotiated_media_from_session(snapshot.state()));
         let mut snapshot = self.lifecycle.snapshot_exact(handle, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
+        }
+        if snapshot.media.is_none() {
+            snapshot.media = media;
         }
         let has_exact_evidence = current.is_some()
             || !snapshot.progress.is_empty()
             || snapshot.answered.is_some()
             || snapshot.media_security.is_some()
+            || snapshot.media.is_some()
             || snapshot.terminal.is_some()
             || snapshot.latest_transfer_outcome.is_some();
         has_exact_evidence.then_some(snapshot).ok_or_else(|| {
@@ -14629,6 +14643,22 @@ impl UnifiedCoordinator {
             .await
     }
 
+    /// The SIP-negotiated media format recorded on one session, or `None`
+    /// until SDP negotiation has produced a codec and payload type.
+    fn negotiated_media_from_session(
+        session: &crate::session_store::state::SessionState,
+    ) -> Option<crate::api::lifecycle::NegotiatedMedia> {
+        let config = session.negotiated_config.as_ref()?;
+        let payload_type = session.negotiated_payload_type()?;
+        Some(crate::api::lifecycle::NegotiatedMedia {
+            codec: config.codec.clone(),
+            payload_type,
+            clock_rate: config.sample_rate,
+            channels: config.channels,
+            fmtp: config.fmtp.clone(),
+        })
+    }
+
     /// Resolve the exact SDP-negotiated media format for one exact live
     /// session lifetime.
     ///
@@ -14639,6 +14669,34 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
     ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
         self.helpers.negotiated_media_config_exact(handle).await
+    }
+
+    /// The SIP-negotiated media format for one call, or `None` until SDP
+    /// negotiation has committed.
+    ///
+    /// This is the codec/rate/channel shape the answer actually selected, read
+    /// from the session store — the same value the media layer encodes with.
+    /// Re-INVITE renegotiation replaces it.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
+    /// if let Some(media) = coordinator.negotiated_media(&call).await? {
+    ///     println!("{} at {} Hz, {} ch (PT {})", media.codec, media.clock_rate, media.channels, media.payload_type);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn negotiated_media(
+        &self,
+        session: &SessionId,
+    ) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
+        Ok(self
+            .helpers
+            .state_machine
+            .store
+            .with_session(session, Self::negotiated_media_from_session)?)
     }
 
     /// Exact number of range-backed RTP/RTCP ports currently leased by SIP

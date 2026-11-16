@@ -647,6 +647,7 @@ pub use api::events::{
     SdesNegotiationFailure, SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState,
     TransferKind, TransferTargetEvidence,
 };
+pub use api::lifecycle::NegotiatedMedia;
 
 // Errors
 pub use errors::{
@@ -684,7 +685,8 @@ pub mod prelude {
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
         EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,
         MediaSecurityFailure, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
-        MediaSessionControllerConfig, PeerControl, PerformanceConfig, PerformanceRecipeBook,
+        MediaSessionControllerConfig, NegotiatedMedia, PeerControl, PerformanceConfig,
+        PerformanceRecipeBook,
         ProfiledSipAdapter, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
         Result, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
         SdesBase64Padding, SdesNegotiationDiagnostic, SdesNegotiationFailureClass,
