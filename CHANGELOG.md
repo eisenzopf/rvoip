@@ -116,8 +116,22 @@ Each item has a one-line migration.
 - The unreleased `rvoip-webex-byob` prototype crate is renamed
   `rvoip-webex-byova` (Cisco's term) before its first release. Migration for
   path or Git users: rename the dependency and `rvoip_webex_byob` paths.
+- **prost 0.13 → 0.14 and tonic 0.12 → 0.14.** The generated types in
+  `rvoip_webex_byova::grpc::wire` (feature `grpc`) and
+  `rvoip_amazon_connect::signaling::proto` implement prost 0.14's `Message`,
+  and `WebexByovaGrpcService::into_server` returns a tonic 0.14
+  `VoiceVirtualAgentServer`. Migration: move your own prost / tonic
+  dependencies to 0.14 (tonic 0.14 needs `tonic-prost` next to it for
+  generated clients); `tonic::transport::server::TcpIncoming::from_listener`
+  is now `TcpIncoming::from(listener)`.
 
 ### Dependencies
+
+**prost** / **prost-build** / **prost-types** 0.13 → 0.14 and **tonic** 0.12 →
+0.14 move together. tonic 0.14 splits prost support out: `rvoip-webex-byova`'s
+`grpc` feature adds `tonic-prost`, and its build script uses
+`tonic-prost-build` in place of `tonic-build`.
+
 
 The low-risk part of the grouped dependabot update (#298). No public API
 changes: none of the crates below has a type in a published rvoip API.
@@ -158,7 +172,7 @@ together with the applications that consume them.
 
 Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
 and axum 0.8 / tower 0.5, as planned. Also held back:
-jsonwebtoken 11, validator 0.21, ordered-float 5, prost 0.14, redis 1.x,
+jsonwebtoken 11, validator 0.21, ordered-float 5, redis 1.x,
 quick-xml 0.42 and web-transport 0.13 (their types are in rvoip's public
 API); opus 0.4 and cpal 0.18 (bundled libopus 1.6 and changed audio-device
 behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
