@@ -1335,10 +1335,68 @@ jobs:
           remaining="$(list_run_instances)"
           test -z "$remaining"
 
+  cleanup-bench:
+    # A bench lane stopped at --max-wall holds its capacity reservations for
+    # the next leg (each has a limited end date, so a leak expires on its
+    # own). This job releases them, and any bench host, once the last bench
+    # job ends, including on cancel. It is never in a leg: a reservation held
+    # for leg 2 must survive leg 1. Nothing found is success.
+    name: Release this run's bench capacity
+    if: always() && needs.plan.outputs.bench_shard_count != '0'
+    needs: [plan, bench-leg-1, bench-leg-2, gate-bench]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+      - name: Cancel bench reservations and hosts left by this run
+        env:
+          # The lane run id is bench-<profile>-<candidate[:12]>-<RVOIP_BENCH_RUN_ID>,
+          # and the bench jobs set RVOIP_BENCH_RUN_ID to this run id.
+          LANE_RUN_IDS: bench-*-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          list_reservations() {
+            aws ec2 describe-capacity-reservations \
+              --filters Name=tag:rvoip-bench,Values=true \
+                "Name=tag:rvoip-run-id,Values=${LANE_RUN_IDS}" \
+                Name=state,Values=active,pending \
+              --query 'CapacityReservations[].CapacityReservationId' \
+              --output text | tr '\t' '\n' | grep -v -e '^None$' -e '^$' || true
+          }
+          list_hosts() {
+            aws ec2 describe-instances \
+              --filters "Name=tag:rvoip-run-id,Values=${LANE_RUN_IDS}" \
+                Name=instance-state-name,Values=pending,running,stopping,stopped \
+              --query 'Reservations[].Instances[].InstanceId' \
+              --output text | tr '\t' '\n' | grep -v -e '^None$' -e '^$' || true
+          }
+          mapfile -t hosts < <(list_hosts)
+          if (( ${#hosts[@]} != 0 )); then
+            echo "Terminating bench hosts left behind: ${hosts[*]}"
+            aws ec2 terminate-instances --instance-ids "${hosts[@]}" >/dev/null
+          fi
+          mapfile -t reservations < <(list_reservations)
+          for id in "${reservations[@]}"; do
+            echo "Cancelling capacity reservation ${id}"
+            aws ec2 cancel-capacity-reservation --capacity-reservation-id "$id" >/dev/null
+          done
+          if (( ${#reservations[@]} == 0 && ${#hosts[@]} == 0 )); then
+            echo "No bench reservation or host left by this run."
+          fi
+          remaining="$(list_reservations)"
+          test -z "$remaining"
+
   collect:
     name: Release Gate
     if: always()
-    needs: [plan, gate-hosted, gate-bench, gate-aws, cleanup-aws]
+    needs: [plan, gate-hosted, gate-bench, cleanup-bench, gate-aws, cleanup-aws]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

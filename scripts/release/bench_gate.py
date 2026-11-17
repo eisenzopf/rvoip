@@ -15,6 +15,20 @@ through `gates.py run-shard`, so the gate receipt is always the gate
 executor's, and run_lane, finding the lane complete, only rewrites its
 receipt.
 
+The minor lane also records: `--record --record-out <artifact dir>/rates.json`
+makes run_lane write the env-id's rates.json (the in-tree tester caps plus
+this run's measured R per row, each row's source_run and candidate_sha naming
+this run) into the gate's evidence instead of the checkout. The release ships
+the measured commit unchanged, and that file goes to main in a rates-only PR
+after the tag, for the next patch release's `release` lane to gate on.
+
+Before it builds anything the wrapper checks that the lane can run: the
+orchestrator, the device-under-test package, and a pinned bench environment
+(`perf-baselines/rfc7502/ENVIRONMENT`, its `<env-id>/env.json`, and the
+env-id's `rates.json` with the testbed's tester caps). Until the bench
+environment PR lands none of these exist, and the gate fails at once with
+exit 2, a usage error the executor never retries.
+
 Exit codes follow run_lane: 0 PASS or WARN, 1 FAIL, 2 usage, 3 INFRA
 (retried), 4 stopped at the budget.
 """
@@ -22,6 +36,7 @@ Exit codes follow run_lane: 0 PASS or WARN, 1 FAIL, 2 usage, 3 INFRA
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -31,10 +46,41 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_LANE = ROOT / "scripts/bench/run_lane.py"
+BASELINES = Path("crates/sip/rvoip-sip/perf-baselines/rfc7502")
 DUT_PACKAGE = "rvoip-bench-uas"
 DEFAULT_MAX_WALL_MINUTES = 330
+RECORDED_RATES = "rates.json"
 EXIT_USAGE = 2
 EXIT_BUDGET = 4
+
+
+def preflight(root: Path) -> str | None:
+    """Why the lane cannot run from this checkout, or None when it can."""
+
+    if not (root / "scripts/bench/run_lane.py").is_file():
+        return "the lane orchestrator scripts/bench/run_lane.py is not installed"
+    metadata = subprocess.run(
+        ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if metadata.returncode:
+        return f"cargo metadata failed: {metadata.stderr.strip()[-500:]}"
+    if DUT_PACKAGE not in {package["name"] for package in json.loads(metadata.stdout)["packages"]}:
+        return f"the device under test, package {DUT_PACKAGE}, is not in the workspace"
+    pin = root / BASELINES / "ENVIRONMENT"
+    env_id = pin.read_text().strip() if pin.is_file() else ""
+    if not env_id:
+        return f"bench environment not pinned: {BASELINES}/ENVIRONMENT is missing or empty"
+    for name in ("env.json", "rates.json"):
+        if not (root / BASELINES / env_id / name).is_file():
+            return (
+                f"bench environment not pinned: {BASELINES}/{env_id}/{name} is missing "
+                "(the bench environment PR adds env.json and the §6.1 baseline's rates.json)"
+            )
+    return None
 
 
 def lane_run_id(profile: str, candidate: str, run: str) -> str:
@@ -51,6 +97,11 @@ def dut_binary(root: Path) -> Path:
 
 
 def lane_command(args: argparse.Namespace, dut: Path, run: str) -> list[str]:
+    record = (
+        ["--record", "--record-out", str(args.receipt.parent / RECORDED_RATES)]
+        if args.profile == "minor"
+        else []
+    )
     return [
         sys.executable,
         str(RUN_LANE),
@@ -67,6 +118,7 @@ def lane_command(args: argparse.Namespace, dut: Path, run: str) -> list[str]:
         "--max-wall",
         str(args.max_wall),
         "--resume",
+        *record,
     ]
 
 
@@ -90,8 +142,9 @@ def main(argv: list[str] | None = None) -> int:
     if not re.fullmatch(r"[0-9a-f]{40}", args.candidate):
         print("bench gate: --candidate must be a full commit SHA", file=sys.stderr)
         return EXIT_USAGE
-    if not RUN_LANE.is_file():
-        print(f"bench gate: the lane orchestrator {RUN_LANE} is not installed", file=sys.stderr)
+    problem = preflight(ROOT)
+    if problem:
+        print(f"bench gate: {problem}; not retried", file=sys.stderr)
         return EXIT_USAGE
     run = os.environ.get("RVOIP_BENCH_RUN_ID", "local")
     build = subprocess.run(
@@ -101,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     code = subprocess.run(lane_command(args, dut_binary(ROOT), run), cwd=ROOT, check=False).returncode
+    if code == EXIT_USAGE:
+        print("bench gate: run_lane rejected its inputs (exit 2, before any launch); not retried", file=sys.stderr)
     if args.advance and code in (0, 1, EXIT_BUDGET):
         # The final leg reports the verdict through the gate executor.
         return 0

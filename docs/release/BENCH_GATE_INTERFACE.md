@@ -15,7 +15,7 @@ the gate catalog and the workflows belong to the release tooling.
 | `perf.rfc7502-minor` | `minor` (bench-minor: searches, R6, R4 overload, IETF report) | every minor release |
 
 Both are in resource class `bench-lane`, depend only on
-`source.remote-clean`, and are **never** in the nightly profile
+`source.remote-clean`, and are **never** in the full qualification profile
 `remote-release`, nor among the dependencies of `report.remote-aggregate`.
 They appear in four catalog profiles:
 
@@ -49,6 +49,11 @@ python3 scripts/bench/run_lane.py --profile <p> --candidate <sha> \
   --receipt <path> --dut-bin <built binary> \
   --run-id bench-<p>-<sha12>-<github run id> --max-wall <minutes> --resume
 ```
+
+For `minor` it adds `--record --record-out <artifact_dir>/rates.json`: run_lane
+writes the env-id's rates.json (the in-tree tester caps plus this run's
+measured R per row, each with `source_run` and `candidate_sha`) into the gate's
+evidence, never into the checkout, and keeps a copy in S3 beside the run.
 
 `--caller-bin` and `--ea-uas-bin` are omitted: they are pinned by the env-id,
 not by the candidate, and run_lane fetches and hash-checks them itself
@@ -122,6 +127,8 @@ release day.
 
 ## Release-day sequence
 
+A patch release (`release-patch`):
+
 1. Pick a main commit `C`. Dispatch **Release qualification** on `C` with
    `profile=remote-release` and, at the same time, `profile=bench-release`.
 2. When the `remote-release` run is green, dispatch **Prepare release PR**
@@ -132,3 +139,13 @@ release day.
    `candidate=B`, `first_candidate=false`,
    `prior_run_id=<C's qualification run>,<bench run>`. Only the bookkeeping gates run.
 5. Publish `B`.
+
+A minor release (`release-minor`, the only profile an `X.Y.0` accepts) is the
+same with `profile=bench-minor` (about 11 h, so start it the evening before)
+and `profile=release-minor`. The commit shipped is the commit measured:
+`C` carries the env-id's rates.json with tester caps (and, after the first
+minor, the previous R); the minor run measures R on `C` and records it into
+its evidence; `B` changes only versions, so it reuses that receipt. After the
+tag, a rates-only PR commits the recorded `rates.json` unchanged, and the next
+patch release's `release` lane confirms against it. Committing it before the
+release would change a bench input and force the minor lane to run again.
