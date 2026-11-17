@@ -16,7 +16,7 @@ description = "Webex Contact Center BYOVA (Bring Your Own Virtual Agent) adapter
 
 [features]
 default = []
-grpc = ["dep:tonic", "dep:prost", "dep:prost-types", "dep:tonic-build", "dep:protoc-bin-vendored", "wav-compat"]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:prost-types", "dep:tonic-prost-build", "dep:protoc-bin-vendored", "wav-compat"]
 # Explicit early-access compatibility exception, contrary to the public WS guide.
 wav-compat = ["dep:rvoip-codec-core"]
 
@@ -39,13 +39,14 @@ tokio-tungstenite.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
-tonic = { version = "0.12", optional = true }
-prost = { version = "0.13", optional = true }
-prost-types = { version = "0.13", optional = true }
+tonic = { version = "0.14", optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
 rvoip-codec-core = { workspace = true, optional = true }
 
 [build-dependencies]
-tonic-build = { version = "0.12", optional = true }
+tonic-prost-build = { version = "0.14", optional = true }
 protoc-bin-vendored = { version = "3", optional = true }
 
 [dev-dependencies]
