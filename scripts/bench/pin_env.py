@@ -3,7 +3,7 @@
 
   pin_env.py --caller-bin <rvoip-loadgen> [--ea-uas-bin <ea-uas>] --ami <ami-id>
              [--bucket <evidence bucket>] [--region us-west-2] [--callers 2]
-             [--dut-type c8i.4xlarge] [--caller-type c8in.24xlarge] [--set-current]
+             [--dut-type c8i.4xlarge] [--caller-type c8in.24xlarge] [--az us-west-2c] [--set-current]
 
 Uploads each binary to s3://<bucket>/bench/builds/<name>-<sha256[:16]> (immutable
 by name), computes the env-id the lane would compute, and writes
@@ -39,6 +39,8 @@ def main():
     p.add_argument('--dut-type', default='c8i.4xlarge')
     p.add_argument('--caller-type', default='c8in.24xlarge')
     p.add_argument('--caller-source', help='where the caller build came from (branch@sha)')
+    p.add_argument('--az', help='the AZ every run on this env-id launches in (run_lane --az); '
+                                'pin it before the baseline so the baseline and the gated runs share it')
     p.add_argument('--set-current', action='store_true')
     a = p.parse_args()
     assert a.bucket, '--bucket or RVOIP_AWS_EVIDENCE_BUCKET'
@@ -56,7 +58,7 @@ def main():
     env_id = run_lane.env_id_for(lane, builds['rvoip-loadgen']['sha256'])
     env = {'schema': 'rvoip-rfc7502-env-v1', 'env_id': env_id, 'region': a.region, 'ami_id': a.ami,
            'dut_instance_type': a.dut_type, 'caller_instance_type': a.caller_type, 'caller_count': a.callers,
-           'builds': builds, 'caller_source': a.caller_source,
+           'builds': builds, 'caller_source': a.caller_source, 'az': a.az,
            'pinned_at': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}
     out = run_lane.BASELINES / env_id / 'env.json'
     out.parent.mkdir(parents=True, exist_ok=True)

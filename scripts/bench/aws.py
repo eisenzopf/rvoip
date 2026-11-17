@@ -49,7 +49,31 @@ class Aws:
         out = self.call('ec2', 'describe-instances', '--instance-ids', *ids)
         return [i for r in out.get('Reservations', []) for i in r['Instances']]
 
-    def run_from_template(self, template, count, tags, ami=None, instance_type=None, user_data=None):
+    def template_in_az(self, template, az):
+        """run-instances overrides that move a launch template to `az`: its network interfaces with the
+        subnet swapped for the same-named subnet of that AZ in the same VPC, and its placement (the
+        cluster placement group takes the AZ of its first instance while empty)."""
+        data = self.call('ec2', 'describe-launch-template-versions', '--launch-template-name', template,
+                         '--versions', '$Default')['LaunchTemplateVersions'][0]['LaunchTemplateData']
+        enis = [dict(e) for e in data.get('NetworkInterfaces', [])]
+        if not enis or not enis[0].get('SubnetId'):
+            raise AwsError('launch template %s names no subnet to move to %s' % (template, az))
+        home = self.call('ec2', 'describe-subnets', '--subnet-ids', enis[0]['SubnetId'])['Subnets'][0]
+        name = next((t['Value'] for t in home.get('Tags', []) if t['Key'] == 'Name'), '')
+        if home['AvailabilityZone'] not in name:
+            raise AwsError('subnet %s (%r) does not name its AZ: cannot find its %s twin' % (home['SubnetId'], name, az))
+        twin = name.replace(home['AvailabilityZone'], az)
+        found = self.call('ec2', 'describe-subnets', '--filters', 'Name=vpc-id,Values=%s' % home['VpcId'],
+                          'Name=availability-zone,Values=%s' % az, 'Name=tag:Name,Values=%s' % twin)['Subnets']
+        if len(found) != 1:
+            raise AwsError('expected one subnet %r in %s, found %d' % (twin, az, len(found)))
+        for e in enis:
+            e['SubnetId'] = found[0]['SubnetId']
+        placement = dict(data.get('Placement') or {}, AvailabilityZone=az)
+        return {'network_interfaces': enis, 'placement': placement}
+
+    def run_from_template(self, template, count, tags, ami=None, instance_type=None, user_data=None,
+                          network_interfaces=None, placement=None):
         spec = [{'ResourceType': rt, 'Tags': [{'Key': k, 'Value': v} for k, v in tags.items()]}
                 for rt in ('instance', 'volume')]
         args = ['ec2', 'run-instances', '--launch-template', 'LaunchTemplateName=%s,Version=$Default' % template,
@@ -58,6 +82,10 @@ class Aws:
             args += ['--image-id', ami]
         if instance_type:
             args += ['--instance-type', instance_type]
+        if network_interfaces:
+            args += ['--network-interfaces', json.dumps(network_interfaces)]
+        if placement:
+            args += ['--placement', json.dumps(placement)]
         if user_data:
             args += ['--user-data', base64.b64encode(user_data.encode()).decode()]
         out = self.call(*args, retries=2)

@@ -183,14 +183,22 @@ class Lane:
         base = {'rvoip-bench': 'true', 'managed-by': 'github-actions', 'rvoip-run-id': self.args.run_id,
                 'rvoip-expires-at': expires}
         ids = {}
+        moved = {}
+        if self.args.az and self.args.az != tf.get('availability_zone'):
+            # Launch templates name one subnet; --az moves both templates to the same-named public subnet of
+            # another AZ (no Terraform change). The whole lane shares the AZ, and so does every later leg.
+            self.log('launching in %s (the templates name %s)' % (self.args.az, tf.get('availability_zone')))
+            for key in ('dut_launch_template', 'caller_launch_template'):
+                moved[key] = self.aws.template_in_az(tf[key], self.args.az)
         try:
             ids['dut'] = self.aws.run_from_template(
                 tf['dut_launch_template'], 1, dict(base, Name='rvoip-bench-dut', **{'rvoip-role': 'dut'}),
-                instance_type=self.args.ea_host_type if self.ea_uas else self.args.dut_type)
+                instance_type=self.args.ea_host_type if self.ea_uas else self.args.dut_type,
+                **moved.get('dut_launch_template', {}))
             ids['callers'] = self.aws.run_from_template(
                 tf['caller_launch_template'], self.args.callers,
                 dict(base, Name='rvoip-bench-caller', **{'rvoip-role': 'caller'}),
-                instance_type=self.args.caller_type)
+                instance_type=self.args.caller_type, **moved.get('caller_launch_template', {}))
         except AwsError as error:
             self.aws.terminate(ids.get('dut', []) + ids.get('callers', []))
             if 'InsufficientInstanceCapacity' in str(error) or 'VcpuLimitExceeded' in str(error):
@@ -221,6 +229,8 @@ class Lane:
             'placement_group': by_id[dut]['Placement'].get('GroupName'),
             'dut_type': by_id[dut]['InstanceType'], 'caller_type': by_id[ids['callers'][0]]['InstanceType'],
         })
+        if self.args.az and self.state['lane']['az'] != self.args.az:
+            raise Infra('lane launched in %s, not the requested %s' % (self.state['lane']['az'], self.args.az))
         for c in self.state['lane']['callers']:
             if len(c['ips']) < 2:
                 raise Infra('caller %s has %d source IPs; need >= 2' % (c['id'], len(c['ips'])))
@@ -816,6 +826,8 @@ def parse_args(argv):
     p.add_argument('--bucket', default=os.environ.get('RVOIP_AWS_EVIDENCE_BUCKET'))
     p.add_argument('--lane-config', help='JSON of the infra/aws/bench outputs (default: terraform output)')
     p.add_argument('--callers', type=int, default=2)
+    p.add_argument('--az', help='launch the lane in this AZ instead of the templates\' (same-named public subnet, '
+                                'same VPC); default: the env-id\'s pinned AZ, else the templates\'')
     p.add_argument('--ea-host-type', default='c8i.12xlarge', help='baseline: ea-uas host type (E74 used c8i.12xlarge)')
     p.add_argument('--run-id')
     p.add_argument('--resume', action='store_true',
@@ -922,6 +934,16 @@ def resolve_environment(args, aws):
     return env_id, pinned
 
 
+def resolve_az(wanted, pinned, leg):
+    """The lane's AZ: --az, else env.json's pinned AZ, else an earlier leg's. A baseline and the runs gated on
+    it share one AZ, and so do the legs of one run: a conflict is a usage error, never a fallback."""
+    for source, az in (('the env-id pins', pinned), ("this run's earlier leg ran in", leg)):
+        if az and wanted and az != wanted:
+            raise Usage('--az %s, but %s %s' % (wanted, source, az))
+        wanted = wanted or az
+    return wanted
+
+
 def outcome_code(status):
     return {'PASS': EXIT_PASS, 'WARN': EXIT_PASS, 'FAIL': EXIT_FAIL}.get(status, EXIT_INFRA)
 
@@ -963,6 +985,7 @@ def main(argv=None):
                     aws.s3_cp(ctx.s3_run + 'record/%s/rates.json' % env, args.record_out)
                 return outcome_code(final['status'])
         env_id, pinned = resolve_environment(args, aws)
+        args.az = resolve_az(args.az, (pinned or {}).get('az'), (ctx.state.get('lane') or {}).get('az'))
         args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
         if not aws.s3_create_exclusive(lock, {'run_id': args.run_id, 'at': utc(), 'profile': args.profile}):
             held = aws.s3_get_json(lock)

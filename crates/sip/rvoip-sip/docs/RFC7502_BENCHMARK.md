@@ -95,10 +95,8 @@ rvoip-bench-uas --config <dut.json>
 Behaviour:
 
 - Answers every INVITE with 200 OK (SDP answer: `RTP/SAVP` + `a=crypto` for
-  `srtp`, `RTP/AVP` for `rtp`; `a=rtcp-mux` when offered and enabled).
-  `media: none` still answers SDP, in the offer's profile (RFC 3264 §6: the
-  TLS rows' SDES offer gets `RTP/SAVP` + an answer `a=crypto`, an `RTP/AVP`
-  offer gets `RTP/AVP`) on port 9, and allocates no RTP socket.
+  `srtp`, `RTP/AVP` for `rtp` and `none`; `a=rtcp-mux` when offered and
+  enabled). `media: none` still answers SDP but allocates no RTP socket.
 - With media, echoes every received RTP packet back to its source (SRTP:
   decrypt and re-encrypt with the answer key), so the caller validates its own
   tone. RTCP is muxed on the RTP port.
@@ -197,8 +195,8 @@ of host CPU, and per-thread CPU of the process under test).
 can never change the release-qualification resources in `infra/aws`. It reads
 the release VPC by tag and creates:
 
-- one bench subnet in an AZ that offers both `c8i.4xlarge` and
-  `c8in.24xlarge`, and a security group open only between bench hosts
+- the lane subnet: the release VPC's public subnet in an AZ that offers both
+  `c8i.4xlarge` and `c8in.24xlarge` (checked), and a security group open only between bench hosts
   (SIP 5060-5100 UDP/TCP, RTP 10000-64999 UDP, metrics 9464-9465 TCP);
 - a cluster placement group;
 - launch templates `rvoip-bench-dut` (c8i.4xlarge) and `rvoip-bench-caller`
@@ -213,6 +211,21 @@ Instances are **not** Terraform resources: the orchestrator launches them from
 the templates for one lane run, tags them `managed-by=github-actions` and
 `rvoip-expires-at` (so the release janitor reaps a stranded lane), and
 terminates them at the end. Lanes run strictly serially.
+
+The templates name the release VPC's public subnet in `var.availability_zone`
+(us-west-2b), but a lane is not tied to it. `run_lane.py --az <az>` launches
+the whole lane in another AZ with no Terraform change: it reuses the
+templates' interfaces with the same-named public subnet of that AZ
+(`rvoip-release-public-<az>`) and overrides their placement. The cluster
+placement group is empty between lanes, so it takes the AZ of each lane's first
+instance. `pin_env.py --az` records the AZ in `env.json`. From then on every
+run on that env-id launches there, and a different `--az` is a usage error, as
+is a resumed leg in an AZ other than its first leg's. A baseline and the runs
+gated on it therefore never span AZs. When an AZ runs short of capacity,
+re-pin a new env-id in another AZ and re-baseline; never fall back between
+AZs mid-environment. The CI orchestrator policy allows `RunInstances` only in
+the template subnet, so `--az` works from an admin session until that policy
+lists the other subnets (a Terraform change).
 
 The AMI (`scripts/bench/ami/bake.py`) is Ubuntu 24.04 plus the E74 host
 tuning, applied at every boot by `rvoip-bench-tune.service`: XPS, NIC IRQs on

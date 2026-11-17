@@ -198,7 +198,8 @@ class Cloud:
             iid = 'i-%017x' % n
             self.instances[iid] = {
                 'InstanceId': iid, 'InstanceType': itype, 'ImageId': AMI, 'State': {'Name': 'running'},
-                'Placement': {'AvailabilityZone': 'us-west-2b', 'GroupName': 'rvoip-bench'},
+                'Placement': {'AvailabilityZone': json.loads(opt(args, '--placement') or '{}').get(
+                    'AvailabilityZone', 'us-west-2b'), 'GroupName': 'rvoip-bench'},
                 'NetworkInterfaces': [{'PrivateIpAddresses': [
                     {'Primary': False, 'PrivateIpAddress': '10.0.%d.11' % n},
                     {'Primary': True, 'PrivateIpAddress': '10.0.%d.10' % n}]}],
@@ -207,6 +208,26 @@ class Cloud:
             out.append({'InstanceId': iid})
         self.clock.advance(60)
         return {'Instances': out}
+
+    SUBNETS = {'subnet-' + az[-1] * 2: az for az in ('us-west-2a', 'us-west-2b', 'us-west-2c')}
+
+    def ec2_describe_launch_template_versions(self, args):
+        eni = {'DeviceIndex': 0, 'Groups': ['sg-bench'], 'SubnetId': 'subnet-bb', 'AssociatePublicIpAddress': True}
+        if opt(args, '--launch-template-name') == 'rvoip-bench-caller':
+            eni['SecondaryPrivateIpAddressCount'] = 1
+        return {'LaunchTemplateVersions': [{'LaunchTemplateData': {
+            'NetworkInterfaces': [eni], 'Placement': {'AvailabilityZone': 'us-west-2b', 'GroupName': 'rvoip-bench'}}}]}
+
+    def ec2_describe_subnets(self, args):
+        def subnet(sid):
+            az = self.SUBNETS[sid]
+            return {'SubnetId': sid, 'VpcId': 'vpc-release', 'AvailabilityZone': az,
+                    'Tags': [{'Key': 'Name', 'Value': 'rvoip-release-public-%s' % az}]}
+        if '--subnet-ids' in args:
+            return {'Subnets': [subnet(s) for s in multi(args, '--subnet-ids')]}
+        want = dict(f.split('=', 1)[1].split(',Values=') for f in multi(args, '--filters'))
+        return {'Subnets': [subnet(sid) for sid, az in self.SUBNETS.items()
+                            if az == want['availability-zone'] and want['tag:Name'].endswith(az)]}
 
     def ec2_describe_instances(self, args):
         ids = multi(args, '--instance-ids')
@@ -870,6 +891,68 @@ class ChainTests(LaneCase):
         code, receipt, log = self.bed.run('release', 'rel-keep', '--rows', 'R1', '--resume')
         self.check(code, receipt, log, 0, 'PASS')
         self.assertEqual(len(self.bed.cloud.launched), launched, 'the live lane is reused, nothing launched')
+
+    def run_instances_calls(self, run_id):
+        return [list(c) for c in self.bed.cloud.calls if c[:2] == ('ec2', 'run-instances')
+                and '"rvoip-run-id", "Value": "%s"' % run_id in opt(list(c), '--tag-specifications')]
+
+    def test_az_override_moves_the_whole_lane(self):
+        code, receipt, log = self.bed.run('smoke', 'smoke-az', '--rows', 'R1', '--az', 'us-west-2c', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(receipt['environment']['availability_zone'], 'us-west-2c')
+        calls = self.run_instances_calls('smoke-az')
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertEqual(json.loads(opt(call, '--placement')),
+                             {'AvailabilityZone': 'us-west-2c', 'GroupName': 'rvoip-bench'})
+            enis = json.loads(opt(call, '--network-interfaces'))
+            self.assertEqual([e['SubnetId'] for e in enis], ['subnet-cc'])
+            self.assertEqual(enis[0]['Groups'], ['sg-bench'])
+        caller = json.loads(opt(calls[1], '--network-interfaces'))[0]
+        self.assertEqual(caller['SecondaryPrivateIpAddressCount'], 1, 'the callers keep their second source IP')
+
+    def test_template_az_needs_no_override(self):
+        self.bed.lane_config.write_text(json.dumps(dict(LANE_CONFIG, availability_zone='us-west-2b')))
+        self.addCleanup(self.bed.lane_config.write_text, json.dumps(LANE_CONFIG))
+        code, receipt, log = self.bed.run('smoke', 'smoke-az-b', '--rows', 'R1', '--az', 'us-west-2b', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        calls = self.run_instances_calls('smoke-az-b')
+        self.assertEqual(len(calls), 2)
+        for call in calls:
+            self.assertNotIn('--placement', call)
+            self.assertNotIn('--network-interfaces', call)
+
+    def pin_az(self, az):
+        env_id = self.bed.env_id()
+        (self.bed.baselines / env_id).mkdir(parents=True, exist_ok=True)
+        (self.bed.baselines / env_id / 'env.json').write_text(json.dumps(
+            {'schema': 'rvoip-rfc7502-env-v1', 'env_id': env_id, 'az': az}))
+        self.addCleanup((self.bed.baselines / env_id / 'env.json').unlink, missing_ok=True)
+        return env_id
+
+    def test_pinned_az_is_where_the_lane_runs(self):
+        env_id = self.pin_az('us-west-2c')
+        code, receipt, log = self.bed.run('smoke', 'smoke-pin', '--rows', 'R1', '--env-id', env_id, world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(receipt['environment']['availability_zone'], 'us-west-2c')
+
+    def test_az_other_than_the_pinned_one_is_refused(self):
+        env_id = self.pin_az('us-west-2c')
+        launched = len(self.bed.cloud.launched)
+        code, receipt, log = self.bed.run('smoke', 'smoke-pin-x', '--rows', 'R1', '--env-id', env_id,
+                                          '--az', 'us-west-2a', world=World())
+        self.assertEqual(code, 2, log)
+        self.assertIn('the env-id pins us-west-2c', ' '.join(receipt['reasons']))
+        self.assertEqual(len(self.bed.cloud.launched), launched, 'nothing launched')
+
+    def test_resume_leg_stays_in_the_first_legs_az(self):
+        world = world_for(tester_capacity=TESTER)
+        code, receipt, log = self.bed.run('release', 'rel-az', '--rows', 'R1', '--max-wall', '40', '--az', 'us-west-2c',
+                                          world=world)
+        self.assertEqual(code, 4, log)
+        code, receipt, log = self.bed.run('release', 'rel-az', '--rows', 'R1', '--resume', '--az', 'us-west-2a')
+        self.assertEqual(code, 2, log)
+        self.assertIn("this run's earlier leg ran in us-west-2c", ' '.join(receipt['reasons']))
 
     def test_resume_of_an_unknown_run_id_starts_fresh(self):
         code, receipt, log = self.bed.run('release', 'rel-new', '--resume', '--rows', 'R1',
