@@ -34,6 +34,9 @@ uuid.workspace = true
 rustls = { workspace = true, features = ["aws_lc_rs"] }
 rvoip-core-traits.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# Local TLS RESP server in tests/tls_process_provider.rs.
+rcgen.workspace = true
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true
