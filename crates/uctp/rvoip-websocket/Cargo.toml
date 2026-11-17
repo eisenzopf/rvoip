@@ -67,6 +67,10 @@ name = "wss_loopback"
 required-features = ["wss"]
 
 [dev-dependencies]
+# The media-webrtc bridge tests carry Opus end to end through rvoip-core's
+# media graph, which only admits Opus with its `opus` feature. Dev-side, as in
+# rvoip-webrtc and rvoip-uctp, so the library does not force libopus on users.
+rvoip-core = { workspace = true, features = ["opus"] }
 rvoip-webrtc.workspace = true
 rustls.workspace = true
 subtle.workspace = true
