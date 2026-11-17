@@ -6,7 +6,7 @@
 use super::RTCReceivedRtpStreamStats;
 use ::serde::{Deserialize, Serialize};
 use shared::serde::instant_to_epoch;
-use std::time::Instant;
+use shared::time::SystemInstant;
 
 /// Statistics for a locally received inbound RTP stream.
 ///
@@ -14,7 +14,7 @@ use std::time::Instant;
 /// W3C WebRTC Statistics API. It provides comprehensive statistics about media
 /// received from a remote peer, including decoding, rendering, and quality metrics.
 ///
-/// # W3C Reference
+/// # Specification
 ///
 /// See [RTCInboundRtpStreamStats](https://www.w3.org/TR/webrtc-stats/#inboundrtpstats-dict*)
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,7 +89,7 @@ pub struct RTCInboundRtpStreamStats {
 
     /// Timestamp of the last received packet.
     #[serde(with = "instant_to_epoch")]
-    pub last_packet_received_timestamp: Instant,
+    pub last_packet_received_timestamp: SystemInstant,
 
     /// Total bytes received in RTP headers.
     pub header_bytes_received: u64,
@@ -125,7 +125,7 @@ pub struct RTCInboundRtpStreamStats {
 
     /// Estimated playout timestamp for synchronization.
     #[serde(with = "instant_to_epoch")]
-    pub estimated_playout_timestamp: Instant,
+    pub estimated_playout_timestamp: SystemInstant,
 
     /// Cumulative jitter buffer delay in seconds.
     pub jitter_buffer_delay: f64,

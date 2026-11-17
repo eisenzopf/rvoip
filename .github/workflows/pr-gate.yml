@@ -42,7 +42,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
 
       - name: Calculate affected crates and gates
         id: plan
@@ -93,7 +93,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           components: rustfmt
 
       - name: Formatting and CI policy tests
@@ -101,6 +101,26 @@ jobs:
           python3 scripts/ci/run_checks.py policy
           --name policy
           --output target/ci-receipts/policy.json
+
+      # Fragments are checked on every PR. On a version-bump PR (the
+      # "Prepare release PR" output) the changelog and release notes must
+      # already be final: this is publication's own finality check, run
+      # before qualification so "notes not final" cannot fail a qualified
+      # commit.
+      - name: Change fragments and release-notes finality
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/notes.py check
+          base="${PR_BASE_SHA:-}"
+          if [[ -z "$base" ]]; then
+            git fetch --depth=1 origin main
+            base="$(git rev-parse FETCH_HEAD)"
+          else
+            git fetch --depth=1 origin "$base"
+          fi
+          python3 scripts/release.py notes-final --if-version-changed-since "$base"
 
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
@@ -131,7 +151,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           components: clippy
 
       - name: Restore content-addressed Rust cache
@@ -182,7 +202,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
 
       - name: Install nightly for release fuzz validation
         if: matrix.gate == 'release-tooling'
@@ -260,7 +280,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           components: clippy
 
       - name: Restore SIP lane cache

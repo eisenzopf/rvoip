@@ -141,7 +141,7 @@ pub mod api;
 pub use dialog::{Dialog, DialogId, DialogState};
 pub use errors::{DialogError, DialogResult};
 pub use events::{DialogEvent, SessionCoordinationEvent};
-pub use manager::{DialogManager, UnifiedDialogManager};
+pub use manager::{live_dialog_count, DialogManager, UnifiedDialogManager};
 
 // **NEW**: Re-export unified configuration types
 pub use config::{ClientBehavior, DialogManagerConfig, HybridBehavior, ServerBehavior};

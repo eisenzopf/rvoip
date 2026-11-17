@@ -13,14 +13,15 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use rtc::interceptor::Registry as RtcRegistry;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -45,11 +46,14 @@ use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
 
+mod common;
+
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
 /// Test reflect functionality: webrtc sends RTP -> rtc reflects -> webrtc receives
 #[tokio::test]
 async fn test_reflect_webrtc_to_rtc() -> Result<()> {
+    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -142,8 +146,9 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Client)
+        .build();
 
     // Create a MediaEngine object to configure the supported codec
     let mut media_engine = MediaEngine::default();
@@ -161,7 +166,7 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
 
-    let registry = rtc::interceptor::Registry::new();
+    let registry = RtcRegistry::new();
 
     // Use the default set of Interceptors
     let registry =
@@ -182,7 +187,7 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
     log::info!("Created RTC peer connection");
 
     // Create output track for reflecting
@@ -208,7 +213,7 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
 
     // Set remote description (the offer from webrtc)
     log::info!("RTC set remote description");
-    rtc_pc.set_remote_description(rtc_offer)?;
+    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
 
     // Add local candidate for rtc peer
     let candidate = CandidateHostConfig {
@@ -230,7 +235,7 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
     log::info!("RTC created answer");
 
     // Set local description on rtc peer
-    rtc_pc.set_local_description(answer.clone())?;
+    rtc_pc.set_local_description(Instant::now(), answer.clone())?;
     log::info!("RTC set local description");
 
     // Convert rtc answer to webrtc SDP
@@ -293,30 +298,68 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
             }
         }
 
-        while let Some(message) = rtc_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, mut rtp_packet) => {
                     let receiver_id = *track_id2_receiver_id
                         .get(&track_id)
                         .ok_or(Error::ErrRTPReceiverNotExisted)?;
-                    let rtp_receiver = rtc_pc
-                        .rtp_receiver(receiver_id)
-                        .ok_or(Error::ErrRTPReceiverNotExisted)?;
-                    let track = rtp_receiver.track();
-                    let media_ssrc = track
-                        .ssrcs()
-                        .last()
-                        .ok_or(Error::ErrRTPReceiverForSSRCTrackStreamNotFound)?;
+                    let inbound_payload_type = rtp_packet.header.payload_type;
+                    let (media_ssrc, track_kind, incoming_codec) = {
+                        let mut rtp_receiver = rtc_pc
+                            .rtp_receiver(receiver_id)
+                            .ok_or(Error::ErrRTPReceiverNotExisted)?;
+                        let incoming_codec = rtp_receiver
+                            .get_parameters()
+                            .rtp_parameters
+                            .codecs
+                            .iter()
+                            .find(|codec| codec.payload_type == inbound_payload_type)
+                            .map(|codec| codec.rtp_codec.clone())
+                            .ok_or(Error::ErrCodecNotFound)?;
+                        let track = rtp_receiver.track();
+                        let media_ssrc = track
+                            .ssrcs()
+                            .last()
+                            .ok_or(Error::ErrRTPReceiverForSSRCTrackStreamNotFound)?;
+                        let track_kind = track.kind();
+                        (media_ssrc, track_kind, incoming_codec)
+                    };
                     rtp_receiver_id2ssrcs.insert(receiver_id, media_ssrc);
 
                     let rtp_sender_id = rtp_sender_ids
-                        .get(&track.kind())
+                        .get(&track_kind)
                         .ok_or(Error::ErrRTPSenderNotExisted)?;
 
                     let mut rtp_sender = rtc_pc
                         .rtp_sender(*rtp_sender_id)
                         .ok_or(Error::ErrRTPReceiverNotExisted)?;
 
+                    rtp_packet.header.payload_type = {
+                        let parameters = rtp_sender.get_parameters();
+                        parameters
+                            .rtp_parameters
+                            .codecs
+                            .iter()
+                            .find(|candidate| {
+                                candidate
+                                    .rtp_codec
+                                    .mime_type
+                                    .eq_ignore_ascii_case(&incoming_codec.mime_type)
+                                    && candidate.rtp_codec.sdp_fmtp_line
+                                        == incoming_codec.sdp_fmtp_line
+                            })
+                            .or_else(|| {
+                                parameters.rtp_parameters.codecs.iter().find(|candidate| {
+                                    candidate
+                                        .rtp_codec
+                                        .mime_type
+                                        .eq_ignore_ascii_case(&incoming_codec.mime_type)
+                                })
+                            })
+                            .map(|candidate| candidate.payload_type)
+                            .ok_or(Error::ErrRTPTransceiverCodecUnsupported)?
+                    };
                     rtp_packet.header.ssrc = rtp_sender
                         .track()
                         .ssrcs()
@@ -327,7 +370,7 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
                         rtp_packet.header.sequence_number,
                         media_ssrc
                     );
-                    rtp_sender.write_rtp(rtp_packet)?;
+                    rtp_sender.write_rtp(Instant::now(), rtp_packet)?;
                 }
                 RTCMessage::RtcpPacket(_, _) => {
                     // Read incoming RTCP packets
@@ -335,6 +378,7 @@ async fn test_reflect_webrtc_to_rtc() -> Result<()> {
                     // like NACK this needs to be called.
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
+                _ => {}
             }
         }
 

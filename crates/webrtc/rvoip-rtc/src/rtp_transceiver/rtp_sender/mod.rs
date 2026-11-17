@@ -16,10 +16,11 @@
 //! ## Getting the sender's track
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpSenderId;
 //! # fn example(sender_id: RTCRtpSenderId) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Get sender and access its track
 //! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
@@ -34,10 +35,11 @@
 //! ## Getting and modifying send parameters
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpSenderId;
 //! # fn example(sender_id: RTCRtpSenderId) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
 //!     // Get current parameters
@@ -59,6 +61,7 @@
 //! ## Replacing a track
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::media_stream::MediaStreamTrack;
 //! # use rtc::rtp_transceiver::RTCRtpSenderId;
@@ -66,7 +69,7 @@
 //! #     sender_id: RTCRtpSenderId,
 //! #     new_track: MediaStreamTrack
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
 //!     // Replace with new track (same kind required)
@@ -79,6 +82,7 @@
 //! ## Writing raw RTP packets
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpSenderId;
 //! # use rtp::packet::Packet;
@@ -87,7 +91,7 @@
 //! #     sender_id: RTCRtpSenderId,
 //! #     mut rtp_packet: Packet
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut sender) = peer_connection.rtp_sender(sender_id) {
 //!     // Write RTP packet directly
@@ -97,7 +101,7 @@
 //!         .ssrcs()
 //!         .last()
 //!         .ok_or(Error::ErrSenderWithNoSSRCs)?;
-//!     sender.write_rtp(rtp_packet)?;
+//!     sender.write_rtp(Instant::now(), rtp_packet)?;
 //! }
 //! # Ok(())
 //! # }
@@ -106,6 +110,7 @@
 //! ## Configuring simulcast with transceiver init
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::media_stream::MediaStreamTrack;
 //! # use rtc::rtp_transceiver::{RTCRtpTransceiverInit, RTCRtpTransceiverDirection};
@@ -113,7 +118,7 @@
 //! #     RTCRtpEncodingParameters, RTCRtpCodingParameters
 //! # };
 //! # fn example(video_track: MediaStreamTrack) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Configure simulcast with three layers
 //! let mut init = RTCRtpTransceiverInit {
@@ -159,9 +164,9 @@
 //! # }
 //! ```
 //!
-//! # Specifications
+//! # Specification
 //!
-//! * [W3C RTCRtpSender](https://w3c.github.io/webrtc-pc/#rtcrtpsender-interface)
+//! * [W3C RTCRtpSender](https://www.w3.org/TR/webrtc/#rtcrtpsender-interface)
 //! * [MDN RTCRtpSender](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender)
 
 //TODO: #[cfg(test)]
@@ -184,12 +189,14 @@ pub(crate) mod set_parameter_options;
 use crate::media_stream::MediaStreamId;
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::RTCPeerConnection;
-use crate::peer_connection::message::RTCMessage;
+use crate::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use crate::peer_connection::transport::RTCDtlsTransport;
 use crate::rtp_transceiver::RTCRtpSenderId;
-use crate::rtp_transceiver::rtp_sender::rtp_codec::{CodecMatch, codec_parameters_fuzzy_search};
-use interceptor::{Interceptor, NoopInterceptor};
+use log::trace;
+use rtp_codec::{CodecMatch, codec_parameters_fuzzy_search};
 use sansio::Protocol;
 use shared::error::{Error, Result};
+use std::time::Instant;
 
 pub use rtcp_parameters::{RTCPFeedback, RTCRtcpParameters};
 pub use rtcp_parameters::{
@@ -219,15 +226,15 @@ pub use set_parameter_options::RTCSetParameterOptions;
 /// * [W3C]
 ///
 /// [MDN]: https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender
-/// [W3C]: https://w3c.github.io/webrtc-pc/#rtcrtpsender-interface
-pub struct RTCRtpSender<'a, I = NoopInterceptor>
-where
-    I: Interceptor,
-{
+/// [W3C]: https://www.w3.org/TR/webrtc/#rtcrtpsender-interface
+pub struct RTCRtpSender<'a> {
     pub(crate) id: RTCRtpSenderId,
-    pub(crate) peer_connection: &'a mut RTCPeerConnection<I>,
+    pub(crate) peer_connection: &'a mut RTCPeerConnection,
 }
 
+/// rvoip: bind an outbound packet's payload type to the codec of the encoding
+/// that owns its SSRC, as `rtc` 0.20 did, so a caller-supplied payload type
+/// that the remote numbered differently is still sent with the negotiated one.
 fn bind_outbound_packet_to_encoding(
     packet: &mut rtp::Packet,
     codecs: &[RTCRtpCodecParameters],
@@ -267,10 +274,41 @@ fn bind_outbound_packet_to_encoding(
     Ok(())
 }
 
-impl<I> RTCRtpSender<'_, I>
-where
-    I: Interceptor,
-{
+impl RTCRtpSender<'_> {
+    /// The DTLS transport over which this sender's RTP packets are sent.
+    ///
+    /// ## Nullability
+    ///
+    /// `None` until this sender's transceiver has been associated by negotiation. The spec
+    /// sources this from the `[[SenderTransport]]` slot, which is per-sender and is filled while
+    /// applying a local or remote description — so the predicate is that transceiver's mid, not
+    /// a connection-wide flag.
+    ///
+    /// Deliberately *not* keyed on whether the DTLS endpoint has been built: an offerer
+    /// associates its transceivers at `setLocalDescription`, before the answer starts DTLS, and a
+    /// browser reports a transport there too. The handle simply reports
+    /// [`RTCDtlsTransportState::New`](crate::peer_connection::transport::RTCDtlsTransportState)
+    /// until the handshake begins.
+    ///
+    /// Under bundling every sender and receiver shares one transport, so all of these compare
+    /// equal by [`id()`](crate::peer_connection::transport::RTCDtlsTransport::id).
+    ///
+    /// ## Specifications
+    ///
+    /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcrtpsender-transport)
+    pub fn transport(&self) -> Option<RTCDtlsTransport<'_>> {
+        // `[[SenderTransport]]` is assigned when this sender's transceiver is associated by
+        // negotiation — the point at which the transceiver acquires a mid. Before that the slot
+        // is null, which is what the spec means by "prior to construction of the
+        // `RTCDtlsTransport` object".
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .mid()
+            .as_ref()?;
+
+        Some(RTCDtlsTransport {
+            peer_connection: self.peer_connection,
+        })
+    }
     /// Returns the media track being sent by this sender.
     pub fn track(&self) -> &MediaStreamTrack {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
@@ -389,13 +427,13 @@ where
     ///
     /// # Errors
     ///
-    /// Returns an error if no matching encoding is found, or the codec is unsupported,
-    /// or internal handle_write returns error
-    pub fn write_rtp(&mut self, mut packet: rtp::Packet) -> Result<()> {
+    /// Returns an error if no matching encoding is found, the codec is unsupported, the packet
+    /// carries a header extension whose id is not negotiated on this sender leg, or internal
+    /// handle_write returns error
+    pub fn write_rtp(&mut self, now: Instant, mut packet: rtp::Packet) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
-        //TODO: handle rtp header extension, etc.
         let (sender, media_engine) = (
             self.peer_connection.rtp_transceivers[self.id.0]
                 .sender_mut()
@@ -413,12 +451,64 @@ where
         }
 
         let parameters = sender.get_parameters(media_engine);
-        let (codecs, encodings) = (&parameters.rtp_parameters.codecs, &parameters.encodings);
 
-        bind_outbound_packet_to_encoding(&mut packet, codecs, encodings)?;
+        // From the SSRC, find the encoding and bind the packet to its codec.
+        bind_outbound_packet_to_encoding(
+            &mut packet,
+            &parameters.rtp_parameters.codecs,
+            &parameters.encodings,
+        )?;
+
+        if !parameters
+            .rtp_parameters
+            .codecs
+            .iter()
+            .any(|codec| codec.payload_type == packet.header.payload_type)
+        {
+            trace!(
+                "rtp_sender {:?} rejecting RTP ssrc {} pt {}: payload type is not negotiated on this sender leg; sender codecs [{}]",
+                self.id,
+                packet.header.ssrc,
+                packet.header.payload_type,
+                parameters
+                    .rtp_parameters
+                    .codecs
+                    .iter()
+                    .map(|codec| format!("{}:{}", codec.rtp_codec.mime_type, codec.payload_type))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Err(Error::ErrRTPTransceiverCodecUnsupported);
+        }
+
+        if let Some(ext) = packet.header.extensions.iter().find(|ext| {
+            !parameters
+                .rtp_parameters
+                .header_extensions
+                .iter()
+                .any(|negotiated| negotiated.id as u8 == ext.id)
+        }) {
+            trace!(
+                "rtp_sender {:?} rejecting RTP ssrc {} header extension id {}: extension id is not negotiated on this sender leg; sender header extensions [{}]",
+                self.id,
+                packet.header.ssrc,
+                ext.id,
+                parameters
+                    .rtp_parameters
+                    .header_extensions
+                    .iter()
+                    .map(|he| format!("{}:{}", he.uri, he.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return Err(Error::ErrHeaderExtensionNotFound);
+        }
+
         let track_id = sender.track().track_id().to_string();
-        self.peer_connection
-            .handle_write(RTCMessage::RtpPacket(track_id, packet))
+        self.peer_connection.handle_write(TaggedRTCMessage {
+            now,
+            message: RTCMessage::RtpPacket(track_id, packet),
+        })
     }
 
     /// Writes RTCP packets to the network.
@@ -433,26 +523,26 @@ where
     /// # Errors
     ///
     /// Returns an error if internal handle_write returns error
-    pub fn write_rtcp(&mut self, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()> {
+    pub fn write_rtcp(&mut self, now: Instant, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
-        //TODO: handle rtcp sender ssrc, header extension, etc.
         let sender = self.peer_connection.rtp_transceivers[self.id.0]
             .sender_mut()
             .as_mut()
             .unwrap();
 
         let track_id = sender.track().track_id().to_string();
-        self.peer_connection
-            .handle_write(RTCMessage::RtcpPacket(track_id, packets))
+        self.peer_connection.handle_write(TaggedRTCMessage {
+            now,
+            message: RTCMessage::RtcpPacket(track_id, packets),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::RTCRtpCodingParameters;
 
     fn codec(
         payload_type: crate::rtp_transceiver::PayloadType,

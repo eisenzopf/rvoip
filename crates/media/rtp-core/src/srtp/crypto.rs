@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::packet::RtpPacket;
 use crate::Result;
 use aes::{
-    cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher},
+    cipher::{Array, KeyIvInit, StreamCipher},
     Aes128, Aes256,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -931,16 +931,16 @@ pub(super) fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(
             iv.len()
         )));
     }
-    let iv = GenericArray::from_slice(&iv[0..16]);
+    let iv = <&Array<u8, _>>::try_from(&iv[0..16]).expect("length checked above");
 
     match key.len() {
         16 => {
-            let key = GenericArray::from_slice(key);
+            let key = <&Array<u8, _>>::try_from(key).expect("length checked above");
             let mut cipher = Aes128Ctr64BE::new(key, iv);
             cipher.apply_keystream(data);
         }
         32 => {
-            let key = GenericArray::from_slice(key);
+            let key = <&Array<u8, _>>::try_from(key).expect("length checked above");
             let mut cipher = Aes256Ctr64BE::new(key, iv);
             cipher.apply_keystream(data);
         }

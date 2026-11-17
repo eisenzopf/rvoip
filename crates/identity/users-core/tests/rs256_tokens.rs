@@ -99,6 +99,14 @@ fn pkcs1_and_pkcs8_forms_publish_the_same_public_jwk() {
     let pkcs1 = issuer(PKCS1_KEY, "tenant-a").public_key_jwk().unwrap();
     assert_eq!(pkcs8["n"], pkcs1["n"]);
     assert_eq!(pkcs8["e"], pkcs1["e"]);
+    // RFC 7518 §6.3.1: `n` and `e` are minimal big-endian octets. 65537 is
+    // `AQAB`, and the 2048-bit modulus has no leading zero octet.
+    assert_eq!(pkcs8["e"], "AQAB");
+    let modulus = URL_SAFE_NO_PAD
+        .decode(pkcs8["n"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(modulus.len(), 256);
+    assert_ne!(modulus[0], 0);
     for private in ["d", "p", "q", "dp", "dq", "qi"] {
         assert!(pkcs8.get(private).is_none());
     }

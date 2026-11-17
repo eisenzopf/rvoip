@@ -539,11 +539,12 @@ pub enum RateLimitError {
 // Rate limiting middleware
 pub async fn rate_limit_middleware(
     State(state): State<crate::api::ApiState>,
-    connect_info: Option<ConnectInfo<SocketAddr>>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let peer = match connect_info {
+    // axum 0.8 no longer extracts `Option<ConnectInfo<_>>`; read the
+    // extension the make-service installs directly.
+    let peer = match request.extensions().get::<ConnectInfo<SocketAddr>>() {
         Some(info) => info.0,
         None => {
             tracing::error!(

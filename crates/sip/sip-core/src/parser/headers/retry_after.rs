@@ -2,11 +2,12 @@
 // Retry-After = "Retry-After" HCOLON delta-seconds [ comment ] *( SEMI retry-param )
 // retry-param = ("duration" EQUAL delta-seconds) / generic-param
 
+use nom::Parser;
 use nom::{
     combinator::{map, map_res, opt},
     error::{Error as NomError, ErrorKind, ParseError},
     multi::many0,
-    sequence::{preceded, tuple},
+    sequence::preceded,
 };
 use std::str;
 
@@ -41,7 +42,7 @@ pub fn retry_param(input: &[u8]) -> ParseResult<'_, RetryParam> {
     }
 
     // If it's not a duration parameter, use generic_param
-    map(generic_param, RetryParam::Generic)(input)
+    map(generic_param, RetryParam::Generic).parse(input)
 }
 
 // Define struct for Retry-After value
@@ -57,17 +58,17 @@ pub struct RetryAfterValue {
 pub fn parse_retry_after(input: &[u8]) -> ParseResult<'_, RetryAfterValue> {
     // New signature
     map_res(
-        tuple((
+        (
             delta_seconds,
             opt(preceded(lws, comment)),
             many0(preceded(semi, retry_param)),
-        )),
+        ),
         |(delta, comment_bytes_opt, params)| {
             // Convert comment bytes to String if present
             let comment_opt_result = comment_bytes_opt
                 .map(|b| {
                     str::from_utf8(b).map(|s| s.to_string()).map_err(|_| {
-                        nom::Err::Failure(NomError::from_error_kind(b, ErrorKind::Char))
+                        nom::Err::<_>::Failure(NomError::from_error_kind(b, ErrorKind::Char))
                     })
                 })
                 .transpose();
@@ -78,7 +79,8 @@ pub fn parse_retry_after(input: &[u8]) -> ParseResult<'_, RetryAfterValue> {
                 params,
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]

@@ -7,12 +7,13 @@ use crate::rtp_transceiver::rtp_sender::rtp_codec::{
     CodecMatch, codec_parameters_fuzzy_search, find_rtx_payload_type,
 };
 use crate::rtp_transceiver::rtp_sender::{RTCRtpCodecParameters, RtpCodecKind};
-use crate::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit, fmtp};
+use crate::rtp_transceiver::{
+    PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverInit, fmtp,
+};
 use interceptor::Interceptor;
 use log::trace;
 use sdp::MediaDescription;
 use shared::error::{Error, Result};
-use std::collections::HashMap;
 use std::fmt;
 use unicase::UniCase;
 
@@ -25,24 +26,24 @@ use unicase::UniCase;
 ///
 /// See [RTCRtpTransceiver](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver) in the W3C WebRTC specification.
 #[derive(Default, Clone)]
-pub(crate) struct RTCRtpTransceiverInternal<I>
-where
-    I: Interceptor,
-{
+pub(crate) struct RTCRtpTransceiverInternal {
     mid: Option<String>,
     kind: RtpCodecKind,
-    sender: Option<RTCRtpSenderInternal<I>>,
-    receiver: Option<RTCRtpReceiverInternal<I>>,
+    sender: Option<RTCRtpSenderInternal>,
+    receiver: Option<RTCRtpReceiverInternal>,
     direction: RTCRtpTransceiverDirection,
     current_direction: RTCRtpTransceiverDirection,
     preferred_codecs: Vec<RTCRtpCodecParameters>,
     stopped: bool,
+    /// Whether this transceiver was implicitly created while applying a remote offer
+    /// (as opposed to being created by the application via `add_track`/`add_transceiver_*`).
+    /// Used by rollback (RFC 9429, Section 5.7): transceivers created by a remote offer that
+    /// is subsequently rolled back must be stopped and removed, unless a track was later
+    /// attached to them via `add_track`.
+    created_by_remote_description: bool,
 }
 
-impl<I> fmt::Debug for RTCRtpTransceiverInternal<I>
-where
-    I: Interceptor,
-{
+impl fmt::Debug for RTCRtpTransceiverInternal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RTCRtpTransceiver")
             .field("mid", &self.mid)
@@ -57,10 +58,7 @@ where
     }
 }
 
-impl<I> RTCRtpTransceiverInternal<I>
-where
-    I: Interceptor,
-{
+impl RTCRtpTransceiverInternal {
     pub(crate) fn new(
         kind: RtpCodecKind,
         track: Option<MediaStreamTrack>,
@@ -88,6 +86,7 @@ where
             current_direction: RTCRtpTransceiverDirection::Unspecified,
             preferred_codecs: vec![],
             stopped: false,
+            created_by_remote_description: false,
         }
     }
 
@@ -98,7 +97,7 @@ where
     ///
     /// # Specification
     ///
-    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-mid).
+    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     pub(crate) fn mid(&self) -> &Option<String> {
         &self.mid
     }
@@ -107,26 +106,26 @@ where
     ///
     /// # Specification
     ///
-    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-mid).
+    /// See [RTCRtpTransceiver.mid](https://www.w3.org/TR/webrtc/#dom-rtptransceiver-mid).
     pub(crate) fn kind(&self) -> RtpCodecKind {
         self.kind
     }
 
     /// sender returns the RTPTransceiver's RTPSender if it has one
-    pub(crate) fn sender(&self) -> &Option<RTCRtpSenderInternal<I>> {
+    pub(crate) fn sender(&self) -> &Option<RTCRtpSenderInternal> {
         &self.sender
     }
     /// sender returns the RTPTransceiver's RTPSender if it has one
-    pub(crate) fn sender_mut(&mut self) -> &mut Option<RTCRtpSenderInternal<I>> {
+    pub(crate) fn sender_mut(&mut self) -> &mut Option<RTCRtpSenderInternal> {
         &mut self.sender
     }
 
     /// receiver returns the RTPTransceiver's RTPReceiver if it has one
-    pub(crate) fn receiver(&self) -> &Option<RTCRtpReceiverInternal<I>> {
+    pub(crate) fn receiver(&self) -> &Option<RTCRtpReceiverInternal> {
         &self.receiver
     }
 
-    pub(crate) fn receiver_mut(&mut self) -> &mut Option<RTCRtpReceiverInternal<I>> {
+    pub(crate) fn receiver_mut(&mut self) -> &mut Option<RTCRtpReceiverInternal> {
         &mut self.receiver
     }
 
@@ -149,16 +148,12 @@ where
     ///
     /// See [RTCRtpTransceiver.direction](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction).
     pub(crate) fn set_direction(&mut self, direction: RTCRtpTransceiverDirection) {
-        let previous_direction: RTCRtpTransceiverDirection = self.direction;
-
+        // The negotiation-needed flag is intentionally not updated here: this internal setter is
+        // also invoked while applying a remote/local session description, where triggering
+        // renegotiation would be incorrect. The public `RTCRtpTransceiver::set_direction` (which
+        // maps to the spec's `direction` setter) performs that step.
+        // See https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction
         self.direction = direction;
-
-        if direction != previous_direction {
-            trace!("Changing direction of transceiver from {previous_direction} to {direction}");
-
-            //TODO: https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction
-            // Update the negotiation-needed flag for connection.
-        }
     }
 
     /// Returns the negotiated direction of the transceiver.
@@ -182,7 +177,11 @@ where
     /// # Specification
     ///
     /// See [RTCRtpTransceiver.stop()](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-stop).
-    pub(crate) fn stop(&mut self, media_engine: &MediaEngine, interceptor: &mut I) -> Result<()> {
+    pub(crate) fn stop(
+        &mut self,
+        media_engine: &MediaEngine,
+        interceptor: &mut dyn Interceptor,
+    ) -> Result<()> {
         if self.stopped {
             return Ok(());
         }
@@ -246,7 +245,7 @@ where
 
     /// Codecs returns list of supported codecs
     pub(crate) fn get_codecs(&self, media_engine: &MediaEngine) -> Vec<RTCRtpCodecParameters> {
-        RTCRtpReceiverInternal::<I>::get_codecs(&self.preferred_codecs, self.kind(), media_engine)
+        RTCRtpReceiverInternal::get_codecs(&self.preferred_codecs, self.kind(), media_engine)
     }
 
     /// set_mid sets the RTPTransceiver's mid. If it was already set, will return an error.
@@ -261,6 +260,25 @@ where
 
     pub(crate) fn stopped(&self) -> bool {
         self.stopped
+    }
+
+    /// Returns whether this transceiver was implicitly created while applying a remote offer.
+    /// See [`RTCRtpTransceiverInternal::created_by_remote_description`].
+    pub(crate) fn created_by_remote_description(&self) -> bool {
+        self.created_by_remote_description
+    }
+
+    /// Marks this transceiver as having been implicitly created while applying a remote offer.
+    pub(crate) fn set_created_by_remote_description(&mut self, created: bool) {
+        self.created_by_remote_description = created;
+    }
+
+    /// Disassociates this transceiver from its "m=" section, as required by rollback
+    /// (RFC 9429, Section 5.7). The mid is cleared and the negotiated (current) direction is
+    /// reset so the transceiver can be re-associated by a subsequent offer/answer exchange.
+    pub(crate) fn disassociate(&mut self) {
+        self.mid = None;
+        self.current_direction = RTCRtpTransceiverDirection::Unspecified;
     }
 
     pub(crate) fn set_current_direction(&mut self, d: RTCRtpTransceiverDirection) {
@@ -287,9 +305,15 @@ where
         // find codec matches between what is in remote description and
         // the transceivers codecs and use payload type registered to
         // media engine.
-        let mut payload_mapping = HashMap::new(); // for RTX re-mapping later
+        // For RTX re-mapping later. Ordered, not a map: the RTX pass below walks these in turn
+        // and appends a codec per entry, so a `HashMap` would place the answer's rtx formats in
+        // a different order on every run. Each pass fills its own list and hands it over, so the
+        // whole stays in step with `filtered_codecs`: exact matches first, then partial, each in
+        // the offer's order.
+        let mut payload_mapping: Vec<(PayloadType, PayloadType)> = vec![];
         let mut filter_by_match = |match_filter: CodecMatch| -> Vec<RTCRtpCodecParameters> {
             let mut filtered_codecs = vec![];
+            let mut pass_mapping = vec![];
             for remote_codec_idx in (0..remote_codecs.len()).rev() {
                 let remote_codec = &mut remote_codecs[remote_codec_idx];
                 if UniCase::new(remote_codec.rtp_codec.mime_type.as_str())
@@ -301,10 +325,14 @@ where
                 let (match_codec, match_type) =
                     codec_parameters_fuzzy_search(&remote_codec.rtp_codec, &left_codecs);
                 if match_type == match_filter {
-                    payload_mapping.insert(remote_codec.payload_type, match_codec.payload_type);
+                    pass_mapping.insert(0, (remote_codec.payload_type, match_codec.payload_type));
 
                     remote_codec.payload_type = match_codec.payload_type;
-                    filtered_codecs.push(remote_codec.clone());
+                    // The scan runs backwards so that matched entries can be removed by index,
+                    // so prepend to undo it: an answer must keep the offer's codec order (the
+                    // offerer reads it back as our preference). Appending here would make the
+                    // answer lead with the offer's *last* codec.
+                    filtered_codecs.insert(0, remote_codec.clone());
 
                     // removed matched codec for next round
                     remote_codecs.remove(remote_codec_idx);
@@ -333,12 +361,7 @@ where
                 }
             }
 
-            // Entries are removed from the back so indices remain valid, but
-            // the answer must preserve the offerer's preference order.  In
-            // particular, reversing an `opus, PCMU, PCMA` offer makes browsers
-            // select PCMA while the rest of the connection still records Opus
-            // as the negotiated primary codec.
-            filtered_codecs.reverse();
+            payload_mapping.extend(pass_mapping);
             filtered_codecs
         };
 

@@ -1,3 +1,4 @@
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take},
@@ -19,11 +20,11 @@ pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 // quoted-pair = "\" (%x00-09 / %x0B-0C / %x0E-7F)
 pub fn quoted_pair(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(
-        tag(b"\\"),
+        tag(&b"\\"[..]),
         map_res(take(1usize), |c: &[u8]| {
             // Check if byte is empty or CR/LF (invalid escapes in SIP)
             if c.is_empty() || c[0] == b'\r' || c[0] == b'\n' {
-                Err(nom::Err::Failure(nom::error::Error::new(
+                Err(nom::Err::<_>::Failure(nom::error::Error::new(
                     input,
                     ErrorKind::Verify,
                 )))
@@ -31,13 +32,14 @@ pub fn quoted_pair(input: &[u8]) -> ParseResult<'_, &[u8]> {
                 Ok(c)
             }
         }),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // RFC 3261 defines folded-line = 1*WSP CRLF 1*WSP
 // This is a specific parser for correctly handling line folding in quoted strings
 pub fn folded_line(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(pair(preceded(many0(wsp), crlf), many0(wsp)))(input)
+    recognize(pair(preceded(many0(wsp), crlf), many0(wsp))).parse(input)
 }
 
 // qdtext = LWS / %x21 / %x23-5B / %x5D-7E / UTF8-NONASCII
@@ -59,7 +61,8 @@ pub fn qdtext(input: &[u8]) -> ParseResult<'_, &[u8]> {
             }
         })),
         utf8_nonascii,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // quoted-string = SWS DQUOTE *(qdtext / quoted-pair ) DQUOTE
@@ -68,7 +71,8 @@ pub fn quoted_string(input: &[u8]) -> ParseResult<'_, &[u8]> {
     preceded(
         sws,
         delimited(dquote, recognize(many0(alt((qdtext, quoted_pair)))), dquote),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Unescapes a quoted string by removing the escape character (\)
@@ -102,7 +106,7 @@ pub fn unescape_quoted_string(input: &[u8]) -> Vec<u8> {
 /// providing full RFC compliance for quoted strings.
 /// Returns the properly unescaped string content as `Vec<u8>`.
 pub fn parse_quoted_string(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
-    map(quoted_string, unescape_quoted_string)(input)
+    map(quoted_string, unescape_quoted_string).parse(input)
 }
 
 // ctext = %x21-27 / %x2A-5B / %x5D-7E / UTF8-NONASCII / LWS
@@ -124,7 +128,8 @@ pub fn ctext(input: &[u8]) -> ParseResult<'_, &[u8]> {
             }
         })),
         utf8_nonascii,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // comment = LPAREN *(ctext / quoted-pair / comment) RPAREN
@@ -134,7 +139,8 @@ pub fn comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
         lparen,                                               // Consumes LPAREN and surrounding SWS
         recognize(many0(alt((ctext, quoted_pair, comment)))), // Recursive call
         rparen,                                               // Consumes RPAREN and surrounding SWS
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Unescapes a comment by removing the escape character (\)
@@ -148,7 +154,7 @@ pub fn unescape_comment(input: &[u8]) -> Vec<u8> {
 /// providing full RFC compliance for comments.
 /// Returns the properly unescaped comment content as `Vec<u8>`.
 pub fn parse_comment(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
-    map(comment, unescape_comment)(input)
+    map(comment, unescape_comment).parse(input)
 }
 
 #[cfg(test)]

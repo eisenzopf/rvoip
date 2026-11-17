@@ -2,7 +2,7 @@
 name = "rvoip-example-customer-escalation-sip-webrtc"
 version = "0.4.0"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.95"
 publish = false
 
 [dependencies]
@@ -19,6 +19,6 @@ rustls = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

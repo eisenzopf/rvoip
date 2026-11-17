@@ -5,6 +5,7 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
+use nom::Parser;
 use nom::{character::complete::char, combinator::map, sequence::separated_pair, IResult};
 
 /// Parser for bandwidth type
@@ -24,7 +25,8 @@ fn bandwidth_parser(input: &str) -> IResult<&str, (String, u32)> {
         map(bwtype_parser, |s: &str| s.to_string()),
         char(':'),
         bandwidth_value_parser,
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parses bandwidth attribute: `b=<bwtype>:<bandwidth>`

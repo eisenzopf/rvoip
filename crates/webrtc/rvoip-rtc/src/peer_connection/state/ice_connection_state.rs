@@ -95,16 +95,17 @@ use std::fmt;
 /// assert!(!is_ice_active(RTCIceConnectionState::Disconnected));
 /// ```
 ///
-/// # Specifications
+/// # Specification
 ///
 /// - [W3C RTCPeerConnection.iceConnectionState]
 /// - [MDN RTCPeerConnection.iceConnectionState]
 /// - [RFC 8445] - ICE Protocol
 ///
-/// [W3C RTCPeerConnection.iceConnectionState]: https://w3c.github.io/webrtc-pc/#dom-peerconnection-ice-connection-state
+/// [W3C RTCPeerConnection.iceConnectionState]: https://www.w3.org/TR/webrtc/#dom-peerconnection-ice-connection-state
 /// [MDN RTCPeerConnection.iceConnectionState]: https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/iceConnectionState
 /// [RFC 8445]: https://datatracker.ietf.org/doc/html/rfc8445
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RTCIceConnectionState {
     /// State not specified. This should not occur in normal operation.
     #[default]

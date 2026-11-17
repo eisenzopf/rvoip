@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -148,6 +148,11 @@ struct SipWirePeer {
     outbound_messages: mpsc::UnboundedReceiver<Request>,
     responses: mpsc::UnboundedReceiver<CapturedResponse>,
     bridge_teardowns: mpsc::UnboundedReceiver<Method>,
+    // Next audio RTP sequence number. One SSRC is one RTP sequence space
+    // (RFC 3550 5.1), so every burst continues where the previous one ended;
+    // restarting at 0 would repeat already-played sequence numbers, which a
+    // conforming receiver discards as duplicates.
+    audio_sequence: AtomicU16,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -400,6 +405,7 @@ impl SipWirePeer {
             outbound_messages,
             responses,
             bridge_teardowns,
+            audio_sequence: AtomicU16::new(0),
             task,
         }
     }
@@ -426,7 +432,8 @@ impl SipWirePeer {
 
     async fn send_audio_burst(&self, dialog: &EstablishedDialog, codec: SipCodec) {
         let payload = vec![codec.silence_octet(); 160];
-        for sequence in 0..12u16 {
+        for _ in 0..12 {
+            let sequence = self.audio_sequence.fetch_add(1, Ordering::Relaxed);
             let packet = rtp_packet(
                 codec.payload_type(),
                 sequence,

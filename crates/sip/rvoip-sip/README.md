@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?release=0.4.0)](https://crates.io/crates/rvoip-sip/0.4.0)
 [![docs.rs](https://img.shields.io/docsrs/rvoip-sip/0.4.0?label=docs)](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)
-[![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
 [![GitHub issues](https://img.shields.io/github/issues/eisenzopf/rvoip.svg)](https://github.com/eisenzopf/rvoip/issues)
@@ -21,7 +21,7 @@ proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
 [immutable qualification history](docs/releases/qualification/README.md)
 retains prior releases and the detailed 0.4.0 performance evaluation.
 
-What changed in this release: the [release notes](docs/RELEASE_NOTES_NEXT.md)
+What changed in this release: the [release notes](../../../docs/release/RELEASE_NOTES_NEXT.md)
 and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
 [0.4 migration guide](../../../docs/MIGRATING_0.4.md) covers the breaking
 changes, including `#[non_exhaustive]` `Config`, the new `Event` variant and
@@ -47,7 +47,7 @@ level without switching protocol stacks.
 ## Install
 
 `rvoip-sip` uses the workspace minimum supported Rust version. The current MSRV
-is **Rust 1.91**.
+is **Rust 1.95**.
 
 ```toml
 [dependencies]
@@ -60,7 +60,7 @@ For repository development:
 ```sh
 git clone https://github.com/eisenzopf/rvoip.git
 cd rvoip
-RUSTUP_TOOLCHAIN=1.91 cargo check -p rvoip-sip --all-targets
+RUSTUP_TOOLCHAIN=1.95 cargo check -p rvoip-sip --all-targets
 ```
 
 ## Quick start
@@ -455,7 +455,7 @@ narrower qualification.
 Local development checks:
 
 ```sh
-RUSTUP_TOOLCHAIN=1.91 cargo check -p rvoip-sip --all-targets
+RUSTUP_TOOLCHAIN=1.95 cargo check -p rvoip-sip --all-targets
 crates/sip/rvoip-sip/scripts/beta_gate.sh --local
 crates/sip/rvoip-sip/scripts/beta_gate.sh --security
 ```
@@ -483,7 +483,7 @@ Operational references:
   tuning guidance.
 - [`docs/INTEROP_CI_PLAN.md`](docs/INTEROP_CI_PLAN.md) for PBX, SIPp, and
   strict-UA runner expectations.
-- [`docs/RELEASE_NOTES_NEXT.md`](docs/RELEASE_NOTES_NEXT.md) and the
+- [`docs/release/RELEASE_NOTES_NEXT.md`](../../../docs/release/RELEASE_NOTES_NEXT.md) and the
   [0.4 migration guide](../../../docs/MIGRATING_0.4.md) for what changed in
   this release and how to upgrade.
 

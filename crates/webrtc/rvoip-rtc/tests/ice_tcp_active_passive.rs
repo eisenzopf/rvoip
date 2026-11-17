@@ -14,9 +14,9 @@
 use anyhow::Result;
 use bytes::BytesMut;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
@@ -51,18 +51,19 @@ impl TcpPeerRunner {
         let passive_local_addr = tcp_listener.local_addr()?;
 
         // Configure offer peer with TCP active candidate
-        let mut offer_setting_engine = SettingEngine::default();
-        offer_setting_engine.set_network_types(vec![
-            ice::network_type::NetworkType::Tcp4,
-            ice::network_type::NetworkType::Tcp6,
-        ]);
+        let offer_setting_engine = SettingEngineBuilder::new()
+            .with_network_types(vec![
+                ice::network_type::NetworkType::Tcp4,
+                ice::network_type::NetworkType::Tcp6,
+            ])
+            .build();
 
         let offer_config = RTCConfigurationBuilder::new().build();
 
         let mut offer_pc = RTCPeerConnectionBuilder::new()
             .with_configuration(offer_config)
             .with_setting_engine(offer_setting_engine)
-            .build()?;
+            .build(Instant::now())?;
 
         // Create TCP active candidate for offer side
         // Port 9 (discard) is used as placeholder for active candidates
@@ -80,19 +81,20 @@ impl TcpPeerRunner {
         offer_pc.add_local_candidate(RTCIceCandidate::from(&offer_candidate).to_json()?)?;
 
         // Configure answer peer with TCP passive candidate
-        let mut answer_setting_engine = SettingEngine::default();
-        answer_setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
-        answer_setting_engine.set_network_types(vec![
-            ice::network_type::NetworkType::Tcp4,
-            ice::network_type::NetworkType::Tcp6,
-        ]);
+        let answer_setting_engine = SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Client)
+            .with_network_types(vec![
+                ice::network_type::NetworkType::Tcp4,
+                ice::network_type::NetworkType::Tcp6,
+            ])
+            .build();
 
         let answer_config = RTCConfigurationBuilder::new().build();
 
         let mut answer_pc = RTCPeerConnectionBuilder::new()
             .with_configuration(answer_config)
             .with_setting_engine(answer_setting_engine)
-            .build()?;
+            .build(Instant::now())?;
 
         // Create TCP passive candidate for answer side
         let answer_candidate = CandidateHostConfig {
@@ -142,12 +144,20 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // Track state
     let mut offer_connected = false;
@@ -182,6 +192,17 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
     while start_time.elapsed() < test_timeout {
         // Process offer peer writes - send via TCP with framing
         while let Some(msg) = runner.offer_pc.poll_write() {
+            // Everything in this test rides the TCP candidate pair, so every
+            // transmit must be stamped TCP: consumers running UDP sockets and
+            // TCP streams side by side route poll_write() output by this
+            // field (regression test for DTLS/SCTP transmits leaving the
+            // engine stamped UDP on a TCP pair).
+            assert_eq!(
+                msg.transport.transport_protocol,
+                TransportProtocol::TCP,
+                "[Offer] transmit to {} must be stamped TCP",
+                msg.transport.peer_addr
+            );
             if let Some(ref mut stream) = offer_stream {
                 let framed = frame_packet(&msg.message);
                 stream.write_all(&framed).await?;
@@ -190,6 +211,12 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
 
         // Process answer peer writes - send via TCP with framing
         while let Some(msg) = runner.answer_pc.poll_write() {
+            assert_eq!(
+                msg.transport.transport_protocol,
+                TransportProtocol::TCP,
+                "[Answer] transmit to {} must be stamped TCP",
+                msg.transport.peer_addr
+            );
             if let Some(ref mut stream) = answer_stream {
                 let framed = frame_packet(&msg.message);
                 stream.write_all(&framed).await?;
@@ -231,14 +258,14 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
         }
 
         // Read messages from offer peer
-        while let Some(message) = runner.offer_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = runner.offer_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(_, _) = message {
                 // Handle any echo messages
             }
         }
 
         // Read messages from answer peer
-        while let Some(message) = runner.answer_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = runner.answer_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(_, msg) = message {
                 let received = String::from_utf8_lossy(&msg.data);
                 log::info!("[Answer] Received message: {}", received);
@@ -252,7 +279,7 @@ async fn test_ice_tcp_active_passive_connection() -> Result<()> {
             && let Some(dc_id) = offer_dc_id
             && let Some(mut dc) = runner.offer_pc.data_channel(dc_id)
         {
-            dc.send_text(message_content.to_string())?;
+            dc.send_text(Instant::now(), message_content.to_string())?;
             offer_messages_sent += 1;
             log::info!(
                 "[Offer] Sent message {}/{}",
@@ -517,12 +544,20 @@ async fn test_ice_tcp_bidirectional_data_channel() -> Result<()> {
 
     // Exchange offer/answer
     let offer = runner.offer_pc.create_offer(None)?;
-    runner.offer_pc.set_local_description(offer.clone())?;
-    runner.answer_pc.set_remote_description(offer)?;
+    runner
+        .offer_pc
+        .set_local_description(Instant::now(), offer.clone())?;
+    runner
+        .answer_pc
+        .set_remote_description(Instant::now(), offer)?;
 
     let answer = runner.answer_pc.create_answer(None)?;
-    runner.answer_pc.set_local_description(answer.clone())?;
-    runner.offer_pc.set_remote_description(answer)?;
+    runner
+        .answer_pc
+        .set_local_description(Instant::now(), answer.clone())?;
+    runner
+        .offer_pc
+        .set_remote_description(Instant::now(), answer)?;
 
     // State tracking
     let mut offer_connected = false;
@@ -590,12 +625,12 @@ async fn test_ice_tcp_bidirectional_data_channel() -> Result<()> {
         }
 
         // Process reads
-        while let Some(message) = runner.offer_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = runner.offer_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(_, _) = message {
                 offer_received += 1;
             }
         }
-        while let Some(message) = runner.answer_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = runner.answer_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(_, _) = message {
                 answer_received += 1;
             }
@@ -608,7 +643,7 @@ async fn test_ice_tcp_bidirectional_data_channel() -> Result<()> {
                 && let Some(dc_id) = offer_dc_id
                 && let Some(mut dc) = runner.offer_pc.data_channel(dc_id)
             {
-                dc.send_text("From offer".to_string()).ok();
+                dc.send_text(Instant::now(), "From offer".to_string()).ok();
             }
         }
         if answer_connected {
@@ -617,7 +652,7 @@ async fn test_ice_tcp_bidirectional_data_channel() -> Result<()> {
                 && let Some(dc_id) = answer_dc_id
                 && let Some(mut dc) = runner.answer_pc.data_channel(dc_id)
             {
-                dc.send_text("From answer".to_string()).ok();
+                dc.send_text(Instant::now(), "From answer".to_string()).ok();
             }
         }
 

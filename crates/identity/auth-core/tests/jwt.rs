@@ -79,7 +79,7 @@ fn mint(claims: &TestClaims) -> String {
     encode(
         &Header::default(),
         claims,
-        &EncodingKey::from_secret(HMAC_SECRET),
+        &EncodingKey::from_secret(HMAC_SECRET).unwrap(),
     )
     .expect("encode test JWT")
 }
@@ -88,14 +88,14 @@ fn mint_json(claims: &serde_json::Value) -> String {
     encode(
         &Header::default(),
         claims,
-        &EncodingKey::from_secret(HMAC_SECRET),
+        &EncodingKey::from_secret(HMAC_SECRET).unwrap(),
     )
     .expect("encode test JWT")
 }
 
 #[tokio::test]
 async fn valid_hmac_token_yields_user_authorized() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let token = mint(&TestClaims::default());
 
     let assurance = validator
@@ -120,7 +120,7 @@ async fn valid_hmac_token_yields_user_authorized() {
 
 #[tokio::test]
 async fn principal_preserves_jwt_authorization_claims() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let expires_at = (Utc::now() + chrono::Duration::hours(1)).timestamp();
     let token = mint(&TestClaims {
         sub: "shared-subject".into(),
@@ -156,7 +156,7 @@ async fn principal_preserves_jwt_authorization_claims() {
 
 #[tokio::test]
 async fn credential_preserves_validated_jti_and_iat() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let issued_at = u64::try_from(Utc::now().timestamp()).unwrap() - 30;
     let token = mint(&TestClaims {
         jti: Some("token-id-123".into()),
@@ -175,7 +175,9 @@ async fn credential_preserves_validated_jti_and_iat() {
 
 #[tokio::test]
 async fn production_jti_policy_and_metadata_bounds_fail_closed() {
-    let required = JwtValidator::from_hmac_secret(HMAC_SECRET).with_required_jti();
+    let required = JwtValidator::from_hmac_secret(HMAC_SECRET)
+        .unwrap()
+        .with_required_jti();
     assert!(matches!(
         required
             .validate_credential(&mint(&TestClaims::default()))
@@ -183,7 +185,7 @@ async fn production_jti_policy_and_metadata_bounds_fail_closed() {
         Err(BearerAuthError::Invalid(ref reason)) if reason.contains("required jti")
     ));
 
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     for jti in [
         "".to_string(),
         "line\nbreak".to_string(),
@@ -202,7 +204,7 @@ async fn production_jti_policy_and_metadata_bounds_fail_closed() {
 
 #[tokio::test]
 async fn issued_at_range_and_order_fail_closed() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let expires_at = (Utc::now() + chrono::Duration::hours(1)).timestamp();
     let after_expiry = u64::try_from(expires_at).unwrap() + 1;
     let token = mint(&TestClaims {
@@ -227,8 +229,10 @@ async fn issued_at_range_and_order_fail_closed() {
 
 #[tokio::test]
 async fn validator_from_decoding_key_validates_hmac_token() {
-    let validator =
-        JwtValidator::from_decoding_key(DecodingKey::from_secret(HMAC_SECRET), Algorithm::HS256);
+    let validator = JwtValidator::from_decoding_key(
+        DecodingKey::from_secret(HMAC_SECRET).unwrap(),
+        Algorithm::HS256,
+    );
     let token = mint(&TestClaims::default());
 
     let assurance = validator
@@ -246,28 +250,28 @@ async fn validator_from_decoding_key_validates_hmac_token() {
 
 #[tokio::test]
 async fn empty_token_rejects_with_empty_error() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let result = validator.validate("").await;
     assert!(matches!(result, Err(BearerAuthError::Empty)));
 }
 
 #[tokio::test]
 async fn malformed_token_rejects_with_invalid() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let result = validator.validate("this.is.not-a-real-jwt").await;
     assert!(matches!(result, Err(BearerAuthError::Invalid(_))));
 }
 
 #[tokio::test]
 async fn token_signed_with_different_secret_rejects() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims::default();
     // Mint with a different secret — signature won't verify against
     // the validator's HMAC_SECRET.
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(b"wrong-secret"),
+        &EncodingKey::from_secret(b"wrong-secret").unwrap(),
     )
     .expect("encode");
     let result = validator.validate(&token).await;
@@ -276,12 +280,12 @@ async fn token_signed_with_different_secret_rejects() {
 
 #[tokio::test]
 async fn token_with_unexpected_algorithm_rejects() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims::default();
     let token = encode(
         &Header::new(Algorithm::HS384),
         &claims,
-        &EncodingKey::from_secret(HMAC_SECRET),
+        &EncodingKey::from_secret(HMAC_SECRET).unwrap(),
     )
     .expect("encode HS384 token");
 
@@ -291,7 +295,7 @@ async fn token_with_unexpected_algorithm_rejects() {
 
 #[tokio::test]
 async fn expired_token_rejects() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims {
         // Default Validation has 60s leeway; 10 minutes past covers it.
         exp: (Utc::now() - chrono::Duration::minutes(10)).timestamp(),
@@ -307,7 +311,7 @@ async fn expired_token_rejects() {
 
 #[tokio::test]
 async fn non_numeric_expiration_claim_fails_closed() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let token = mint_json(&serde_json::json!({
         "sub": "id_alice",
         "exp": "not-a-numeric-date"
@@ -321,7 +325,7 @@ async fn non_numeric_expiration_claim_fails_closed() {
 
 #[tokio::test]
 async fn principal_boundary_rejects_token_inside_decoder_leeway() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let token = mint(&TestClaims {
         // jsonwebtoken accepts this inside its default 60-second clock-skew
         // leeway; the principal boundary must still reject it as inactive.
@@ -337,7 +341,9 @@ async fn principal_boundary_rejects_token_inside_decoder_leeway() {
 
 #[tokio::test]
 async fn audience_constraint_enforced() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).with_audience(["uctp.example.com"]);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET)
+        .unwrap()
+        .with_audience(["uctp.example.com"]);
 
     // Wrong audience → reject.
     let bad = mint(&TestClaims {
@@ -359,8 +365,9 @@ async fn audience_constraint_enforced() {
 
 #[tokio::test]
 async fn issuer_constraint_enforced() {
-    let validator =
-        JwtValidator::from_hmac_secret(HMAC_SECRET).with_issuer(["https://idp.example.com"]);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET)
+        .unwrap()
+        .with_issuer(["https://idp.example.com"]);
 
     let bad = mint(&TestClaims {
         iss: Some("https://imposter.example.com".into()),
@@ -380,7 +387,7 @@ async fn issuer_constraint_enforced() {
 
 #[tokio::test]
 async fn space_separated_scope_claim_parses() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims {
         scope: Some("read:calls write:messages admin".into()),
         ..Default::default()
@@ -396,7 +403,7 @@ async fn space_separated_scope_claim_parses() {
 
 #[tokio::test]
 async fn array_scopes_claim_parses() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims {
         scopes: Some(vec!["read:calls".into(), "write:messages".into()]),
         ..Default::default()
@@ -412,7 +419,7 @@ async fn array_scopes_claim_parses() {
 
 #[tokio::test]
 async fn both_scope_forms_merge_without_duplicates() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims {
         scope: Some("read:calls write:messages".into()),
         scopes: Some(vec!["read:calls".into(), "admin".into()]),
@@ -433,7 +440,7 @@ async fn both_scope_forms_merge_without_duplicates() {
 
 #[tokio::test]
 async fn top_level_roles_map_to_role_scopes() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET);
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).unwrap();
     let claims = TestClaims {
         roles: Some(vec!["admin".into(), "operator".into()]),
         ..Default::default()
@@ -450,11 +457,11 @@ async fn top_level_roles_map_to_role_scopes() {
 
 #[tokio::test]
 async fn revocation_checker_accepts_active_jti() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).with_revocation_checker(Arc::new(
-        StaticRevocationChecker {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET)
+        .unwrap()
+        .with_revocation_checker(Arc::new(StaticRevocationChecker {
             revoked: "revoked-token",
-        },
-    ));
+        }));
     let token = mint(&TestClaims {
         jti: Some("active-token".into()),
         ..Default::default()
@@ -465,11 +472,11 @@ async fn revocation_checker_accepts_active_jti() {
 
 #[tokio::test]
 async fn revocation_checker_rejects_revoked_jti() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).with_revocation_checker(Arc::new(
-        StaticRevocationChecker {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET)
+        .unwrap()
+        .with_revocation_checker(Arc::new(StaticRevocationChecker {
             revoked: "revoked-token",
-        },
-    ));
+        }));
     let token = mint(&TestClaims {
         jti: Some("revoked-token".into()),
         ..Default::default()
@@ -481,13 +488,21 @@ async fn revocation_checker_rejects_revoked_jti() {
 
 #[tokio::test]
 async fn revocation_checker_rejects_missing_jti() {
-    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET).with_revocation_checker(Arc::new(
-        StaticRevocationChecker {
+    let validator = JwtValidator::from_hmac_secret(HMAC_SECRET)
+        .unwrap()
+        .with_revocation_checker(Arc::new(StaticRevocationChecker {
             revoked: "revoked-token",
-        },
-    ));
+        }));
     let token = mint(&TestClaims::default());
 
     let result = validator.validate(&token).await;
     assert!(matches!(result, Err(BearerAuthError::Invalid(err)) if err.contains("missing jti")));
+}
+
+#[test]
+fn empty_hmac_secret_is_rejected_at_construction() {
+    assert!(matches!(
+        JwtValidator::from_hmac_secret(b""),
+        Err(BearerAuthError::Unavailable(err)) if err.contains("HMAC secret")
+    ));
 }

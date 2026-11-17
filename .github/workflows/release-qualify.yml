@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       candidate:
-        description: Main commit to qualify, or same-repository branch head to diagnose
+        description: Main commit to qualify (any commit on main), or same-repository branch head to diagnose
         required: true
         default: main
         type: string
       profile:
-        description: Preflight, exact-gate diagnosis, core dry run, or qualification
+        description: Preflight, exact-gate diagnosis, core dry run, full qualification, release benchmark, or release qualification
         required: true
         default: remote-core
         type: choice
@@ -18,23 +18,52 @@ on:
           - remote-diagnostic
           - remote-core
           - remote-release
+          - bench-release
+          - bench-minor
+          - release-patch
+          - release-minor
       diagnostic_gates:
         description: Comma-separated exact release or preflight EC2 gate IDs for remote-diagnostic
         required: false
         type: string
       first_candidate:
-        description: Force every selected gate to run fresh
+        description: Force every selected gate to run fresh (diagnostics without prior_run_id always run fresh)
         required: true
         default: true
         type: boolean
       prior_run_id:
-        description: Optional comma-separated run IDs whose exact matching evidence may be reused
+        description: Optional comma-separated run IDs whose exact matching evidence may be reused (diagnostic runs may reuse diagnostic evidence; nothing they produce is reusable for release)
         required: false
         type: string
       changed_since:
         description: Optional prior candidate SHA for fail-closed changed-path validation
         required: false
         type: string
+  # Callable from another workflow with the same inputs. Nothing schedules a
+  # qualification: an EC2 fanout runs only when someone dispatches it.
+  workflow_call:
+    inputs:
+      candidate:
+        required: true
+        type: string
+      profile:
+        required: true
+        type: string
+      diagnostic_gates:
+        required: false
+        type: string
+        default: ""
+      first_candidate:
+        required: true
+        type: boolean
+      prior_run_id:
+        required: false
+        type: string
+        default: ""
+      changed_since:
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -48,7 +77,7 @@ concurrency:
   cancel-in-progress: ${{ inputs.profile == 'remote-preflight' || inputs.profile == 'remote-diagnostic' }}
 
 env:
-  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16
+  RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16
   RUSTUP_MAX_RETRIES: "10"
   CARGO_INCREMENTAL: "0"
   CARGO_PROFILE_DEV_DEBUG: "0"
@@ -58,11 +87,9 @@ jobs:
   plan:
     name: Plan exact-candidate gates
     runs-on: ubuntu-latest
-    # Exact-main Rust CodeQL has exceeded 20 minutes and approached 30 on a
-    # hosted runner. Keep the job deadline above the one-hour policy poll
-    # window so a post-merge dispatch cannot fail while the authoritative
-    # analysis is still making progress.
-    timeout-minutes: 75
+    # The exact-candidate CodeQL wait is the `security.codeql-exact` gate,
+    # which runs beside every other gate; planning itself takes minutes.
+    timeout-minutes: 20
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       hosted_matrix: ${{ steps.plan.outputs.hosted_matrix }}
@@ -70,6 +97,8 @@ jobs:
       shard_count: ${{ steps.plan.outputs.shard_count }}
       hosted_shard_count: ${{ steps.plan.outputs.hosted_shard_count }}
       aws_shard_count: ${{ steps.plan.outputs.aws_shard_count }}
+      bench_matrix: ${{ steps.plan.outputs.bench_matrix }}
+      bench_shard_count: ${{ steps.plan.outputs.bench_shard_count }}
       candidate_sha: ${{ steps.plan.outputs.candidate_sha }}
       environment_id: ${{ steps.plan.outputs.environment_id }}
       run_count: ${{ steps.plan.outputs.run_count }}
@@ -84,7 +113,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
 
       - name: Require protected main candidate or trusted diagnostic branch head
         env:
@@ -100,12 +129,12 @@ jobs:
                 echo "diagnostic candidates must be the exact head of a branch in this repository" >&2
                 exit 1
               }
-          elif [[ "$PROFILE" == remote-release ]]; then
-            test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" || {
-              echo "remote-release must qualify the current protected main head" >&2
-              exit 1
-            }
           else
+            # Any commit on main, not only its head: a release qualifies a
+            # green nightly candidate or the version bump on top of it, and
+            # a merge during the run no longer restarts it. Reused receipts
+            # must come from the candidate's own ancestors (its receipt
+            # chain); the plan records the delta from each one.
             git merge-base --is-ancestor HEAD origin/main || {
               echo "release candidates must be commits on origin/main" >&2
               exit 1
@@ -113,7 +142,7 @@ jobs:
           fi
 
       - name: Require complete structured release coverage
-        if: inputs.profile == 'remote-release'
+        if: contains(fromJSON('["remote-release","release-patch","release-minor"]'), inputs.profile)
         run: |
           python3 - <<'PY'
           import json
@@ -125,41 +154,14 @@ jobs:
               raise SystemExit(1)
           PY
 
-      - name: Require exact-candidate CodeQL with zero open alerts
-        if: inputs.profile == 'remote-release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          python3 scripts/ci/check_codeql_release_policy.py
-          --repository "${{ github.repository }}"
-          --candidate "$(git rev-parse HEAD)"
-          --timeout-seconds 3600
-          --receipt target/release-plan/codeql-policy.json
-
       - name: Download prior qualification evidence
-        if: inputs.profile != 'remote-preflight' && inputs.profile != 'remote-diagnostic' && inputs.prior_run_id != ''
+        if: inputs.profile != 'remote-preflight' && inputs.prior_run_id != ''
         env:
           GH_TOKEN: ${{ github.token }}
           PRIOR_RUN_IDS: ${{ inputs.prior_run_id }}
+          PROFILE: ${{ inputs.profile }}
           REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          IFS=, read -r -a run_ids <<< "$PRIOR_RUN_IDS"
-          if (( ${#run_ids[@]} > 5 )); then
-            echo "at most five prior evidence runs may be combined" >&2
-            exit 1
-          fi
-          for value in "${run_ids[@]}"; do
-            run_id="${value//[[:space:]]/}"
-            [[ "$run_id" =~ ^[1-9][0-9]*$ ]] || {
-              echo "invalid prior run ID: $value" >&2
-              exit 1
-            }
-            gh run download "$run_id" \
-              --repo "$REPOSITORY" \
-              --name release-gate-evidence \
-              --dir "target/prior-evidence/$run_id"
-          done
+        run: bash scripts/release/download_prior_evidence.sh
 
       - name: Plan fresh and reusable gates
         id: plan
@@ -181,19 +183,17 @@ jobs:
           if test "$PROFILE" = remote-diagnostic; then
             args+=(--only-gates "$DIAGNOSTIC_GATES")
           fi
+          # A diagnostic runs fresh unless it names prior diagnostic evidence
+          # (the receipt-reuse proof); its own evidence is never reusable.
           if test "$FIRST_CANDIDATE" = true \
             || test "$PROFILE" = remote-preflight \
-            || test "$PROFILE" = remote-diagnostic; then
+            || { test "$PROFILE" = remote-diagnostic && test -z "$PRIOR_RUN_ID"; }; then
             args+=(--first-candidate)
           fi
-          if test "$PROFILE" != remote-preflight \
-            && test "$PROFILE" != remote-diagnostic \
-            && test -n "$PRIOR_RUN_ID"; then
+          if test "$PROFILE" != remote-preflight && test -n "$PRIOR_RUN_ID"; then
             args+=(--prior-evidence target/prior-evidence)
           fi
-          if test "$PROFILE" != remote-preflight \
-            && test "$PROFILE" != remote-diagnostic \
-            && test -n "$CHANGED_SINCE"; then
+          if test "$PROFILE" != remote-preflight && test -n "$CHANGED_SINCE"; then
             args+=(--changed-since "$CHANGED_SINCE")
           fi
           python3 scripts/release/gates.py plan "${args[@]}"
@@ -211,6 +211,19 @@ jobs:
             if [[ '${{ inputs.profile }}' == remote-diagnostic ]]; then
               echo "- Reusable for release: no"
             fi
+            echo
+            echo "### Receipt chain"
+            echo
+            echo "| Evidence from | Reused gates | Files changed since |"
+            echo "| --- | ---: | ---: |"
+            jq -r '.receipt_chain[] | "| `\(.candidate_sha)` | \(.reused_gate_count) | \(.changed_file_count) |"' \
+              target/release-plan/plan.json
+            echo
+            echo "<details><summary>Gates that run</summary>"
+            echo
+            jq -r '.gates[] | select(.decision == "RUN") | "- `\(.id)`"' target/release-plan/plan.json
+            echo
+            echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload qualification plan
@@ -244,8 +257,19 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
           components: clippy,rustfmt
+
+      # Hosted shards rebuilt the workspace from nothing on every run. A
+      # per-shard compiler cache (keyed by Cargo.lock and the toolchain, and
+      # restored only from this repository's own runs) only skips
+      # recompiling unchanged dependencies; every gate still builds and runs
+      # the exact candidate.
+      - name: Restore hosted shard Rust cache
+        if: matrix.hosted
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-hosted-${{ matrix.id }}
 
       - name: Install nightly for bounded fuzz gates
         if: matrix.needs_nightly
@@ -277,6 +301,172 @@ jobs:
         run: sudo apt-get install -y chromium
 
       - name: Run gate shard
+        env:
+          GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}
+        run: >-
+          python3 scripts/release/gates.py run-shard
+          --candidate '${{ needs.plan.outputs.candidate_sha }}'
+          --environment-id '${{ needs.plan.outputs.environment_id }}'
+          --gates '${{ matrix.gates_csv }}'
+          --output target/release-shard
+
+      - name: Upload shard evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-gate-shard-${{ matrix.id }}
+          path: target/release-shard/
+          retention-days: 90
+          if-no-files-found: warn
+
+  # bench-minor takes about 11 hours, longer than one hosted job or one
+  # provisioner session. These legs advance the same lane (one run id,
+  # `--resume`, a 330-minute budget each) before gate-bench finishes it and
+  # records the receipt; a lane that completes early makes later legs no-ops.
+  bench-leg-1:
+    name: bench / minor lane, leg 1
+    if: contains(needs.plan.outputs.bench_matrix, 'perf.rfc7502-minor')
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+      - name: Restore bench DUT build cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-bench-dut
+      - name: Install DUT build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Advance the bench-minor lane
+        env:
+          RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
+          RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+        run: >-
+          python3 scripts/release/bench_gate.py --advance
+          --profile minor --candidate "$CANDIDATE" --max-wall 330
+          --receipt target/bench-leg/bench-receipt.json
+
+  bench-leg-2:
+    name: bench / minor lane, leg 2
+    if: contains(needs.plan.outputs.bench_matrix, 'perf.rfc7502-minor')
+    needs: [plan, bench-leg-1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+      - name: Restore bench DUT build cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-bench-dut
+      - name: Install DUT build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Advance the bench-minor lane
+        env:
+          RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
+          RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+        run: >-
+          python3 scripts/release/bench_gate.py --advance
+          --profile minor --candidate "$CANDIDATE" --max-wall 330
+          --receipt target/bench-leg/bench-receipt.json
+
+
+  gate-bench:
+    # Release-only RFC 7501/7502 benchmark lanes (docs/release/BENCH_GATE_INTERFACE.md).
+    # `scripts/bench/run_lane.py` provisions its own DUT and callers and
+    # writes the receipt this job's gate shard records; this job is only the
+    # controller that holds the AWS session and uploads the evidence.
+    name: bench / ${{ matrix.id }}
+    if: >-
+      always() && needs.plan.result == 'success'
+      && needs.plan.outputs.bench_shard_count != '0'
+      && needs.bench-leg-1.result != 'failure' && needs.bench-leg-2.result != 'failure'
+    needs: [plan, bench-leg-1, bench-leg-2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.bench_matrix) }}
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.95.0
+
+      - name: Restore bench DUT build cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-bench-dut
+
+      - name: Install DUT build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+          role-duration-seconds: 21600
+
+      - name: Run benchmark lane gate
+        env:
+          RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
+          RVOIP_BENCH_MAX_WALL: "330"
+          RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
+          RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          RVOIP_AWS_SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}
+          RVOIP_AWS_SECURITY_GROUP_ID: ${{ vars.RVOIP_AWS_SECURITY_GROUP_ID }}
+          RVOIP_AWS_RUNNER_INSTANCE_PROFILE: ${{ vars.RVOIP_AWS_RUNNER_INSTANCE_PROFILE }}
+          RVOIP_RELEASE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: >-
           python3 scripts/release/gates.py run-shard
           --candidate '${{ needs.plan.outputs.candidate_sha }}'
@@ -928,16 +1118,18 @@ jobs:
               esac
             done < <(jq -c '.workers[]' target/aws-controller/workers.json)
 
-            # A candidate that has already failed the bounded performance,
-            # burst, or proxy lane cannot become releasable by finishing an
-            # hour-long soak.  Preserve all early results, then stop only the
-            # still-running deferred workers so fixes can be verified without
-            # waiting for proof that can no longer qualify this candidate.
+            # Once the bounded performance, burst, and proxy lanes have
+            # settled with a failure, stop only the deferred workers (interop
+            # lanes, long soaks) holding a gate that depends on a failed
+            # shard. Independent hour-long work keeps running: its evidence
+            # stays reusable, so one flake costs a rerun of its own shard
+            # instead of an hour of discarded work.
             cutoff_json="$(python3 scripts/release/aws_fanout.py \
               early-failure-decision \
               --manifest target/aws-controller/workers.json \
               --downloads target/aws-controller/downloads \
-              --states target/aws-controller/states.csv)"
+              --states target/aws-controller/states.csv \
+              --catalog scripts/release/gates.json)"
             while IFS= read -r failed_shard; do
               announcement="target/aws-controller/downloads/${failed_shard}/failure-announced"
               if [[ ! -f "$announcement" ]]; then
@@ -961,7 +1153,8 @@ jobs:
                 echo
                 echo "- Bounded EC2 workers settled: ${early_settled}/${early_expected}"
                 echo "- Observed failures: ${observed_failures}"
-                echo "- Deferred workers stopped: ${#deferred_running[@]}"
+                echo "- Dependent deferred workers stopped: ${#deferred_running[@]}"
+                echo "- Independent deferred workers kept running: $(jq '.deferred_independent | length' <<< "$cutoff_json")"
                 echo "- Completed evidence remains reusable when its exact digests match."
               } >> "$GITHUB_STEP_SUMMARY"
               # An ACPI stop runs the shutdown checkpoint, which snapshots
@@ -1145,7 +1338,7 @@ jobs:
   collect:
     name: Release Gate
     if: always()
-    needs: [plan, gate-hosted, gate-aws, cleanup-aws]
+    needs: [plan, gate-hosted, gate-bench, gate-aws, cleanup-aws]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -1158,6 +1351,9 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.candidate_sha }}
+          # Reused evidence is bound to the receipt-chain ancestor that
+          # produced it; the collector resolves that commit and its tree.
+          fetch-depth: 0
 
       - name: Download qualification plan
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -1173,15 +1369,31 @@ jobs:
           path: target/release-evidence
           merge-multiple: true
 
+      - name: Download reused gates' prior evidence
+        if: inputs.profile != 'remote-preflight' && inputs.prior_run_id != '' && needs.plan.outputs.reuse_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIOR_RUN_IDS: ${{ inputs.prior_run_id }}
+          PROFILE: ${{ inputs.profile }}
+          REPOSITORY: ${{ github.repository }}
+        run: bash scripts/release/download_prior_evidence.sh
+
       - name: Reconcile exact-candidate qualification
-        run: >-
-          python3 scripts/release/gates.py collect
-          --plan target/release-plan/plan.json
-          --evidence target/release-evidence
-          --output target/release-qualification/aggregate.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --plan target/release-plan/plan.json
+            --evidence target/release-evidence
+            --output target/release-qualification/aggregate.json
+          )
+          if [[ -d target/prior-evidence ]]; then
+            args+=(--prior-evidence target/prior-evidence)
+          fi
+          python3 scripts/release/gates.py collect "${args[@]}"
 
       - name: Render exact-candidate qualification reports
-        if: inputs.profile == 'remote-release'
+        if: contains(fromJSON('["remote-release","release-patch","release-minor"]'), inputs.profile)
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

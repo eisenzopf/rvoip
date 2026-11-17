@@ -138,7 +138,7 @@ impl fmt::Debug for IntrospectionAudience {
 impl OAuth2IntrospectionValidator {
     /// Create an introspection validator for an RFC 7662 endpoint.
     pub fn new(endpoint: Url) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::ring_http_client_builder()
             .user_agent("rvoip-auth-core/0.1 (oauth2-introspection)")
             .timeout(Duration::from_secs(10))
             .build()

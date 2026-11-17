@@ -29,7 +29,7 @@ async fn whep_post_patch_reaches_connected() {
             .expect("whip serve")
     });
 
-    let client = reqwest::Client::builder()
+    let client = ring_reqwest_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client");
@@ -110,4 +110,11 @@ async fn whep_post_patch_reaches_connected() {
 
     player.close().await.expect("close player");
     server.abort();
+}
+
+/// reqwest is built with `rustls-no-provider`: install the workspace's ring
+/// provider as the process default before building a client.
+fn ring_reqwest_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
 }

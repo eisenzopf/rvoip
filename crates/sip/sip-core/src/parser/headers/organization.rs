@@ -1,6 +1,7 @@
 // Parser for Organization header (RFC 3261 Section 20.27)
 // Organization = "Organization" HCOLON [TEXT-UTF8-TRIM]
 
+use nom::Parser;
 use nom::{
     combinator::{map, map_res, opt},
     sequence::delimited,
@@ -54,7 +55,8 @@ pub fn parse_organization(input: &[u8]) -> ParseResult<'_, Organization> {
                 |opt_val| Organization::new(opt_val.unwrap_or_default()),
             ),
             sws,
-        )(text_part)?;
+        )
+        .parse(text_part)?;
 
         return Ok((params_part, org));
     }
@@ -75,7 +77,8 @@ pub fn parse_organization(input: &[u8]) -> ParseResult<'_, Organization> {
             |opt_val| Organization::new(opt_val.unwrap_or_default()),
         ),
         sws,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]

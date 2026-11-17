@@ -4,7 +4,7 @@ use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 pub use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::configuration::{
     RTCConfiguration, RTCConfigurationBuilder, RTCIceServer, RTCIceTransportPolicy,
 };
@@ -365,14 +365,16 @@ async fn build_peer_connection_inner(
     let registry = register_default_interceptors(Registry::new(), &mut media_engine)
         .map_err(|e| WebRtcError::Webrtc(format!("{e}")))?;
     let rtc_config = build_rtc_configuration(config);
-    let mut setting_engine = SettingEngine::default();
+    let mut setting_engine = SettingEngineBuilder::new();
     if !config.nat_1to1_ips.is_empty() {
         let candidate_type = match config.nat_1to1_candidate_type {
             crate::config::Nat1To1CandidateType::Host => RTCIceCandidateType::Host,
             crate::config::Nat1To1CandidateType::Srflx => RTCIceCandidateType::Srflx,
         };
-        setting_engine.set_nat_1to1_ips(config.nat_1to1_ips.clone(), candidate_type);
+        setting_engine =
+            setting_engine.with_nat_1to1_ips(config.nat_1to1_ips.clone(), candidate_type);
     }
+    let setting_engine = setting_engine.build();
 
     let mut builder = PeerConnectionBuilder::<String>::new()
         .with_configuration(rtc_config)

@@ -6,11 +6,9 @@
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::token;
 use crate::types::sdp::{FmtpAttribute, ParsedAttribute};
+use nom::Parser;
 use nom::{
-    bytes::complete::take_till1,
-    character::complete::space1,
-    combinator::map,
-    sequence::{preceded, tuple},
+    bytes::complete::take_till1, character::complete::space1, combinator::map, sequence::preceded,
     IResult,
 };
 
@@ -28,12 +26,13 @@ fn format_parameters(input: &str) -> IResult<&str, &str> {
 
 /// Parser for the complete fmtp attribute: <format> <parameters>
 fn fmtp_parser(input: &str) -> IResult<&str, (String, String)> {
-    tuple((
+    (
         // Format identifier
         map(format_id, |s: &str| s.to_string()),
         // Space followed by format parameters
         map(preceded(space1, format_parameters), |s: &str| s.to_string()),
-    ))(input)
+    )
+        .parse(input)
 }
 
 /// Parses fmtp attribute: `a=fmtp:<format> <format specific parameters>`

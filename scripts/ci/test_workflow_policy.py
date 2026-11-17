@@ -23,7 +23,13 @@ class WorkflowPolicyTests(unittest.TestCase):
             with self.subTest(workflow=workflow.name):
                 self.assertNotIn("pull_request_target", text)
                 uses = [line for line in text.splitlines() if "uses:" in line]
-                self.assertTrue(all(SHA_ACTION.search(line) for line in uses))
+                # A local reusable workflow is pinned by the commit it runs from.
+                self.assertTrue(
+                    all(
+                        SHA_ACTION.search(line) or "uses: ./.github/workflows/" in line
+                        for line in uses
+                    )
+                )
 
     def test_every_runner_job_declares_a_timeout(self) -> None:
         # GitHub's default job timeout is six hours; every hosted job sets
@@ -55,7 +61,8 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_pr_gate_has_no_secret_or_write_permission_surface(self) -> None:
         text = (ROOT / ".github/workflows/pr-gate.yml").read_text()
         self.assertNotIn("secrets.", text)
-        self.assertNotIn("contents: write", text)
+        # GITHUB_TOKEN itself stays read-only; only the App token writes.
+        self.assertIsNone(re.search(r"(?m)^  contents: write", text))
         self.assertNotIn("pull_request_target", text)
 
     def test_pr_gate_reuses_each_shard_build_for_tests_and_lint(self) -> None:
@@ -97,7 +104,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         # change that would have selected the old combined gate still verifies
         # all four packages, it just does so concurrently instead of against
         # one shared 45-minute budget it could not fit inside.
-        gates = sorted(run_checks.CODEC_FEATURE_GATES)
+        gates = sorted(run_checks.ALL_CODEC_FEATURE_GATES)
         main = (ROOT / ".github/workflows/main-ci.yml").read_text()
         for gate in gates:
             with self.subTest(gate=gate):
@@ -288,7 +295,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         helper_test = text.index(
             "crates/sip/rvoip-sip/scripts/test_beta_attestation.py", prepare_step
         )
-        commit_step = text.index("Commit release preparation")
+        commit_step = text.index("Commit and push the version bump")
 
         self.assertLess(prepare_step, helper_test)
         self.assertLess(helper_test, commit_step)
@@ -300,7 +307,7 @@ class WorkflowPolicyTests(unittest.TestCase):
             if rule["gate"] == "release-tooling"
         )
         for path in (
-            "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            "docs/release/RELEASE_NOTES_NEXT.md",
             "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
         ):
             with self.subTest(path=path):
@@ -556,7 +563,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         # proxy interop) before the prebuild, one for performance workers after.
         self.assertEqual(workflow.count("aws ec2 run-instances"), 3)
         self.assertIn(
-            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
             workflow,
         )
         self.assertIn("expected 48 publishable workspace packages", probe)
@@ -574,12 +581,58 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test -z "${CRATES_IO_TOKEN:-}"', probe)
         self.assertIn('"publishing_credentials_present": False', probe)
 
-    def test_release_planner_outlives_exact_candidate_codeql_poll(self) -> None:
+    def test_exact_candidate_codeql_is_a_parallel_gate_not_a_plan_step(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         plan = workflow.split("  plan:\n", maxsplit=1)[1].split("\n  gate-hosted:\n", maxsplit=1)[0]
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        gate = next(g for g in catalog["gates"] if g["id"] == "security.codeql-exact")
 
-        self.assertIn("timeout-minutes: 75", plan)
-        self.assertIn("--timeout-seconds 3600", plan)
+        # The 23-29 minute CodeQL wait no longer sits in front of every worker.
+        self.assertNotIn("check_codeql_release_policy.py", plan)
+        self.assertIn("timeout-minutes: 20", plan)
+        self.assertEqual(gate["resource_class"], "github-evidence")
+        self.assertIn("--timeout-seconds", gate["command"])
+        self.assertIn("3600", gate["command"])
+        self.assertGreaterEqual(gate["timeout_minutes"], 61)
+        self.assertIn(gate["id"], catalog["profiles"]["remote-release"])
+        self.assertIn("GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}", workflow)
+
+    def test_no_schedule_starts_an_ec2_qualification(self) -> None:
+        # The full fanout is 24 workers and 272 vCPUs; it runs only when
+        # someone dispatches it.
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = workflow.read_text()
+            if "schedule:" not in text:
+                continue
+            with self.subTest(workflow=workflow.name):
+                self.assertNotIn("release-qualify.yml", text)
+                self.assertNotIn("aws_fanout.py", text)
+        interop = (ROOT / ".github/workflows/nightly-interop.yml").read_text()
+        self.assertIn("schedule:", interop)
+        self.assertNotIn("self-hosted", interop)
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        self.assertFalse(
+            {"perf.rfc7502-release", "perf.rfc7502-minor"} & set(catalog["profiles"]["remote-release"])
+        )
+
+    def test_hosted_release_shards_restore_a_compiler_cache(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        hosted = workflow.split("\n  gate-hosted:\n", maxsplit=1)[1].split("\n  gate-bench:\n", maxsplit=1)[0]
+        self.assertIn("Swatinem/rust-cache@", hosted)
+        self.assertIn("shared-key: release-hosted-${{ matrix.id }}", hosted)
+
+    def test_early_failure_cutoff_is_scoped_by_the_catalog(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        self.assertIn("--catalog scripts/release/gates.json)", workflow)
+
+    def test_release_candidate_is_any_main_commit_with_a_receipt_chain(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+
+        self.assertNotIn("must qualify the current protected main head", workflow)
+        self.assertIn("git merge-base --is-ancestor HEAD origin/main", workflow)
+        self.assertIn("### Receipt chain", workflow)
+        self.assertIn("--prior-evidence target/prior-evidence", workflow)
+        self.assertIn("fetch-depth: 0", workflow.split("  collect:\n", maxsplit=1)[1])
 
     def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
@@ -596,11 +649,17 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Upload non-reusable diagnostic evidence", workflow)
         self.assertIn("name: diagnostic-gate-evidence", workflow)
         self.assertIn("Reusable for release: no", workflow)
-        self.assertIn("at most five prior evidence runs may be combined", workflow)
-        self.assertIn('--dir "target/prior-evidence/$run_id"', workflow)
+        download = (ROOT / "scripts/release/download_prior_evidence.sh").read_text()
+        self.assertIn("bash scripts/release/download_prior_evidence.sh", workflow)
+        self.assertIn("at most five prior evidence runs may be combined", download)
+        self.assertIn('--dir "target/prior-evidence/$run_id"', download)
+        # Release profiles reuse only attested release evidence; only a
+        # diagnostic may read diagnostic evidence.
+        self.assertIn('if [[ "${PROFILE:?}" == remote-diagnostic ]]; then', download)
+        self.assertIn("--name diagnostic-gate-evidence", download)
         self.assertIn(
-            'test "$(jq -r .profile "$aggregate")" = remote-release',
-            publication,
+            "remote-release|release-patch|release-minor) ;;",
+            (ROOT / "scripts/release/resolve_qualified_candidate.sh").read_text(),
         )
 
     def test_release_resume_only_finishes_a_proven_post_gate_failure(self) -> None:
@@ -613,10 +672,12 @@ class WorkflowPolicyTests(unittest.TestCase):
             '["Render exact-candidate qualification reports"]', resume
         )
         self.assertIn('"status": "PASS"', resume)
-        self.assertIn('"gate_count": 213', resume)
-        self.assertIn('"fresh_count": 213', resume)
-        self.assertIn('"reused_count": 0', resume)
-        self.assertIn('len(aggregate.get("accepted_gates", [])) != 213', resume)
+        # The gate count is read from the candidate's catalog, never pinned.
+        self.assertNotIn("213", resume)
+        self.assertIn('git show "$candidate:scripts/release/gates.json"', resume)
+        self.assertIn('expected_ids = catalog["profiles"][profile]', resume)
+        self.assertIn('"gate_count": gate_count', resume)
+        self.assertNotIn("--version 0.3.10", resume)
         self.assertIn("git merge-base --is-ancestor", resume)
         self.assertIn("render_qualification_reports.py generate", resume)
         self.assertIn('"test_execution_repeated": False', resume)
@@ -625,14 +686,92 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertNotIn("scripts/release/gates.py run", resume)
         self.assertNotIn("cargo test", resume)
 
+    def test_release_prepare_opens_the_pr_as_the_release_app(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+
+        # The App path is the default whenever both App settings exist: its
+        # token checks out, pushes and opens the PR, and the PR's own PR Gate
+        # starts by itself.
+        self.assertIn(
+            "APP_CONFIGURED: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID != '' && "
+            "secrets.RVOIP_RELEASE_APP_PRIVATE_KEY != '' }}",
+            text,
+        )
+        mint = text.split("- name: Mint the release App token", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: env.APP_CONFIGURED == 'true'", mint)
+        self.assertIn("actions/create-github-app-token@", mint)
+        self.assertIn("client-id: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID }}", mint)
+        self.assertIn("private-key: ${{ secrets.RVOIP_RELEASE_APP_PRIVATE_KEY }}", mint)
+        self.assertIn("token: ${{ steps.app-token.outputs.token || github.token }}", text)
+        self.assertIn(
+            "GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}",
+            text.split("- name: Open the release pull request", 1)[1],
+        )
+        # The workflow-wide default stays read-only; only this job may write.
+        self.assertIsNone(re.search(r"(?m)^  contents: write", text))
+        self.assertIn("git merge-base --is-ancestor HEAD origin/main", text)
+        self.assertLess(
+            text.index("python3 scripts/release/notes.py"),
+            text.index("python3 scripts/release.py prepare"),
+        )
+
+    def test_release_prepare_fallback_needs_a_maintainer_approval(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+
+        # Without the App, GITHUB_TOKEN opens the PR and GitHub holds the PR's
+        # own PR Gate run for a maintainer; a dispatched copy does not unblock
+        # the merge (0.4.0). The workflow warns, dispatches the gate as an early
+        # signal, and links the held run. It never approves a run itself.
+        warn = text.split("- name: Warn when the release App is not configured", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: env.APP_CONFIGURED != 'true'", warn)
+        self.assertIn("::warning title=Prepare release PR fallback::", warn)
+        fallback = text.split('- name: "Fallback: dispatch the PR Gate and link the held run to approve"', 1)[1]
+        self.assertIn("if: env.APP_CONFIGURED != 'true'", fallback)
+        self.assertIn('gh workflow run pr-gate.yml --repo "$REPOSITORY" --ref "$branch"', fallback)
+        self.assertIn("event=pull_request", fallback)
+        self.assertIn("Approve and run", fallback)
+        self.assertIn('gh pr comment "$branch"', fallback)
+        self.assertEqual(text.count("gh workflow run pr-gate.yml"), 1)
+        for forbidden in ("/approve", "pending_deployments", "--admin"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+        pr_gate = (ROOT / ".github/workflows/pr-gate.yml").read_text()
+        self.assertIn("workflow_dispatch:", pr_gate)
+
+    def test_pr_gate_checks_fragments_and_bump_notes_finality(self) -> None:
+        text = (ROOT / ".github/workflows/pr-gate.yml").read_text()
+        policy = text.split("\n  policy:\n", maxsplit=1)[1].split("\n  crate-tests:\n", maxsplit=1)[0]
+
+        self.assertIn("python3 scripts/release/notes.py check", policy)
+        self.assertIn('notes-final --if-version-changed-since "$base"', policy)
+
+    def test_release_publish_needs_one_approval_and_packages_once(self) -> None:
+        text = (ROOT / ".github/workflows/release-publish.yml").read_text()
+        package = text.split("\n  package:\n", maxsplit=1)[1].split("\n  publish:\n", maxsplit=1)[0]
+        publish = text.split("\n  publish:\n", maxsplit=1)[1]
+
+        self.assertNotIn("environment:", package)
+        self.assertNotIn("CARGO_REGISTRY_TOKEN", package)
+        self.assertIn('python3 "$RELEASE_TOOL" package', package)
+        self.assertIn("name: release-packages", package)
+        self.assertIn("environment: release-publish", publish)
+        self.assertIn("if: inputs.execute", publish)
+        self.assertIn("needs: package", publish)
+        self.assertIn("--packages target/release-packages", publish)
+        self.assertIn("--execute", publish)
+        # The protected job neither verifies nor builds again.
+        self.assertNotIn('"$RELEASE_TOOL" verify', publish)
+        self.assertNotIn("Swatinem/rust-cache", publish)
+        self.assertNotIn("apt-get", publish)
+        self.assertIn('test "$PACKAGED_CANDIDATE" = "$QUALIFIED_CANDIDATE"', publish)
+
     def test_release_publish_consumes_exact_attested_candidate(self) -> None:
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
-        preflight = publication.split(
-            "      - name: Resolve, verify, and check out qualified candidate\n",
-            maxsplit=1,
-        )[1].split("      - name: Fresh package and source verification\n", maxsplit=1)[0]
-
-        self.assertIn("GH_TOKEN: ${{ github.token }}", preflight)
+        preflight = (ROOT / "scripts/release/resolve_qualified_candidate.sh").read_text()
+        self.assertEqual(
+            publication.count("run: bash scripts/release/resolve_qualified_candidate.sh"), 2
+        )
+        self.assertIn("GH_TOKEN: ${{ github.token }}", publication)
         self.assertIn('gh attestation verify "$aggregate"', preflight)
         self.assertIn('candidate="$(jq -r .candidate_sha "$aggregate")"', preflight)
         self.assertIn('git merge-base --is-ancestor "$candidate" origin/main', preflight)
@@ -645,7 +784,6 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         self.assertIn('python3 "$RELEASE_TOOL" verify', publication)
         self.assertIn('--qualified-head "$QUALIFIED_CANDIDATE"', publication)
-        self.assertIn('python3 "$RELEASE_TOOL" "${args[@]}"', publication)
 
     def test_release_publish_retains_qualification_reports_as_release_assets(self) -> None:
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()

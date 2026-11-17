@@ -3,6 +3,7 @@
 // route-param  =  name-addr *( SEMI rr-param )
 // rr-param     =  generic-param
 
+use nom::Parser;
 use nom::{combinator::map, sequence::pair};
 
 // Import from base parser modules
@@ -38,7 +39,8 @@ fn route_param(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params = params_vec;
             addr
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Route = "Route" HCOLON route-param *(COMMA route-param)
@@ -51,7 +53,8 @@ pub fn parse_route(input: &[u8]) -> ParseResult<'_, RouteHeader> {
 
             RouteHeader(entries)
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
