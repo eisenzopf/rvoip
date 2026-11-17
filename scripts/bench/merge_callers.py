@@ -14,8 +14,13 @@ caller-2/, ... (RFC7502_BENCHMARK.md §5). The merged view:
 
 * puts every host's calls on the first host's clock: each host's elapsed_ms
   is shifted by its measured offset (the epoch of its elapsed 0, taken from
-  its `run_started` event), so 1 s bins, stage windows and latency
-  percentiles are exact over the union of calls;
+  its `run_started` event), so the cross-host time series (1 s bins,
+  backpressure seconds, resource windows) are on one wall clock;
+* places every call in its stage by its OWN host's schedule (`planned`):
+  call `<run_id>-<n>` is the n-th call of that host's caller.json stages,
+  due at the caller's schedule_offset(n) after its own `run_started`, so a
+  start skew between hosts never moves a call into a neighbouring stage
+  (expressed on the first host's elapsed clock: first run_start_ms + offset);
 * namespaces call ids per host: the first host keeps `<run_id>-<n>`, host k
   becomes `<run_id>-c<k>-<n>`;
 * sums counts (report counters, stage cps, calls, max_concurrent), AND-s the
@@ -43,6 +48,7 @@ ENDED_KEYS = ('outcome', 'reason', 'phase', 'failure_class', 'failure_operation'
               'first_audio_ms', 'audio_match', 'received_samples', 'received_frames', 'max_audio_gap_ms',
               'remote_ended', 'duration_ms', 'call_model', 'held_ms', 'caller_bye_ms', 'rfc6076', 'source_ip')
 CALLER_DIR = re.compile(r'caller-(\d+)$')
+CALL_INDEX = re.compile(r'(\d+)$')
 
 
 def parse_stamp(text):
@@ -137,6 +143,50 @@ def load_caller(directory):
     return out
 
 
+def schedule_offset_ms(index, stages, cps=None):
+    """The caller's schedule_offset(index) in ms after its run start: the index-th call of `stages`
+    ([{cps, seconds}], each a whole number of calls), or index / cps without stages. None past the plan."""
+    if not stages:
+        return index * 1000.0 / cps if cps else None
+    elapsed, remaining = 0.0, index
+    for stage in stages:
+        count = int(round(stage['cps'] * stage['seconds']))
+        if remaining < count:
+            return (elapsed + remaining / float(stage['cps'])) * 1000.0
+        remaining -= count
+        elapsed += stage['seconds']
+    return None
+
+
+def call_index(call_id, label):
+    """n of `<label>-<n>`, or None."""
+    if not isinstance(call_id, str) or not label or not call_id.startswith(label + '-'):
+        return None
+    match = CALL_INDEX.fullmatch(call_id[len(label) + 1:])
+    return int(match.group(1)) if match else None
+
+
+def planned_offsets(events, config, label):
+    """Call id -> ms after this host's own run start at which its scheduler was due to place the call.
+
+    From the call's schedule index and this host's caller.json stages (exact); a call whose id or plan does not
+    give it falls back to its own clock: call_scheduled elapsed minus scheduler_lateness_ms minus run_started.
+    Returns (offsets, basis counts)."""
+    stages = [s for s in (config or {}).get('stages') or []]
+    cps = (config or {}).get('cps')
+    offsets, basis = {}, {'call_index': 0, 'own_clock': 0}
+    for call_id, at in events['scheduled'].items():
+        index = call_index(call_id, label)
+        offset = schedule_offset_ms(index, stages, cps) if index is not None else None
+        if offset is None:
+            offset = at - (events['lateness'].get(call_id) or 0.0) - events['run_start_ms']
+            basis['own_clock'] += 1
+        else:
+            basis['call_index'] += 1
+        offsets[call_id] = offset
+    return offsets, basis
+
+
 def namespace(call_id, label, tag):
     """`<label>-<n>` -> `<label>-<tag>-<n>` (other ids get a `<tag>-` prefix); unchanged without a tag."""
     if not tag or not isinstance(call_id, str):
@@ -149,13 +199,18 @@ def merge(callers):
 
     Returns {'roles', 'offsets' (s, schedule start vs the first host), 'start_skew_seconds',
     'run_start_epoch', 'run_start_ms', 'scheduled', 'lateness', 'sent', 'established', 'ended',
-    'host_of' (call id -> role), 'config', 'report'}."""
+    'planned' (call id -> its own host's schedule, on the first host's elapsed clock: what places a call in its
+    stage), 'planned_basis', 'host_of' (call id -> role), 'config', 'report'}.
+
+    scheduled/sent/established are wall-clock aligned (cross-host time series); `planned` ignores the start
+    skew, so stage membership is exact on every host."""
     usable = [c for c in callers if c.get('events')]
     if not usable:
         raise ValueError('no caller host with events')
     first = usable[0]['events']
     merged = {'roles': [c['role'] for c in usable], 'offsets': {}, 'scheduled': {}, 'lateness': {}, 'sent': {},
-              'established': {}, 'ended': {}, 'host_of': {}, 'duplicate_ends': 0,
+              'established': {}, 'ended': {}, 'host_of': {}, 'duplicate_ends': 0, 'planned': {},
+              'planned_basis': {'call_index': 0, 'own_clock': 0},
               'run_start_epoch': first['run_start_epoch'], 'run_start_ms': first['run_start_ms']}
     for index, caller in enumerate(usable):
         events = caller['events']
@@ -170,6 +225,11 @@ def merge(callers):
                 target[namespace(call_id, label, tag)] = at + shift
         for call_id, value in events['lateness'].items():
             merged['lateness'][namespace(call_id, label, tag)] = value
+        planned, basis = planned_offsets(events, caller.get('config'), label)
+        for call_id, offset in planned.items():
+            merged['planned'][namespace(call_id, label, tag)] = first['run_start_ms'] + offset
+        for key, count in basis.items():
+            merged['planned_basis'][key] += count
         for call_id, fields in events['ended'].items():
             # The terminal fields are shared with the host's own view (no copy: they carry no clock).
             new_id = namespace(call_id, label, tag)

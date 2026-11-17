@@ -133,6 +133,18 @@ class PredicateTests(unittest.TestCase):
 
 
 class MergeTests(unittest.TestCase):
+    def test_schedule_offset_follows_the_callers_stages(self):
+        stages = [{'cps': 2.5, 'seconds': 4}, {'cps': 10, 'seconds': 3}]
+        self.assertEqual(merge_callers.schedule_offset_ms(0, stages), 0.0)
+        self.assertEqual(merge_callers.schedule_offset_ms(9, stages), 3600.0)
+        self.assertEqual(merge_callers.schedule_offset_ms(10, stages), 4000.0)   # first call of stage 2
+        self.assertEqual(merge_callers.schedule_offset_ms(39, stages), 6900.0)
+        self.assertIsNone(merge_callers.schedule_offset_ms(40, stages))
+        self.assertEqual(merge_callers.schedule_offset_ms(5, [], cps=10), 500.0)
+        self.assertEqual(merge_callers.call_index('run-h2-17', 'run-h2'), 17)
+        self.assertIsNone(merge_callers.call_index('run-h2-x', 'run-h2'))
+        self.assertIsNone(merge_callers.call_index('other-3', 'run-h2'))
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 

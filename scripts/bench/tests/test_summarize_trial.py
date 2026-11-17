@@ -133,6 +133,28 @@ class SummarizeTests(unittest.TestCase):
         self.assertIs(s['checks']['caller_start_skew'], False)
         self.assertEqual(s['callers']['caller-2']['start_offset_seconds'], 2.5)
 
+    def test_start_skew_never_moves_a_call_out_of_its_stage(self):
+        # Two caller hosts 0.5 s apart: each call stays in the stage its own host scheduled it in, so the
+        # scored attempts are exactly the planned scored calls; the 1 s bins stay on one wall clock.
+        d, profile = self.trial(40, skew=0.5)
+        s = summarize_trial.summarize(d, 'rfc')
+        self.assertEqual(s['caller_start_skew_seconds'], 0.5)
+        self.assertIs(s['checks']['caller_start_skew'], True)
+        for stage, row in zip(profile['stages'], s['stage_summaries']):
+            planned = stage['cps'] * stage['seconds']
+            self.assertEqual((row['planned_offers'], row['scheduled'], row['whole_stage']['offered']), (planned,) * 3)
+        planned = sum(st['cps'] * st['seconds'] for st in profile['stages'] if st['name'].startswith('trial-'))
+        attempted, succeeded, valid, _ = rfc7502.evaluate_trial(s)
+        self.assertEqual((attempted, succeeded, valid), (planned, planned, True))
+        self.assertEqual(s['rfc6076']['scored']['invites'], planned)
+        self.assertEqual(s['stage_assignment']['own_clock'], 0)
+        self.assertEqual(s['evaluation']['outcome'], 'pass')
+        self.assertTrue(s['caller_validity']['caller_valid_before_backpressure'])
+        self.assertEqual(s['caller_validity']['dispatch_misses'], [])
+        total = sum(st['cps'] * st['seconds'] for st in profile['stages'])
+        host2_tail = profile['stages'][-1]['cps'] // 2 // 2   # host 2's last 0.5 s runs past host 1's timeline
+        self.assertEqual(sum(row['offered'] for row in s['bins_1s']), total - host2_tail)
+
     def test_media_row_reports_echo_validation(self):
         d, _ = self.trial(40, media=True, hold_ms=1000, caller_kwargs={'audio_fail_every': 50})
         s = summarize_trial.summarize(d)

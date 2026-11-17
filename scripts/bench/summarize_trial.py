@@ -68,11 +68,14 @@ def complete_call(call):
     return call.get('sip_status') == 200 and call.get('outcome') == 'pass'
 
 
-def build_calls(scheduled, sent, ended, lateness=None):
-    """One row per scheduled call: elapsed-ms schedule/send times and terminal fields."""
+def build_calls(scheduled, sent, ended, lateness=None, planned=None):
+    """One row per scheduled call: elapsed-ms schedule/send times (wall clock, for the 1 s bins), the planned
+    time on its own host's schedule (`plan_ms`, for stage membership; the schedule time without a plan)
+    and terminal fields."""
     lateness = lateness or {}
-    return [{'id': cid, 'scheduled_ms': at, 'send_ms': sent.get(cid, at), 'dispatched': cid in sent,
-             'scheduler_lateness_ms': lateness.get(cid), 'end': ended.get(cid)}
+    planned = planned or {}
+    return [{'id': cid, 'scheduled_ms': at, 'send_ms': sent.get(cid, at), 'plan_ms': planned.get(cid, at),
+             'dispatched': cid in sent, 'scheduler_lateness_ms': lateness.get(cid), 'end': ended.get(cid)}
             for cid, at in scheduled.items()]
 
 
@@ -104,7 +107,9 @@ def aggregate(rows, seconds):
 
 
 def stage_summaries(stages, run_start_ms, calls, transient=()):
-    """Per stage: whole-stage denominators (INVITE send time in the stage) plus a steady scored window."""
+    """Per stage: whole-stage denominators plus a steady scored window. A call belongs to the stage its own
+    caller host scheduled it in (`plan_ms`: its schedule index on that host's stages, from the host's own
+    run start), so neither a start skew between hosts nor a late dispatch moves it to another stage."""
     transient = set(transient)
     result = []
     elapsed = 0
@@ -115,14 +120,14 @@ def stage_summaries(stages, run_start_ms, calls, transient=()):
         is_transient = name in transient or stage['seconds'] < 60
         skip = 0 if is_transient else STEADY_SKIP_SECONDS
         scored_begin = begin + skip * 1000
-        whole = [row for row in calls if begin <= row['send_ms'] < finish]
-        scored = [row for row in calls if scored_begin <= row['send_ms'] < finish]
+        whole = [row for row in calls if begin <= row['plan_ms'] < finish]
+        scored = [row for row in calls if scored_begin <= row['plan_ms'] < finish]
         row = {'name': name, 'index': index, 'requested_cps': stage['cps'], 'cps': stage['cps'], 'seconds': stage['seconds'],
                'start_seconds': elapsed, 'end_seconds': elapsed + stage['seconds'],
                'planned_offers': int(round(stage['cps'] * stage['seconds'])),
-               'scheduled': sum(begin <= row['scheduled_ms'] < finish for row in calls),
+               'scheduled': len(whole),
                'transient': is_transient,
-               'scoring': 'whole stage by INVITE send time; steady window skips the first %d s' % skip,
+               'scoring': "whole stage by each call's own host schedule; steady window skips the first %d s" % skip,
                'whole_stage': aggregate(whole, stage['seconds']),
                'scored_window_seconds': stage['seconds'] - skip,
                'scored': aggregate(scored, stage['seconds'] - skip)}
@@ -446,6 +451,8 @@ def summarize(trial_dir, criterion=None):
     hold_s = ((report or {}).get('hold_ms') or (plan or {}).get('hold_ms') or 0) / 1000.0
     out['run_start_epoch'] = run_start_epoch
     out['caller_start_skew_seconds'] = merged['start_skew_seconds'] if merged else None
+    out['stage_assignment'] = dict(merged['planned_basis'], basis='each call by its own host schedule') \
+        if merged else None
     windows = [(row_start, row_end) for row_start, row_end in rfc7502.trial_windows(
         {'stage_summaries': [{'name': s['name'], 'seconds': s['seconds']} for s in stages]})]
     scored_window = (windows[0][0], windows[-1][1]) if windows else None
@@ -462,7 +469,8 @@ def summarize(trial_dir, criterion=None):
     out['dut'] = dut
 
     # Calls, bins, stages
-    calls = build_calls(merged['scheduled'], merged['sent'], merged['ended'], merged['lateness']) if merged else []
+    calls = build_calls(merged['scheduled'], merged['sent'], merged['ended'], merged['lateness'],
+                        merged['planned']) if merged else []
     bin_rows = bins(stages, run_start_ms, calls) if stages else []
     backpressure = first_backpressure(bin_rows, calls, run_start_ms, [dut.get('first_503_second')])
     out['backpressure'] = backpressure
@@ -525,7 +533,7 @@ def summarize(trial_dir, criterion=None):
     scored_ids = set()
     if trial_rows and merged:
         bounds = [(run_start_ms + r['start_seconds'] * 1000, run_start_ms + r['end_seconds'] * 1000) for r in trial_rows]
-        scored_ids = {row['id'] for row in calls if any(a <= row['send_ms'] < b for a, b in bounds)}
+        scored_ids = {row['id'] for row in calls if any(a <= row['plan_ms'] < b for a, b in bounds)}
     scored_ends = [merged['ended'][cid] for cid in scored_ids if cid in merged['ended']] if merged else []
     all_ends = list(merged['ended'].values()) if merged else []
     out['rfc6076'] = {'all_calls': rfc6076.metrics(all_ends) if merged else None,

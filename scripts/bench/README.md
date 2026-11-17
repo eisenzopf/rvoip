@@ -209,8 +209,9 @@ Caller (`rvoip-loadgen`, unchanged from the E74 caller):
   `duration_ms`, and `rfc6076` with the `rfc.rs` fields `final_status`, `first_response_status`,
   `srd_ms`, `srd_kind`, `sdd_ms`, `sdt_ms`, `bye_final_status`, `completed`, `trace_complete`,
   `invite_transmissions`).
-- Call ids are `<run_id>-<n>`; `caller.json` carries `run_id` and `stages: [{cps, seconds}]`
-  (this host's share, same order and seconds as `plan.json`), `calls`.
+- Call ids are `<run_id>-<n>`, n the schedule index (the call is due at `schedule_offset(n)` after
+  `run_started`); `caller.json` carries `run_id` and `stages: [{cps, seconds}]` (this host's share,
+  same order and seconds as `plan.json`), `calls`. A call's stage comes from n and these stages.
 - Every call is journalled (`journal_sample` 1). A sampled journal makes the caller's
   per-call evidence missing (the trial is invalid), never estimated.
 - `report.json`: `planned`, `attempted`, `generator_skipped`, `interrupted`,
@@ -250,8 +251,9 @@ DUT (`rvoip-bench-uas`, RFC7502_BENCHMARK.md §3):
 | `caller_start_skew_seconds` | spread of the hosts' `run_started` instants |
 | `trial_window` | scored `trial-*` window: `start_seconds, end_seconds, start_epoch, end_epoch` |
 | `stage_summaries[]` | `name, index, requested_cps, cps, seconds, start_seconds, end_seconds, planned_offers, scheduled, transient, whole_stage, scored_window_seconds, scored` |
-| `…whole_stage` / `…scored` | `offered, dispatched, terminal_observations, missing_terminal_observations, admitted, rejected_503, full, generator_skipped, admitted_incomplete, full_of_offered_pct, offered_cps, admitted_cps, setup_ms{p50,p95,p99,p99_9,max,count}, first_audio_ms{…}, rejection_503_duration_ms, rfc_session_ok, rfc_attempt_ok, rfc_disconnect_failures, rfc6076{…}` (calls keyed by INVITE send time; `scored` skips the first 15 s of stages >= 60 s) |
-| `bins_1s[]` | merged 1 s bins: `t, stage, requested_cps, offered, dispatched, admitted, rejected_503, full, guard_skips, setup_p99_ms` |
+| `…whole_stage` / `…scored` | `offered, dispatched, terminal_observations, missing_terminal_observations, admitted, rejected_503, full, generator_skipped, admitted_incomplete, full_of_offered_pct, offered_cps, admitted_cps, setup_ms{p50,p95,p99,p99_9,max,count}, first_audio_ms{…}, rejection_503_duration_ms, rfc_session_ok, rfc_attempt_ok, rfc_disconnect_failures, rfc6076{…}` (each call in the stage its own caller host scheduled it in: its schedule index on that host's stages, from the host's own `run_started`, so start skew never moves a call between stages; `scored` skips the first 15 s of stages >= 60 s) |
+| `stage_assignment` | `call_index`, `own_clock` (calls placed by schedule index, or by their own clock when the id gives no index), `basis` |
+| `bins_1s[]` | merged 1 s bins on caller-1's wall clock (the cross-host time series; per-host validity uses each host's own clock): `t, stage, requested_cps, offered, dispatched, admitted, rejected_503, full, guard_skips, setup_p99_ms` |
 | `backpressure` | `first_second, first_503_second, first_timeout_second, dut_first_503_second` (s from the run start) |
 | `caller_validity` | combined predicate: `caller_valid, caller_valid_before_backpressure, checks{dispatch_within_1pct_per_bin_before_backpressure, schedule_to_write_p99_at_most_5ms, process_cpu_at_most_limit, no_thread_above_0_8_core, zero_guard_skips, clean_shutdown, source_pools_balanced}, dispatch_misses[{t, requested, dispatched, caller}], scheduler_lateness_p99_ms, process_peak_cores, process_core_limit, thread_peak_cores, hottest_thread, source_pools, missing_inputs, backpressure_second` |
 | `caller_validity_by_caller` | the same per host (own clock) |
@@ -271,7 +273,7 @@ DUT (`rvoip-bench-uas`, RFC7502_BENCHMARK.md §3):
 ## How a trial maps to pass / fail / invalid
 
 `rfc7502.evaluate_trial(summary, criterion)` scores the `trial-*` stages
-(whole stage, by INVITE send time):
+(whole stage, each call by its own host's schedule):
 
 - **attempted** = calls scheduled in the scored stages; **succeeded** = calls
   answered 200 (criterion `rfc`, RFC 7501 §3.1.8) or passed by the call model
