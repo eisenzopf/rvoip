@@ -1,5 +1,6 @@
 // Shared parser for <absoluteURI> *(SEMI generic-param)
 
+use nom::Parser;
 use nom::{
     combinator::{map, map_res},
     multi::many0,
@@ -30,7 +31,8 @@ pub fn uri_with_generic_params(input: &[u8]) -> ParseResult<'_, (String, Vec<Par
             many0(preceded(semi, generic_param)),
         ),
         |(uri_str, params_vec)| (uri_str, params_vec),
-    )(input)
+    )
+    .parse(input)
 }
 
 // Helper function to extract the URI content between angle brackets

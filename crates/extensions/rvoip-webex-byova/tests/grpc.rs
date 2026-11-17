@@ -35,8 +35,7 @@ async fn serve(
     let (service, calls) = adapter.grpc_service();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let incoming = tonic::transport::server::TcpIncoming::from_listener(listener, true, None)
-        .expect("incoming");
+    let incoming = tonic::transport::server::TcpIncoming::from(listener).with_nodelay(Some(true));
     tokio::spawn(async move {
         tonic::transport::Server::builder()
             .add_service(service.into_server())

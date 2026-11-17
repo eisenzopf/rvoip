@@ -19,7 +19,7 @@ pub mod udp;
 pub mod ws;
 
 pub use runtime::HandshakeAdmissionConfig;
-pub use tcp::TcpTransport;
+pub use tcp::{TcpFlowConfig, TcpTransport};
 pub use tls::TlsTransport;
 pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
@@ -33,6 +33,35 @@ pub(crate) fn validate_typed_outbound_message(message: &Message) -> Result<()> {
     rvoip_sip_core::validation::validate_typed_outbound_message(message).map_err(|_| {
         Error::ProtocolError("outbound typed SIP message failed wire-safety validation".to_string())
     })
+}
+
+/// Open an outbound TCP connection for a stream transport (TCP or TLS).
+///
+/// With `source` set to a specified IP of the same address family as
+/// `remote`, the socket is bound to `(source, 0)` before connecting, so the
+/// flow leaves from that address rather than the one the kernel's routing
+/// table would pick. Otherwise this is a plain `TcpStream::connect`.
+pub(crate) async fn connect_stream_from(
+    remote: SocketAddr,
+    source: Option<IpAddr>,
+) -> std::io::Result<tokio::net::TcpStream> {
+    let Some(source) = source.filter(|ip| !ip.is_unspecified()) else {
+        return tokio::net::TcpStream::connect(remote).await;
+    };
+    let socket = match (source, remote) {
+        (IpAddr::V4(_), SocketAddr::V4(_)) => tokio::net::TcpSocket::new_v4()?,
+        (IpAddr::V6(_), SocketAddr::V6(_)) => tokio::net::TcpSocket::new_v6()?,
+        _ => {
+            tracing::debug!(
+                %source,
+                destination = %remote,
+                "outbound source address family differs from the destination; not binding"
+            );
+            return tokio::net::TcpStream::connect(remote).await;
+        }
+    };
+    socket.bind(SocketAddr::new(source, 0))?;
+    socket.connect(remote).await
 }
 
 /// Return a log-safe method label without reflecting extension method text.

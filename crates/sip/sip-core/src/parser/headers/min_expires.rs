@@ -6,6 +6,7 @@
 // to indicate the minimum registration period accepted by the server.
 
 use nom::sequence::delimited;
+use nom::Parser;
 
 // Import delta_seconds parser
 use crate::parser::values::delta_seconds;
@@ -28,7 +29,7 @@ use crate::parser::ParseResult;
 pub fn parse_min_expires(input: &[u8]) -> ParseResult<'_, u32> {
     // Use delimited to handle optional whitespace around the value
     // sws = [LWS] (optional linear whitespace) - RFC 3261 Section 25.1
-    delimited(sws, delta_seconds, sws)(input)
+    delimited(sws, delta_seconds, sws).parse(input)
 }
 
 /// A validator function that checks if a Min-Expires value is reasonable

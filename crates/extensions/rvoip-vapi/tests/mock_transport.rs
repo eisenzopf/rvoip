@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -147,14 +146,16 @@ async fn mock_websocket(mut socket: WebSocket, state: MockState) {
         let _ = socket
             .send(AxumWsMessage::Close(Some(AxumCloseFrame {
                 code: 1000,
-                reason: Cow::Borrowed(""),
+                reason: "".into(),
             })))
             .await;
         return;
     }
 
     for chunk in state.audio_chunks.iter() {
-        let _ = socket.send(AxumWsMessage::Binary(chunk.clone())).await;
+        let _ = socket
+            .send(AxumWsMessage::Binary(chunk.clone().into()))
+            .await;
     }
     let _ = socket
         .send(AxumWsMessage::Text(
@@ -172,7 +173,7 @@ async fn mock_websocket(mut socket: WebSocket, state: MockState) {
             }
             injected = injected.recv() => {
                 let message = match injected {
-                    Ok(Injected::Binary(payload)) => AxumWsMessage::Binary(payload),
+                    Ok(Injected::Binary(payload)) => AxumWsMessage::Binary(payload.into()),
                     Ok(Injected::Text(text)) => AxumWsMessage::Text(text.into()),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => break,
@@ -187,7 +188,7 @@ async fn mock_websocket(mut socket: WebSocket, state: MockState) {
             Ok(AxumWsMessage::Binary(payload)) => {
                 let _ = state
                     .observed
-                    .send(Observed::Binary(payload, Instant::now()));
+                    .send(Observed::Binary(payload.to_vec(), Instant::now()));
             }
             Ok(AxumWsMessage::Text(text)) => {
                 if let Ok(value) = serde_json::from_str::<Value>(&text) {

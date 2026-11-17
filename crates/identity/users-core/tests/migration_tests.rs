@@ -1,4 +1,4 @@
-use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
+use sqlx_core::{query::query, raw_sql::raw_sql, row::Row, sql_str::AssertSqlSafe};
 use sqlx_sqlite::SqlitePool;
 use tempfile::TempDir;
 use users_core::SqliteUserStore;
@@ -31,7 +31,7 @@ async fn table_exists(pool: &SqlitePool, table: &str) -> bool {
 
 async fn column_exists(pool: &SqlitePool, table: &str, column: &str) -> bool {
     let pragma = format!("PRAGMA table_info({table})");
-    query(&pragma)
+    query(AssertSqlSafe(pragma))
         .fetch_all(pool)
         .await
         .unwrap()

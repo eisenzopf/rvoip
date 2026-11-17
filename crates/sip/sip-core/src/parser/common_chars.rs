@@ -1,9 +1,9 @@
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while1, take_while_m_n},
     character::complete::hex_digit1,
     combinator::recognize,
-    sequence::tuple,
     IResult,
 };
 
@@ -13,15 +13,15 @@ pub type ParseResult<'a, O> = IResult<&'a [u8], O>;
 // Core Rules (RFC 2234) & Basic Rules (RFC 3261) Character Sets
 
 pub fn alpha(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    take_while1(nom::character::is_alphabetic)(input)
+    take_while1(|c: u8| c.is_ascii_alphabetic())(input)
 }
 
 pub fn digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    take_while1(nom::character::is_digit)(input)
+    take_while1(|c: u8| c.is_ascii_digit())(input)
 }
 
 pub fn alphanum(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    take_while1(nom::character::is_alphanumeric)(input)
+    take_while1(|c: u8| c.is_ascii_alphanumeric())(input)
 }
 
 pub fn hex_digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
@@ -36,37 +36,39 @@ pub fn lhex(input: &[u8]) -> ParseResult<'_, &[u8]> {
 pub fn mark(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // mark = "-" / "_" / "." / "!" / "~" / "*" / "'" / "(" / ")"
     recognize(alt((
-        tag(b"-"),
-        tag(b"_"),
-        tag(b"."),
-        tag(b"!"),
-        tag(b"~"),
-        tag(b"*"),
-        tag(b"'"),
-        tag(b"("),
-        tag(b")"),
-    )))(input)
+        tag(&b"-"[..]),
+        tag(&b"_"[..]),
+        tag(&b"."[..]),
+        tag(&b"!"[..]),
+        tag(&b"~"[..]),
+        tag(&b"*"[..]),
+        tag(&b"'"[..]),
+        tag(&b"("[..]),
+        tag(&b")"[..]),
+    )))
+    .parse(input)
 }
 
 pub fn unreserved(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // unreserved = alphanum / mark
-    alt((alphanum, mark))(input)
+    alt((alphanum, mark)).parse(input)
 }
 
 pub fn reserved(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // reserved = ";" / "/" / "?" / ":" / "@" / "&" / "=" / "+" / "$" / ","
     recognize(alt((
-        tag(b";"),
-        tag(b"/"),
-        tag(b"?"),
-        tag(b":"),
-        tag(b"@"),
-        tag(b"&"),
-        tag(b"="),
-        tag(b"+"),
-        tag(b"$"),
-        tag(b","),
-    )))(input)
+        tag(&b";"[..]),
+        tag(&b"/"[..]),
+        tag(&b"?"[..]),
+        tag(&b":"[..]),
+        tag(&b"@"[..]),
+        tag(&b"&"[..]),
+        tag(&b"="[..]),
+        tag(&b"+"[..]),
+        tag(&b"$"[..]),
+        tag(&b","[..]),
+    )))
+    .parse(input)
 }
 
 fn is_hex_digit_byte(c: u8) -> bool {
@@ -75,7 +77,7 @@ fn is_hex_digit_byte(c: u8) -> bool {
 
 pub fn escaped(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // escaped = "%" HEXDIG HEXDIG
-    recognize(tuple((tag(b"%"), take_while_m_n(2, 2, is_hex_digit_byte))))(input)
+    recognize((tag(&b"%"[..]), take_while_m_n(2, 2, is_hex_digit_byte))).parse(input)
 }
 
 pub fn lalpha(input: &[u8]) -> ParseResult<'_, &[u8]> {

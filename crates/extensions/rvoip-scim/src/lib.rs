@@ -141,7 +141,7 @@ impl ScimService {
             )
             .route("/Users", get(list_users_handler).post(create_user_handler))
             .route(
-                "/Users/:id",
+                "/Users/{id}",
                 get(get_user_handler)
                     .put(replace_user_handler)
                     .patch(patch_user_handler)
@@ -152,7 +152,7 @@ impl ScimService {
                 get(list_groups_handler).post(create_group_handler),
             )
             .route(
-                "/Groups/:id",
+                "/Groups/{id}",
                 get(get_group_handler)
                     .put(replace_group_handler)
                     .patch(patch_group_handler)
@@ -1138,6 +1138,49 @@ mod tests {
         });
         let service = ScimService::new(auth, bearer, ScimConfig::new("okta")).unwrap();
         (temp, service)
+    }
+
+    /// axum 0.8 changed path parameters from `/:id` to `/{id}`; the old
+    /// syntax panics when the router is built. Every parameterised route must
+    /// reach its handler (no 404/405).
+    #[tokio::test]
+    async fn router_builds_and_matches_every_path_parameter_route() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        let (_temp, service) = test_service(vec!["scim"]).await;
+        let app = Arc::new(service).router();
+        for (method, uri) in [
+            ("GET", "/Users/u-1"),
+            ("PUT", "/Users/u-1"),
+            ("PATCH", "/Users/u-1"),
+            ("DELETE", "/Users/u-1"),
+            ("GET", "/Groups/g-1"),
+            ("PUT", "/Groups/g-1"),
+            ("PATCH", "/Groups/g-1"),
+            ("DELETE", "/Groups/g-1"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                !matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{method} {uri} did not reach its handler ({})",
+                response.status()
+            );
+        }
     }
 
     #[test]

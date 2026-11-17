@@ -50,6 +50,7 @@ use crate::parser::parse_address; // For FromStr
 use crate::types::address::Address;
 use crate::types::header::Header;
 use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
@@ -285,7 +286,8 @@ impl FromStr for From {
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming, handle input type, map result and error
-        nom::combinator::all_consuming(parse_address)(s.as_bytes())
+        nom::combinator::all_consuming(parse_address)
+            .parse(s.as_bytes())
             .map(|(_rem, addr)| From(addr))
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }

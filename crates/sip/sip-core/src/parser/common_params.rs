@@ -14,6 +14,7 @@
 // Note: According to these rules, spaces should NOT be preserved in token values,
 // but should be preserved inside quoted-string values.
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -86,7 +87,8 @@ fn gen_value(input: &[u8]) -> ParseResult<'_, GenericValue> {
         map_res(quoted_string, |bytes| {
             unquote_string(bytes).map(GenericValue::Quoted)
         }),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // generic-param = token [ EQUAL gen-value ]
@@ -100,15 +102,20 @@ pub fn generic_param(input: &[u8]) -> ParseResult<'_, Param> {
                 .to_string();
             Ok::<_, nom::Err<NomError<&[u8]>>>(Param::Other(name, val_opt))
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // accept-param = ("q" EQUAL qvalue) / generic-param
 pub fn accept_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
-        map(preceded(pair(tag_no_case(b"q"), equal), qvalue), Param::Q),
+        map(
+            preceded(pair(tag_no_case(&b"q"[..]), equal), qvalue),
+            Param::Q,
+        ),
         generic_param,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parses zero or more semicolon-preceded generic parameters.
@@ -118,7 +125,8 @@ pub fn semicolon_params0(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
     many0(preceded(
         semi,          // Use the semi parser which handles surrounding SWS
         generic_param, // Parse one generic parameter
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parses zero or more semicolon-preceded parameters using a specific parameter parser function.
@@ -129,7 +137,8 @@ pub fn semicolon_separated_params0<'a, O, F>(
 where
     F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
-    many0(preceded(semi, param_parser))
+    let mut parser = many0(preceded(semi, param_parser));
+    move |input| parser.parse(input)
 }
 
 // Helper to convert a Vec<Param> (like from semicolon_params0) to a HashMap for easier lookup.
@@ -142,7 +151,7 @@ pub fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
     // eprintln!("Attempting to parse tag from: {:?}", input);
 
     // Use match explicitly to handle errors better
-    match preceded(tag_no_case(b"tag"), preceded(equal, token))(input) {
+    match preceded(tag_no_case(&b"tag"[..]), preceded(equal, token)).parse(input) {
         Ok((rem, tag_bytes)) => {
             // Handle UTF-8 conversion safely
             match str::from_utf8(tag_bytes) {
@@ -170,17 +179,17 @@ pub fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
 // Specific param parser for From/To headers
 // from-param / to-param = tag-param / generic-param
 pub fn from_to_param(input: &[u8]) -> ParseResult<'_, Param> {
-    alt((tag_param, generic_param))(input)
+    alt((tag_param, generic_param)).parse(input)
 }
 
 // c-p-q = "q" EQUAL qvalue
 fn cp_q(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
-    preceded(pair(tag_no_case(b"q"), equal), qvalue)(input)
+    preceded(pair(tag_no_case(&b"q"[..]), equal), qvalue).parse(input)
 }
 
 // c-p-expires = "expires" EQUAL delta-seconds
 fn cp_expires(input: &[u8]) -> ParseResult<'_, u32> {
-    preceded(pair(tag_no_case(b"expires"), equal), delta_seconds)(input)
+    preceded(pair(tag_no_case(&b"expires"[..]), equal), delta_seconds).parse(input)
 }
 
 // contact-params = c-p-q / c-p-expires / contact-extension
@@ -192,7 +201,8 @@ pub fn contact_param_item(input: &[u8]) -> ParseResult<'_, Param> {
         map(cp_expires, Param::Expires),
         tag_param,     // Add tag_param parsing for Contact headers
         generic_param, // Fallback to generic
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // Function to parse a semicolon-separated list of key-value parameters into a HashMap<String, Option<String>>

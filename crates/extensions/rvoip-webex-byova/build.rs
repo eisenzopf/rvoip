@@ -62,7 +62,7 @@ fn compile_protos() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={}", dir.join(file).display());
     }
     std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
-    tonic_build::configure().compile_protos(
+    tonic_prost_build::configure().compile_protos(
         &[dir.join("voicevirtualagent.proto")],
         &[dir, protoc_bin_vendored::include_path()?],
     )?;

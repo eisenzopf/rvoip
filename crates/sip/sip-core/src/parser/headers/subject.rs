@@ -1,6 +1,7 @@
 // Parser for Subject header (RFC 3261 Section 20.38)
 // Subject = ( "Subject" / "s" ) HCOLON [TEXT-UTF8-TRIM]
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -42,9 +43,13 @@ pub fn parse_subject(input: &[u8]) -> ParseResult<'_, Subject> {
 /// This handles both the standard "Subject:" form and the compact "s:" form.
 pub fn parse_subject_header(input: &[u8]) -> ParseResult<'_, Subject> {
     preceded(
-        terminated(alt((tag_no_case(b"Subject"), tag_no_case(b"s"))), hcolon),
+        terminated(
+            alt((tag_no_case(&b"Subject"[..]), tag_no_case(&b"s"[..]))),
+            hcolon,
+        ),
         parse_subject,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -55,7 +60,9 @@ mod tests {
 
     // Test helper for fully consuming the input
     fn test_parse_subject(input: &[u8]) -> Result<Subject, nom::Err<nom::error::Error<&[u8]>>> {
-        all_consuming(parse_subject)(input).map(|(_, output)| output)
+        all_consuming(parse_subject)
+            .parse(input)
+            .map(|(_, output)| output)
     }
 
     #[test]
