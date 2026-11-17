@@ -27,8 +27,9 @@ aws-live = ["aws-control"]
 # `server` adds the batteries-included SIP → Amazon Connect screen-pop server
 # (`ConnectScreenPopServer`): a SIP UAS + media bridge. Pulls the SIP stack and
 # the media-core transcoder, so it is off by default for users who only want
-# the adapter.
-server = ["dep:rvoip-sip", "dep:rvoip-sip-core", "dep:rvoip-media-core"]
+# the adapter. The bridge carries Opus on the Connect leg, so it also enables
+# Opus in rvoip-core's media graph, which refuses Opus streams without it.
+server = ["dep:rvoip-sip", "dep:rvoip-sip-core", "dep:rvoip-media-core", "rvoip-core/opus"]
 
 [dependencies]
 rvoip-core.workspace = true
