@@ -761,14 +761,48 @@ def dependent_closure(failed: set[str], reverse: dict[str, set[str]]) -> set[str
     return result
 
 
+def colocated_units(gates: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Group gates that depend on each other, directly or transitively.
+
+    A shard runs its gates in dependency order, but nothing orders gates on
+    different workers, so a chain within one resource class (a lab's
+    up -> matrix -> down) must stay on one worker. Split, the matrix ran
+    against a lab that came up on another machine and never saw its env file,
+    and the teardown ran before the lab existed.
+    """
+
+    ids = {gate["id"] for gate in gates}
+    parent = {gate_id: gate_id for gate_id in ids}
+
+    def root(gate_id: str) -> str:
+        while parent[gate_id] != gate_id:
+            parent[gate_id] = parent[parent[gate_id]]
+            gate_id = parent[gate_id]
+        return gate_id
+
+    for gate in gates:
+        for dependency in gate.get("dependencies", []):
+            if dependency in ids:
+                parent[root(gate["id"])] = root(dependency)
+    units: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
+    for gate in gates:
+        units[root(gate["id"])].append(gate)
+    return list(units.values())
+
+
 def balance_gates(gates: list[dict[str, Any]], count: int) -> list[list[dict[str, Any]]]:
-    count = min(max(1, count), len(gates))
+    units = colocated_units(gates)
+    count = min(max(1, count), len(units))
+
+    def weight(unit: list[dict[str, Any]]) -> int:
+        return sum(int(gate.get("estimated_seconds", 1)) for gate in unit)
+
     shards: list[tuple[int, list[dict[str, Any]]]] = [(0, []) for _ in range(count)]
-    for gate in sorted(gates, key=lambda item: (-int(item.get("estimated_seconds", 1)), item["id"])):
+    for unit in sorted(units, key=lambda item: (-weight(item), min(gate["id"] for gate in item))):
         index = min(range(count), key=lambda item: (shards[item][0], item))
-        weight, items = shards[index]
-        items.append(gate)
-        shards[index] = (weight + int(gate.get("estimated_seconds", 1)), items)
+        total, items = shards[index]
+        items.extend(unit)
+        shards[index] = (total + weight(unit), items)
     return [items for _, items in shards]
 
 
@@ -799,10 +833,10 @@ def matrix_for(plan_gates: list[dict[str, Any]], by_id: dict[str, dict[str, Any]
         # (prebuild included) about ten minutes of slack and started the second
         # soak on a machine the first had just finished loading.
         "ec2-performance-soak-long": 3,
-        # The twelve proxy rows have independent ephemeral peer labs. Two
-        # workers keep the complete release fanout at 192 concurrent vCPUs,
-        # well inside the account's On-Demand Standard vCPU quota, while a
-        # failed row can still be retried alone.
+        # The twelve signalling-only proxy rows have independent ephemeral
+        # peer labs; each media lab (Kamailio, OpenSIPS + rtpengine) is an
+        # up/matrix/down chain that balance_gates keeps on one worker. Two
+        # small workers, and a failed row can still be retried alone.
         "ec2-proxy-interop": 2,
         # Interoperability gates run one shard per lab lane (`interop_lane`,
         # build_gate_catalog.INTEROP_LANES): a lane keeps its stateful
