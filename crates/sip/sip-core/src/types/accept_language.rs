@@ -39,6 +39,7 @@ use crate::error::{Error, Result};
 use crate::parser::headers::accept_language::{parse_accept_language, LanguageInfo};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -348,7 +349,7 @@ impl fmt::Display for AcceptLanguage {
 
 // Helper function to parse from owned bytes
 fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<LanguageInfo>> {
-    match all_consuming(parse_accept_language)(bytes.as_slice()) {
+    match all_consuming(parse_accept_language).parse(bytes.as_slice()) {
         Ok((_, languages)) => Ok(languages),
         Err(e) => Err(Error::ParseError(format!(
             "Failed to parse Accept-Language header: {:?}",

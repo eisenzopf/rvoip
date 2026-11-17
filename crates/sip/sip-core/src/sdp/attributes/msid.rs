@@ -4,6 +4,7 @@
 //! Format: `a=msid:<stream identifier> [<track identifier>]`
 
 use crate::error::{Error, Result};
+use nom::Parser;
 use nom::{
     bytes::complete::take_while1,
     character::complete::space1,
@@ -40,7 +41,8 @@ fn msid_parser(input: &str) -> IResult<&str, (String, Option<String>)> {
             space1,
             map(track_id_parser, |s: &str| s.to_string()),
         )),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parses msid attribute: `a=msid:<stream identifier> [<track identifier>]`

@@ -8,12 +8,12 @@ use chrono::Datelike;
 use chrono::Timelike;
 #[cfg(test)]
 use chrono::Weekday;
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
     character::complete::space1,
     error::{Error as NomError, ErrorKind, ParseError},
-    sequence::tuple,
 };
 
 // Import from new modules
@@ -33,7 +33,8 @@ fn wkday(input: &[u8]) -> ParseResult<'_, &[u8]> {
         tag_no_case("Fri"),
         tag_no_case("Sat"),
         tag_no_case("Sun"),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // month = "Jan" / "Feb" / "Mar" / "Apr" / "May" / "Jun" /
@@ -52,7 +53,8 @@ fn month(input: &[u8]) -> ParseResult<'_, &[u8]> {
         tag_no_case("Oct"),
         tag_no_case("Nov"),
         tag_no_case("Dec"),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // 2DIGIT helper
@@ -73,7 +75,7 @@ fn four_digit(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // Returns DateTime<FixedOffset> assuming chrono is available
 pub fn sip_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
     // First, parse the structured parts to ensure RFC compliance
-    let (remaining, date_parts) = tuple((
+    let (remaining, date_parts) = (
         wkday,
         tag(","),
         space1,
@@ -90,7 +92,8 @@ pub fn sip_date(input: &[u8]) -> ParseResult<'_, DateTime<FixedOffset>> {
         two_digit, // second
         space1,
         tag("GMT"), // timezone
-    ))(input)?;
+    )
+        .parse(input)?;
 
     // Convert components to strings
     let _day_of_week = match std::str::from_utf8(date_parts.0) {

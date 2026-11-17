@@ -1,5 +1,6 @@
 // Shared parser for server-val structure (RFC 3261 Section 20.33/20.41)
 
+use nom::Parser;
 use nom::{
     branch::alt,
     combinator::{map, map_res, opt},
@@ -20,7 +21,7 @@ use crate::types::server::{Product, ServerVal};
 
 // product-version = token
 fn product_version(input: &[u8]) -> ParseResult<'_, String> {
-    map_res(token, |bytes| str::from_utf8(bytes).map(String::from))(input)
+    map_res(token, |bytes| str::from_utf8(bytes).map(String::from)).parse(input)
 }
 
 // product = token [SLASH product-version]
@@ -34,7 +35,8 @@ fn product(input: &[u8]) -> ParseResult<'_, Product> {
                 version: version_opt,
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // server-val = product / comment
@@ -45,7 +47,8 @@ pub fn server_val(input: &[u8]) -> ParseResult<'_, ServerVal> {
         map_res(comment, |bytes| {
             str::from_utf8(bytes).map(|s| ServerVal::Comment(s.to_string()))
         }),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // Alias for function to help with migration

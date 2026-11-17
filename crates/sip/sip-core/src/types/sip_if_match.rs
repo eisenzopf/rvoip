@@ -30,6 +30,7 @@
 //! ```
 
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -72,7 +73,9 @@ impl FromStr for SipIfMatch {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let (_, if_match) = all_consuming(parse_sip_if_match)(s.as_bytes()).map_err(Error::from)?;
+        let (_, if_match) = all_consuming(parse_sip_if_match)
+            .parse(s.as_bytes())
+            .map_err(Error::from)?;
         Ok(if_match)
     }
 }
