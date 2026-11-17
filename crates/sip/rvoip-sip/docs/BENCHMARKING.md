@@ -100,10 +100,13 @@ the reviewed `20260929T224805Z` regression baseline. The complete release
 result is in [BETA_RELEASE_REPORT.md](BETA_RELEASE_REPORT.md); do not use
 ignored, untracked run directories as documentation references.
 
-> **`--release` is mandatory.** Every scenario asserts
-> `!cfg!(debug_assertions)` at startup. Debug-build numbers are not
-> citable: dialog and transaction state machines run 5–20× slower
-> without optimisation.
+> **`--release` is mandatory.** Every scenario test is marked
+> `#[cfg_attr(debug_assertions, ignore = "requires --release")]`, so a debug
+> `cargo test` (including `--all-features` sweeps) reports it as ignored
+> rather than passed, and every scenario still asserts
+> `!cfg!(debug_assertions)` at startup if a debug run forces it with
+> `--ignored`. Debug-build numbers are not citable: dialog and transaction
+> state machines run 5–20× slower without optimisation.
 
 ---
 
@@ -156,7 +159,8 @@ the reference hardware listed below.
 
 - Rust toolchain pinned by the workspace (`rustc --version` — both the run-host
   rustc and the version reported in the JSON output should match).
-- `--release` builds — debug builds will panic at startup.
+- `--release` builds — debug builds report the scenarios as ignored, and
+  panic at startup if forced with `--ignored`.
 - An idle host. CPU steal in a VM, an active Spotlight reindex, a noisy
   Docker daemon, or another perf run on the same machine will skew p99 numbers.
 

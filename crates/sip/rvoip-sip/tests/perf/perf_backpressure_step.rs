@@ -191,6 +191,7 @@ async fn drive_phase(
     let _ = tokio::time::timeout(call_timeout, drain).await;
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_backpressure_step() {
     let knee_cps: f64 = std::env::var("RVOIP_PERF_BP_KNEE_CPS")

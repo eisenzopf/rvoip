@@ -200,3 +200,6 @@ anyhow             = { workspace = true }
 serial_test        = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Parses this crate's own manifest so the bundle contract tests can check
+# each bundle's declared feature closure (see `feature_bundle_contract_tests`).
+toml               = { workspace = true, features = ["std", "parse", "serde"] }

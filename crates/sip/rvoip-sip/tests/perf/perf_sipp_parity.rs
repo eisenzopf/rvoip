@@ -90,6 +90,7 @@ fn sipp_installed(bin: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn perf_sipp_parity() {
     let sipp_bin = std::env::var("RVOIP_PERF_SIPP_BIN").unwrap_or_else(|_| "sipp".to_string());

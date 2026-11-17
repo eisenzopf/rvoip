@@ -353,6 +353,7 @@ async fn run_one_point(
     report
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_mixed_workload() {
     let points = parse_sweep_env("RVOIP_PERF_SWEEP_MIXED_OPS").unwrap_or_else(|| {

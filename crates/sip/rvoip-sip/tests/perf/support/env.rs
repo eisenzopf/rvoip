@@ -2,9 +2,11 @@
 //! carries the context needed to compare runs across machines.
 //!
 //! The block also enforces release-mode at startup. Debug-build perf
-//! numbers are not citable, so a debug run is treated as a programming
-//! error: [`EnvironmentBlock::capture`] panics if `cfg!(debug_assertions)`
-//! is true.
+//! numbers are not citable. Each scenario test carries
+//! `#[cfg_attr(debug_assertions, ignore = "requires --release")]`, so a
+//! debug `cargo test` reports it as ignored; this guard is the safety net
+//! for a debug run that forces it with `--ignored` / `--include-ignored`:
+//! [`EnvironmentBlock::capture`] panics if `cfg!(debug_assertions)` is true.
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};

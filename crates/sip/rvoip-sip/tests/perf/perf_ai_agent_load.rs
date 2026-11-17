@@ -294,6 +294,7 @@ async fn run_one_point(
     report
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_ai_agent_load() {
     let points = parse_sweep_env("RVOIP_PERF_SWEEP_AI_AGENTS").unwrap_or_else(|| {

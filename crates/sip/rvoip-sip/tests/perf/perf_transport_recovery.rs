@@ -202,6 +202,7 @@ async fn drive_calls(
     .await;
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_transport_recovery() {
     let cps: f64 = std::env::var("RVOIP_PERF_REC_CPS")
