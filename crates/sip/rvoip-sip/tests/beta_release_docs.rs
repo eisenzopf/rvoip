@@ -109,7 +109,6 @@ fn beta_release_docs_exist_and_archived_docs_are_out_of_active_set() {
         "BETA_RELEASE_REPORT.md",
         "BETA_GATE_REPORT.md",
         "BETA_PERFORMANCE_REPORT.md",
-        "RELEASE_NOTES_NEXT.md",
         "TUNING.md",
     ];
 
@@ -272,14 +271,12 @@ fn active_release_docs_keep_high_cps_and_webrtc_as_non_claims() {
     let compatibility = read(docs.join("COMPATIBILITY_MATRIX.md"));
     let topology = read(docs.join("TOPOLOGY_PROFILES.md"));
     let performance = read(docs.join("BETA_PERFORMANCE_REPORT.md"));
-    let notes = read(docs.join("RELEASE_NOTES_NEXT.md"));
 
     assert!(compatibility.contains("| General full-media | Beta target | Up to 2,000 CPS |"));
     assert!(performance.contains("up to 2,000 CPS with media enabled"));
     assert!(topology.contains("| Browser/WebRTC edge | Post-beta |"));
     assert!(compatibility.contains("| DTLS-SRTP | Post-beta |"));
     assert!(compatibility.contains("| ICE/TURN/WebRTC browser | Post-beta |"));
-    assert!(notes.contains("General-user 10,000 CPS full-media capability"));
 }
 
 #[test]

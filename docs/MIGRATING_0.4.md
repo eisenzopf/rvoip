@@ -9,7 +9,7 @@ with before/after code. It is written for downstream applications such as
 Thelve and vapi-central, but applies to any crate that depends on rvoip.
 
 The [changelog](../CHANGELOG.md) lists every change, and the
-[release notes](../crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) describe
+[release notes](release/RELEASE_NOTES_NEXT.md) describe
 the features and the interop evidence.
 
 ## Contents

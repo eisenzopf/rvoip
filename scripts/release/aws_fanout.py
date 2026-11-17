@@ -352,10 +352,41 @@ def load_instance_states(path: Path) -> dict[str, str]:
     return states
 
 
+def dependent_gates(
+    failed: set[str], dependencies: dict[str, set[str]]
+) -> set[str]:
+    """Every gate that transitively depends on one of `failed`."""
+
+    reverse: dict[str, set[str]] = {}
+    for gate_id, required in dependencies.items():
+        for dependency in required:
+            reverse.setdefault(dependency, set()).add(gate_id)
+    result: set[str] = set()
+    pending = list(failed)
+    while pending:
+        for dependent in reverse.get(pending.pop(), set()):
+            if dependent not in result:
+                result.add(dependent)
+                pending.append(dependent)
+    return result
+
+
 def early_failure_decision(
-    *, manifest: dict[str, Any], downloads: Path, states: dict[str, str]
+    *,
+    manifest: dict[str, Any],
+    downloads: Path,
+    states: dict[str, str],
+    dependencies: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
-    """Decide whether failed bounded work makes deferred work unnecessary."""
+    """Decide whether failed bounded work makes deferred work unnecessary.
+
+    With `dependencies` (gate -> the gates it depends on, from the catalog)
+    the cutoff is scoped: it stops only deferred workers holding a gate that
+    depends on a gate in a failed shard. Independent hour-long work keeps
+    running, so a single flake costs one rerun of its own shard while the
+    rest of the evidence stays reusable. Without it, every deferred worker
+    is stopped (the original, unscoped behaviour).
+    """
     validate_manifest(manifest)
     early_expected = 0
     early_settled = 0
@@ -393,6 +424,22 @@ def early_failure_decision(
 
     failed_shards.sort()
     deferred_running.sort()
+    deferred_independent: list[str] = []
+    if dependencies is not None and failed_shards:
+        workers_by_id = {worker["id"]: worker for worker in manifest["workers"]}
+        failed_gates = {
+            gate_id for shard in failed_shards for gate_id in workers_by_id[shard]["gates"]
+        }
+        affected = dependent_gates(failed_gates, dependencies) - failed_gates
+        workers_by_name = {worker["name"]: worker for worker in manifest["workers"]}
+        deferred_independent = [
+            name
+            for name in deferred_running
+            if not affected.intersection(workers_by_name[name]["gates"])
+        ]
+        deferred_running = [
+            name for name in deferred_running if name not in deferred_independent
+        ]
     return {
         "schema": "rvoip-ec2-early-failure-decision-v1",
         "early_expected": early_expected,
@@ -400,6 +447,8 @@ def early_failure_decision(
         "failed_shards": failed_shards,
         "invalid_results": invalid_results,
         "deferred_running": deferred_running,
+        "deferred_independent": deferred_independent,
+        "scoped": dependencies is not None,
         "should_stop": bool(
             early_expected > 0
             and early_settled == early_expected
@@ -643,6 +692,11 @@ def build_parser() -> argparse.ArgumentParser:
     cutoff.add_argument("--manifest", type=Path, required=True)
     cutoff.add_argument("--downloads", type=Path, required=True)
     cutoff.add_argument("--states", type=Path, required=True)
+    cutoff.add_argument(
+        "--catalog",
+        type=Path,
+        help="gate catalog; scopes the cutoff to workers that depend on a failed shard",
+    )
 
     user_data = commands.add_parser("user-data")
     user_data.add_argument("--startup", type=Path, required=True)
@@ -680,10 +734,18 @@ def main(argv: list[str] | None = None) -> int:
             if receipt["status"] != "PASS":
                 return 1
         elif args.command == "early-failure-decision":
+            dependencies = None
+            if args.catalog is not None:
+                catalog = load_json(args.catalog, "gate catalog")
+                dependencies = {
+                    gate["id"]: set(gate.get("dependencies", []))
+                    for gate in catalog.get("gates", [])
+                }
             decision = early_failure_decision(
                 manifest=load_json(args.manifest, "EC2 fanout manifest"),
                 downloads=args.downloads,
                 states=load_instance_states(args.states),
+                dependencies=dependencies,
             )
             print(json.dumps(decision, sort_keys=True))
         else:

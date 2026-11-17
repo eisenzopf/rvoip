@@ -1,0 +1,93 @@
+name: Nightly qualification
+
+# Qualify the head of main every night with the full remote-release profile
+# (never the RFC 7502 benchmark, which runs only for a release), chained to
+# the previous nights' receipts: unchanged gates are reused, so a quiet night
+# reruns only the bookkeeping gates. A release then starts from a main commit
+# that already has complete green receipts (docs/RELEASING.md, "Release day").
+# The browser interop and credential-timing jobs (nightly-interop.yml) run
+# here too.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      fresh:
+        description: Run every gate fresh instead of reusing earlier nights' receipts
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+  security-events: read
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: nightly-qualification
+  cancel-in-progress: false
+
+jobs:
+  chain:
+    name: Find the candidate and its receipt chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      candidate: ${{ steps.chain.outputs.candidate }}
+      prior_run_id: ${{ steps.chain.outputs.prior_run_id }}
+    steps:
+      - name: Resolve main and the previous nightly runs
+        id: chain
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          FRESH: ${{ inputs.fresh || false }}
+        run: |
+          set -euo pipefail
+          candidate="$(gh api "repos/${REPOSITORY}/commits/main" --jq .sha)"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          prior=""
+          if [[ "$FRESH" != true ]]; then
+            # Up to the last two completed nightlies that kept their evidence:
+            # a failed night still has reusable passing receipts, and the
+            # planner reuses only exact, ancestor-bound evidence and reruns
+            # everything else.
+            ids=()
+            for run_id in $(gh run list --repo "$REPOSITORY" \
+              --workflow nightly-qualification.yml --status completed \
+              --limit 10 --json databaseId --jq '.[].databaseId'); do
+              if gh api "repos/${REPOSITORY}/actions/runs/${run_id}/artifacts" \
+                --jq '.artifacts[] | select(.name == "release-gate-evidence" and .expired == false) | .id' \
+                | grep -q .; then
+                ids+=("$run_id")
+              fi
+              (( ${#ids[@]} < 2 )) || break
+            done
+            prior="$(IFS=,; printf '%s' "${ids[*]}")"
+          fi
+          echo "prior_run_id=$prior" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Nightly qualification"
+            echo
+            echo "- Candidate: \`$candidate\`"
+            echo "- Receipt chain from runs: ${prior:-none (fresh)}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  qualify:
+    name: Qualify main
+    needs: chain
+    uses: ./.github/workflows/release-qualify.yml
+    with:
+      candidate: ${{ needs.chain.outputs.candidate }}
+      profile: remote-release
+      first_candidate: ${{ needs.chain.outputs.prior_run_id == '' }}
+      prior_run_id: ${{ needs.chain.outputs.prior_run_id }}
+
+  interop:
+    name: Browser interop and credential timing
+    uses: ./.github/workflows/nightly-interop.yml
+    secrets: inherit
