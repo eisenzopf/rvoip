@@ -72,6 +72,14 @@ class Interrupted(Infra):
 SIGNALS = {'unwinding': False}
 
 
+def parse_utc(text):
+    return datetime.datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+# A reservation held across a --max-wall stop ends by itself this long after the stop at the latest.
+HOLD_SECONDS = 2 * 3600
+
+
 def utc(ts=None):
     return datetime.datetime.fromtimestamp(ts or time.time(), datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
@@ -314,9 +322,12 @@ class Lane:
     # minor/full hold one targeted reservation per instance type for the lane (1 DUT + N callers) in the
     # lane's AZ and cluster placement group, so a long run cannot lose its hosts to a capacity miss. A leg
     # creates them before it launches (a capacity miss here is the same INFRA as a launch miss: nothing is
-    # recorded yet), launches only into them (never unreserved), and cancels them on every exit path.
-    # Each also ends by itself at the lane's rvoip-expires-at, so a crashed orchestrator stops billing
-    # then at the latest; the next lane on the env-id cancels it sooner (sweep_reservations).
+    # recorded yet), launches only into them (never unreserved), and cancels them on every exit path but
+    # one: a --max-wall stop (exit 4) holds them for the next leg, ending by themselves at the earlier of
+    # the stop + HOLD_SECONDS and the lane expiry; the resumed leg adopts them (same run-id and AZ) or
+    # reserves again when they have ended. Each also ends by itself at the lane's rvoip-expires-at, so a
+    # crashed orchestrator stops billing then at the latest; the next lane on the env-id cancels it sooner
+    # (sweep_reservations).
 
     @property
     def env_tag(self):
@@ -337,17 +348,11 @@ class Lane:
         for role, itype in need.items():
             counts[itype] = counts.get(itype, 0) + (1 if role == 'dut' else self.args.callers)
         reservations = self.state.setdefault('reservations', [])
-        live = [r for r in reservations if not r.get('cancelled_at') and r['az'] == az]
-        if live:
-            found = {r['CapacityReservationId']: r for r in self.aws.describe_capacity_reservations([r['id'] for r in live])}
-            usable = {r['instance_type']: r for r in live if (found.get(r['id']) or {}).get('State') == 'active'
-                      and found[r['id']].get('AvailableInstanceCount', 0) >= counts.get(r['instance_type'], 0)}
-        else:
-            usable = {}
+        usable = self.adoptable(az, counts, expires)
         by_type = {}
         for itype, count in counts.items():
             if itype in usable:
-                by_type[itype] = usable[itype]['id']
+                by_type[itype] = usable[itype]
                 continue
             tags = {'rvoip-bench': 'true', 'Name': 'rvoip-bench-lane', 'rvoip-run-id': self.args.run_id,
                     'rvoip-env-id': self.env_tag, 'rvoip-expires-at': expires}
@@ -366,31 +371,108 @@ class Lane:
         self.aws.wait_capacity_reservations(sorted(set(by_type.values())))
         return {role: by_type[itype] for role, itype in need.items()}
 
-    def release_reservations(self):
-        """Cancel every reservation this run still holds (each exit path)."""
-        held = [r for r in self.state.get('reservations', []) if not r.get('cancelled_at')]
-        for r in held:
-            try:
-                self.aws.cancel_capacity_reservation(r['id'])
-                r['cancelled_at'] = utc()
-                self.log('cancelled capacity reservation', r['id'])
+    @staticmethod
+    def live(r):
+        return not r.get('cancelled_at') and not r.get('ended_state')
+
+    def adoptable(self, az, counts, expires):
+        """instance type -> id of an active reservation of this run in `az` with room for the lane (a hold
+        from the previous leg), its end moved back to this leg's expiry. Reservations of this run that have
+        ended are marked so; none is cancelled here."""
+        reservations = self.state.setdefault('reservations', [])
+        found = {r['CapacityReservationId']: r for r in self.aws.describe_capacity_reservations(filters=(
+            ('tag:rvoip-bench', 'true'), ('tag:rvoip-run-id', self.args.run_id)))}
+        for r in reservations:
+            if self.live(r) and (found.get(r['id']) or {}).get('State') != 'active':
+                r['ended_state'] = (found.get(r['id']) or {}).get('State', 'gone')
+                self.log('capacity reservation %s has ended (%s): reserving again' % (r['id'], r['ended_state']))
+        usable = {}
+        for cid, f in sorted(found.items()):
+            itype = f['InstanceType']
+            if (f['State'] != 'active' or f['AvailabilityZone'] != az or itype not in counts or itype in usable
+                    or f.get('AvailableInstanceCount', 0) < counts[itype]):
+                continue
+            try:    # the hold ends soon after the stop: this leg needs it until its own expiry
+                self.aws.end_capacity_reservation_at(cid, expires)
+                self.aws.tag(cid, {'rvoip-held-for-resume': 'false'})
             except AwsError as error:
-                self.log('WARNING cancel %s failed; it ends by itself at %s:' % (r['id'], r.get('ends_at')), error)
+                self.log('WARNING could not adopt %s; reserving again:' % cid, error)
+                continue
+            usable[itype] = cid
+            entry = next((r for r in reservations if r['id'] == cid), None)
+            if entry is None:    # held by a leg whose state was lost: adopt by tag
+                entry = {'id': cid, 'instance_type': itype, 'count': f.get('TotalInstanceCount'), 'az': az,
+                         'created_at': None, 'ends_at': None}
+                reservations.append(entry)
+            entry.update(adopted_at=utc(), ends_at=expires)
+            self.log('adopting held capacity reservation %s (%s x %s in %s)' % (
+                cid, f.get('TotalInstanceCount'), itype, az))
+        self.save()
+        return usable
+
+    def hold_reservations(self):
+        """--max-wall stop: keep this run's reservations for the next leg, ending by themselves at the earlier
+        of now + HOLD_SECONDS and the lane expiry. One that cannot be shortened is cancelled instead."""
+        held = [r for r in self.state.get('reservations', []) if self.live(r)]
+        expires = (self.state.get('lane') or {}).get('expires_at')
+        for r in held:
+            end = time.time() + HOLD_SECONDS
+            for bound in (r.get('ends_at'), expires):
+                if bound:
+                    end = min(end, parse_utc(bound))
+            if end <= time.time() + 600:
+                self.cancel_one(r)
+                continue
+            try:
+                self.aws.end_capacity_reservation_at(r['id'], utc(end))
+                self.aws.tag(r['id'], {'rvoip-held-for-resume': 'true'})
+            except AwsError as error:
+                self.log('WARNING could not hold %s for the next leg:' % r['id'], error)
+                self.cancel_one(r)
+                continue
+            r.update(held_for_resume=True, held_at=utc(), ends_at=utc(end))
+            self.log('holding capacity reservation %s for the next leg until %s' % (r['id'], r['ends_at']))
+        if held:
+            self.save()
+
+    def cancel_one(self, r):
+        try:
+            self.aws.cancel_capacity_reservation(r['id'])
+            r['cancelled_at'] = utc()
+            self.log('cancelled capacity reservation', r['id'])
+        except AwsError as error:
+            self.log('WARNING cancel %s failed; it ends by itself at %s:' % (r['id'], r.get('ends_at')), error)
+
+    def release_reservations(self):
+        """Cancel every reservation this run still holds (every exit path but a --max-wall stop)."""
+        held = [r for r in self.state.get('reservations', []) if self.live(r)]
+        for r in held:
+            self.cancel_one(r)
         if held:
             self.save()
 
     def sweep_reservations(self):
-        """Cancel bench reservations tagged for this env-id that no live run holds (a crashed leg's)."""
-        mine = {r['id'] for r in self.state.get('reservations', []) if not r.get('cancelled_at')}
+        """Cancel bench reservations tagged for this env-id that no live leg holds (a crashed leg's). A resumed
+        run spares exactly what its previous leg held for it: its own run-id, tagged held-for-resume."""
+        keep = set()
+        if self.args.resume:
+            keep = {r['id'] for r in self.state.get('reservations', []) if self.live(r) and r.get('held_for_resume')}
         found = self.aws.describe_capacity_reservations(filters=(
             ('tag:rvoip-bench', 'true'), ('tag:rvoip-env-id', self.env_tag), ('state', 'active,pending')))
         for r in found:
-            if r['CapacityReservationId'] in mine:
-                continue
+            cid = r['CapacityReservationId']
             tags = {t['Key']: t['Value'] for t in r.get('Tags', [])}
+            if cid in keep or (self.args.resume and tags.get('rvoip-run-id') == self.args.run_id
+                               and tags.get('rvoip-held-for-resume') == 'true'):
+                self.log('keeping capacity reservation %s held for this run' % cid)
+                continue
             self.log('cancelling orphaned capacity reservation %s (run %s, %s x %s)' % (
-                r['CapacityReservationId'], tags.get('rvoip-run-id'), r.get('TotalInstanceCount'), r.get('InstanceType')))
-            self.aws.cancel_capacity_reservation(r['CapacityReservationId'])
+                cid, tags.get('rvoip-run-id'), r.get('TotalInstanceCount'), r.get('InstanceType')))
+            self.aws.cancel_capacity_reservation(cid)
+            for mine in self.state.get('reservations', []):
+                if mine['id'] == cid:
+                    mine['cancelled_at'] = utc()
+        self.save()
 
     def teardown(self):
         ids = self.state.get('lane', {}).get('instances', [])
@@ -874,7 +956,7 @@ def receipt_for(ctx, rows, started, status, reasons, env_id, rates_path, report)
             'connections_per_source': CALLER_CONNECTIONS, 'ami_id': lane.get('ami_id'),
             'kernel': facts.get('kernel'),
             'capacity_reservations': [{k: r.get(k) for k in ('id', 'instance_type', 'count', 'az', 'created_at',
-                                                              'cancelled_at')}
+                                                              'cancelled_at', 'held_for_resume', 'ends_at')}
                                       for r in state.get('reservations', [])]}, **bins),
         'baseline': {'path': str(rates_path.relative_to(REPO)) if rates_path else None,
                      'sha256': sha256_file(rates_path) if rates_path and rates_path.exists() else None},
@@ -1090,6 +1172,7 @@ def run(argv=None):
     status, reasons, rows, report = 'INFRA', [], [], None
     env_id, rates_path = args.env_id, None
     code = EXIT_INFRA
+    stopped_for_wall = False
     try:
         if args.dry_run:
             log('dry run: quota', aws.vcpu_quota(), 'in use', aws.running_standard_vcpus(),
@@ -1187,6 +1270,7 @@ def run(argv=None):
             score.record_rates(rows, env_id, BASELINES, ctx, args.profile, out=args.record_out)
     except WallClock as error:
         log('stopping (exit 4, resume later):', error)
+        stopped_for_wall = True
         return EXIT_WALL
     except Usage as error:
         log('usage:', error)
@@ -1206,7 +1290,10 @@ def run(argv=None):
                 log('WARNING teardown failed; the janitor reaps by rvoip-expires-at:', error)
         if not args.dry_run:
             try:
-                ctx.lane.release_reservations()
+                if stopped_for_wall and args.reserve_capacity:
+                    ctx.lane.hold_reservations()
+                else:
+                    ctx.lane.release_reservations()
             except Exception as error:  # noqa: BLE001
                 log('WARNING reservation release failed; each ends by itself at the lane expiry:', error)
             if have_lock:

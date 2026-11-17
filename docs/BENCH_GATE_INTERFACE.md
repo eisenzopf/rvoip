@@ -95,7 +95,7 @@ JSON style as `gates.py` (sorted keys, no whitespace).
     "ami_id": "ami-...", "kernel": "6.8.0-...",
     "capacity_reservations": [
       {"id": "cr-...", "instance_type": "c8in.24xlarge", "count": 2, "az": "us-west-2b",
-       "created_at": "...Z", "cancelled_at": "...Z"}
+       "created_at": "...Z", "cancelled_at": "...Z", "held_for_resume": true, "ends_at": "...Z"}
     ],
     "dut_sha256": "...", "caller_sha256": "...", "ea_uas_sha256": null
   },

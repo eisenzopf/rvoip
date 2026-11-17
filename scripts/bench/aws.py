@@ -75,6 +75,14 @@ class Aws:
             args += ['--filters', *('Name=%s,Values=%s' % (k, v) for k, v in filters)]
         return self.call(*args).get('CapacityReservations', [])
 
+    def end_capacity_reservation_at(self, cid, end):
+        self.call('ec2', 'modify-capacity-reservation', '--capacity-reservation-id', cid,
+                  '--end-date-type', 'limited', '--end-date', end)
+
+    def tag(self, resource, tags):
+        self.call('ec2', 'create-tags', '--resources', resource,
+                  '--tags', *('Key=%s,Value=%s' % (k, v) for k, v in tags.items()))
+
     def cancel_capacity_reservation(self, cid):
         self.call('ec2', 'cancel-capacity-reservation', '--capacity-reservation-id', cid)
 

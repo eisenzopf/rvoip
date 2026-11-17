@@ -295,6 +295,23 @@ class Cloud:
                 found = [r for r in found if any(t['Key'] == name[4:] and t['Value'] in values for t in r['Tags'])]
         return {'CapacityReservations': [dict(r) for r in found]}
 
+    def ec2_modify_capacity_reservation(self, args):
+        r = self.reservations[opt(args, '--capacity-reservation-id')]
+        assert r['State'] == 'active' and opt(args, '--end-date-type') == 'limited', r
+        r['EndDate'] = opt(args, '--end-date')
+        return {'Return': True}
+
+    def ec2_create_tags(self, args):
+        for rid in multi(args, '--resources'):
+            r = self.reservations[rid]
+            for kv in multi(args, '--tags'):
+                k, v = re.match(r'Key=([^,]+),Value=(.*)', kv).groups()
+                r['Tags'] = [t for t in r['Tags'] if t['Key'] != k] + [{'Key': k, 'Value': v}]
+        return {}
+
+    def tags_of(self, cid):
+        return {t['Key']: t['Value'] for t in self.reservations[cid]['Tags']}
+
     def ec2_cancel_capacity_reservation(self, args):
         r = self.reservations[opt(args, '--capacity-reservation-id')]
         if r['State'] != 'active':
@@ -1112,24 +1129,114 @@ class ReservationTests(LaneCase):
         self.assertEqual(code, 2, log)
         self.assert_all_cancelled(receipt)
 
-    def test_cancelled_at_max_wall_and_the_resumed_leg_reserves_again(self):
-        world = world_for(tester_capacity=TESTER)
-        code, receipt, log = self.bed.run('minor', 'min-cr-wall', '--rows', 'R1', '--max-wall', '40', '--r0', 'R1=3000', world=world)
+    def stop_at_max_wall(self, run_id):
+        """Leg 1 of a minor run, stopped by --max-wall after its lane launched: (held ids, its state)."""
+        code, receipt, log = self.bed.run('minor', run_id, '--rows', 'R1', '--r0', 'R1=3000', '--max-wall', '40',
+                                          world=world_for(tester_capacity=TESTER))
         self.assertEqual(code, 4, log)
-        self.assertEqual(self.bed.cloud.held_reservations(), [], 'cancelled at the --max-wall stop')
-        self.assertEqual(self.bed.alive(), [])
-        first = {cid for cid in self.bed.cloud.reservations}
-        self.assertEqual(len(first), 2)
-        code, receipt, log = self.bed.run('minor', 'min-cr-wall', '--rows', 'R1', '--r0', 'R1=3000', '--resume')
+        self.assertEqual(self.bed.alive(), [], 'the lane is torn down at the stop')
+        state = json.loads((self.bed.local(run_id) / 'state.json').read_text())
+        return self.bed.cloud.held_reservations(), state, log
+
+    def resume(self, run_id):
+        return self.bed.run('minor', run_id, '--rows', 'R1', '--r0', 'R1=3000', '--resume')
+
+    def test_max_wall_holds_the_reservations_until_two_hours_after_the_stop(self):
+        held, state, log = self.stop_at_max_wall('min-hold')
+        self.assertEqual(len(held), 2, 'both reservations survive exit 4')
+        for r in state['reservations']:
+            self.assertTrue(r['held_for_resume'], r)
+            self.assertIsNone(r.get('cancelled_at'))
+            self.assertEqual(run_lane.parse_utc(r['ends_at']) - run_lane.parse_utc(r['held_at']), 2 * 3600)
+            self.assertLess(r['ends_at'], state['lane']['expires_at'])
+            cloud = self.bed.cloud.reservations[r['id']]
+            self.assertEqual(cloud['EndDate'], r['ends_at'], 'the reservation itself ends then')
+            self.assertEqual(self.bed.cloud.tags_of(r['id'])['rvoip-held-for-resume'], 'true')
+        self.assertIn('holding capacity reservation', log)
+
+    def test_hold_never_outlives_the_lane_expiry(self):
+        with mock.patch.object(run_lane, 'HOLD_SECONDS', 100 * 3600):
+            held, state, log = self.stop_at_max_wall('min-hold-cap')
+        for r in state['reservations']:
+            self.assertEqual(r['ends_at'], state['lane']['expires_at'])
+
+    def test_resumed_leg_adopts_the_held_reservations(self):
+        held, state, log = self.stop_at_max_wall('min-adopt')
+        creates = len(self.creates())
+        code, receipt, log = self.resume('min-adopt')
         self.check(code, receipt, log, 0, 'PASS')
-        second = set(self.bed.cloud.reservations) - first
-        self.assertEqual(len(second), 2, 'the resumed leg holds its own reservations')
-        legs = self.launches('min-cr-wall')
-        self.assertEqual(len(legs), 4)
-        for call in legs[2:]:
+        self.assertEqual(len(self.creates()), creates, 'nothing new reserved')
+        self.assertIn('adopting held capacity reservation', log)
+        leg2 = self.launches('min-adopt')[2:]
+        self.assertEqual(len(leg2), 2)
+        for call in leg2:
             target = json.loads(opt(call, '--capacity-reservation-specification'))
-            self.assertIn(target['CapacityReservationTarget']['CapacityReservationId'], second)
-        self.assertEqual(len(receipt['environment']['capacity_reservations']), 4)
+            self.assertIn(target['CapacityReservationTarget']['CapacityReservationId'], held)
+        lane2 = json.loads((self.bed.local('min-adopt') / 'state.json').read_text())['lane']
+        for cid in held:
+            self.assertEqual(self.bed.cloud.reservations[cid]['EndDate'], lane2['expires_at'],
+                             'adopted: extended to the new leg expiry')
+        entries = receipt['environment']['capacity_reservations']
+        self.assertEqual(sorted(r['id'] for r in entries), held)
+        self.assertTrue(all(r['held_for_resume'] for r in entries))
+        self.assert_all_cancelled(receipt)
+
+    def test_sweep_spares_only_the_held_reservations(self):
+        held, state, log = self.stop_at_max_wall('min-sweep')
+        orphan = self.bed.cloud.add_reservation('c8in.24xlarge', 2, {
+            'rvoip-bench': 'true', 'rvoip-env-id': 'unpinned', 'rvoip-run-id': 'crashed'})
+        stray = self.bed.cloud.add_reservation('c8in.24xlarge', 2, {
+            'rvoip-bench': 'true', 'rvoip-env-id': 'unpinned', 'rvoip-run-id': 'min-sweep'})
+        code, receipt, log = self.resume('min-sweep')
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(self.bed.cloud.reservations[orphan]['State'], 'cancelled')
+        self.assertEqual(self.bed.cloud.reservations[stray]['State'], 'cancelled', 'not held: swept')
+        for cid in held:
+            self.assertIn('keeping capacity reservation %s held for this run' % cid, log)
+        self.assertNotIn(stray, [r['id'] for r in receipt['environment']['capacity_reservations']])
+        self.assert_all_cancelled(receipt)
+
+    def test_a_fresh_run_with_the_same_run_id_sweeps_the_hold(self):
+        held, state, log = self.stop_at_max_wall('min-norsm')
+        code, receipt, log = self.bed.run('minor', 'min-norsm', '--rows', 'R1', '--r0', 'R1=3000')
+        self.check(code, receipt, log, 0, 'PASS')
+        for cid in held:
+            self.assertEqual(self.bed.cloud.reservations[cid]['State'], 'cancelled')
+
+    def test_expired_hold_falls_back_to_a_new_reservation(self):
+        held, state, log = self.stop_at_max_wall('min-expired')
+        for cid in held:
+            self.bed.cloud.reservations[cid]['State'] = 'expired'
+        creates = len(self.creates())
+        code, receipt, log = self.resume('min-expired')
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(len(self.creates()), creates + 2, 'reserved again')
+        new = set(self.bed.cloud.reservations) - set(held)
+        for call in self.launches('min-expired')[2:]:
+            target = json.loads(opt(call, '--capacity-reservation-specification'))
+            self.assertIn(target['CapacityReservationTarget']['CapacityReservationId'], new)
+        ended = [r for r in receipt['environment']['capacity_reservations'] if r['id'] in held]
+        self.assertEqual(len(ended), 2)
+        self.assertEqual(self.bed.cloud.held_reservations(), [])
+        self.assertNotIn('WARNING cancel', log, 'an ended hold is not cancelled again')
+
+    def test_expired_hold_and_no_capacity_is_infra(self):
+        held, state, log = self.stop_at_max_wall('min-expired-short')
+        for cid in held:
+            self.bed.cloud.reservations[cid]['State'] = 'expired'
+        self.bed.cloud.world.reserve_short = ('c8i.4xlarge', 'c8in.24xlarge')
+        launched = len(self.bed.cloud.launched)
+        code, receipt, log = self.resume('min-expired-short')
+        self.assertEqual(code, 3, log)
+        self.assertIn('reserve 1 x c8i.4xlarge', ' '.join(receipt['reasons']))
+        self.assertEqual(len(self.bed.cloud.launched), launched, 'no unreserved fallback')
+
+    def test_signal_during_a_leg_cancels_instead_of_holding(self):
+        code, receipt, log = self.bed.run('minor', 'min-sig', '--rows', 'R1', '--r0', 'R1=3000', '--max-wall', '40',
+                                          world=world_for(tester_capacity=TESTER,
+                                                          signal_on=('caller-run', signal.SIGTERM)))
+        self.assertEqual(code, 3, log)
+        self.assertIn('interrupted by SIGTERM', ' '.join(receipt['reasons']))
         self.assert_all_cancelled(receipt)
 
     def check_signal(self, signum, name):

@@ -234,11 +234,20 @@ creates one targeted reservation per instance type (1 DUT + N callers; one
 reservation when the types match) in the lane's AZ and cluster placement group,
 and launches only into it. A capacity miss while reserving is INFRA before
 anything is recorded, exactly like a launch miss; there is no fallback to
-unreserved launches. Every exit path cancels the reservations: a verdict,
-INFRA, a `--max-wall` stop, and SIGINT/SIGTERM. A resumed leg reserves again.
+unreserved launches. Every exit path cancels the reservations at once (a
+verdict, INFRA, SIGINT/SIGTERM) except a `--max-wall` stop (exit 4). That stop
+holds them for the next leg: their end date moves to the earlier of the stop +
+2 h and the lane expiry, and they are tagged `rvoip-held-for-resume=true`. So a
+second leg that never starts costs at most about two hours of reservation. The
+resumed leg adopts the hold (same run-id, same AZ, room for the lane), moves
+its end date back to the new lane's expiry, and launches into it. If the hold
+has expired or is gone, it reserves again, and a capacity miss is INFRA as
+before.
 Each reservation also ends by itself at the lane's `rvoip-expires-at`, and
-every lane start cancels reservations tagged for its env-id that no live run
-holds, so a crashed orchestrator cannot keep billing. A reservation in use
+every lane start cancels reservations tagged for its env-id, sparing only a
+resumed run's own hold, so a crashed orchestrator cannot keep billing. A
+`--max-wall` stop writes no receipt; the hold is recorded in the run state and
+in the final receipt (`held_for_resume`, `ends_at`). A reservation in use
 costs nothing beyond the instances it holds. The receipt lists the
 reservations under `environment.capacity_reservations`. The orchestrator
 policy has no Capacity Reservation actions yet (the same Terraform item as the
