@@ -16,6 +16,7 @@ description = "Generic OIDC discovery helpers for RVoIP Bearer authentication"
 async-trait = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 rvoip-auth-core.workspace = true
 rvoip-core-traits.workspace = true
 serde = { workspace = true, features = ["derive"] }

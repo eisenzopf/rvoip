@@ -57,6 +57,7 @@ base64 = { workspace = true }
 # rustls CryptoProvider before the Chime wss connect (the AWS SDK also links
 # aws-lc-rs, so rustls can't auto-select and must be told to use ring).
 rustls = { workspace = true }
+webpki-roots = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 # AWS control plane (optional — see `aws-control` feature).

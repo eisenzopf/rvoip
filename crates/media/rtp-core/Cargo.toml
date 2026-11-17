@@ -73,6 +73,8 @@ time = { version = "0.3.47", features = ["std"] }
 # Renamed to `dtls_ext` to avoid any confusion with this crate's own
 # `crate::dtls` module.
 dtls_ext = { package = "dtls", version = "0.17", optional = true }
+# Process-level provider fallback for `dtls` (see `dtls_srtp::ensure_process_crypto_provider`).
+rustls = { workspace = true, optional = true }
 # Only the `Conn` transport trait and the `KeyingMaterialExporter` trait
 # (RFC 5705 keying-material export, used for RFC 5764 SRTP key derivation)
 # are used from this.
@@ -81,7 +83,7 @@ webrtc-util = { version = "0.17", optional = true, default-features = false, fea
 [features]
 default = []
 memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]
-dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util"]
+dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util", "dep:rustls"]
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -91,6 +93,9 @@ tokio = { version = "1.41", features = ["full", "test-util"] }
 # used for `dtls`/`webrtc-util` this session), used purely to prove real
 # RFC 3711 interoperability instead of just self-consistent round-tripping.
 webrtc-srtp = "0.17"
+# Link rustls's aws-lc-rs provider next to ring in tests, so rustls cannot
+# infer a process-level provider: the DTLS tests prove rtp-core copes.
+rustls = { workspace = true, features = ["aws_lc_rs"] }
 
 [[example]]
 name = "dtls_test"

@@ -242,29 +242,18 @@ pub(crate) async fn build_checked_client(
         ));
     }
     let addresses: Vec<SocketAddr> = addresses.into_iter().collect();
-    let builder = crate::ring_http_client_builder()
-        .use_rustls_tls()
+    #[cfg(feature = "tls-rustls")]
+    let extra_roots = context
+        .tls_trust()
+        .map(|trust| trust.certificates().to_vec())
+        .unwrap_or_default();
+    #[cfg(not(feature = "tls-rustls"))]
+    let extra_roots = Vec::new();
+    let builder = crate::ring_http_client_builder_with_roots(extra_roots)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(policy.connect_timeout())
         .timeout(policy.signaling_timeout())
         .resolve_to_addrs(host, &addresses);
-    #[cfg(feature = "tls-rustls")]
-    let builder = match context.tls_trust() {
-        Some(trust) => {
-            let mut configured = builder;
-            for certificate in trust.certificates() {
-                let certificate =
-                    reqwest::Certificate::from_der(certificate.as_ref()).map_err(|_| {
-                        WebRtcError::Signaling(format!(
-                            "{protocol} TLS trust profile construction failed"
-                        ))
-                    })?;
-                configured = configured.add_root_certificate(certificate);
-            }
-            configured
-        }
-        None => builder,
-    };
     builder
         .build()
         .map_err(|_| WebRtcError::Signaling(format!("{protocol} HTTP client construction failed")))

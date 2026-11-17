@@ -22,7 +22,7 @@ name = "users_core"
 [features]
 default = []
 auth-core = ["dep:rvoip-auth-core", "dep:rvoip-core-traits"]
-client = ["reqwest", "dep:rustls"]
+client = ["reqwest"]
 postgres = ["dep:sqlx-postgres"]
 
 [dependencies]
@@ -77,7 +77,7 @@ rsa = "0.10"
 
 # HTTP client (for examples)
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"], optional = true }
-rustls = { workspace = true, optional = true }
+rustls = { workspace = true }
 
 # Validation
 validator = { version = "0.21", features = ["derive"] }

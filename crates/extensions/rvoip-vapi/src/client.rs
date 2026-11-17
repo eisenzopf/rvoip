@@ -161,9 +161,15 @@ pub(crate) async fn connect_websocket(
         .max_write_buffer_size(config.max_message_bytes.saturating_add(1))
         .max_message_size(Some(config.max_message_bytes))
         .max_frame_size(Some(config.max_message_bytes));
+    let connector = crate::ring_websocket_connector().map_err(|_| VapiError::WebSocketSetup)?;
     let (socket, _) = tokio::time::timeout(
         config.websocket_timeout,
-        tokio_tungstenite::connect_async_with_config(request, Some(socket_config), true),
+        tokio_tungstenite::connect_async_tls_with_config(
+            request,
+            Some(socket_config),
+            true,
+            Some(connector),
+        ),
     )
     .await
     .map_err(|_| VapiError::WebSocketTimeout)?

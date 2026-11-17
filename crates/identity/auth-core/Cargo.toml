@@ -20,6 +20,7 @@ async-trait = "0.1"
 # HTTP client for OAuth2 flows
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider", "http2", "charset"] }
 rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
 
 # JWT handling
 jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }

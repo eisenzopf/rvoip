@@ -87,6 +87,9 @@ tracing-subscriber = { workspace = true }
 criterion = { workspace = true }
 # Generate self-signed certs in TLS handshake tests.
 rcgen = "0.14"
+# Link rustls's aws-lc-rs provider next to ring in tests, so rustls cannot
+# infer a process-level provider: TLS configuration must name its own.
+rustls = { workspace = true, features = ["aws_lc_rs"] }
 tempfile = "3"
 # Authoritative DNS fixture for the RFC 3263 end-to-end test.
 hickory-server = "0.26.1"

@@ -310,6 +310,8 @@ socket2 = { version = "0.6", features = ["all"] }
 # We standardize on `ring`. "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.0"
+# Explicit-provider HTTPS clients (reqwest `rustls-no-provider` + `tls_backend_preconfigured`).
+rustls-platform-verifier = "0.7"
 url = "2"
 # Used by rvoip-webrtc tls-rustls feature for in-process HTTPS/WSS termination.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }

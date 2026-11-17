@@ -20,6 +20,8 @@ moq = ["dep:rvoip-moq"]
 async-trait = { workspace = true }
 chrono = { workspace = true }
 redis = { version = "1", default-features = false, features = ["cluster-async", "connection-manager", "script", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
+# Process-level provider fallback for redis TLS (see `ensure_process_crypto_provider`).
+rustls = { workspace = true }
 rvoip-auth-core.workspace = true
 rvoip-moq = { workspace = true, optional = true }
 sha2 = { workspace = true }
@@ -28,6 +30,8 @@ tokio = { workspace = true, features = ["sync", "time"] }
 uuid.workspace = true
 
 [dev-dependencies]
+# Link rustls's aws-lc-rs provider next to ring in tests (see tests/tls_process_provider.rs).
+rustls = { workspace = true, features = ["aws_lc_rs"] }
 rvoip-core-traits.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
