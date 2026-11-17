@@ -120,7 +120,7 @@ homepage = "https://github.com/eisenzopf/rvoip"
 repository = "https://github.com/eisenzopf/rvoip"
 documentation = "https://docs.rs/rvoip"
 authors = ["RVOIP AUTHORS"]
-rust-version = "1.91"  # Minimum supported Rust version
+rust-version = "1.95"  # Minimum supported Rust version
 categories = ["network-programming", "multimedia", "web-programming"]
 keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 
@@ -291,7 +291,7 @@ async-trait = "0.1"
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
-parking_lot = "0.12"
+parking_lot = "0.13"
 rand = { version = "0.8", features = ["small_rng"] }
 clap = { version = "4.0", features = ["derive"] }
 
@@ -330,7 +330,7 @@ ring = "0.17"
 rcgen = "0.14"
 x509-parser = "0.18"
 webpki-roots = "1.0"
-serial_test = "3.1"
+serial_test = "4.0"
 fastrand = "2.0"
 
 # UCTP substrate deps — QUIC, WebTransport, length-prefix codec, metrics.
@@ -367,7 +367,7 @@ criterion = { version = "0.8", features = ["html_reports"] }
 console-subscriber = "0.5"
 dhat = "0.3"
 hdrhistogram = "7.5"
-sysinfo = "0.31"
+sysinfo = "0.40"
 [profile.release]
 # Speed-optimized release for a perf-sensitive networking library.
 # Was previously `opt-level = "s"` (size) — switched to 3 after

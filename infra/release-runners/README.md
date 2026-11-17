@@ -31,7 +31,7 @@ instance metadata beyond the credentials the instance role provides.
 
 The startup script installs the pinned AWS CLI v2 before anything else and
 verifies the archive's detached PGP signature against the AWS CLI Team key
-embedded in the script. It then installs the apt package set, Rust 1.91.0
+embedded in the script. It then installs the apt package set, Rust 1.95.0
 with `lld`, and a verified `sccache`, clones the exact candidate, and runs
 `scripts/release/gates.py run-shard`. An `EXIT` trap packages the evidence
 directory, writes `result.json`, and uploads all three objects with the
