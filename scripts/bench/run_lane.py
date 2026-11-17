@@ -385,7 +385,8 @@ class Trials:
         try:
             ready = self.aws.run([dut], self.lane.agent(self.s3_run, 'dut-start', trial_prefix, dut_bin),
                                  'rvoip bench dut-start', 180)
-            ready_line = ready[dut]['StandardOutputContent'].strip().splitlines()[-1]
+            out = ready[dut]['StandardOutputContent']
+            ready_line = json.dumps(json.loads(out[out.index('{'):out.rindex('}') + 1]))   # ready.json may be pretty-printed
             (local / 'ready.json').write_text(ready_line + '\n')
         except AwsError as error:
             self.finish_dut(trial_prefix, dut_bin)
