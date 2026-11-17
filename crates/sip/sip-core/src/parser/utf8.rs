@@ -1,6 +1,7 @@
 // RFC 3261 Section 25.1: Basic Rules
 // UTF-8 Character definitions
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::take,
@@ -83,13 +84,17 @@ pub fn text_utf8_char(input: &[u8]) -> ParseResult<'_, &[u8]> {
         // %x21-7E (Printable US-ASCII chars excluding space)
         map_res(take(1usize), |byte: &[u8]| {
             if byte.is_empty() || !(byte[0] >= 0x21 && byte[0] <= 0x7E) {
-                Err(nom::Err::Failure(NomError::new(input, ErrorKind::Verify)))
+                Err(nom::Err::<_>::Failure(NomError::new(
+                    input,
+                    ErrorKind::Verify,
+                )))
             } else {
                 Ok(byte)
             }
         }),
         utf8_nonascii,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]

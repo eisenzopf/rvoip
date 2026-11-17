@@ -1,6 +1,7 @@
 // Parser for the Contact header (RFC 3261 Section 20.10)
 // Contact = ("Contact" / "m" ) HCOLON ( STAR / (contact-param *(COMMA contact-param)))
 
+use nom::Parser;
 use nom::{
     branch::alt,
     combinator::{map, value},
@@ -40,7 +41,8 @@ fn contact_param(input: &[u8]) -> ParseResult<'_, ContactParamInfo> {
                                                // If ContactParamInfo needs separate fields, adjust here:
                                                // ContactParamInfo { address_uri: addr.uri, display_name: addr.display_name, params: params_vec }
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Contact = ("Contact" / "m") HCOLON (STAR / (contact-param *(COMMA contact-param)))
@@ -54,7 +56,8 @@ pub fn parse_contact(input: &[u8]) -> ParseResult<'_, ContactValue> {
         map(comma_separated_list1(contact_param), |params| {
             ContactValue::Params(params)
         }),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]

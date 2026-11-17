@@ -40,6 +40,7 @@ use crate::parser::headers::accept::AcceptValue;
 use crate::parser::headers::parse_accept;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -327,7 +328,7 @@ fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<AcceptValue>> {
             &bytes
         };
 
-    match all_consuming(parse_accept)(bytes_to_parse) {
+    match all_consuming(parse_accept).parse(bytes_to_parse) {
         Ok((_, accept)) => Ok(accept.0),
         Err(e) => Err(Error::ParseError(format!(
             "Failed to parse Accept header: {:?}",

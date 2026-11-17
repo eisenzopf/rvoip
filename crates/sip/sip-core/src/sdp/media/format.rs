@@ -2,6 +2,7 @@
 //
 // Handles parsing of media formats in m= lines
 
+use nom::Parser;
 use nom::{
     bytes::complete::take_while1, character::complete::space1, combinator::map,
     multi::separated_list1, IResult,
@@ -22,7 +23,8 @@ pub(crate) fn parse_formats(input: &str) -> IResult<&str, Vec<String>> {
             }),
             |s: &str| s.to_string(),
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse port and optional port count
@@ -31,24 +33,24 @@ pub(crate) fn parse_port_and_count(input: &str) -> IResult<&str, (u16, Option<u1
         branch::alt,
         character::complete::{char, digit1},
         combinator::{map, map_res},
-        sequence::tuple,
     };
 
     alt((
         // Port with count: "port/count"
         map(
-            tuple((
+            (
                 map_res(digit1, |s: &str| s.parse::<u16>()),
                 char('/'),
                 map_res(digit1, |s: &str| s.parse::<u16>()),
-            )),
+            ),
             |(port, _, count)| (port, Some(count)),
         ),
         // Just port
         map(map_res(digit1, |s: &str| s.parse::<u16>()), |port| {
             (port, None)
         }),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 #[cfg(test)]

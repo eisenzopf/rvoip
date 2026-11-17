@@ -18,6 +18,7 @@ use crate::types::address::Address;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::uri::Uri;
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
@@ -109,7 +110,8 @@ impl FromStr for PAssertedIdentity {
         let bytes = s.as_bytes();
         match all_consuming(
             crate::parser::headers::p_asserted_identity::parse_p_asserted_identity_value,
-        )(bytes)
+        )
+        .parse(bytes)
         {
             Ok((_, list)) => Ok(PAssertedIdentity(list)),
             Err(_) => Err(Error::ParseError(format!(
@@ -264,7 +266,8 @@ impl FromStr for PPreferredIdentity {
         let bytes = s.as_bytes();
         match all_consuming(
             crate::parser::headers::p_asserted_identity::parse_p_asserted_identity_value,
-        )(bytes)
+        )
+        .parse(bytes)
         {
             Ok((_, list)) => Ok(PPreferredIdentity(list)),
             Err(_) => Err(Error::ParseError(format!(

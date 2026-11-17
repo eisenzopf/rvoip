@@ -1531,8 +1531,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             ),
             "remote-preflight": sorted(gate["id"] for gate in preflight),
             "remote-core": remote_core,
-            # The nightly qualification profile. It never contains a bench
-            # gate; the release profiles below add one.
+            # The full qualification. It never contains a bench gate; the
+            # release profiles below add one.
             "remote-release": remote_release,
             "bench-release": ["perf.rfc7502-release", "source.remote-clean"],
             "bench-minor": ["perf.rfc7502-minor", "source.remote-clean"],

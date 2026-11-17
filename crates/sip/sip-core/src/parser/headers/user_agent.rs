@@ -41,6 +41,7 @@
 // User-Agent = "User-Agent" HCOLON server-val *(LWS server-val)
 
 use nom::multi::separated_list1;
+use nom::Parser;
 
 // Import from new modules
 use super::server_val::server_val; // Use the shared server_val parser
@@ -54,7 +55,7 @@ use crate::types::server::ServerVal;
 // server-val *(LWS server-val)
 fn server_val_list(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {
     // separated_list1 ensures at least one server_val, separated by LWS
-    separated_list1(lws, server_val)(input)
+    separated_list1(lws, server_val).parse(input)
 }
 
 pub fn parse_user_agent(input: &[u8]) -> ParseResult<'_, Vec<ServerVal>> {

@@ -1,11 +1,12 @@
 // Parsers for Media Type and Media Range (RFC 2045, RFC 3261)
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
     combinator::{map_res, recognize},
     multi::many0,
-    sequence::{preceded, separated_pair, tuple},
+    sequence::{preceded, separated_pair},
 };
 use std::collections::HashMap;
 use std::str;
@@ -28,7 +29,8 @@ fn m_value(input: &[u8]) -> ParseResult<'_, String> {
     alt((
         map_res(quoted_string, unquote_string),
         map_res(token, |bytes| str::from_utf8(bytes).map(String::from)),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // m-parameter = m-attribute EQUAL m-value
@@ -39,14 +41,15 @@ fn m_parameter(input: &[u8]) -> ParseResult<'_, (String, String)> {
         |(attr_bytes, value_string)| {
             str::from_utf8(attr_bytes).map(|attr_str| (attr_str.to_lowercase(), value_string))
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // ietf-token = token
 // extension-token = ietf-token / x-token
 // x-token = "x-" token
 fn extension_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(alt((token, preceded(tag_no_case(b"x-"), token))))(input)
+    recognize(alt((token, preceded(tag_no_case(&b"x-"[..]), token)))).parse(input)
 }
 
 // m-subtype = extension-token / iana-token
@@ -64,28 +67,29 @@ fn m_type(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // Using tag_no_case for known types, fallback to extension_token
     alt((
         // discrete
-        tag_no_case(b"text"),
-        tag_no_case(b"image"),
-        tag_no_case(b"audio"),
-        tag_no_case(b"video"),
-        tag_no_case(b"application"),
+        tag_no_case(&b"text"[..]),
+        tag_no_case(&b"image"[..]),
+        tag_no_case(&b"audio"[..]),
+        tag_no_case(&b"video"[..]),
+        tag_no_case(&b"application"[..]),
         // composite
-        tag_no_case(b"message"),
-        tag_no_case(b"multipart"),
+        tag_no_case(&b"message"[..]),
+        tag_no_case(&b"multipart"[..]),
         // extension
         extension_token,
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // media-type = m-type SLASH m-subtype *(SEMI m-parameter)
 // Returns MediaType struct
 pub fn media_type(input: &[u8]) -> ParseResult<'_, MediaType> {
     map_res(
-        tuple((
+        (
             m_type,
             preceded(slash, m_subtype),
             many0(preceded(semi, m_parameter)), // Returns Vec<(String, String)>
-        )),
+        ),
         |(type_bytes, subtype_bytes, params_vec)| -> Result<MediaType, std::str::Utf8Error> {
             let type_str = str::from_utf8(type_bytes)?.to_lowercase();
             let subtype_str = str::from_utf8(subtype_bytes)?.to_lowercase();
@@ -97,7 +101,8 @@ pub fn media_type(input: &[u8]) -> ParseResult<'_, MediaType> {
                 parameters: params_map,
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Helper to convert parsed media parameters (Vec<(&[u8], &[u8])>) into a HashMap.
