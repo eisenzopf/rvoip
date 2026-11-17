@@ -252,4 +252,9 @@ def record_rates(rows, env_id, baselines, ctx, profile):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(current, indent=1, sort_keys=True) + '\n')
     ctx.log('recorded', path)
+    try:
+        # The committed rates.json must be the one this run produced: keep a copy beside its receipt.
+        ctx.aws.s3_cp(path, ctx.s3_run + 'record/%s/rates.json' % env_id)
+    except Exception as error:  # noqa: BLE001
+        ctx.log('WARNING rates upload:', error)
     return path
