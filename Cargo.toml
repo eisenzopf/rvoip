@@ -284,8 +284,6 @@ anyhow = "1.0"
 bytes = { version = "1.5", features = ["serde"] }
 uuid = { version = "1.7", features = ["v4", "serde"] }
 axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["trace", "cors"] }
 proptest = "1.4"
 async-trait = "0.1"
 futures = "0.3"
@@ -302,7 +300,6 @@ nom = "7.1"
 log = "0.4"
 ordered-float = { version = "4.2.0", features = ["serde"] }
 socket2 = { version = "0.6", features = ["all"] }
-mio = { version = "0.8", features = ["os-poll", "net"] }
 # default-features=false drops rustls's default `aws_lc_rs` provider AND
 # `prefer-post-quantum` (which also requires aws_lc_rs) — otherwise the process
 # links two CryptoProviders (ring + aws-lc-rs) and rustls can't auto-select one.
@@ -352,7 +349,7 @@ moq-relay-ietf = { package = "rvoip-moq-relay", path = "crates/moq/rvoip-moq-rel
 # transport, webrtc for the co-located PeerConnection media plane.
 # webrtc is pre-1.0 and API-volatile — pinned strictly. Bumping requires
 # verifying the WebRtcMediaBridge still compiles.
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 webrtc = { package = "rvoip-webrtc-stack", path = "crates/webrtc/rvoip-webrtc-stack", version = "0.4.0" }
 hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio", "system-config"] }
 tracing-appender = "0.2"

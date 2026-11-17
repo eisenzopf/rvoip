@@ -15,7 +15,7 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 [features]
 default = []
 test-hooks = []
-signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest"]
+signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest", "dep:rustls"]
 signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core"]
 client = ["dep:serde_json"]
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
@@ -99,13 +99,13 @@ tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { workspace = true, optional = true }
 chromiumoxide = { workspace = true, optional = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
 
 # D3a — cpal microphone/speaker + opus encoder. Both pinned to the same
 # versions audio-core (`cpal = "0.15"`) and media-core (`opus = "0.3"`)
 # already use, so cargo resolves a single copy across the workspace.
 cpal = { version = "0.15", optional = true }
-opus = { version = "0.3", optional = true }
+opus = { version = "0.4", optional = true }
 
 # D3b/c — video encoder + camera capture (all optional).
 # `nokhwa` 0.10 with `input-native` for cross-platform camera capture.
@@ -128,7 +128,7 @@ openh264 = { version = "0.9.3", optional = true }
 rvoip-core = { workspace = true, features = ["opus"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 rustls.workspace = true
 rvoip-quic.workspace = true

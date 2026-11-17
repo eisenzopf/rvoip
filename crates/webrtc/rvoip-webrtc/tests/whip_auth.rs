@@ -49,7 +49,7 @@ async fn start_bearer_server(token: &str) -> (Arc<WebRtcAdapter>, String) {
 }
 
 fn http() -> reqwest::Client {
-    reqwest::Client::builder()
+    ring_reqwest_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .unwrap()
@@ -237,4 +237,11 @@ async fn whip_patch_ice_restart_with_stale_if_match_returns_412() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::PRECONDITION_FAILED);
+}
+
+/// reqwest is built with `rustls-no-provider`: install the workspace's ring
+/// provider as the process default before building a client.
+fn ring_reqwest_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
 }
