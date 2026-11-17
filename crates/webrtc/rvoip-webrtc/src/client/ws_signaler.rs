@@ -19,7 +19,7 @@
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use tokio_tungstenite::connect_async;
+use tokio_tungstenite::connect_async_tls_with_config;
 
 use crate::client::{Answer, IceCandidate, Offer, Signaler};
 use crate::errors::{Result, WebRtcError};
@@ -85,7 +85,10 @@ async fn connect_with_retry(url: &str, config: &WsSignalerConfig) -> Result<WsCl
     let mut backoff = config.initial_backoff;
     let mut last_err: Option<WebRtcError> = None;
     for attempt in 0..max_attempts {
-        match connect_async(url).await {
+        // An explicit connector keeps `wss` off the process-level rustls default.
+        let connector = crate::ring_websocket_connector(&[])
+            .map_err(|e| WebRtcError::Signaling(format!("ws TLS connector: {e}")))?;
+        match connect_async_tls_with_config(url, None, false, Some(connector)).await {
             Ok((ws, _)) => return Ok(ws),
             Err(e) => {
                 last_err = Some(WebRtcError::Signaling(format!(

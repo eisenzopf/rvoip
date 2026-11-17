@@ -77,13 +77,95 @@ pub use client::{
 #[cfg(all(feature = "client", feature = "signaling-ws"))]
 pub use client::{WsSignaler, WsSignalerConfig};
 
-/// Start a reqwest client builder on the workspace's ring rustls provider.
+/// The rustls provider every rvoip-webrtc TLS configuration is built on.
 ///
-/// reqwest is built with `rustls-no-provider` and so uses the process-default
-/// rustls provider. Install the workspace's ring provider as that default
-/// first (a no-op when the application has already installed one).
-#[cfg(feature = "signaling-whip")]
+/// Configurations name this provider explicitly instead of reading the
+/// process-level rustls default, which rustls cannot infer when a dependency
+/// graph compiles both its `ring` and `aws-lc-rs` providers. Nothing here
+/// installs a process default.
+#[cfg(any(
+    feature = "signaling-whip",
+    feature = "signaling-ws",
+    feature = "tls-rustls"
+))]
+pub(crate) fn rustls_crypto_provider() -> std::sync::Arc<rustls::crypto::CryptoProvider> {
+    static PROVIDER: std::sync::OnceLock<std::sync::Arc<rustls::crypto::CryptoProvider>> =
+        std::sync::OnceLock::new();
+    PROVIDER
+        .get_or_init(|| std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .clone()
+}
+
+/// Start a reqwest client builder whose TLS runs on [`rustls_crypto_provider`].
+///
+/// reqwest is built with `rustls-no-provider`, so on its own it would read the
+/// process-level rustls default. It is handed a ready `ClientConfig` instead.
+/// Server certificates are checked by the platform verifier, as reqwest's own
+/// rustls backend does; if that verifier cannot be initialised,
+/// `ClientBuilder::build` returns the error.
+#[cfg(all(test, feature = "signaling-whip"))]
 pub(crate) fn ring_http_client_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
+    ring_http_client_builder_with_roots(Vec::new())
+}
+
+/// [`ring_http_client_builder`] with extra trust roots added to the platform's.
+#[cfg(feature = "signaling-whip")]
+pub(crate) fn ring_http_client_builder_with_roots(
+    extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+) -> reqwest::ClientBuilder {
+    match ring_https_client_config(extra_roots) {
+        Ok(config) => reqwest::Client::builder().tls_backend_preconfigured(config),
+        // An unrecognised preconfigured backend makes `build()` fail, which
+        // is where reqwest reports its own TLS initialisation errors.
+        Err(_) => reqwest::Client::builder().tls_backend_preconfigured(()),
+    }
+}
+
+#[cfg(feature = "signaling-whip")]
+fn ring_https_client_config(
+    extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+) -> std::result::Result<rustls::ClientConfig, rustls::Error> {
+    let provider = rustls_crypto_provider();
+    let verifier = if extra_roots.is_empty() {
+        rustls_platform_verifier::Verifier::new(provider.clone())?
+    } else {
+        #[cfg(any(all(unix, not(target_os = "android")), target_os = "windows"))]
+        {
+            rustls_platform_verifier::Verifier::new_with_extra_roots(extra_roots, provider.clone())?
+        }
+        #[cfg(not(any(all(unix, not(target_os = "android")), target_os = "windows")))]
+        {
+            return Err(rustls::Error::General(
+                "extra trust roots are not supported by the platform verifier on this target"
+                    .into(),
+            ));
+        }
+    };
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(config)
+}
+
+/// A WebSocket TLS connector on [`rustls_crypto_provider`] that trusts the
+/// WebPKI roots plus `extra_roots`.
+#[cfg(feature = "signaling-ws")]
+pub(crate) fn ring_websocket_connector(
+    extra_roots: &[rustls::pki_types::CertificateDer<'static>],
+) -> std::result::Result<tokio_tungstenite::Connector, rustls::Error> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    for certificate in extra_roots {
+        roots.add(certificate.clone())?;
+    }
+    let config = rustls::ClientConfig::builder_with_provider(rustls_crypto_provider())
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+        config,
+    )))
 }

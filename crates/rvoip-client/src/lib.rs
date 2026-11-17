@@ -680,7 +680,6 @@ impl Client {
 
 #[cfg(feature = "uctp")]
 fn default_quic_endpoint() -> Result<Arc<quinn::Endpoint>> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| ClientError::ConnectFailed(format!("bind UDP endpoint: {e}")))?;
     let endpoint = quinn::Endpoint::new(
@@ -695,10 +694,12 @@ fn default_quic_endpoint() -> Result<Arc<quinn::Endpoint>> {
 
 #[cfg(feature = "uctp")]
 fn default_tls_config() -> rustls::ClientConfig {
-    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    rustls::ClientConfig::builder()
+    // Named explicitly: never read from, or installed as, the process default.
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("the ring provider supports rustls's default protocol versions")
         .with_root_certificates(roots)
         .with_no_client_auth()
 }

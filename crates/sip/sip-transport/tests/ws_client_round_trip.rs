@@ -231,10 +231,14 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
             ]
         }
     }
-    let config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(StdArc::new(AcceptAll))
-        .with_no_client_auth();
+    let config = ClientConfig::builder_with_provider(StdArc::new(
+        tokio_rustls::rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("ring supports the default protocol versions")
+    .dangerous()
+    .with_custom_certificate_verifier(StdArc::new(AcceptAll))
+    .with_no_client_auth();
 
     let connector = TlsConnector::from(StdArc::new(config));
     let server_name = ServerName::try_from("localhost".to_string()).expect("server name");

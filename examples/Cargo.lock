@@ -3786,6 +3786,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "webpki-roots 1.0.11",
  "zeroize",
 ]
 
@@ -3813,6 +3814,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-core-traits",
  "rvoip-infra-common",
  "serde",
@@ -4405,6 +4407,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "reqwest",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-core",
  "serde",
  "serde_json",
@@ -4414,6 +4417,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "webpki-roots 1.0.11",
  "zeroize",
 ]
 
@@ -4448,6 +4452,7 @@ dependencies = [
  "futures",
  "hmac 0.13.0",
  "parking_lot 0.13.0",
+ "rustls",
  "rvoip-auth-core",
  "rvoip-core",
  "rvoip-rtc",
@@ -4461,6 +4466,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+ "webpki-roots 1.0.11",
  "zeroize",
 ]
 

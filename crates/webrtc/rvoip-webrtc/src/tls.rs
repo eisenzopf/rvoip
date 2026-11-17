@@ -46,36 +46,32 @@ impl TlsConfig {
         let cert_path = cert.as_ref().to_path_buf();
         let key_path = key.as_ref().to_path_buf();
 
-        // axum-server has a convenience loader for its own RustlsConfig.
-        let axum = RustlsConfig::from_pem_file(&cert_path, &key_path)
-            .await
-            .map_err(|e| WebRtcError::Signaling(format!("load TLS cert/key: {e}")))?;
-
-        // Build a separate ServerConfig for the WS path (no axum-server here).
         let cert_pem = tokio::fs::read(&cert_path)
             .await
             .map_err(|e| WebRtcError::Signaling(format!("read {cert_path:?}: {e}")))?;
         let key_pem = tokio::fs::read(&key_path)
             .await
             .map_err(|e| WebRtcError::Signaling(format!("read {key_path:?}: {e}")))?;
-        let acceptor = build_acceptor(&cert_pem, &key_pem)?;
-
-        Ok(Self { axum, acceptor })
+        Self::from_pem_bytes(&cert_pem, &key_pem).await
     }
 
     /// Build directly from in-memory PEM bytes (handy for tests with `rcgen`).
     pub async fn from_pem_bytes(cert_pem: &[u8], key_pem: &[u8]) -> Result<Self> {
-        let axum = RustlsConfig::from_pem(cert_pem.to_vec(), key_pem.to_vec())
-            .await
-            .map_err(|e| WebRtcError::Signaling(format!("load TLS cert/key (PEM): {e}")))?;
-        let acceptor = build_acceptor(cert_pem, key_pem)?;
-        Ok(Self { axum, acceptor })
+        let config = build_server_config(cert_pem, key_pem)?;
+        // HTTPS (axum-server) negotiates HTTP/2 or HTTP/1.1, as axum-server's
+        // own loaders do; the WSS acceptor keeps no ALPN.
+        let mut https = config.clone();
+        https.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        Ok(Self {
+            axum: RustlsConfig::from_config(Arc::new(https)),
+            acceptor: tokio_rustls::TlsAcceptor::from(Arc::new(config)),
+        })
     }
 }
 
-fn build_acceptor(cert_pem: &[u8], key_pem: &[u8]) -> Result<tokio_rustls::TlsAcceptor> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
+/// Both listeners share one `ServerConfig` built on the crate's explicit
+/// rustls provider, so neither reads nor installs the process default.
+fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<ServerConfig> {
     let mut cert_reader = std::io::BufReader::new(cert_pem);
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
         .filter_map(|c| c.ok())
@@ -89,10 +85,10 @@ fn build_acceptor(cert_pem: &[u8], key_pem: &[u8]) -> Result<tokio_rustls::TlsAc
         .map_err(|e| WebRtcError::Signaling(format!("parse PEM key: {e}")))?
         .ok_or_else(|| WebRtcError::Signaling("no private key in PEM".into()))?;
 
-    let config = ServerConfig::builder()
+    ServerConfig::builder_with_provider(crate::rustls_crypto_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| WebRtcError::Signaling(format!("build ServerConfig: {e}")))?
         .with_no_client_auth()
         .with_single_cert(certs, PrivateKeyDer::from(key))
-        .map_err(|e| WebRtcError::Signaling(format!("build ServerConfig: {e}")))?;
-
-    Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
+        .map_err(|e| WebRtcError::Signaling(format!("build ServerConfig: {e}")))
 }

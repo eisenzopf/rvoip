@@ -15,7 +15,7 @@ description = "rvoip-core ConnectionAdapter implementation over WebSocket (signa
 [features]
 default = []
 media-webrtc = ["dep:rvoip-webrtc"]
-wss = ["dep:tokio-rustls", "dep:rustls", "tokio-tungstenite/rustls-tls-webpki-roots"]
+wss = ["dep:tokio-rustls", "dep:rustls", "dep:webpki-roots", "tokio-tungstenite/rustls-tls-webpki-roots"]
 
 [dependencies]
 rvoip-core.workspace = true
@@ -38,6 +38,7 @@ serde_json.workspace = true
 tokio-tungstenite = { workspace = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
 url = "2"
 
 tracing.workspace = true

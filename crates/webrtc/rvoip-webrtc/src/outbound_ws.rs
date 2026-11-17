@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::{header, HeaderValue};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{client_async_tls_with_config, Connector, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{client_async_tls_with_config, MaybeTlsStream, WebSocketStream};
 use webrtc::peer_connection::RTCIceCandidateInit;
 use zeroize::Zeroize;
 
@@ -511,10 +511,20 @@ async fn connect_checked(context: &WebRtcOriginateContext) -> Result<ClientStrea
     let websocket_config = WebSocketConfig::default()
         .max_message_size(Some(MAX_SIGNALING_MESSAGE_BYTES))
         .max_frame_size(Some(MAX_SIGNALING_MESSAGE_BYTES));
+    // Always hand tungstenite an explicit connector: without one it builds a
+    // `wss` connector on the process-level rustls default.
     #[cfg(feature = "tls-rustls")]
-    let tls_connector = context.tls_trust().map(build_tls_connector).transpose()?;
+    let extra_roots = context
+        .tls_trust()
+        .map(|trust| trust.certificates().to_vec())
+        .unwrap_or_default();
     #[cfg(not(feature = "tls-rustls"))]
-    let tls_connector: Option<Connector> = None;
+    let extra_roots: Vec<rustls::pki_types::CertificateDer<'static>> = Vec::new();
+    // Custom profile roots are additive. Public WebRTC signaling targets
+    // must continue to validate against the ordinary WebPKI root set.
+    let tls_connector = Some(crate::ring_websocket_connector(&extra_roots).map_err(|_| {
+        WebRtcError::Signaling("WebRTC TLS trust profile construction failed".into())
+    })?);
     let (stream, response) = tokio::time::timeout(
         policy.connect_timeout(),
         client_async_tls_with_config(request, tcp, Some(websocket_config), tls_connector),
@@ -533,23 +543,6 @@ async fn connect_checked(context: &WebRtcOriginateContext) -> Result<ClientStrea
         ));
     }
     Ok(stream)
-}
-
-#[cfg(feature = "tls-rustls")]
-fn build_tls_connector(trust: &crate::originate::WebRtcTlsClientTrust) -> Result<Connector> {
-    let mut roots = rustls::RootCertStore::empty();
-    // Custom profile roots are additive. Public WebRTC signaling targets
-    // must continue to validate against the ordinary WebPKI root set.
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    for certificate in trust.certificates() {
-        roots.add(certificate.clone()).map_err(|_| {
-            WebRtcError::Signaling("WebRTC TLS trust profile construction failed".into())
-        })?;
-    }
-    let config = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    Ok(Connector::Rustls(Arc::new(config)))
 }
 
 async fn connect_one(

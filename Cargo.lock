@@ -7402,6 +7402,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "webpki-roots 1.0.11",
  "zeroize",
 ]
 
@@ -7431,6 +7432,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-auth-core",
  "serde",
  "serde_json",
@@ -7456,6 +7458,7 @@ dependencies = [
  "reqwest 0.13.4",
  "ring",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-core-traits",
  "rvoip-infra-common",
  "serde",
@@ -7626,6 +7629,7 @@ dependencies = [
  "md-5 0.11.0",
  "reqwest 0.13.4",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-sip",
  "serde",
  "serde_json",
@@ -7670,6 +7674,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-auth-core",
  "rvoip-core-traits",
  "serde",
@@ -7684,6 +7689,8 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "ldap3",
+ "rustls",
+ "rustls-native-certs",
  "rvoip-auth-core",
  "rvoip-core-traits",
  "thiserror 2.0.19",
@@ -7835,6 +7842,7 @@ dependencies = [
  "async-trait",
  "reqwest 0.13.4",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-auth-core",
  "rvoip-core-traits",
  "serde",
@@ -7875,13 +7883,16 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "rcgen 0.14.8",
  "redis",
+ "rustls",
  "rvoip-auth-core",
  "rvoip-core-traits",
  "rvoip-moq",
  "sha2 0.11.1",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-rustls",
  "uuid",
 ]
 
@@ -7948,6 +7959,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.10.4",
  "rcgen 0.14.8",
+ "rustls",
  "rvoip-infra-common",
  "sha1 0.11.0",
  "sha2 0.11.1",
@@ -8198,6 +8210,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rustls",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "rustls-webpki",
  "rvoip-sip-core",
  "rvoip-sip-dialog",
@@ -8307,6 +8320,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "reqwest 0.13.4",
  "rustls",
+ "rustls-platform-verifier",
  "rvoip-core",
  "serde",
  "serde_json",
@@ -8316,6 +8330,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "webpki-roots 1.0.11",
  "zeroize",
 ]
 
@@ -8347,6 +8362,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "rustls",
  "rvoip-core",
  "rvoip-vcon",
  "serde_json",
@@ -8434,6 +8450,7 @@ dependencies = [
  "reqwest 0.13.4",
  "rustls",
  "rustls-pemfile",
+ "rustls-platform-verifier",
  "rvoip-auth-core",
  "rvoip-core",
  "rvoip-harness",
@@ -8513,6 +8530,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]

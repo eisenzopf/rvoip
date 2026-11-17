@@ -15,8 +15,8 @@ description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha
 [features]
 default = []
 test-hooks = []
-signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest", "dep:rustls"]
-signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core"]
+signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:serde_json", "dep:rvoip-auth-core", "dep:reqwest", "dep:rustls", "dep:rustls-platform-verifier"]
+signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json", "dep:rvoip-auth-core", "dep:rustls", "dep:webpki-roots"]
 client = ["dep:serde_json"]
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
 # D3a — cpal-backed microphone capture + speaker playback, real Opus encoder.
@@ -87,6 +87,7 @@ rvoip-uctp = { workspace = true, optional = true }
 rvoip-auth-core = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
+rustls-platform-verifier = { workspace = true, optional = true }
 
 axum = { workspace = true, optional = true }
 hyper = { version = "1", optional = true }

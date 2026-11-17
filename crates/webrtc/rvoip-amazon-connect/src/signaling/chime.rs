@@ -343,18 +343,25 @@ pub fn ice_servers_from_turn(turn: &SdkTurnCredentials) -> Vec<IceServerConfig> 
         .collect()
 }
 
-/// Install the `ring` rustls CryptoProvider as the process default, once.
+/// A `wss` connector trusting the WebPKI roots, built on the ring rustls
+/// provider explicitly.
 ///
-/// rustls 0.23 refuses to auto-select a provider when more than one backend is
-/// linked. The AWS SDK pulls in `aws-lc-rs` while the workspace standardizes on
-/// `ring`, so without an explicit choice the first TLS handshake panics. We pin
-/// `ring` to match the rest of the workspace. Idempotent and harmless if a
-/// provider was already installed by the host application.
-fn ensure_crypto_provider() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+/// Without an explicit connector tungstenite builds one on the process-level
+/// rustls default, which rustls cannot infer when a dependency graph compiles
+/// both its `ring` and `aws-lc-rs` providers (the AWS SDK brings `aws-lc-rs`).
+/// Nothing here reads or installs the process default.
+fn ring_websocket_connector() -> std::result::Result<tokio_tungstenite::Connector, rustls::Error> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Ok(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+        config,
+    )))
 }
 
 /// Entry point: opens the signaling socket and completes JOIN/JOIN_ACK.
@@ -365,7 +372,6 @@ impl ChimeSignalingClient {
     /// handshake, returning the post-JOIN handle (which carries the TURN
     /// credentials needed to build the peer connection).
     pub async fn join(conn: &ConnectionData, timeout: Duration) -> Result<ChimeJoin> {
-        ensure_crypto_provider();
         let url = build_signaling_url(&conn.media_placement.signaling_url);
 
         // Auth: the attendee join token rides in the `Sec-WebSocket-Protocol`
@@ -384,7 +390,15 @@ impl ChimeSignalingClient {
                 .map_err(|e| ConnectError::Signaling(format!("subprotocol header: {e}")))?,
         );
 
-        let (mut ws, _resp) = tokio_tungstenite::connect_async(request)
+        let (mut ws, _resp) =
+            tokio_tungstenite::connect_async_tls_with_config(
+                request,
+                None,
+                false,
+                Some(ring_websocket_connector().map_err(|e| {
+                    ConnectError::Signaling(format!("websocket TLS connector: {e}"))
+                })?),
+            )
             .await
             .map_err(|e| ConnectError::Signaling(format!("websocket connect: {e}")))?;
 
