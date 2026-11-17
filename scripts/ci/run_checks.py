@@ -514,19 +514,29 @@ def specialty_commands(
                 None,
             ),
         ]
-    if gate == "facade-feature-bundles":
-        commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = [
-            (
-                [
-                    "python3",
-                    "scripts/ci/check_facade_feature_bundles.py",
-                    "--verify-resolved",
-                ],
-                None,
-                None,
+    facade_part = re.fullmatch(r"facade-feature-bundles(?:--part-([12]))?", gate)
+    if facade_part:
+        # The whole gate, or one of the two parts the PR and main plans run
+        # in parallel (pr_plan.SPECIALTY_PARTS): bundles interleaved so each
+        # part gets one of the two full bundles.
+        part = int(facade_part.group(1)) if facade_part.group(1) else None
+        bundles = facade_bundle_names(root)
+        if part is not None:
+            bundles = bundles[part - 1 :: 2]
+        commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
+        if part in (None, 1):
+            commands.append(
+                (
+                    [
+                        "python3",
+                        "scripts/ci/check_facade_feature_bundles.py",
+                        "--verify-resolved",
+                    ],
+                    None,
+                    None,
+                )
             )
-        ]
-        for feature in facade_bundle_names(root):
+        for feature in bundles:
             commands.append(
                 (
                     [

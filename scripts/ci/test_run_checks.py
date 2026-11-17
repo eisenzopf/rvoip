@@ -128,6 +128,25 @@ class RunChecksTests(unittest.TestCase):
         self.assertTrue(any("e2e_full_stack" in command for command in argv))
         self.assertTrue(any("voip-3" in command for command in argv))
 
+    def test_facade_bundle_parts_cover_the_whole_gate_once(self) -> None:
+        whole = run_checks.specialty_commands("facade-feature-bundles", ROOT)
+        parts = [
+            command
+            for gate in ("facade-feature-bundles--part-1", "facade-feature-bundles--part-2")
+            for command in run_checks.specialty_commands(gate, ROOT)
+        ]
+        self.assertEqual(sorted(map(str, parts)), sorted(map(str, whole)))
+        self.assertEqual(len(parts), len(whole))
+        spec = importlib.util.spec_from_file_location("pr_plan_for_parts", ROOT / "scripts/ci/pr_plan.py")
+        assert spec and spec.loader
+        plan = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = plan
+        spec.loader.exec_module(plan)
+        self.assertEqual(
+            plan.expand_specialty_parts(["facade-feature-bundles", "rustdoc"]),
+            ["facade-feature-bundles--part-1", "facade-feature-bundles--part-2", "rustdoc"],
+        )
+
     def test_facade_bundle_gate_is_manifest_derived_and_disables_defaults(self) -> None:
         commands = run_checks.specialty_commands(
             "facade-feature-bundles", ROOT
