@@ -28,16 +28,18 @@ def event(epoch, elapsed_ms, run_id, kind, call_id=None, **fields):
     return json.dumps({'timestamp': stamp(epoch), 'level': 'INFO', 'target': 'rvoip_loadgen', 'fields': row})
 
 
-def default_outcome(stage, index_in_stage, rate, limit):
-    """Status of one call: 503 for the share of the trial stage above `limit` (a DUT capacity), else 200."""
+def default_outcome(stage, index_in_stage, rate, limit, reject_status=503):
+    """Status of one call: `reject_status` (503; None = no final response, a timeout) for the share of the
+    trial stage above `limit` (a DUT capacity), else 200."""
     if limit is not None and stage.startswith('trial-') and rate > limit and (index_in_stage % rate) >= limit:
-        return 503
+        return reject_status
     return 200
 
 
 def write_caller(directory, profile, host_index, hosts, run_start_epoch, rate, *, limit=None, media=False,
                  hold_ms=0, process_offset_ms=400, lateness_ms=0.4, audio_fail_every=None, thread_cores=0.3,
-                 process_cores=3.0, transport='tls_srtp', skip_events=False, bye_status=200, drop_bins=()):
+                 process_cores=3.0, transport='tls_srtp', skip_events=False, bye_status=200, drop_bins=(),
+                 reject_status=503, setup_offset_ms=0.0):
     """One caller host's share of `profile`. Returns the number of calls scheduled."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -61,14 +63,14 @@ def write_caller(directory, profile, host_index, hosts, run_start_epoch, rate, *
             call_id = '%s-%d' % (run_id, calls)
             calls += 1
             global_index = k * hosts + host_index
-            status = default_outcome(stage['name'], global_index, stage['cps'], limit)
+            status = default_outcome(stage['name'], global_index, stage['cps'], limit, reject_status)
             sched_epoch = epoch0 + scheduled / 1000.0
             lines.append(event(sched_epoch, scheduled, run_id, 'call_scheduled', call_id, scheduler_lateness_ms=lateness_ms))
             sent = scheduled + 1
             lines.append(event(sched_epoch, sent, run_id, 'invite_sent', call_id, session_id='s%d' % calls))
             invite_ms = int((epoch0 * 1000) + sent)
             if status == 200:
-                setup = 4.0 + (k % 7)
+                setup = 4.0 + (k % 7) + setup_offset_ms
                 final_at = invite_ms + int(setup)
                 bye_at = final_at + hold_ms
                 record = {'invite_at_ms': invite_ms, 'invite_transmissions': 1, 'first_response_status': 200,
@@ -97,7 +99,8 @@ def write_caller(directory, profile, host_index, hosts, run_start_epoch, rate, *
                           'bye_transmissions': 0, 'srd_ms': 1.0, 'srd_kind': 'failed', 'established': False,
                           'completed': False, 'trace_complete': True}
                 ended = {'sip_status': status, 'setup_ms': 0.0, 'outcome': 'fail', 'reason': 'setup_or_no_audio',
-                         'failure_class': 'sip_rejected', 'call_model': 'caller-hold' if media else 'signaling-only',
+                         'failure_class': 'sip_rejected' if status is not None else 'timeout',
+                         'call_model': 'caller-hold' if media else 'signaling-only',
                          'duration_ms': 1.0, 'rfc6076': record}
             counters['passed' if ended['outcome'] == 'pass' else 'failed'] += 1
             end_ms = sent + int(ended['duration_ms']) + 1

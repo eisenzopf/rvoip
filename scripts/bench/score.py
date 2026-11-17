@@ -2,6 +2,7 @@
 configs, RFC 6076 latency budgets, the R4 overload verdict, the report spec
 and recorded rates. Standard library only."""
 import datetime
+import hashlib
 import json
 from pathlib import Path
 
@@ -161,7 +162,20 @@ def overload_verdict(summary, ceiling, profile):
 # Report and recorded rates
 # ---------------------------------------------------------------------------
 
-def render_report(ctx, rows, env_id):
+def _finding(r):
+    """One line per row of the run for the report's findings."""
+    why = ' (%s)' % r['reason'] if r.get('reason') else ''
+    if r['id'] == 'R4':
+        return 'R4 overload at the ceiling C = %s sps: %s%s.' % (r.get('ceiling'), r.get('verdict'), why)
+    if r.get('r') is None:
+        return '%s: no result: %s%s.' % (r['id'], r.get('verdict'), why)
+    return '%s: R %s %s sps%s; verdict %s%s.' % (r['id'], '>=' if r.get('tester_limited') else '=', r['r'],
+                                                 ' (tester-limited)' if r.get('tester_limited') else '',
+                                                 r.get('verdict'), why)
+
+
+def render_report(ctx, rows, env_id, baseline=None):
+    """Render both reports; `baseline` is the env-id's recorded baseline_sps (a baseline run reads its own searches)."""
     lane = ctx.lane.info
     facts = next(iter((lane.get('facts') or {}).values()), {})
     spec = {
@@ -175,7 +189,9 @@ def render_report(ctx, rows, env_id):
                 'physical_cores': 8 if lane.get('dut_type') == 'c8i.4xlarge' else None},
         'testbed': {'caller_hosts': len(lane.get('callers', [])), 'caller_type': lane.get('caller_type'),
                     'sources_per_host': min(len(c['ips']) for c in lane['callers']),
-                    'connections_per_source': 8},
+                    'connections_per_source': 8,
+                    'caller_build': 'rvoip-loadgen sha256 %s' % hashlib.sha256(
+                        Path(ctx.args.caller_bin).read_bytes()).hexdigest()[:12]},
         'environment': {'env_id': env_id, 'region': ctx.args.region, 'ami': lane.get('ami_id'),
                         'az': lane.get('az'), 'kernel': facts.get('kernel')},
         'rows': [{'row': r['id'], 'search': '%s/search.json' % r['id'], 'trials': '%s/trials.jsonl' % r['id']}
@@ -187,6 +203,13 @@ def render_report(ctx, rows, env_id):
         ],
         'assumptions': [],
     }
+    if ctx.lane.ea_uas:
+        spec['baseline'] = {r['id']: {'search': '%s/search.json' % r['id']} for r in rows if r.get('search')}
+    elif baseline:
+        spec['baseline'] = {row: {'result_sps': b.get('r'), 'tester_limited': b.get('tester_limited'),
+                                  'source': 'rates.json baseline_sps (%s)' % b.get('source_run')}
+                            for row, b in baseline.items()}
+    spec['findings'] = [_finding(r) for r in rows]
     r4 = next((r for r in rows if r['id'] == 'R4'), None)
     if r4 and r4.get('trials'):
         spec['overload'] = {'row': 'R4', 'trial': r4['trials'][0]['run']}

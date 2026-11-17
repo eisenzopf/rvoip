@@ -158,8 +158,11 @@ class Lane:
     def tf_outputs(self):
         if self.args.lane_config:
             return json.loads(Path(self.args.lane_config).read_text())
-        out = subprocess.run(['terraform', '-chdir=%s' % (REPO / 'infra/aws/bench'), 'output', '-json'],
-                             capture_output=True, text=True)
+        try:
+            out = subprocess.run(['terraform', '-chdir=%s' % (REPO / 'infra/aws/bench'), 'output', '-json'],
+                                 capture_output=True, text=True)
+        except FileNotFoundError:
+            raise Usage('terraform is not installed (pass --lane-config)')
         if out.returncode:
             raise Usage('terraform output failed (pass --lane-config): %s' % out.stderr.strip()[-500:])
         return {k: v['value'] for k, v in json.loads(out.stdout).items()}
@@ -194,6 +197,9 @@ class Lane:
                 raise Infra('launch: %s' % error)
             raise
         every = ids['dut'] + ids['callers']
+        if (self.state.get('lane') or {}).get('launched_at'):   # an earlier leg's lane: still billed in cost()
+            self.state.setdefault('earlier_lanes', []).append(
+                {k: self.state['lane'].get(k) for k in ('launched_at', 'terminated_at', 'dut_type', 'callers')})
         self.state['lane'] = {'instances': every, 'region': self.args.region, 'launched_at': utc(),
                               'expires_at': expires, 'tf': tf}
         self.save()
@@ -498,6 +504,18 @@ def compact(verdict, summary, **extra):
     return out
 
 
+def search_record(trial, s3_run):
+    """The receipt's record of one search.json trial (the compact() fields)."""
+    detail = trial.get('detail') or {}
+    run = detail.get('run')
+    return {'rate': trial['rate'], 'run': run, 'outcome': trial['outcome'], 'kind': 'search',
+            'attempted': trial.get('attempted'), 'established': trial.get('succeeded'),
+            'attempt_failures': trial.get('failed', 0), 'disconnect_failures': detail.get('disconnect_failures'),
+            'status_counts': detail.get('final_status_counts'),
+            'invalid_reason': '; '.join(detail.get('invalid_reasons') or []) if trial['outcome'] == 'invalid' else None,
+            'halt': detail.get('halt_reasons') or None, 'evidence': s3_run + run + '/' if run else None}
+
+
 def run_smoke(ctx, row_id):
     """smoke: one short trial per row at --r0 (functional check of a lane; never a gate)."""
     p = profiles.PROFILES['smoke']
@@ -600,11 +618,13 @@ def run_search_row(ctx, row_id, recorded, caps):
     for name in ('search.json', 'trials.jsonl'):
         if (folder / name).exists():
             ctx.aws.s3_cp(folder / name, ctx.s3_run + row_id + '/' + name)
+    if outcome.get('paused') and outcome.get('halted'):
+        raise Infra('search %s paused: %s' % (row_id, outcome['halted']))   # void trials, not the wall clock
     if outcome.get('paused'):
         raise WallClock('search %s paused: %s' % (row_id, outcome.get('halted')))
     trials = []
     if (folder / 'search.json').exists():
-        trials = json.loads((folder / 'search.json').read_text()).get('trials', [])
+        trials = [search_record(t, ctx.s3_run) for t in json.loads((folder / 'search.json').read_text()).get('trials', [])]
     result = {'id': row_id, 'transport': row['transport'], 'media': row['media'], 'hold_ms': row['hold_ms'],
               'recorded_r': (recorded or {}).get('r'), 'tester_cap': cap,
               'search': {k: outcome.get(k) for k in ('algorithm', 'result_sps', 'stop_reason', 'tester_limited',
@@ -699,17 +719,17 @@ class Context:
 
 
 def cost(state, ended):
-    lane = state.get('lane') or {}
-    if not lane.get('launched_at'):
-        return {'instance_hours': {}, 'estimated_usd': 0.0}
-    start = datetime.datetime.strptime(lane['launched_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
-    end = lane.get('terminated_at')
-    end = datetime.datetime.strptime(end, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp() if end else ended
-    hours = (end - start) / 3600
     by_type = {}
-    for t in [lane.get('dut_type')] + [c['type'] for c in lane.get('callers', [])]:
-        if t:
-            by_type[t] = round(by_type.get(t, 0) + hours, 3)
+    for lane in (state.get('earlier_lanes') or []) + [state.get('lane') or {}]:   # every leg's lane
+        if not lane.get('launched_at'):
+            continue
+        start = datetime.datetime.strptime(lane['launched_at'], '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
+        end = lane.get('terminated_at')
+        end = datetime.datetime.strptime(end, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp() if end else ended
+        hours = (end - start) / 3600
+        for t in [lane.get('dut_type')] + [c['type'] for c in lane.get('callers') or []]:
+            if t:
+                by_type[t] = round(by_type.get(t, 0) + hours, 3)
     usd = sum(profiles.PRICE_PER_HOUR.get(t, 0) * h for t, h in by_type.items())
     return {'instance_hours': by_type, 'estimated_usd': round(usd, 2)}
 
@@ -803,6 +823,8 @@ def parse_args(argv):
         raise Usage('--candidate must be a 40-hex sha')
     if not args.bucket:
         raise Usage('--bucket or RVOIP_AWS_EVIDENCE_BUCKET is required')
+    if args.record and profiles.PROFILES[args.profile]['method'] != 'search':
+        raise Usage('--record is for minor, full and baseline')
     ea = profiles.PROFILES[args.profile].get('ea_uas')
     if not ea and not args.dry_run and not (args.dut_bin and Path(args.dut_bin).is_file()):
         raise Usage('--dut-bin: no such file %r' % args.dut_bin)
@@ -941,7 +963,8 @@ def main(argv=None):
         rates, rates_path = load_rates(env_id)
         aws.s3_put_json(ctx.s3_run + 'lane.json', {k: v for k, v in lane.items() if k != 'facts'})
         log('env-id', env_id, 'rates', rates_path if rates else 'none recorded')
-        caps = dict((rates or {}).get('tester_caps', {}), **args.cap)
+        # A baseline measures the testbed itself: never capped by, or seeded from, what it recorded before.
+        caps = dict({} if profile.get('ea_uas') else (rates or {}).get('tester_caps', {}), **args.cap)
         if args.profile == 'release' and not rates:
             raise Usage('no recorded rates for %s (%s): run baseline and minor --record first' % (env_id, rates_path))
         for row_id in rows_wanted:
@@ -949,7 +972,7 @@ def main(argv=None):
             if done and done.get('verdict'):
                 rows.append(done)
                 continue
-            recorded = (rates or {}).get('rows', {}).get(row_id)
+            recorded = (rates or {}).get('baseline_sps' if profile.get('ea_uas') else 'rows', {}).get(row_id)
             if profile['method'] == 'smoke':
                 result = run_smoke(ctx, row_id)
             elif profile['method'] == 'confirm':
@@ -980,7 +1003,7 @@ def main(argv=None):
         else:
             status, code = 'PASS', EXIT_PASS
         if profile.get('report'):
-            report = score.render_report(ctx, rows, env_id)
+            report = score.render_report(ctx, rows, env_id, (rates or {}).get('baseline_sps'))
         if args.record and status in ('PASS', 'WARN'):
             score.record_rates(rows, env_id, BASELINES, ctx, args.profile)
     except WallClock as error:
@@ -1006,6 +1029,8 @@ def main(argv=None):
                     aws.s3_rm(lock)
                 except AwsError as error:
                     log('WARNING lock release:', error)
+    if args.dry_run:
+        return code   # a dry run leaves no receipt and nothing in S3
     receipt = receipt_for(ctx, rows, started, status, reasons, env_id, rates_path, report)
     try:
         write_manifest(ctx, receipt)

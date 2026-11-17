@@ -317,6 +317,9 @@ def classify(ctx, row, found):
     if value is None:
         if not found['trials']:
             return PENDING, PENDING
+        if result.get('highest_passing_sps') and 'invalid' in str(result.get('stop_reason') or ''):
+            # the tester went invalid above every passing rate (a §6.1 baseline): a lower bound
+            return '>= %s sps' % fmt(result['highest_passing_sps']), 'tester (%s)' % result['stop_reason']
         return ('not converged: passes up to %s, fails from %s' % (fmt(result.get('highest_passing_sps')),
                                                                    fmt(result.get('lowest_failing_sps'))),
                 result.get('stop_reason') or 'search running')
@@ -387,9 +390,10 @@ def section_headline(doc, ctx, title):
         cell, binding = classify(ctx, row, found)
         base, lower, _ = baseline_value(ctx, row)
         result = (found or {}).get('result') or {}
+        r_max = (result.get('parameters') or {}).get('r_max')
         rows.append([row, info.get('transport', PENDING), info.get('media', PENDING), info.get('hold', PENDING),
                      cell, binding, (('>= ' if lower else '') + fmt(base) + ' sps') if base is not None else PENDING,
-                     fmt((result.get('parameters') or {}).get('r_max')) if found else PENDING,
+                     (EMPTY if r_max is None else fmt(r_max)) if found else PENDING,   # '-': an uncapped search
                      fmt(result.get('trials')) if found else PENDING])
     doc.table(['Row', 'Transport', 'Media', 'Hold', 'Session Establishment Rate R', 'Binding limit', '§6.1 baseline',
                'r_max (sps)', 'Trials'], rows,
