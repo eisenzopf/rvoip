@@ -261,7 +261,7 @@ impl HttpAkaVectorProvider {
         Self {
             vector: Arc::new(vector),
             validation_endpoint: validation_endpoint.into(),
-            client: reqwest::Client::new(),
+            client: crate::ring_http_client(),
         }
     }
 }
@@ -575,4 +575,17 @@ mod tests {
         assert_eq!(request.authorization, CANARY);
         assert_eq!(response.subject.as_deref(), Some(CANARY));
     }
+}
+
+/// Build a reqwest client on the workspace's ring rustls provider.
+///
+/// reqwest is built with `rustls-no-provider` and so uses the process-default
+/// rustls provider. Install the workspace's ring provider as that default
+/// first (a no-op when the application has already installed one).
+#[cfg(feature = "http")]
+pub(crate) fn ring_http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .build()
+        .expect("reqwest client builds with the ring rustls provider")
 }

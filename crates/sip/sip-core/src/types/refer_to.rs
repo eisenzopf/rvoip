@@ -53,6 +53,7 @@ use crate::parser::headers::parse_refer_to;
 use crate::types::address::Address;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -439,7 +440,8 @@ impl FromStr for ReferTo {
     fn from_str(s: &str) -> Result<Self> {
         // Parse using the refer_to parser which handles both name-addr and addr-spec
         // formats as well as any parameters following the address.
-        all_consuming(parse_refer_to)(s.as_bytes())
+        all_consuming(parse_refer_to)
+            .parse(s.as_bytes())
             .map(|(_rem, address)| ReferTo::new(address))
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }

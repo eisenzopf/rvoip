@@ -2,6 +2,7 @@
 // Supported = ( "Supported" / "k" ) HCOLON [ option-tag *(COMMA option-tag) ]
 // option-tag = token
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case},
@@ -20,7 +21,7 @@ use crate::parser::ParseResult;
 
 /// Parses optional whitespace followed by a comma and more whitespace
 fn ws_comma_ws(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(delimited(owsp, char(','), owsp))(input)
+    recognize(delimited(owsp, char(','), owsp)).parse(input)
 }
 
 /// Parses a list of option-tags (tokens) separated by commas,
@@ -48,10 +49,11 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     let result = separated_list0(
         ws_comma_ws,
         alt((
-            token,                     // Normal token
-            value(&b""[..], tag(b"")), // Empty token (becomes empty string)
+            token,                          // Normal token
+            value(&b""[..], tag(&b""[..])), // Empty token (becomes empty string)
         )),
-    )(input);
+    )
+    .parse(input);
 
     match result {
         Ok((remaining, tokens)) => {
@@ -62,7 +64,7 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
             };
 
             // Handle trailing comma after tokens
-            let remaining = match opt(ws_comma_ws)(remaining) {
+            let remaining = match opt(ws_comma_ws).parse(remaining) {
                 Ok((rest, _)) => rest,
                 Err(_) => remaining,
             };
@@ -90,9 +92,13 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
 /// Handles both the standard "Supported:" form and the compact "k:" form.
 pub fn parse_supported_header(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     preceded(
-        terminated(alt((tag_no_case(b"Supported"), tag_no_case(b"k"))), hcolon),
+        terminated(
+            alt((tag_no_case(&b"Supported"[..]), tag_no_case(&b"k"[..]))),
+            hcolon,
+        ),
         parse_supported,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -104,7 +110,9 @@ mod tests {
     fn test_parse_supported(
         input: &[u8],
     ) -> Result<Vec<String>, nom::Err<nom::error::Error<&[u8]>>> {
-        all_consuming(parse_supported)(input).map(|(_, output)| output)
+        all_consuming(parse_supported)
+            .parse(input)
+            .map(|(_, output)| output)
     }
 
     #[test]

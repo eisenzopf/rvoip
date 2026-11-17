@@ -170,7 +170,7 @@ pub struct KeycloakOidcProvider {
 impl KeycloakOidcProvider {
     /// Fetch `.well-known/openid-configuration` for a Keycloak realm.
     pub async fn discover(config: KeycloakConfig) -> Result<Self, KeycloakError> {
-        let client = reqwest::Client::new();
+        let client = crate::ring_http_client();
         let metadata = client
             .get(config.discovery_url()?)
             .send()
@@ -327,7 +327,7 @@ impl KeycloakPasswordGrantClient {
     pub fn new(config: KeycloakConfig) -> Self {
         Self {
             config,
-            client: reqwest::Client::new(),
+            client: crate::ring_http_client(),
         }
     }
 
@@ -522,7 +522,7 @@ mod tests {
                     .unwrap(),
                 ),
             },
-            client: reqwest::Client::new(),
+            client: crate::ring_http_client(),
         }
     }
 
@@ -567,4 +567,16 @@ mod tests {
             rvoip_auth_core::AuthenticationMethod::Oidc
         );
     }
+}
+
+/// Build a reqwest client on the workspace's ring rustls provider.
+///
+/// reqwest is built with `rustls-no-provider` and so uses the process-default
+/// rustls provider. Install the workspace's ring provider as that default
+/// first (a no-op when the application has already installed one).
+pub(crate) fn ring_http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .build()
+        .expect("reqwest client builds with the ring rustls provider")
 }

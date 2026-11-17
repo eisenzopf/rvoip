@@ -1,6 +1,7 @@
 // Parser for RSeq header (RFC 3262)
 // RSeq = "RSeq" HCOLON 1*DIGIT
 
+use nom::Parser;
 use nom::{
     character::complete::digit1,
     combinator::{map_res, recognize},
@@ -20,12 +21,14 @@ pub fn parse_rseq(input: &[u8]) -> ParseResult<'_, u32> {
     // Define parse_digit as a function rather than a variable
     fn parse_digit(input: &[u8]) -> ParseResult<'_, u32> {
         map_res(recognize(digit1), |digits: &[u8]| {
-            let digits_str = str::from_utf8(digits)
-                .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))?;
+            let digits_str = str::from_utf8(digits).map_err(|_| {
+                nom::Err::<_>::Error(nom::error::Error::new(digits, ErrorKind::Digit))
+            })?;
             digits_str
                 .parse::<u32>()
                 .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))
-        })(input)
+        })
+        .parse(input)
     }
 
     let (input, rseq_val) = parse_digit(input)?;
@@ -37,7 +40,7 @@ pub fn parse_rseq(input: &[u8]) -> ParseResult<'_, u32> {
 
 /// Parse a complete RSeq header, including the header name and colon
 pub fn parse_rseq_header(input: &[u8]) -> ParseResult<'_, u32> {
-    let (input, _) = nom::bytes::complete::tag_no_case(b"RSeq")(input)?;
+    let (input, _) = nom::bytes::complete::tag_no_case(&b"RSeq"[..])(input)?;
     let (input, _) = hcolon(input)?;
     parse_rseq(input)
 }
@@ -49,7 +52,9 @@ mod tests {
 
     // Helper function to test the parser with full input consumption
     fn test_parse_rseq(input: &[u8]) -> Result<u32, nom::Err<nom::error::Error<&[u8]>>> {
-        all_consuming(parse_rseq)(input).map(|(_, output)| output)
+        all_consuming(parse_rseq)
+            .parse(input)
+            .map(|(_, output)| output)
     }
 
     #[test]

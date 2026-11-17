@@ -1,5 +1,6 @@
 // Placeholder for common parsing utilities
 use super::separators::comma;
+use nom::Parser;
 use nom::{multi::separated_list0, IResult};
 use std::str;
 
@@ -9,7 +10,6 @@ use nom::{
     character::complete::digit1,
     combinator::{map_res, recognize},
     error::{Error as NomError, ErrorKind},
-    sequence::tuple,
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,10 +25,11 @@ pub fn comma_separated_list0<'a, O, F>(
 where
     F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
-    separated_list0(
+    let mut parser = separated_list0(
         comma, // Uses the comma parser which handles surrounding SWS
         item_parser,
-    )
+    );
+    move |input| parser.parse(input)
 }
 
 /// Parses a comma-separated list of items that must have at least one item.
@@ -40,16 +41,23 @@ pub fn comma_separated_list1<'a, O, F>(
 where
     F: FnMut(&'a [u8]) -> ParseResult<'_, O> + Copy,
 {
-    nom::multi::separated_list1(
+    let mut parser = nom::multi::separated_list1(
         comma, // Uses the comma parser which handles surrounding SWS
         item_parser,
-    )
+    );
+    move |input| parser.parse(input)
 }
 
 // SIP-Version = "SIP" "/" 1*DIGIT "." 1*DIGIT
 pub fn sip_version(input: &[u8]) -> ParseResult<'_, Version> {
     map_res(
-        recognize(tuple((tag(b"SIP"), tag(b"/"), digit1, tag(b"."), digit1))),
+        recognize((
+            tag(&b"SIP"[..]),
+            tag(&b"/"[..]),
+            digit1,
+            tag(&b"."[..]),
+            digit1,
+        )),
         // This closure must return Result<Version, E> where E can be handled by map_res.
         // Let's make E = NomError<&[u8]>
         |bytes: &[u8]| -> Result<Version, NomError<&[u8]>> {
@@ -73,7 +81,8 @@ pub fn sip_version(input: &[u8]) -> ParseResult<'_, Version> {
                 Err(NomError::new(bytes, ErrorKind::Verify))
             }
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -170,7 +179,7 @@ mod tests {
 
     // Test with a more complex parser that handles quoted strings
     fn parse_simple_or_quoted(input: &[u8]) -> ParseResult<'_, String> {
-        let (rem, value) = nom::branch::alt((quoted_string, token))(input)?;
+        let (rem, value) = nom::branch::alt((quoted_string, token)).parse(input)?;
 
         let result = if value.starts_with(b"\"") && value.ends_with(b"\"") {
             // If it's quoted, remove the quotes and unescape

@@ -10,11 +10,11 @@ use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use p256::ecdh::EphemeralSecret;
 use p256::elliptic_curve::Generate;
 use p256::PublicKey;
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use sha2::{Digest, Sha256};
 
 pub mod hash;
@@ -208,7 +208,7 @@ impl Zrtp {
     pub fn new(config: ZrtpConfig, role: ZrtpRole) -> Self {
         // Generate random ZID
         let mut zid = [0u8; 12];
-        OsRng.fill_bytes(&mut zid);
+        UnwrapErr(SysRng).fill_bytes(&mut zid);
 
         Self {
             config,

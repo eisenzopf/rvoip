@@ -42,3 +42,30 @@ and sockets are polled and the task yields on every pass, and it returns when
 the command channel closes. Private regressions in `peer_connection::driver`
 cover a repeatedly expired deadline with a queued `Close`, abort of a driver
 whose deadline stays expired, and a closed command channel.
+
+## `rvoip-rtc` 0.21.1 baseline
+
+`rvoip-rtc` now tracks upstream `rtc` 0.21.1 rather than 0.20.0-alpha.1, and
+this crate is adapted to that API without otherwise moving its own `webrtc`
+0.20.0-alpha.1 baseline:
+
+- `RTCPeerConnection` is no longer generic over its interceptor chain, so the
+  interceptor type parameter is gone from `PeerConnectionBuilder` and the
+  internal peer-connection, transceiver, sender, receiver and data-channel
+  wrappers. `PeerConnectionBuilder::with_interceptor_registry` takes the
+  non-generic `Registry` and returns the same builder type.
+- The driver and wrappers pass `Instant::now()` to the core calls that now take
+  the current time (`build`, descriptions, RTP/RTCP writes, data-channel sends,
+  the STUN client and the sample packetizer) and read `TaggedRTCMessage` from
+  `poll_read`.
+- Events and messages the core marks `#[non_exhaustive]` that this crate does
+  not handle are logged at debug level and ignored.
+- `create_data_channel` wakes the driver, as upstream `webrtc` 0.21 does, so
+  the DCEP OPEN of a channel dialed on an established association is written
+  at once instead of at the next protocol timeout.
+- `DataChannel::id` is now the core's connection-local handle, which differs
+  between the two peers. `DataChannel::stream_id` (a provided trait method)
+  returns the SCTP stream id both peers share.
+- `SettingEngineBuilder` is re-exported from `webrtc::peer_connection`, and
+  tests and examples build `SettingEngine` through it. A relay-only ICE policy
+  now needs a TURN server, so the policy test configures one.

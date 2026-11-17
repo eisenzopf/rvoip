@@ -4,7 +4,7 @@
 # `crates/webrtc/rvoip-webrtc/docs/ci/nightly-interop.yml` is documentation only.
 #
 # What it does:
-#   1. Installs Chromium on the runner.
+#   1. Installs Chromium and the native build packages on the runner.
 #   2. Builds the crate with `interop-browser` + `signaling-whip,signaling-ws`.
 #   3. Runs `tests/browser_interop.rs --include-ignored` (the headless
 #      Chromium harness from H6 follow-up #43).
@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           shared-key: nightly-credential-timing
@@ -58,14 +58,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
       - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
           workspaces: "."
-      - name: Install Chromium
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium
+      # libopus-dev keeps audiopus_sys on the system Opus. Without it the crate
+      # builds bundled Opus with CMake, which CMake 4 on ubuntu-26.04 rejects.
+      - name: Install Chromium and native dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          chromium libasound2-dev libopus-dev protobuf-compiler pkg-config cmake
       - name: Build interop tests
         run: |
           cargo test -p rvoip-webrtc \
@@ -97,7 +99,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20

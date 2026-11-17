@@ -22,7 +22,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-use rand::RngCore;
+use rand::Rng;
 
 use super::StunError;
 
@@ -49,7 +49,7 @@ const TXN_ID_LEN: usize = 12;
 /// Returns `(wire_bytes, transaction_id)`.
 pub fn encode_binding_request() -> (Vec<u8>, [u8; TXN_ID_LEN]) {
     let mut txn_id = [0u8; TXN_ID_LEN];
-    rand::thread_rng().fill_bytes(&mut txn_id);
+    rand::rng().fill_bytes(&mut txn_id);
 
     let mut buf = Vec::with_capacity(HEADER_LEN);
     buf.extend_from_slice(&BINDING_REQUEST.to_be_bytes());

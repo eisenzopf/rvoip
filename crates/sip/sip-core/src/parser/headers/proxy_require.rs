@@ -12,6 +12,7 @@
 // Example:
 // Proxy-Require: sec-agree, precondition
 
+use nom::Parser;
 use nom::{bytes::complete::tag, combinator::map_res, sequence::delimited};
 use std::str;
 
@@ -25,12 +26,12 @@ use crate::parser::ParseResult;
 /// RFC 3261 defines option-tag as a token, which cannot contain whitespace
 /// This function ensures we only parse valid tokens and strips any surrounding whitespace
 fn option_tag(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    delimited(sws, token, sws)(input)
+    delimited(sws, token, sws).parse(input)
 }
 
 /// Parses an option-tag and converts it to a String
 fn option_tag_string(input: &[u8]) -> ParseResult<'_, String> {
-    map_res(option_tag, |tag| str::from_utf8(tag).map(String::from))(input)
+    map_res(option_tag, |tag| str::from_utf8(tag).map(String::from)).parse(input)
 }
 
 /// Custom implementation of comma-separated-list for option-tags
@@ -47,7 +48,7 @@ fn option_tag_list(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     // Parse remaining tokens
     loop {
         // Try to match a comma followed by a tag
-        match delimited(sws, tag(b","), sws)(remaining) {
+        match delimited(sws, tag(&b","[..]), sws).parse(remaining) {
             Ok((after_comma, _)) => {
                 // After a comma, we must have a tag (not another comma)
                 // This prevents "foo,,bar" from being accepted
@@ -174,7 +175,7 @@ mod tests {
     fn test_parse_proxy_require_invalid_tokens() {
         // Test with invalid token characters
         // Direct token testing without using our parser (which might handle whitespace differently)
-        assert!(all_consuming(token)(b"foo bar").is_err());
+        assert!(all_consuming(token).parse(b"foo bar").is_err());
 
         // Test through our proxy require parser
         let result = parse_proxy_require(b"foo bar");

@@ -18,10 +18,11 @@ tokio = { version = "1.40", features = ["full"] }
 async-trait = "0.1"
 
 # HTTP client for OAuth2 flows
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "charset"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider", "http2", "charset"] }
+rustls = { workspace = true }
 
 # JWT handling
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -51,9 +52,9 @@ tracing = "0.1"
 
 # SIP Digest authentication
 md5 = "0.8"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
-rand = "0.8"
+rand = "0.10"
 
 # Internal dependencies
 rvoip-infra-common.workspace = true

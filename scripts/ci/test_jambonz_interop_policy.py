@@ -178,7 +178,7 @@ class JambonzInteropPolicyTests(unittest.TestCase):
             "README.md": ROOT / "README.md",
             "SIP README": ROOT / "crates/sip/rvoip-sip/README.md",
             "release notes": ROOT
-            / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            / "docs/release/RELEASE_NOTES_NEXT.md",
             "compatibility matrix": ROOT
             / "crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md",
             "interop plan": ROOT / "crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md",
@@ -213,7 +213,7 @@ class JambonzInteropPolicyTests(unittest.TestCase):
 
     def test_transfer_documentation_keeps_referred_by_optional(self) -> None:
         documents = (
-            ROOT / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+            ROOT / "docs/release/RELEASE_NOTES_NEXT.md",
             ROOT / "crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md",
             ROOT / "docs/sip/SIP_RFC_COMPLIANCE.md",
         )

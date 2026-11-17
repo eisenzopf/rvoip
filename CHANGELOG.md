@@ -51,7 +51,8 @@ Each item has a one-line migration.
   without the new rows keep their behaviour, and `CancelAfterTrying` is
   derived by the executor and cannot be submitted as an event.
 - **`rvoip_sip_dialog::transaction::transport::TransportManagerConfig` gains
-  the public fields `tls_flow` (#338) and `new_call_admission` (#350).**
+  the public fields `tls_flow` (#338), `new_call_admission` (#350) and
+  `tcp_flow`.**
   Migration: add them to struct literals, or end the literal with
   `..Default::default()`.
 - **`rvoip_sip_dialog::dialog::Dialog` gains the public field
@@ -315,6 +316,25 @@ bumps (they break the test fixtures and examples built on the older APIs).
   `TlsTransport::bind_with_role_and_flow_config` and
   `TlsTransport::client_only_with_flow_config`. Existing `TlsTransport`
   constructors use `TlsFlowConfig::default()`.
+
+#### Outbound TCP and TLS source address
+
+- New opt-in `TlsFlowConfig::bind_outbound_to_local_ip` (also
+  `with_bind_outbound_to_local_ip`) and a new `TcpFlowConfig`
+  (`#[non_exhaustive]`) with the same field, in rvoip-sip-transport. When
+  set, every TCP or TLS connection the transport dials is bound to the
+  transport's own local IP address before it connects, so it leaves from
+  that address rather than the one the kernel's routing table picks. A host
+  running one endpoint per local address, such as a multi-source load
+  generator, otherwise sent every flow from its primary address even though
+  each endpoint's listener and Contact used its own. The option has no
+  effect for an unspecified local address (`0.0.0.0` / `::`) or a
+  destination of the other address family. Default `false`, so dialing is
+  unchanged unless it is turned on. Set it with
+  `rvoip_sip::Config::with_sip_bind_outbound_to_local_ip(true)`, which sets
+  both `Config::sip_tcp_flow` (new, also `with_sip_tcp_flow`) and
+  `Config::sip_tls_flow`; with `TransportManagerConfig::tcp_flow` and
+  `tls_flow`; or with the new `TcpTransport::bind_with_flow_config`.
 
 #### TLS Contact compatibility
 

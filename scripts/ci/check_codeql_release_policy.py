@@ -40,6 +40,30 @@ def latest_codeql_by_category(analyses: list[dict[str, Any]]) -> dict[str, dict[
     return latest
 
 
+def candidate_codeql_by_category(
+    analyses: list[dict[str, Any]], candidate: str
+) -> dict[str, dict[str, Any]]:
+    """The newest CodeQL analysis of exactly this commit, per category.
+
+    The candidate need not be the head of main: a release may qualify any
+    main commit with a receipt chain, and a nightly candidate stays valid
+    after later merges add newer analyses for other commits.
+    """
+
+    bound: dict[str, dict[str, Any]] = {}
+    for analysis in analyses:
+        if analysis.get("tool", {}).get("name") != "CodeQL":
+            continue
+        category = analysis.get("category")
+        if (
+            isinstance(category, str)
+            and category not in bound
+            and analysis.get("commit_sha") == candidate
+        ):
+            bound[category] = analysis
+    return bound
+
+
 def evaluate(
     analyses: list[dict[str, Any]],
     alerts: list[dict[str, Any]],
@@ -47,11 +71,12 @@ def evaluate(
     required_categories: tuple[str, ...] = DEFAULT_CATEGORIES,
 ) -> dict[str, Any]:
     latest = latest_codeql_by_category(analyses)
+    bound = candidate_codeql_by_category(analyses, candidate)
     missing = [category for category in required_categories if category not in latest]
     stale = [
         category
         for category in required_categories
-        if category in latest and latest[category].get("commit_sha") != candidate
+        if category in latest and category not in bound
     ]
     open_alerts = [alert for alert in alerts if alert.get("state") == "open"]
     failures: list[str] = []
@@ -69,9 +94,9 @@ def evaluate(
         "candidate": candidate,
         "required_categories": list(required_categories),
         "analysis_ids": {
-            category: latest[category].get("id")
+            category: bound[category].get("id")
             for category in required_categories
-            if category in latest
+            if category in bound
         },
         "open_alert_count": len(open_alerts),
         "open_alert_numbers": [alert.get("number") for alert in open_alerts],
@@ -133,7 +158,11 @@ def write_receipt(path: Path, result: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repository", required=True)
+    parser.add_argument(
+        "--repository",
+        default=os.environ.get("GITHUB_REPOSITORY"),
+        required=not os.environ.get("GITHUB_REPOSITORY"),
+    )
     parser.add_argument("--candidate", required=True)
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--timeout-seconds", type=int, default=3_600)

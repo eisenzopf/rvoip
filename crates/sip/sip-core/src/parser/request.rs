@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::types::param::Param;
+use nom::Parser;
 use nom::{
     bytes::complete::take_till,
     combinator::all_consuming,
@@ -54,7 +55,7 @@ pub fn parse_request_line_with_mode<'a>(
     mode: &ParseMode,
 ) -> ParseResult<'a, (Method, Uri, Version)> {
     let error = |at: &'a [u8], kind| nom::Err::Error(NomError::new(at, kind));
-    let (rest, line) = terminated(take_till(|b| b == b'\r' || b == b'\n'), crlf)(input)?;
+    let (rest, line) = terminated(take_till(|b| b == b'\r' || b == b'\n'), crlf).parse(input)?;
     let lenient = *mode == ParseMode::Lenient;
 
     let elements: Vec<&[u8]> = if lenient {
@@ -68,7 +69,7 @@ pub fn parse_request_line_with_mode<'a>(
         return Err(error(line, ErrorKind::Space));
     };
 
-    let (_, method_bytes) = all_consuming(token)(method_bytes)?;
+    let (_, method_bytes) = all_consuming(token).parse(method_bytes)?;
     let method = str::from_utf8(method_bytes)
         .ok()
         .and_then(|m| m.parse::<Method>().ok())
@@ -80,7 +81,7 @@ pub fn parse_request_line_with_mode<'a>(
     };
     let (_, uri) = sip_or_absolute_uri(uri_bytes)?;
 
-    let (_, version) = all_consuming(sip_version)(version_bytes)?;
+    let (_, version) = all_consuming(sip_version).parse(version_bytes)?;
     Ok((rest, (method, uri, version)))
 }
 

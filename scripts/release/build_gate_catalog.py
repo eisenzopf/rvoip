@@ -89,6 +89,60 @@ JAMBONZ_GATE_IDS = [
     "interop.jambonz-down",
 ]
 CURRENT_PERFORMANCE_EVALUATION_GATE_IDS = ["perf.canonical-2k-current"]
+# Interoperability lanes. Each runs on its own `ec2-interop` worker with its
+# own fresh lab, so the lanes run concurrently instead of as one serial chain
+# (Asterisk -> FreeSWITCH -> Jambonz -> SIPp -> strict UA, plus libSRTP and
+# the AMR sweep), which made interop the fleet's longest shard. Ordering
+# dependencies remain only within a lane, where gates share one lab.
+INTEROP_LANES = {
+    "asterisk": [
+        "interop.freeswitch-down-before-asterisk",
+        "interop.asterisk-up",
+        "interop.asterisk-matrix",
+        "interop.asterisk-down-after",
+    ],
+    "freeswitch": [
+        "interop.asterisk-down-before-freeswitch",
+        "interop.freeswitch-up",
+        "interop.freeswitch-matrix",
+        "interop.freeswitch-down-after",
+        "interop.restore-asterisk-down",
+        "interop.restore-freeswitch-down",
+    ],
+    "sipp": [
+        "interop.sipp-build",
+        "interop.sipp-start",
+        "interop.sipp-matrix",
+        "interop.sipp-stop",
+        "interop.strict-ua",
+    ],
+    "jambonz": ["interop.jambonz-up", "interop.jambonz-matrix", "interop.jambonz-down"],
+    "libsrtp": ["interop.remote-libsrtp"],
+    "amr-sweep": [
+        "interop.amr-rate-sweep.up",
+        *[f"interop.amr-rate-sweep.{profile}-{transport.lower()}" for profile, transport in [("amrnb", "UDP"), ("amrwb", "UDP"), ("amrnb", "TLS"), ("amrwb", "TLS")]],
+        "interop.amr-rate-sweep.down",
+    ],
+}
+INTEROP_LANE_OF = {gate_id: lane for lane, gate_ids in INTEROP_LANES.items() for gate_id in gate_ids}
+# Release-only RFC 7501/7502 benchmark gates (docs/release/BENCH_GATE_INTERFACE.md).
+# They run on the release candidate at release time, never in the nightly
+# `remote-release` profile, and the bump commit reuses their receipts through
+# version-normalized input digests.
+BENCH_LANE_GATES = {
+    "perf.rfc7502-release": ("release", "patch-release RFC 7502 confirmation trials", 4 * 3600),
+    "perf.rfc7502-minor": ("minor", "minor-release RFC 7502 search and overload report", 12 * 3600),
+}
+BENCH_LANE_PATHS = [
+    "Cargo.lock",
+    "Cargo.toml",
+    "crates/foundation/**",
+    "crates/media/**",
+    "crates/sip/**",
+    "crates/tools/**",
+    "scripts/bench/**",
+    "infra/aws/bench/**",
+]
 # The reviewed performance-regression baseline moves when it is re-recorded on
 # new release hardware, but this gate's argv is reconstructed from the July
 # 2026 legacy evidence, which names whichever baseline was current then. Pin
@@ -261,7 +315,7 @@ AFFECTED_PATH_ADDITIONS = {
     "build.evidence-helper-tests": [
         ".github/workflows/release-prepare.yml",
         "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
-        "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+        "docs/release/RELEASE_NOTES_NEXT.md",
         "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
         "scripts/release.py",
         "scripts/test_release.py",
@@ -477,7 +531,11 @@ def dependencies(record: dict[str, Any], records: list[dict[str, Any]]) -> list[
     interop_chain = [item["id"] for item in records if item["id"].startswith("interop.")]
     if gate_id in interop_chain:
         index = interop_chain.index(gate_id)
-        return ["source.clean-start"] + ([interop_chain[index - 1]] if index else [])
+        previous = interop_chain[index - 1] if index else None
+        # The legacy sequence ran every lab on one host; keep its order only
+        # between gates that still share a lab (a lane).
+        same_lane = previous is not None and INTEROP_LANE_OF.get(previous) == INTEROP_LANE_OF.get(gate_id)
+        return ["source.clean-start"] + ([previous] if same_lane else [])
     return ["source.clean-start"]
 
 
@@ -722,7 +780,9 @@ def proxy_pbx_gates() -> list[dict[str, Any]]:
             resource="ec2-proxy-interop",
             dependencies=[f"interop.proxy-pbx.{peer}.matrix"],
             paths=paths,
-            always_fresh=True,
+            # Not always-fresh: a teardown reruns whenever anything in its
+            # chain reruns (the plan's dependent closure), and is reused with
+            # the chain otherwise. Run alone it would find no lab.
         )
         result.extend([up, matrix, down])
 
@@ -820,7 +880,7 @@ def amr_rate_sweep_gates() -> list[dict[str, Any]]:
         paths=paths,
         # Runs even when a sweep fails: a lab left up holds its ports and the
         # next suite to want them fails for a reason that looks unrelated.
-        always_fresh=True,
+        # Reused with its chain, rerun whenever any sweep cell reruns.
     )
 
     aggregate = synthetic_gate(
@@ -851,8 +911,11 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
             "--receipt",
             "{artifact_dir}/latest.json",
         ],
-        resource="ec2-interop",
-        dependencies=["source.remote-clean", "interop.freeswitch-down-after"],
+        # A network-only upstream check (git ls-remote and raw package.json):
+        # it needs no lab, so it runs on a hosted runner and a requalification
+        # that reuses the Jambonz lab chain needs no EC2 worker for it.
+        resource="github-evidence",
+        dependencies=["source.remote-clean"],
         paths=paths,
         always_fresh=True,
     )
@@ -868,6 +931,7 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
             "jambonz-up",
         ],
         resource="ec2-interop",
+        # Its own interop lane and worker (INTEROP_LANES); no other lab shares it.
         dependencies=["interop.jambonz-latest"],
         paths=paths,
     )
@@ -915,7 +979,6 @@ def jambonz_interop_gates() -> list[dict[str, Any]]:
         resource="ec2-interop",
         dependencies=["interop.jambonz-matrix"],
         paths=paths,
-        always_fresh=True,
     )
     return [latest, up, matrix, down]
 
@@ -986,7 +1049,7 @@ def infrastructure_preflight_gates() -> list[dict[str, Any]]:
         ("ec2-performance", 6),
         ("ec2-performance-soak", 7),
         ("ec2-performance-soak-long", 3),
-        ("ec2-interop", 1),
+        ("ec2-interop", len(INTEROP_LANES)),
         ("ec2-proxy-interop", 2),
     ):
         suffix = resource.removeprefix("ec2-")
@@ -1127,6 +1190,109 @@ def facade_feature_bundle_gate() -> dict[str, Any]:
     return gate
 
 
+def package_archives_gate() -> dict[str, Any]:
+    """Build every publishable crate from its packaged archive.
+
+    This was the compiling `cargo publish --dry-run` the protected publish
+    job ran crate by crate. As a gate it runs on the nightly candidate, in
+    parallel with the EC2 fanout, and the version-bump commit reuses it, so
+    publication only assembles and uploads the archives.
+    """
+
+    gate = synthetic_gate(
+        "package.archives",
+        "every publishable crate builds from its packaged archive",
+        executor="argv",
+        command=["python3", "scripts/release.py", "package-check"],
+        # The hosted evidence shard holds one-second bookkeeping gates and
+        # the CodeQL poll; a sixty-minute build there adds no hosted job.
+        resource="github-evidence",
+        dependencies=["source.remote-clean"],
+        paths=[
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/**",
+            "scripts/release.py",
+        ],
+        timeout_minutes=180,
+        estimated_seconds=3_600,
+    )
+    gate["kind"] = "remote"
+    return gate
+
+
+def codeql_gate() -> dict[str, Any]:
+    """Exact-candidate CodeQL with zero open alerts, as a parallel gate.
+
+    It used to be a step of the plan job, so its 23-29 minute wait for the
+    push analysis sat in front of every worker. As a gate it overlaps the
+    rest of qualification, and like any gate it is reused by exact inputs:
+    a version bump carries its candidate's analysis.
+    """
+
+    gate = synthetic_gate(
+        "security.codeql-exact",
+        "exact-candidate CodeQL analysis with zero open alerts",
+        executor="argv",
+        command=[
+            "python3",
+            "scripts/ci/check_codeql_release_policy.py",
+            "--candidate",
+            "{candidate}",
+            "--timeout-seconds",
+            "3600",
+            "--receipt",
+            "{artifact_dir}/codeql-policy.json",
+        ],
+        # The evidence shard holds only one-second bookkeeping gates, so the
+        # CodeQL poll shares it instead of adding a twentieth hosted job.
+        resource="github-evidence",
+        dependencies=["source.remote-clean"],
+        timeout_minutes=75,
+        estimated_seconds=1_800,
+    )
+    gate["kind"] = "security"
+    gate["expected_outputs"].append("codeql-policy.json")
+    return gate
+
+
+def bench_lane_gates() -> list[dict[str, Any]]:
+    """Release-only RFC 7501/7502 benchmark gates on a dedicated bench lane."""
+
+    result = []
+    for gate_id, (profile, name, seconds) in BENCH_LANE_GATES.items():
+        gate = synthetic_gate(
+            gate_id,
+            name,
+            executor="argv",
+            command=[
+                "python3",
+                "{workspace}/scripts/release/bench_gate.py",
+                "--profile",
+                profile,
+                "--candidate",
+                "{candidate}",
+                "--receipt",
+                "{artifact_dir}/bench-receipt.json",
+            ],
+            resource="bench-lane",
+            dependencies=["source.remote-clean"],
+            paths=[*BENCH_LANE_PATHS, "scripts/release/bench_gate.py"],
+            # One hosted job; bench-minor's earlier legs run before it
+            # (release-qualify.yml, bench-leg-*).
+            timeout_minutes=350,
+            estimated_seconds=seconds,
+        )
+        # run_lane exit 3: quota, capacity, lane lock, or a tester that
+        # stayed invalid; retried once like any infrastructure failure.
+        gate["retry_on_exit_codes"] = [3, 75]
+        gate["kind"] = "benchmark"
+        gate["category"] = "Performance and resiliency"
+        gate["expected_outputs"].append("bench-receipt.json")
+        result.append(gate)
+    return result
+
+
 def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     source_payload = json.loads(source.read_text())
     records = source_payload["records"]
@@ -1193,6 +1359,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             ],
         ),
         facade_feature_bundle_gate(),
+        codeql_gate(),
+        package_archives_gate(),
         synthetic_gate(
             "perf.canonical-2k-current",
             "three-pass exact-candidate 2,000-CPS performance evaluation",
@@ -1212,7 +1380,9 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "crates/sip/rvoip-sip/**",
                 "scripts/release/**",
             ],
-            always_fresh=True,
+            # Reusable by exact, version-normalized inputs: a bump commit
+            # carries its candidate's evaluation, bound to that ancestor by
+            # the report.performance-metrics reconciliation.
             timeout_minutes=120,
             estimated_seconds=4_500,
         ),
@@ -1252,6 +1422,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
     ]
     synthetic.extend(burst_scenario_gates())
+    bench = bench_lane_gates()
     preflight = infrastructure_preflight_gates()
     core = [core_gate(package, root, weights) for package in package_rows]
     security = security_gates()
@@ -1272,7 +1443,17 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             always_fresh=True,
         ),
     ]
-    gates = legacy + synthetic + preflight + core + security + final
+    gates = legacy + synthetic + preflight + core + security + final + bench
+    for gate in gates:
+        if gate["resource_class"] != "ec2-interop" or gate["executor"] != "argv":
+            continue
+        if gate["id"].startswith("preflight."):
+            # The preflight recreates the release shape: one worker per lane.
+            gate["interop_lane"] = gate["id"].removeprefix("preflight.")
+            continue
+        if gate["id"] not in INTEROP_LANE_OF:
+            raise RuntimeError(f"interop gate {gate['id']} has no INTEROP_LANES lane")
+        gate["interop_lane"] = INTEROP_LANE_OF[gate["id"]]
     for gate in gates:
         measured = MEASURED_EC2_SECONDS.get(gate["id"])
         if measured is not None:
@@ -1317,6 +1498,8 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 *[f"security.fuzz-{suffix}" for suffix in AMR_FUZZ_TARGETS],
                 "interop.browser-dtmf",
                 "build.facade-feature-bundles",
+                "security.codeql-exact",
+                "package.archives",
                 "report.remote-aggregate",
                 "source.remote-final",
             ]
@@ -1348,7 +1531,13 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             ),
             "remote-preflight": sorted(gate["id"] for gate in preflight),
             "remote-core": remote_core,
+            # The full qualification. It never contains a bench gate; the
+            # release profiles below add one.
             "remote-release": remote_release,
+            "bench-release": ["perf.rfc7502-release", "source.remote-clean"],
+            "bench-minor": ["perf.rfc7502-minor", "source.remote-clean"],
+            "release-patch": sorted(set(remote_release) | {"perf.rfc7502-release"}),
+            "release-minor": sorted(set(remote_release) | {"perf.rfc7502-minor"}),
         },
         "remote_release_legacy_coverage": {
             "required_legacy_count": len(records),

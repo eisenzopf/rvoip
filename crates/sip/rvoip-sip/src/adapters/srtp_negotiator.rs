@@ -34,7 +34,7 @@ use base64::{
     engine::general_purpose::{STANDARD, STANDARD_NO_PAD},
     Engine,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use rvoip_rtp_core::srtp::{
     SrtpContext, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
     SRTP_AES256_CM_SHA1_32, SRTP_AES256_CM_SHA1_80,
@@ -116,8 +116,8 @@ fn rtp_suite_for(suite: CryptoSuite) -> SrtpCryptoSuite {
 fn generate_keysalt(suite: &SrtpCryptoSuite) -> (Vec<u8>, Vec<u8>, String) {
     let mut key = vec![0u8; suite.key_length];
     let mut salt = vec![0u8; SDES_SALT_LEN];
-    OsRng.fill_bytes(&mut key);
-    OsRng.fill_bytes(&mut salt);
+    UnwrapErr(SysRng).fill_bytes(&mut key);
+    UnwrapErr(SysRng).fill_bytes(&mut salt);
     let mut combined = Vec::with_capacity(key.len() + salt.len());
     combined.extend_from_slice(&key);
     combined.extend_from_slice(&salt);

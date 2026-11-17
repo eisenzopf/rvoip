@@ -34,6 +34,7 @@ use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverId, SSRC};
 use crate::statistics::StatsSelector;
 use crate::statistics::report::{RTCStatsReport, RTCStatsReportEntry};
 use ice::CandidatePairStats;
+use sctp::StreamId;
 use std::collections::HashMap;
 use std::time::Instant;
 
@@ -99,6 +100,26 @@ pub(crate) struct RTCStatsAccumulator {
     fec_ssrc_to_primary: HashMap<SSRC, SSRC>,
 }
 
+/// Asserts a stats record was stamped with `expected`, ignoring the wall-clock half.
+///
+/// A [`SystemInstant`] pairs a monotonic instant with a wall-clock reading taken beside it, and
+/// `PartialEq` compares both. Rebuilding one in a test — `SystemInstant::now(now)` — reproduces
+/// the monotonic half exactly but takes a *fresh* wall-clock reading, so the two are never equal:
+/// they differ by however long the test took to get there, typically a few hundred microseconds.
+///
+/// The monotonic half is the part under test: it says the snapshot stamped the record with the
+/// instant the caller supplied rather than one it went and read. Recover it via the round-trip
+/// `instant(duration_since_unix_epoch())`, which cancels the anchor and returns the instant the
+/// `SystemInstant` was built from.
+#[cfg(test)]
+pub(crate) fn assert_stamped_at(stamp: shared::time::SystemInstant, expected: Instant) {
+    assert_eq!(
+        stamp.instant(stamp.duration_since_unix_epoch()),
+        expected,
+        "stats must be stamped with the caller's instant"
+    );
+}
+
 impl RTCStatsAccumulator {
     /// Creates a new empty stats accumulator.
     pub(crate) fn new() -> Self {
@@ -110,7 +131,7 @@ impl RTCStatsAccumulator {
     /// This method iterates through all accumulators and produces an
     /// immutable `RTCStatsReport` containing all current statistics.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `now` - The timestamp to use for all stats in the report
     ///
@@ -220,7 +241,7 @@ impl RTCStatsAccumulator {
     /// - If selector is Receiver, returns inbound RTP streams for that receiver
     ///   and all stats referenced by those streams
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `now` - The timestamp to use for all stats in the report
     /// * `selector` - Controls which statistics are included
@@ -388,7 +409,7 @@ impl RTCStatsAccumulator {
 
     /// Gets or creates an inbound stream accumulator for the given SSRC.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `ssrc` - The SSRC identifier for this stream
     /// * `kind` - The media kind (audio/video)
@@ -434,7 +455,7 @@ impl RTCStatsAccumulator {
 
     /// Gets or creates an outbound stream accumulator for the given SSRC.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `ssrc` - The SSRC identifier for this stream
     /// * `kind` - The media kind (audio/video)
@@ -476,7 +497,7 @@ impl RTCStatsAccumulator {
 
     /// Gets or creates a data channel accumulator.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `id` - The data channel identifier
     /// * `label` - The label assigned to the data channel
@@ -490,11 +511,26 @@ impl RTCStatsAccumulator {
         self.data_channels
             .entry(id)
             .or_insert_with(|| DataChannelStatsAccumulator {
-                data_channel_identifier: id,
+                // The wire value is filled in by `set_data_channel_stream_id` once the SCTP
+                // connected procedure assigns one; the map itself is keyed by handle, so an
+                // accumulator can exist before then.
+                data_channel_identifier: 0,
                 label: label.to_string(),
                 protocol: protocol.to_string(),
                 ..Default::default()
             })
+    }
+
+    /// Records the SCTP stream identifier a data channel was assigned.
+    ///
+    /// The accumulator is keyed by the channel's handle, which exists from creation, but
+    /// `data_channel_identifier` is the W3C-defined *wire* value and is only known once the
+    /// SCTP connected procedure assigns one (RFC 8832 section 6). This fills it in at that
+    /// point; until then it reads 0.
+    pub(crate) fn set_data_channel_stream_id(&mut self, id: RTCDataChannelId, stream_id: StreamId) {
+        if let Some(dc) = self.data_channels.get_mut(&id) {
+            dc.data_channel_identifier = stream_id;
+        }
     }
 
     /// Gets or creates an ICE candidate pair accumulator.
@@ -700,10 +736,11 @@ impl RTCStatsAccumulator {
     /// This method merges the STUN-level stats (requests, responses, RTT) from the ice agent
     /// with the application-level stats (packets, bytes) tracked at the RTC layer.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
-    /// * `pair_id` - The ID of the candidate pair to sync
-    /// * `cp_stats.` - CandidatePairStats
+    /// * `local_id` - The local candidate ID of the pair to sync
+    /// * `remote_id` - The remote candidate ID of the pair to sync
+    /// * `cp_stats` - The ice agent's stats for that candidate pair
     pub(crate) fn update_ice_agent_stats(
         &mut self,
         local_id: &str,
@@ -730,7 +767,7 @@ impl RTCStatsAccumulator {
     /// This method registers the codec (if not already registered) and links it
     /// to the inbound RTP stream.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `ssrc` - The SSRC of the inbound RTP stream
     /// * `codec` - The codec information
@@ -765,7 +802,7 @@ impl RTCStatsAccumulator {
     /// This method registers the codec (if not already registered) and links it
     /// to the outbound RTP stream.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `ssrc` - The SSRC of the outbound RTP stream
     /// * `codec` - The codec information

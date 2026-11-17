@@ -13,15 +13,16 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use rtc::interceptor::Registry as RtcRegistry;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::event::RTCTrackEvent;
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -47,11 +48,14 @@ use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
 
+mod common;
+
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
 /// Test streaming media to disk: webrtc streams -> rtc receives
 #[tokio::test]
 async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
+    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -136,8 +140,9 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Client)
+        .build();
 
     // Create a MediaEngine object to configure the supported codec
     let mut media_engine = MediaEngine::default();
@@ -167,7 +172,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
     media_engine.register_codec(audio_codec.clone(), RtpCodecKind::Audio)?;
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
 
-    let registry = rtc::interceptor::Registry::new();
+    let registry = RtcRegistry::new();
 
     // Use the default set of Interceptors
     let registry =
@@ -188,7 +193,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
     log::info!("Created RTC peer connection");
 
     // Add transceivers to receive video and audio
@@ -211,7 +216,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
     log::info!("Added video transceiver");
 
     // Set remote description (the offer from webrtc)
-    rtc_pc.set_remote_description(rtc_offer)?;
+    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
 
     // Add local candidate for rtc peer
     let candidate = CandidateHostConfig {
@@ -233,7 +238,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
     log::info!("RTC created answer");
 
     // Set local description on rtc peer
-    rtc_pc.set_local_description(answer.clone())?;
+    rtc_pc.set_local_description(Instant::now(), answer.clone())?;
     log::info!("RTC set local description");
 
     // Convert rtc answer to webrtc SDP
@@ -352,7 +357,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
         }
 
         // Process RTP packets received by rtc
-        while let Some(message) = rtc_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, _rtp_packet) => {
                     let receiver_id = {
@@ -413,6 +418,7 @@ async fn test_save_to_disk_vpx_webrtc_to_rtc() -> Result<()> {
                     // Process RTCP packets
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
+                _ => {}
             }
         }
 

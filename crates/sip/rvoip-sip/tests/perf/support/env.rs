@@ -60,7 +60,7 @@ impl EnvironmentBlock {
             panic!("perf tests must be run with --release; debug-build numbers are not citable");
         }
 
-        let mut sys = System::new();
+        let mut sys = System::new().expect("initialise sysinfo");
         sys.refresh_memory();
         sys.refresh_cpu_all();
 
@@ -71,13 +71,13 @@ impl EnvironmentBlock {
             .unwrap_or_else(|| "unknown".to_string());
 
         let cpu_count_logical = sys.cpus().len();
-        let cpu_count_physical = sys.physical_core_count().unwrap_or(cpu_count_logical);
+        let cpu_count_physical = System::physical_core_count().unwrap_or(cpu_count_logical);
         let total_ram_gb = (sys.total_memory() as f64) / (1024.0 * 1024.0 * 1024.0);
 
         let os = format!(
             "{} {}",
-            System::name().unwrap_or_else(|| "unknown".to_string()),
-            System::os_version().unwrap_or_else(|| "?".to_string())
+            System::name().unwrap_or_else(|_| "unknown".to_string()),
+            System::os_version().unwrap_or_else(|_| "?".to_string())
         );
 
         let rustc = rustc_version();
@@ -190,7 +190,7 @@ fn capture_source_provenance() -> SourceProvenance {
         git_commit,
         git_rev,
         git_dirty: !status.is_empty(),
-        source_fingerprint_sha256: format!("{:x}", fingerprint.finalize()),
+        source_fingerprint_sha256: hex::encode(fingerprint.finalize()),
     }
 }
 

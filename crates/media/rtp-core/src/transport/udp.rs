@@ -1158,8 +1158,8 @@ impl UdpRtpTransport {
         {
             // Generate a session ID if not provided
             let session_id = config.session_id.clone().unwrap_or_else(|| {
-                use rand::Rng;
-                let random_suffix: u32 = rand::thread_rng().gen();
+                use rand::RngExt;
+                let random_suffix: u32 = rand::rng().random();
                 format!("rtp-session-{}", random_suffix)
             });
             // Persist generated ownership so `close()` releases the exact

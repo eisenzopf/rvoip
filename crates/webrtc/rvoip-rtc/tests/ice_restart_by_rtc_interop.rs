@@ -14,9 +14,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -33,12 +34,15 @@ use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfigu
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState as WebrtcRTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as WebrtcRTCSessionDescription;
 
+mod common;
+
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 const TEST_MESSAGE: &str = "Hello before restart!";
 const TEST_MESSAGE_AFTER_RESTART: &str = "Hello after restart!";
 
 #[tokio::test]
 async fn test_ice_restart_by_rtc_interop() -> Result<()> {
+    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -146,8 +150,9 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
         log::info!("RTC bound to {}", local_addr);
 
         // Create RTC peer connection
-        let mut setting_engine = SettingEngine::default();
-        setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+        let setting_engine = SettingEngineBuilder::new()
+            .with_answering_dtls_role(RTCDtlsRole::Server)
+            .build();
 
         let config = RTCConfigurationBuilder::default()
             .with_ice_servers(vec![RTCIceServer {
@@ -158,13 +163,13 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
         let mut rtc_pc = RTCPeerConnectionBuilder::new()
             .with_configuration(config)
             .with_setting_engine(setting_engine)
-            .build()?;
+            .build(Instant::now())?;
 
         // Create data channel
         let _ = rtc_pc.create_data_channel("test", None)?;
         log::info!("RTC: Created data channel");
 
-        let mut dc_id: Option<u16> = None;
+        let mut dc_id: Option<RTCDataChannelId> = None;
         let mut buf = vec![0u8; 8192];
         let mut write_buf = BytesMut::new();
 
@@ -175,7 +180,9 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                     log::info!("RTC: Creating offer");
                     match rtc_pc.create_offer(None) {
                         Ok(offer) => {
-                            if let Err(e) = rtc_pc.set_local_description(offer.clone()) {
+                            if let Err(e) =
+                                rtc_pc.set_local_description(Instant::now(), offer.clone())
+                            {
                                 resp_tx
                                     .send(Response::Error(format!(
                                         "Failed to set local description: {}",
@@ -242,7 +249,7 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                 Ok(Command::SetRemoteDescription(sdp)) => {
                     log::info!("RTC: Setting remote description");
                     let answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(sdp)?;
-                    if let Err(e) = rtc_pc.set_remote_description(answer) {
+                    if let Err(e) = rtc_pc.set_remote_description(Instant::now(), answer) {
                         resp_tx
                             .send(Response::Error(format!(
                                 "Failed to set remote description: {}",
@@ -255,7 +262,7 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                     log::info!("RTC: Sending message: {}", msg);
                     if let Some(channel_id) = dc_id
                         && let Some(mut dc) = rtc_pc.data_channel(channel_id)
-                        && let Err(e) = dc.send_text(msg)
+                        && let Err(e) = dc.send_text(Instant::now(), msg)
                     {
                         resp_tx
                             .send(Response::Error(format!("Failed to send message: {}", e)))
@@ -353,7 +360,9 @@ async fn test_ice_restart_by_rtc_interop() -> Result<()> {
                                 new_pwd
                             );
 
-                            if let Err(e) = rtc_pc.set_local_description(offer.clone()) {
+                            if let Err(e) =
+                                rtc_pc.set_local_description(Instant::now(), offer.clone())
+                            {
                                 resp_tx
                                     .send(Response::Error(format!(
                                         "Failed to set local description: {}",

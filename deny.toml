@@ -39,9 +39,9 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 # Unmaintained advisories are informational here, matching the beta release
 # gate's `cargo audit` (which does not fail the build on them). The ones
-# currently present are all deep transitive: paste, proc-macro-error2,
-# audiopus_sys (via the opus codec) and rustls-pemfile. Tighten to
-# "workspace" or "all" once those transitive stacks are cleaned up.
+# currently present are all deep transitive: paste, proc-macro-error2 and
+# rustls-pemfile. Tighten to "workspace" or "all" once those transitive
+# stacks are cleaned up.
 unmaintained = "none"
 # Mirrors the accepted-advisory set enforced by the beta release gate
 # (crates/sip/rvoip-sip/scripts/beta_gate.sh -> `cargo audit`). Each is
@@ -56,14 +56,14 @@ ignore = [
     # `crypto-bigint` 0.5 — transitive via the RustCrypto elliptic-curve 0.13
     # stack. rtp-core, jsonwebtoken (aws-lc-rs backend) and webauthn-rs 0.6.2
     # no longer use it; it remains only through third-party stacks: `dtls`
-    # 0.17 (rtp-core `dtls-webrtc`), the `rtc-*` 0.20 alphas and `aws-config`
-    # (amazon-connect). The fix ships only in 0.7.6, which needs
+    # 0.17 (rtp-core `dtls-webrtc`) and the `rtc-*` 0.20 alphas (`aws-config`
+    # left it at 1.13). The fix ships only in 0.7.6, which needs
     # elliptic-curve 0.14. Revisit when those move to it.
     "RUSTSEC-2026-0387",
     # `libsqlite3-sys` 0.30 (bundled SQLite 3.46) — transitive via
     # sqlx-sqlite in users-core. The fix is libsqlite3-sys 0.39 (SQLite
-    # 3.54), but every sqlx release caps it below 0.38 (sqlx-sqlite 0.9.0:
-    # `>=0.30.1, <0.38.0`, and Rust 1.94 > our 1.91 MSRV). Exposure needs a
+    # 3.54), but every sqlx release caps it below 0.38 (sqlx-sqlite 0.9.0,
+    # which users-core uses: `>=0.30.1, <0.38.0`). Exposure needs a
     # locally attacker-written database plus `-wal` pair; users-core opens
     # only its own configured database. Revisit when sqlx allows 0.39.
     "RUSTSEC-2026-0459",

@@ -1,5 +1,6 @@
 // Parser for multipart MIME bodies (RFC 2046)
 
+use nom::Parser;
 use std::str;
 
 use bytes::Bytes;
@@ -151,7 +152,7 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
                     .unwrap_or_else(|_| HeaderName::Other(name_str.to_string()));
 
                 // Consume the line ending
-                let (input, _) = alt((tag(b"\r\n"), tag(b"\n"), eof))(input)?;
+                let (input, _) = alt((tag(&b"\r\n"[..]), tag(&b"\n"[..]), eof)).parse(input)?;
 
                 Ok((input, (header_name, value_bytes.to_vec())))
             }
@@ -160,7 +161,7 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
                     HeaderName::Other(String::from_utf8_lossy(name_bytes).into_owned());
 
                 // Consume the line ending
-                let (input, _) = alt((tag(b"\r\n"), tag(b"\n"), eof))(input)?;
+                let (input, _) = alt((tag(&b"\r\n"[..]), tag(&b"\n"[..]), eof)).parse(input)?;
 
                 Ok((input, (header_name, value_bytes.to_vec())))
             }
@@ -176,7 +177,7 @@ fn parse_header_line(input: &[u8]) -> IResult<&[u8], (HeaderName, Vec<u8>)> {
 /// Parse a single line including its terminator
 fn parse_line(input: &[u8]) -> IResult<&[u8], &[u8]> {
     let (input, line) = take_till_crlf(input)?;
-    let (input, _) = alt((tag(b"\r\n"), tag(b"\n"), eof))(input)?;
+    let (input, _) = alt((tag(&b"\r\n"[..]), tag(&b"\n"[..]), eof)).parse(input)?;
 
     Ok((input, line))
 }
@@ -302,7 +303,7 @@ fn parse_boundary_delimiter<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a 
         let (input, _) = space0(input)?;
 
         // Accept either CRLF, LF (for robustness), or EOF (for final boundary at the end of data)
-        let (input, _) = alt((parse_crlf, tag(b"\n"), eof))(input)?;
+        let (input, _) = alt((parse_crlf, tag(&b"\n"[..]), eof)).parse(input)?;
 
         return Ok((input, true));
     }
@@ -318,7 +319,7 @@ fn parse_boundary_delimiter<'a>(input: &'a [u8], boundary: &str) -> IResult<&'a 
         let (input, _) = space0(input)?;
 
         // Accept either CRLF, LF (for robustness), or EOF (for final boundary at the end of data)
-        let (input, _) = alt((parse_crlf, tag(b"\n"), eof))(input)?;
+        let (input, _) = alt((parse_crlf, tag(&b"\n"[..]), eof)).parse(input)?;
 
         return Ok((input, false));
     }

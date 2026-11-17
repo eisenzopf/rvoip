@@ -43,20 +43,27 @@ thresholds rather than a reviewed baseline, so resizing that class needed no
 rebaseline.
 
 The full `remote-release` shape is six short-performance workers, three
-long-soak workers, seven burst/soak workers, one interoperability worker, and
-two proxy-interoperability workers, 192 vCPUs concurrently. The interop and
+long-soak workers, seven burst/soak workers, six interoperability workers, and
+two proxy-interoperability workers, 272 vCPUs concurrently. The interop and
 proxy-interop workers read no performance bundle, so they launch alongside the
 32-vCPU builder instead of waiting for it; the performance workers launch once
-the builder's bundle is verified. Interop is the fleet's longest serial chain,
-one stateful peer lab running 27 gates, three of which compile on the worker,
-which is why it has 16 vCPUs and why it no longer waits about 26 minutes for a
-bundle it never reads. Each long-soak
+the builder's bundle is verified.
+
+Interoperability runs one worker per lab lane (`INTEROP_LANES` in
+`scripts/release/build_gate_catalog.py`, each gate's `interop_lane`):
+Asterisk, FreeSWITCH, Jambonz, SIPp and strict UA, libSRTP, and the AMR
+per-rate sweep. It used to be one stateful lab running 27 gates in series,
+about two hours by the catalog estimates; each lane now starts its own fresh
+lab, ordering dependencies remain only between gates of the same lane, and the
+interop critical path is the longest lane (the AMR sweep, about 35 minutes).
+Each worker keeps 16 vCPUs because three lanes compile on the worker. Each
+long-soak
 worker owns one long gate: the canonical 2,000-CPS evaluation, the monolithic
 soak, or the soak candidate. Packed two to a worker, the two hour-long soaks
 ran back to back for about 2 h 20 min, leaving the three-hour controller job,
 which also covers the prebuild, about ten minutes of slack, and starting the
 second soak on a machine the first had just loaded. Peak
-demand is therefore 192 On-Demand Standard vCPUs against the account's
+demand is therefore 272 On-Demand Standard vCPUs against the account's
 1,152-vCPU quota in `us-west-2`.
 
 Machine classes are policy values recorded in every attestation. Moving clouds
@@ -68,6 +75,10 @@ changed it again, to
 `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`: the per-gate
 evidence identity is the environment identifier plus the resource class, so
 without the bump an 8-vCPU receipt would still match.
+Raising the minimum Rust to 1.95 changed it once more, to
+`rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`,
+so the first qualification on the new toolchain runs every
+environment-sensitive gate fresh.
 Performance thresholds are unchanged; the first AWS run establishes whether
 `m5` meets them and becomes the comparison baseline for later releases.
 
@@ -197,14 +208,43 @@ rvoip-expires-at=<ISO 8601 UTC, creation + 4h>
 - `gate-aws` prepares the manifest, builds the performance bundle once on an
   `m5.8xlarge` (or reuses the content-addressed cache), creates every worker
   concurrently with `run-instances`, polls S3 and instance states, applies the
-  same early-failure cutoff by stopping deferred workers, downloads and
-  verifies every bundle, and terminates the fleet.
+  early-failure cutoff, downloads and verifies every bundle, and terminates
+  the fleet. The cutoff is scoped by the gate catalog: once the bounded lanes
+  have settled with a failure, it stops only deferred workers (interop lanes,
+  long soaks) holding a gate that depends on a failed shard. Independent
+  hour-long work keeps running and its evidence stays reusable, so one flake
+  costs a rerun of its own shard.
+- Hosted gate shards restore a per-shard compiler cache
+  (`Swatinem/rust-cache`, keyed by `Cargo.lock` and the toolchain); every gate
+  still builds and runs the exact candidate.
 - `cleanup-aws` sweeps instances tagged with this run that an interrupted
   controller left behind and fails if any remain.
+- `gate-bench` runs the release-only `bench-lane` shards (the RFC 7502
+  benchmark) from a hosted controller job holding the provisioner role; the
+  lane provisions its own DUT and callers
+  (`docs/release/BENCH_GATE_INTERFACE.md`). It runs only for the
+  `bench-release`, `bench-minor`, `release-patch` and `release-minor` profiles
+  and only when the bench receipt cannot be reused.
+
+A requalification whose plan reuses every EC2 gate (a version-only bump on top
+of a qualified candidate) creates no worker at all: `aws_shard_count` is zero,
+so `preflight-aws`, `gate-aws` and `cleanup-aws` are skipped. The lab teardown
+gates are reused with their chains and rerun whenever anything in their chain
+reruns, and `interop.jambonz-latest` (a network-only upstream check) runs in
+the hosted evidence shard.
 
 Cleanup runs in three layers as before: worker self-termination after
 evidence upload, controller terminate on `always()`, and the scheduled
 janitor.
+
+## No scheduled qualification
+
+Nothing runs this workflow on a schedule: the full fanout (up to 24 workers
+and 272 vCPUs) runs only when someone dispatches it, normally on release day
+(`docs/RELEASING.md`, "Release day"). `scripts/ci/test_workflow_policy.py`
+fails if a scheduled workflow calls it. The browser interop and
+credential-timing jobs (`nightly-interop.yml`) keep their own nightly
+schedule on a hosted runner.
 
 ## What was removed
 

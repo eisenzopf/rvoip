@@ -53,7 +53,7 @@ async fn whips_post_returns_201_over_tls() {
     let addr = server.whips_addr().expect("whips addr");
 
     // reqwest with danger_accept_invalid_certs — self-signed.
-    let http = reqwest::Client::builder()
+    let http = ring_reqwest_builder()
         .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(10))
         .build()
@@ -221,4 +221,11 @@ impl rustls::client::danger::ServerCertVerifier for InsecureVerifier {
             rustls::SignatureScheme::ED25519,
         ]
     }
+}
+
+/// reqwest is built with `rustls-no-provider`: install the workspace's ring
+/// provider as the process default before building a client.
+fn ring_reqwest_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
 }

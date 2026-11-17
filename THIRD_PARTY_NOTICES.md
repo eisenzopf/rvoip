@@ -20,8 +20,8 @@ Upstream: <https://github.com/cloudflare/moq-rs> and
 
 ## WebRTC.rs
 
-`rvoip-rtc` derives from WebRTC.rs `rtc` 0.20.0-alpha.1 at commit
-`b808b74f712ed379312a114b848ede133880d58a`, with the reviewed changes listed
+`rvoip-rtc` derives from WebRTC.rs `rtc` 0.21.1 at commit
+`2a732df55ca4bcf26b80914fa0f570cfaf74cfcb`, with the reviewed changes listed
 in its `RVOIP_PATCHES.md`.
 `rvoip-webrtc-stack` derives from WebRTC.rs `webrtc` 0.20.0-alpha.1 at commit
 `b899593a5c525e88098ce9f5326fe29b4478832d` and binds that attributed RTC

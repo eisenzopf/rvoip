@@ -24,5 +24,18 @@ class ActiveReleaseMetadataTests(unittest.TestCase):
             version = tomllib.load(handle)["workspace"]["package"]["version"]
         RELEASE.validate_active_release_metadata(ROOT, version)
 
+    def test_release_notes_keep_high_cps_as_a_non_claim(self) -> None:
+        # Moved from rvoip-sip's beta_release_docs.rs when the notes moved to
+        # docs/release/: the notes are release bookkeeping, outside every
+        # qualification gate's inputs, so their content is policed here, in
+        # the PR Gate's universal policy job, on every pull request.
+        notes = (ROOT / "docs/release/RELEASE_NOTES_NEXT.md").read_text(encoding="utf-8")
+        self.assertIn("General-user 10,000 CPS full-media capability", notes)
+        stub = (ROOT / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("docs/release/RELEASE_NOTES_NEXT.md", stub)
+
+
 if __name__ == "__main__":
     unittest.main()

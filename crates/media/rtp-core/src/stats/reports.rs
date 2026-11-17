@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 use crate::packet::rtcp::{
     NtpTimestamp, RtcpReceiverReport, RtcpReportBlock, RtcpSdesChunk, RtcpSdesItem,
@@ -130,7 +130,7 @@ impl RtcpIntervalParams {
     /// The transmission interval: `Td` scaled by a uniform factor in
     /// [0.5, 1.5] and divided by `e - 3/2` (RFC 3550 Appendix A.7).
     pub fn randomized<R: Rng + ?Sized>(&self, rng: &mut R) -> Duration {
-        let factor: f64 = rng.gen_range(0.5..=1.5);
+        let factor: f64 = rng.random_range(0.5..=1.5);
         Duration::from_secs_f64(self.deterministic().as_secs_f64() * factor / RTCP_COMPENSATION)
     }
 
@@ -345,7 +345,7 @@ impl RtcpReportGenerator {
     /// minimum (halved before the first report), randomised over
     /// [0.5, 1.5] and divided by `e - 3/2`.
     pub fn calculate_interval(&mut self) -> Duration {
-        let interval = self.interval_params().randomized(&mut rand::thread_rng());
+        let interval = self.interval_params().randomized(&mut rand::rng());
         self.last_interval = interval;
         interval
     }

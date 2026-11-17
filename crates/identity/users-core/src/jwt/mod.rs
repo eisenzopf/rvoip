@@ -12,13 +12,13 @@ use uuid::Uuid;
 /// PKCS#1 private-key PEM. JWT verification and JWKS publication both need
 /// the public key; the private PEM is not a usable verification key.
 fn rsa_public_components(signing_key: &str) -> Result<(String, String)> {
-    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(signing_key)
-        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(signing_key))
+    let private_key = rsa::PrivateKey::from_pkcs8_pem(signing_key)
+        .or_else(|_| rsa::PrivateKey::from_pkcs1_pem(signing_key))
         .map_err(|err| Error::Config(format!("invalid RSA signing key: {err}")))?;
     let public_key = private_key.to_public_key();
     Ok((
-        URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
-        URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+        URL_SAFE_NO_PAD.encode(public_key.n().to_be_bytes_trimmed_vartime()),
+        URL_SAFE_NO_PAD.encode(public_key.e().to_be_bytes_trimmed_vartime()),
     ))
 }
 
@@ -274,7 +274,8 @@ impl JwtIssuer {
         let encoding_key = match config.algorithm.as_str() {
             "RS256" => EncodingKey::from_rsa_pem(signing_key.as_bytes())
                 .map_err(|e| Error::Config(format!("Invalid RSA key: {}", e)))?,
-            "HS256" => EncodingKey::from_secret(signing_key.as_bytes()),
+            "HS256" => EncodingKey::from_secret(signing_key.as_bytes())
+                .map_err(|e| Error::Config(format!("Invalid HS256 signing key: {}", e)))?,
             _ => {
                 return Err(Error::Config(format!(
                     "Unsupported algorithm: {}",
@@ -291,7 +292,8 @@ impl JwtIssuer {
                 DecodingKey::from_rsa_components(&modulus, &exponent)
                     .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?
             }
-            "HS256" => DecodingKey::from_secret(signing_key.as_bytes()),
+            "HS256" => DecodingKey::from_secret(signing_key.as_bytes())
+                .map_err(|e| Error::Config(format!("Invalid HS256 signing key: {}", e)))?,
             _ => unreachable!(),
         };
 
@@ -461,10 +463,10 @@ impl JwtIssuer {
 
     fn generate_hs256_secret() -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        use rand::{rngs::OsRng, RngCore};
+        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 
         let mut secret = [0u8; 32];
-        OsRng.fill_bytes(&mut secret);
+        UnwrapErr(SysRng).fill_bytes(&mut secret);
         URL_SAFE_NO_PAD.encode(secret)
     }
 }
@@ -500,6 +502,15 @@ mod tests {
             updated_at: now,
             last_login: None,
         }
+    }
+
+    #[test]
+    fn empty_hs256_signing_key_is_a_config_error() {
+        let result = JwtIssuer::new(JwtConfig {
+            signing_key: Some(String::new()),
+            ..JwtConfig::default()
+        });
+        assert!(matches!(result, Err(Error::Config(msg)) if msg.contains("HS256 signing key")));
     }
 
     #[test]

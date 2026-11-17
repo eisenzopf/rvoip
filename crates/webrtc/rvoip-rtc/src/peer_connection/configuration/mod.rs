@@ -19,6 +19,7 @@
 //! # Quick Start
 //!
 //! ```
+//! # use std::time::Instant;
 //! use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! use rtc::peer_connection::configuration::{RTCConfigurationBuilder, RTCIceServer};
 //!
@@ -35,7 +36,7 @@
 //!             ])
 //!             .build()
 //!     )
-//!     .build()?;
+//!     .build(Instant::now())?;
 //! # Ok(())
 //! # }
 //! ```
@@ -97,12 +98,17 @@
 //! ```
 //! use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 //! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rcgen::KeyPair;
+//! use rtc::crypto::{self, SignatureScheme};
+//! use rtc::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//!     let provider = crypto::default_provider()?;
 //! // Generate custom certificate for peer identity
-//! let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-//! let certificate = RTCCertificate::from_key_pair(key_pair)?;
+//! let certificate = RTCCertificate::generate(
+//!     provider.crypto(),
+//!     SignatureScheme::EcdsaP256Sha256,
+//!     CertificateParams::new(vec!["localhost".to_owned()])?,
+//! )?;
 //!
 //! let config = RTCConfigurationBuilder::new()
 //!     .with_certificates(vec![certificate])
@@ -150,11 +156,16 @@
 //! };
 //! use rtc::peer_connection::configuration::RTCIceServer;
 //! use rtc::peer_connection::certificate::RTCCertificate;
-//! use rcgen::KeyPair;
+//! use rtc::crypto::{self, SignatureScheme};
+//! use rtc::peer_connection::certificate::CertificateParams;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-//! let certificate = RTCCertificate::from_key_pair(key_pair)?;
+//!     let provider = crypto::default_provider()?;
+//! let certificate = RTCCertificate::generate(
+//!     provider.crypto(),
+//!     SignatureScheme::EcdsaP256Sha256,
+//!     CertificateParams::new(vec!["localhost".to_owned()])?,
+//! )?;
 //!
 //! let config = RTCConfigurationBuilder::new()
 //!     .with_ice_servers(vec![
@@ -197,15 +208,14 @@
 //! - **Negotiate** - Try to multiplex, fall back to separate ports
 //! - **Require** - Require multiplexing (standard for WebRTC, recommended)
 //!
-//! # Specifications
+//! # Specification
 //!
-//! * [W3C RTCConfiguration](https://w3c.github.io/webrtc-pc/#rtcconfiguration-dictionary)
-//! * [RFC 8834 - WebRTC Transports](https://tools.ietf.org/html/rfc8834)
-//! * [RFC 8445 - ICE](https://tools.ietf.org/html/rfc8445)
+//! * [W3C RTCConfiguration](https://www.w3.org/TR/webrtc/#rtcconfiguration-dictionary)
+//! * [RFC 8834 - WebRTC Transports](https://datatracker.ietf.org/doc/html/rfc8834)
+//! * [RFC 8445 - ICE](https://datatracker.ietf.org/doc/html/rfc8445)
 
 use crate::peer_connection::certificate::RTCCertificate;
 pub use crate::peer_connection::transport::ice::server::RTCIceServer;
-use rcgen::KeyPair;
 use shared::error::{Error, Result};
 use std::time::SystemTime;
 
@@ -236,7 +246,7 @@ pub(crate) const UNSPECIFIED_STR: &str = "Unspecified";
 ///
 /// * [W3C]
 ///
-/// [W3C]: https://w3c.github.io/webrtc-pc/#rtcconfiguration-dictionary
+/// [W3C]: https://www.w3.org/TR/webrtc/#rtcconfiguration-dictionary
 #[derive(Default, Clone, Debug)]
 pub struct RTCConfiguration {
     /// ice_servers defines a slice describing servers available to be used by
@@ -331,7 +341,7 @@ impl RTCConfiguration {
     }
 
     /// get_ice_servers side-steps the strict parsing mode of the ice package
-    /// (as defined in https://tools.ietf.org/html/rfc7064) by copying and then
+    /// (as defined in https://datatracker.ietf.org/doc/html/rfc7064) by copying and then
     /// stripping any erroneous queries from "stun(s):" URLs before parsing.
     #[allow(clippy::assigning_clones)]
     fn get_ice_servers(&self) -> Vec<RTCIceServer> {
@@ -358,19 +368,38 @@ impl RTCConfiguration {
             }
         }
 
+        if self.ice_transport_policy == RTCIceTransportPolicy::Relay {
+            let mut has_turn = false;
+            for server in &sanitized_ice_servers {
+                let urls = server.urls()?;
+                for url in urls {
+                    if url.scheme == ice::url::SchemeType::Turn
+                        || url.scheme == ice::url::SchemeType::Turns
+                    {
+                        has_turn = true;
+                        break;
+                    }
+                }
+                if has_turn {
+                    break;
+                }
+            }
+            if !has_turn {
+                return Err(Error::Other(
+                    "Relay-only ICE transport policy configured, but no TURN/TURNS servers are available".to_owned()
+                ));
+            }
+        }
+
         // <https://www.w3.org/TR/webrtc/#constructor> (step #3)
         if !self.certificates.is_empty() {
-            let now = SystemTime::now();
+            let now = SystemTime::now(); // Exemption: wall-clock is correct here to check X.509 certificate expiry
             for cert in &self.certificates {
                 cert.expires
                     .duration_since(now)
                     .map_err(|_| Error::ErrCertificateExpired)?;
             }
-        } else {
-            let kp = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-            let cert = RTCCertificate::from_key_pair(kp)?;
-            self.certificates = vec![cert];
-        };
+        }
 
         Ok(())
     }
@@ -378,7 +407,7 @@ impl RTCConfiguration {
 
 /// Builder for creating RTCConfiguration instances.
 ///
-/// This builder provides a fluent API for configuring WebRTC peer connection settings:
+/// This registry provides a fluent API for configuring WebRTC peer connection settings:
 /// - ICE servers (STUN/TURN) for NAT traversal
 /// - Transport policies (which ICE candidates to use)
 /// - Bundle and RTCP mux policies
@@ -455,11 +484,16 @@ impl RTCConfiguration {
 /// ```
 /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 /// use rtc::peer_connection::certificate::RTCCertificate;
-/// use rcgen::KeyPair;
+/// use rtc::crypto::{self, SignatureScheme};
+/// use rtc::peer_connection::certificate::CertificateParams;
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-/// let certificate = RTCCertificate::from_key_pair(key_pair)?;
+///     let provider = crypto::default_provider()?;
+/// let certificate = RTCCertificate::generate(
+///     provider.crypto(),
+///     SignatureScheme::EcdsaP256Sha256,
+///     CertificateParams::new(vec!["localhost".to_owned()])?,
+/// )?;
 ///
 /// let config = RTCConfigurationBuilder::new()
 ///     .with_certificates(vec![certificate])
@@ -467,45 +501,8 @@ impl RTCConfiguration {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Default, Debug)]
-pub struct RTCConfigurationBuilder {
-    /// ice_servers defines a slice describing servers available to be used by
-    /// ICE, such as STUN and TURN servers.
-    pub(crate) ice_servers: Vec<RTCIceServer>,
-
-    /// ice_transport_policy indicates which candidates the ICEAgent is allowed
-    /// to use.
-    pub(crate) ice_transport_policy: RTCIceTransportPolicy,
-
-    /// bundle_policy indicates which media-bundling policy to use when gathering
-    /// ICE candidates.
-    pub(crate) bundle_policy: RTCBundlePolicy,
-
-    /// rtcp_mux_policy indicates which rtcp-mux policy to use when gathering ICE
-    /// candidates.
-    pub(crate) rtcp_mux_policy: RTCRtcpMuxPolicy,
-
-    /// peer_identity sets the target peer identity for the PeerConnection.
-    /// The PeerConnection will not establish a connection to a remote peer
-    /// unless it can be successfully authenticated with the provided name.
-    pub(crate) peer_identity: String,
-
-    /// certificates describes a set of certificates that the PeerConnection
-    /// uses to authenticate. Valid values for this parameter are created
-    /// through calls to the generate_certificate function. Although any given
-    /// DTLS connection will use only one certificate, this attribute allows the
-    /// caller to provide multiple certificates that support different
-    /// algorithms. The final certificate will be selected based on the DTLS
-    /// handshake, which establishes which certificates are allowed. The
-    /// PeerConnection implementation selects which of the certificates is
-    /// used for a given connection; how certificates are selected is outside
-    /// the scope of this specification. If this value is absent, then a default
-    /// set of certificates is generated for each PeerConnection instance.
-    pub(crate) certificates: Vec<RTCCertificate>,
-
-    /// ice_candidate_pool_size describes the size of the prefetched ICE pool.
-    pub(crate) ice_candidate_pool_size: u8,
-}
+#[derive(Default)]
+pub struct RTCConfigurationBuilder(RTCConfiguration);
 
 impl RTCConfigurationBuilder {
     /// Creates a new RTCConfigurationBuilder with default settings.
@@ -556,7 +553,7 @@ impl RTCConfigurationBuilder {
     ///     .build();
     /// ```
     pub fn with_ice_servers(mut self, ice_servers: Vec<RTCIceServer>) -> Self {
-        self.ice_servers = ice_servers;
+        self.0.ice_servers = ice_servers;
         self
     }
 
@@ -580,7 +577,7 @@ impl RTCConfigurationBuilder {
         mut self,
         ice_transport_policy: RTCIceTransportPolicy,
     ) -> Self {
-        self.ice_transport_policy = ice_transport_policy;
+        self.0.ice_transport_policy = ice_transport_policy;
         self
     }
 
@@ -601,7 +598,7 @@ impl RTCConfigurationBuilder {
     ///     .build();
     /// ```
     pub fn with_bundle_policy(mut self, bundle_policy: RTCBundlePolicy) -> Self {
-        self.bundle_policy = bundle_policy;
+        self.0.bundle_policy = bundle_policy;
         self
     }
 
@@ -621,7 +618,7 @@ impl RTCConfigurationBuilder {
     ///     .build();
     /// ```
     pub fn with_rtcp_mux_policy(mut self, rtcp_mux_policy: RTCRtcpMuxPolicy) -> Self {
-        self.rtcp_mux_policy = rtcp_mux_policy;
+        self.0.rtcp_mux_policy = rtcp_mux_policy;
         self
     }
 
@@ -640,7 +637,7 @@ impl RTCConfigurationBuilder {
     ///     .build();
     /// ```
     pub fn with_peer_identitys(mut self, peer_identity: String) -> Self {
-        self.peer_identity = peer_identity;
+        self.0.peer_identity = peer_identity;
         self
     }
 
@@ -654,11 +651,16 @@ impl RTCConfigurationBuilder {
     /// ```
     /// use rtc::peer_connection::configuration::RTCConfigurationBuilder;
     /// use rtc::peer_connection::certificate::RTCCertificate;
-    /// use rcgen::KeyPair;
+    /// use rtc::crypto::{self, SignatureScheme};
+    /// use rtc::peer_connection::certificate::CertificateParams;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// let key_pair = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-    /// let certificate = RTCCertificate::from_key_pair(key_pair)?;
+    ///     let provider = crypto::default_provider()?;
+    /// let certificate = RTCCertificate::generate(
+    ///     provider.crypto(),
+    ///     SignatureScheme::EcdsaP256Sha256,
+    ///     CertificateParams::new(vec!["localhost".to_owned()])?,
+    /// )?;
     ///
     /// let config = RTCConfigurationBuilder::new()
     ///     .with_certificates(vec![certificate])
@@ -667,7 +669,7 @@ impl RTCConfigurationBuilder {
     /// # }
     /// ```
     pub fn with_certificates(mut self, certificates: Vec<RTCCertificate>) -> Self {
-        self.certificates = certificates;
+        self.0.certificates = certificates;
         self
     }
 
@@ -686,7 +688,7 @@ impl RTCConfigurationBuilder {
     ///     .build();
     /// ```
     pub fn with_ice_candidate_pool_size(mut self, ice_candidate_pool_size: u8) -> Self {
-        self.ice_candidate_pool_size = ice_candidate_pool_size;
+        self.0.ice_candidate_pool_size = ice_candidate_pool_size;
         self
     }
 
@@ -702,15 +704,7 @@ impl RTCConfigurationBuilder {
     /// let config = RTCConfigurationBuilder::new().build();
     /// ```
     pub fn build(self) -> RTCConfiguration {
-        RTCConfiguration {
-            ice_servers: self.ice_servers,
-            ice_transport_policy: self.ice_transport_policy,
-            bundle_policy: self.bundle_policy,
-            rtcp_mux_policy: self.rtcp_mux_policy,
-            peer_identity: self.peer_identity,
-            certificates: self.certificates,
-            ice_candidate_pool_size: self.ice_candidate_pool_size,
-        }
+        self.0
     }
 }
 
@@ -747,6 +741,36 @@ mod test {
             let parsed_urls = cfg.get_ice_servers();
             assert_eq!(parsed_urls[0].urls[0], expected_server_str);
         }
+    }
+
+    #[test]
+    fn test_configuration_validate_relay_policy() {
+        // Relay policy with no ICE servers should fail validation
+        let mut cfg = RTCConfigurationBuilder::new()
+            .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
+            .build();
+        assert!(cfg.validate().is_err());
+
+        // Relay policy with STUN server only should fail validation
+        let mut cfg = RTCConfigurationBuilder::new()
+            .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
+            .with_ice_servers(vec![RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_owned()],
+                ..Default::default()
+            }])
+            .build();
+        assert!(cfg.validate().is_err());
+
+        // Relay policy with TURN server should pass validation
+        let mut cfg = RTCConfigurationBuilder::new()
+            .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
+            .with_ice_servers(vec![RTCIceServer {
+                urls: vec!["turn:turn.example.com:3478".to_owned()],
+                username: "user".to_owned(),
+                credential: "pass".to_owned(),
+            }])
+            .build();
+        assert!(cfg.validate().is_ok());
     }
 
     /*TODO:#[test] fn test_configuration_json() {

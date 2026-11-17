@@ -211,7 +211,7 @@ impl OtlpAuditSink {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::ring_http_client(),
             endpoint,
             headers: HeaderMap::new(),
             service_name: "rvoip".to_string(),
@@ -330,7 +330,7 @@ impl SiemAuditSink {
             ));
         }
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: crate::ring_http_client(),
             endpoint,
             headers: HeaderMap::new(),
             format,
@@ -649,4 +649,16 @@ mod tests {
             "SipRegister"
         );
     }
+}
+
+/// Build a reqwest client on the workspace's ring rustls provider.
+///
+/// reqwest is built with `rustls-no-provider` and so uses the process-default
+/// rustls provider. Install the workspace's ring provider as that default
+/// first (a no-op when the application has already installed one).
+pub(crate) fn ring_http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .build()
+        .expect("reqwest client builds with the ring rustls provider")
 }
