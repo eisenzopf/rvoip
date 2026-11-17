@@ -4,6 +4,7 @@
 // other-priority = token
 
 use nom::combinator::{all_consuming, map_res};
+use nom::Parser;
 use std::str;
 
 // Import from new modules
@@ -21,7 +22,7 @@ fn priority_value(input: &[u8]) -> ParseResult<'_, Priority> {
         token, // Any token is valid per RFC 3261
         |bytes| {
             let s = str::from_utf8(bytes).map_err(|_| {
-                nom::Err::Failure(nom::error::Error::new(bytes, nom::error::ErrorKind::Char))
+                nom::Err::<_>::Failure(nom::error::Error::new(bytes, nom::error::ErrorKind::Char))
             })?;
 
             // Check if it's a numeric string and verify it's within u8 range
@@ -40,7 +41,8 @@ fn priority_value(input: &[u8]) -> ParseResult<'_, Priority> {
                 Ok(Priority::from_token(s))
             }
         },
-    ))(input)
+    ))
+    .parse(input)
 }
 
 pub fn parse_priority(input: &[u8]) -> ParseResult<'_, Priority> {

@@ -46,7 +46,7 @@ fn static_dir() -> PathBuf {
 async fn spawn_static_server() -> (std::net::SocketAddr, Arc<Notify>) {
     let root = static_dir();
     let app = Router::new().route(
-        "/:file",
+        "/{file}",
         get(move |Path(file): Path<String>| {
             let root = root.clone();
             async move { serve_file(&root, &file).await }

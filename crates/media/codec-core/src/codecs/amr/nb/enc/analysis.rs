@@ -868,10 +868,10 @@ impl WeightedSpeech {
             "pre_big works on two whole subframes inside the frame"
         );
         let g1 = pre_big_gamma1(mode);
-        let mut slot = usize::from(offset > 0) * 2;
+        let first_slot = usize::from(offset > 0) * 2;
         let mut at = offset;
 
-        for _ in 0..2 {
+        for slot in first_slot..first_slot + 2 {
             let a = &az[slot * MP1..(slot + 1) * MP1];
             let ap1 = expand_bandwidth(ctx, a, g1);
             let ap2 = expand_bandwidth(ctx, a, &GAMMA2);
@@ -887,7 +887,6 @@ impl WeightedSpeech {
             self.mem_w =
                 synthesis_filter_in_place(ctx, &ap2, &mut wsp[at..at + L_SUBFR], &self.mem_w);
 
-            slot += 1;
             at += L_SUBFR;
         }
     }

@@ -7,6 +7,7 @@ use crate::parser::separators::{comma, equal, ldquot, rdquot};
 use crate::parser::token::token;
 use crate::parser::uri::parse_uri;
 use crate::parser::ParseResult;
+use nom::Parser;
 // Keep types used internally or returned by base parsers
 use crate::types::auth::{Algorithm, AuthParam, AuthenticationInfoParam, DigestParam, Qop};
 use crate::types::Uri;
@@ -83,7 +84,8 @@ fn auth_value(input: &[u8]) -> ParseResult<'_, (&[u8], bool)> {
     alt((
         nom::combinator::map(token, |value| (value, false)),
         nom::combinator::map(quoted_string, |value| (value, true)),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // auth-param = auth-param-name EQUAL auth-value
@@ -109,7 +111,8 @@ pub fn auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
                 quoted,
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Helper to check if a value is a quoted string
@@ -125,7 +128,8 @@ pub fn realm(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("realm"), preceded(equal, realm_value)),
         |bytes| str::from_utf8(bytes).map(String::from), // Assuming realm_value returns content
-    )(input)
+    )
+    .parse(input)
 }
 
 // nonce-value = quoted-string
@@ -139,7 +143,8 @@ pub fn nonce(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("nonce"), preceded(equal, nonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // opaque = "opaque" EQUAL quoted-string
@@ -148,7 +153,8 @@ pub fn opaque(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("opaque"), preceded(equal, quoted_string)),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // domain = "domain" EQUAL LDQUOT URI *( 1*SP URI ) RDQUOT ; Not quite right per RFC
@@ -159,7 +165,8 @@ pub fn domain(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("domain"), preceded(equal, quoted_string)),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
     // TODO: Parse the actual list of URIs inside the string if needed later
 }
 
@@ -175,7 +182,8 @@ pub fn stale(input: &[u8]) -> ParseResult<'_, bool> {
                 value(false, bytes::tag_no_case("false")),
             )),
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 // algorithm = "algorithm" EQUAL ( "MD5" / "MD5-sess" / "SHA-256" /
@@ -183,10 +191,10 @@ pub fn stale(input: &[u8]) -> ParseResult<'_, bool> {
 // (RFC 3261 §25.1 as updated by RFC 8760 §2.6). A quoted value, which some
 // peers send, is accepted too. Unknown tokens keep their spelling.
 pub fn algorithm(input: &[u8]) -> ParseResult<'_, Algorithm> {
-    let (input, _) = tag_no_case(b"algorithm")(input)?;
+    let (input, _) = tag_no_case(&b"algorithm"[..])(input)?;
     let (input, _) = equal(input)?;
     let (input, value) = if input.first() == Some(&b'"') {
-        delimited(tag(b"\""), take_while(|c| c != b'"'), tag(b"\""))(input)?
+        delimited(tag(&b"\""[..]), take_while(|c| c != b'"'), tag(&b"\""[..])).parse(input)?
     } else {
         take_while(is_token_char)(input)?
     };
@@ -201,20 +209,21 @@ pub fn algorithm(input: &[u8]) -> ParseResult<'_, Algorithm> {
 // qop-value = "auth" / "auth-int" / token
 // Returns Qop enum
 fn qop_value(input: &[u8]) -> ParseResult<'_, Qop> {
-    map_res(token, |bytes| Qop::from_str(str::from_utf8(bytes)?))(input)
+    map_res(token, |bytes| Qop::from_str(str::from_utf8(bytes)?)).parse(input)
 }
 
 // qop-options = "qop" EQUAL LDQUOT qop-value *("," qop-value) RDQUOT
 // Returns Vec<Qop>
 pub fn qop_options(input: &[u8]) -> ParseResult<'_, Vec<Qop>> {
     preceded(
-        pair(bytes::tag_no_case(b"qop"), equal),
+        pair(bytes::tag_no_case(&b"qop"[..]), equal),
         delimited(
             ldquot,
             separated_list1(comma, qop_value), // Use comma separator
             rdquot,
         ),
-    )(input)
+    )
+    .parse(input)
 }
 
 // username-value = quoted-string
@@ -231,7 +240,8 @@ pub fn username(input: &[u8]) -> ParseResult<'_, String> {
             preceded(equal, username_value),
         ),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // digest-uri-value = Request-URI (SIP-URI / SIPS-URI / absoluteURI)
@@ -240,7 +250,7 @@ pub fn username(input: &[u8]) -> ParseResult<'_, String> {
 // digest-uri = "uri" EQUAL LDQUOT digest-uri-value RDQUOT ; Corrected grammar
 // Returns Uri struct
 pub fn digest_uri(input: &[u8]) -> ParseResult<'_, Uri> {
-    let (rest, _) = preceded(bytes::tag_no_case("uri"), equal)(input)?;
+    let (rest, _) = preceded(bytes::tag_no_case("uri"), equal).parse(input)?;
 
     let (rest, value) = quoted_string(rest)?;
 
@@ -258,7 +268,7 @@ fn is_hex_digit(c: u8) -> bool {
 // request-digest = LDQUOT 32LHEX RDQUOT ; RFC 2617 specifies 32 hex digits
 // However, we'll allow other lengths as some implementations don't adhere strictly to 32
 fn request_digest(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    delimited(ldquot, take_while1(is_hex_digit), rdquot)(input)
+    delimited(ldquot, take_while1(is_hex_digit), rdquot).parse(input)
 }
 
 // dresponse = "response" EQUAL request-digest
@@ -270,7 +280,8 @@ pub fn dresponse(input: &[u8]) -> ParseResult<'_, String> {
             preceded(equal, request_digest),
         ),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // cnonce-value = nonce-value (quoted-string)
@@ -284,14 +295,15 @@ pub fn cnonce(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
         preceded(bytes::tag_no_case("cnonce"), preceded(equal, cnonce_value)),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // message-qop = "qop" EQUAL qop-value
 // Note: This is different from qop-options in challenge, value is not quoted
 // Returns Qop enum
 pub fn message_qop(input: &[u8]) -> ParseResult<'_, Qop> {
-    preceded(bytes::tag_no_case("qop"), preceded(equal, qop_value))(input)
+    preceded(bytes::tag_no_case("qop"), preceded(equal, qop_value)).parse(input)
 }
 
 // nc-value = 8LHEX
@@ -316,7 +328,8 @@ fn nc_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // nonce-count = "nc" EQUAL nc-value
 // Returns u32 (parsed hex)
 pub fn nonce_count(input: &[u8]) -> ParseResult<'_, u32> {
-    let (rem, nc_bytes) = preceded(bytes::tag_no_case("nc"), preceded(equal, nc_value))(input)?;
+    let (rem, nc_bytes) =
+        preceded(bytes::tag_no_case("nc"), preceded(equal, nc_value)).parse(input)?;
 
     // Convert Utf8Error and ParseIntError into nom::Err::Failure
     let s = str::from_utf8(nc_bytes)
@@ -337,12 +350,13 @@ pub fn nextnonce(input: &[u8]) -> ParseResult<'_, String> {
             preceded(equal, nonce_value),
         ),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // response-digest = LDQUOT *LHEX RDQUOT
 fn response_digest(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    delimited(ldquot, recognize(many0(lhex)), rdquot)(input)
+    delimited(ldquot, recognize(many0(lhex)), rdquot).parse(input)
 }
 
 // response-auth = "rspauth" EQUAL response-digest
@@ -354,7 +368,8 @@ pub fn response_auth(input: &[u8]) -> ParseResult<'_, String> {
             preceded(equal, response_digest),
         ),
         |bytes| str::from_utf8(bytes).map(String::from),
-    )(input)
+    )
+    .parse(input)
 }
 
 // ainfo = nextnonce / message-qop / response-auth / cnonce / nonce-count
@@ -367,7 +382,8 @@ pub fn ainfo(input: &[u8]) -> ParseResult<'_, AuthenticationInfoParam> {
         map(response_auth, AuthenticationInfoParam::ResponseAuth),
         map(cnonce, AuthenticationInfoParam::Cnonce),
         map(nonce_count, AuthenticationInfoParam::NonceCount), // nonce_count returns u32
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // digest-param = realm / nonce / opaque / stale / algorithm / domain / qop-options ; Challenge params
@@ -394,7 +410,8 @@ pub fn digest_param(input: &[u8]) -> ParseResult<'_, DigestParam> {
         map(nonce_count, DigestParam::NonceCount), // nonce_count returns u32
         // Generic fallback MUST be last
         map(auth_param, DigestParam::Param),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // digest-credential = digest-param *(COMMA digest-param)

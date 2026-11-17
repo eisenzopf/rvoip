@@ -431,7 +431,7 @@ rcgen = "0.14"
 # automatically when more than one provider feature is reachable).
 rustls = { workspace = true }
 clap = { workspace = true }
-cpal = "0.15"
+cpal = "0.18"
 crossterm = "0.29"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 criterion = { workspace = true }
