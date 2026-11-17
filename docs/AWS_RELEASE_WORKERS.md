@@ -75,6 +75,10 @@ changed it again, to
 `rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`: the per-gate
 evidence identity is the environment identifier plus the resource class, so
 without the bump an 8-vCPU receipt would still match.
+Raising the minimum Rust to 1.95 changed it once more, to
+`rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`,
+so the first qualification on the new toolchain runs every
+environment-sensitive gate fresh.
 Performance thresholds are unchanged; the first AWS run establishes whether
 `m5` meets them and becomes the comparison baseline for later releases.
 
