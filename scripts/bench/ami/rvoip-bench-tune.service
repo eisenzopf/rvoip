@@ -1,0 +1,12 @@
+[Unit]
+Description=rvoip bench host tuning (NIC placement, coalescing, ports, THP)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/rvoip-bench/bench_tune.py
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
