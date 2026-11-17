@@ -1668,6 +1668,23 @@ version = "{version}"
                 "candidate_sha": "c" * 40,
                 "status": "PASS",
                 "reasons": [],
+                # Additive lane fields (AZ pin, capacity reservations) are
+                # recorded in the evidence as written, never rejected.
+                "environment": {
+                    "env_id": "c8i-test",
+                    "availability_zone": "us-east-1a",
+                    "capacity_reservations": [
+                        {
+                            "id": "cr-0123456789abcdef0",
+                            "instance_type": "c8i.4xlarge",
+                            "count": 1,
+                            "az": "us-east-1a",
+                            "created_at": "2026-11-17T00:00:00Z",
+                            "cancelled_at": None,
+                            "held_for_resume": True,
+                        }
+                    ],
+                },
             }
             (gate_dir / "bench-receipt.json").write_text(json.dumps(bench))
             receipt = {
