@@ -491,7 +491,7 @@ The current release's authority documents:
 - [Performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md).
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) and [security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md).
 - [Interop plan](crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md) — the evidence boundaries.
-- [Changelog](CHANGELOG.md), [release notes](crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md) and the [0.4 migration guide](docs/MIGRATING_0.4.md) — what changed in this release and how to upgrade from 0.3.
+- [Changelog](CHANGELOG.md), [release notes](docs/release/RELEASE_NOTES_NEXT.md) and the [0.4 migration guide](docs/MIGRATING_0.4.md) — what changed in this release and how to upgrade from 0.3.
 
 This is bounded interoperability evidence, not a claim of compatibility with
 every version, module, configuration, transport, codec, or SIP extension, and

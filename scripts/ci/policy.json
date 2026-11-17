@@ -27,7 +27,9 @@
     "SECURITY.md",
     "LICENSE",
     "CHANGELOG.md",
-    "README.md"
+    "README.md",
+    "changes/**",
+    "docs/release/**"
   ],
   "specialty_only_paths": [
     "crates/sip/sip-proxy/tests/interop/scripts/**"
@@ -245,7 +247,7 @@
       "gate": "release-tooling",
       "patterns": [
         "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md",
-        "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md",
+        "docs/release/RELEASE_NOTES_NEXT.md",
         "crates/sip/rvoip-sip/scripts/full_beta_release.sh",
         "crates/sip/rvoip-sip/scripts/test_beta_*.py",
         "crates/sip/rvoip-sip/scripts/test_canonical_2k_evidence.py",
@@ -254,6 +256,8 @@
         "crates/sip/sip-proxy/tests/interop/scripts/**",
         "scripts/release.py",
         "scripts/release.sh",
+        "scripts/release/notes.py",
+        "scripts/test_release_notes.py",
         "scripts/release/**",
         "scripts/release_*.py",
         "scripts/test_render_qualification_reports.py",
