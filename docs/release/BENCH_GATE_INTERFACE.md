@@ -122,12 +122,13 @@ release day.
 
 ## Release-day sequence
 
-1. Pick a main commit `C` whose nightly `remote-release` run passed.
-2. Dispatch **Release qualification** with `profile=bench-release`,
-   `candidate=C`, and at the same time **Prepare release PR** for `C`.
+1. Pick a main commit `C`. Dispatch **Release qualification** on `C` with
+   `profile=remote-release` and, at the same time, `profile=bench-release`.
+2. When the `remote-release` run is green, dispatch **Prepare release PR**
+   for `C`.
 3. When both are green, merge the bump PR (its head `B` is `C` plus the
    version bump).
 4. Dispatch **Release qualification** with `profile=release-patch`,
    `candidate=B`, `first_candidate=false`,
-   `prior_run_id=<nightly run>,<bench run>`. Only the bookkeeping gates run.
+   `prior_run_id=<C's qualification run>,<bench run>`. Only the bookkeeping gates run.
 5. Publish `B`.

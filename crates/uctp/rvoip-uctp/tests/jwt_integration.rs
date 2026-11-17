@@ -34,7 +34,7 @@ fn mint(sub: &str, expires_in_secs: i64) -> String {
     encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(SECRET),
+        &EncodingKey::from_secret(SECRET).unwrap(),
     )
     .expect("encode")
 }
@@ -45,7 +45,7 @@ async fn coordinator_accepts_valid_jwt_and_unlocks_envelopes() {
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let validator = Arc::new(JwtValidator::from_hmac_secret(SECRET));
+    let validator = Arc::new(JwtValidator::from_hmac_secret(SECRET).unwrap());
     let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, validator);
 
     // Drive `auth.hello → auth.challenge → auth.response (token) → auth.session`.
@@ -109,7 +109,7 @@ async fn coordinator_rejects_invalid_jwt_with_401() {
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let validator = Arc::new(JwtValidator::from_hmac_secret(SECRET));
+    let validator = Arc::new(JwtValidator::from_hmac_secret(SECRET).unwrap());
     let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, validator);
 
     let hello = UctpEnvelope::new(
@@ -163,7 +163,7 @@ async fn coordinator_rejects_expired_jwt_with_401() {
     let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
-    let validator = Arc::new(JwtValidator::from_hmac_secret(SECRET));
+    let validator = Arc::new(JwtValidator::from_hmac_secret(SECRET).unwrap());
     let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, validator);
 
     let hello = UctpEnvelope::new(

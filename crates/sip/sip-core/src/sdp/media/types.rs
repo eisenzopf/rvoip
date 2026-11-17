@@ -3,6 +3,7 @@
 // Handles parsing of media types (e.g., audio, video, application)
 
 use crate::sdp::media::utils::tag_no_case;
+use nom::Parser;
 use nom::{branch::alt, combinator::value, IResult};
 
 /// Parse a media type - audio, video, application, text, message
@@ -13,7 +14,8 @@ pub(crate) fn parse_media_type(input: &str) -> IResult<&str, String> {
         value("application".to_string(), tag_no_case("application")),
         value("text".to_string(), tag_no_case("text")),
         value("message".to_string(), tag_no_case("message")),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Validates if a media type string is valid

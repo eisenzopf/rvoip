@@ -43,6 +43,7 @@ use crate::error::Result;
 #[cfg(test)]
 use crate::types::HeaderValue;
 use crate::types::{Header, HeaderName, TypedHeaderTrait};
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -366,7 +367,8 @@ impl TypedHeaderTrait for Require {
         };
 
         // Parse the header value
-        let require = all_consuming(parse_require)(bytes)
+        let require = all_consuming(parse_require)
+            .parse(bytes)
             .map_err(crate::error::Error::from)
             .map(|(_, v)| Require::new(v))?;
 

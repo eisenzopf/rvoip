@@ -102,9 +102,9 @@ chromiumoxide = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"], optional = true }
 
 # D3a — cpal microphone/speaker + opus encoder. Both pinned to the same
-# versions audio-core (`cpal = "0.15"`) and media-core (`opus = "0.3"`)
-# already use, so cargo resolves a single copy across the workspace.
-cpal = { version = "0.15", optional = true }
+# versions rvoip-audio-device (`cpal = "0.18"`) and codec-core
+# (`opus = "0.4"`) use, so cargo resolves a single copy across the workspace.
+cpal = { version = "0.18", optional = true }
 opus = { version = "0.4", optional = true }
 
 # D3b/c — video encoder + camera capture (all optional).

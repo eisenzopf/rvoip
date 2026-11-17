@@ -5,12 +5,13 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::token;
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till1},
     character::complete::{digit1, space1},
     combinator::{map, opt, verify},
-    sequence::{preceded, tuple},
+    sequence::preceded,
     IResult,
 };
 
@@ -25,7 +26,8 @@ fn payload_type_parser(input: &str) -> IResult<&str, String> {
             }),
             |s: &str| s.to_string(),
         ),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parser for feedback type
@@ -41,7 +43,7 @@ fn additional_params_parser(input: &str) -> IResult<&str, &str> {
 
 /// Main parser for RTCP-FB attribute
 fn rtcp_fb_parser(input: &str) -> IResult<&str, (String, String, Option<String>)> {
-    tuple((
+    (
         // Payload type or "*"
         map(payload_type_parser, |s| s),
         // Space + feedback type
@@ -51,7 +53,8 @@ fn rtcp_fb_parser(input: &str) -> IResult<&str, (String, String, Option<String>)
             space1,
             map(additional_params_parser, |s: &str| s.trim().to_string()),
         )),
-    ))(input)
+    )
+        .parse(input)
 }
 
 /// Parses rtcp-mux attribute: a=rtcp-mux

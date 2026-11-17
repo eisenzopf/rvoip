@@ -6,6 +6,7 @@
 // comma-separated-list = *(token LWS "," LWS) token
 
 use nom::combinator::map_res;
+use nom::Parser;
 
 // Import from new modules
 use crate::parser::token::token;
@@ -27,7 +28,7 @@ use std::str;
 // Helper to parse a token into a String
 // Based on RFC 3261 Section 25.1 token definition
 pub fn token_string(input: &[u8]) -> ParseResult<'_, String> {
-    map_res(token, |b| str::from_utf8(b).map(String::from))(input)
+    map_res(token, |b| str::from_utf8(b).map(String::from)).parse(input)
 }
 
 #[cfg(test)]

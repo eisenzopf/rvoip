@@ -274,7 +274,8 @@ impl JwtIssuer {
         let encoding_key = match config.algorithm.as_str() {
             "RS256" => EncodingKey::from_rsa_pem(signing_key.as_bytes())
                 .map_err(|e| Error::Config(format!("Invalid RSA key: {}", e)))?,
-            "HS256" => EncodingKey::from_secret(signing_key.as_bytes()),
+            "HS256" => EncodingKey::from_secret(signing_key.as_bytes())
+                .map_err(|e| Error::Config(format!("Invalid HS256 signing key: {}", e)))?,
             _ => {
                 return Err(Error::Config(format!(
                     "Unsupported algorithm: {}",
@@ -291,7 +292,8 @@ impl JwtIssuer {
                 DecodingKey::from_rsa_components(&modulus, &exponent)
                     .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?
             }
-            "HS256" => DecodingKey::from_secret(signing_key.as_bytes()),
+            "HS256" => DecodingKey::from_secret(signing_key.as_bytes())
+                .map_err(|e| Error::Config(format!("Invalid HS256 signing key: {}", e)))?,
             _ => unreachable!(),
         };
 
@@ -500,6 +502,15 @@ mod tests {
             updated_at: now,
             last_login: None,
         }
+    }
+
+    #[test]
+    fn empty_hs256_signing_key_is_a_config_error() {
+        let result = JwtIssuer::new(JwtConfig {
+            signing_key: Some(String::new()),
+            ..JwtConfig::default()
+        });
+        assert!(matches!(result, Err(Error::Config(msg)) if msg.contains("HS256 signing key")));
     }
 
     #[test]

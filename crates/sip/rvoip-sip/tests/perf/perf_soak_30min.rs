@@ -2153,10 +2153,7 @@ fn rss_active_tail_metrics(
         && theil_sen.is_some()
         && endpoint.is_some();
     ActiveTailRssMetrics {
-        growth_mb_per_hr: theil_sen.map_or_else(
-            || rss_growth_mb_per_min(&selected) * 60.0,
-            |estimate| estimate,
-        ),
+        growth_mb_per_hr: theil_sen.unwrap_or_else(|| rss_growth_mb_per_min(&selected) * 60.0),
         sample_count: selected.len(),
         window_secs: actual_secs,
         complete,

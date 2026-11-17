@@ -45,6 +45,7 @@ use crate::error::{Error, Result};
 use crate::parser::headers::parse_call_id;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
@@ -257,7 +258,7 @@ impl FromStr for CallId {
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Call the parser first
-        let parse_result = all_consuming(parse_call_id)(s.as_bytes());
+        let parse_result = all_consuming(parse_call_id).parse(s.as_bytes());
 
         // Match on the Result
         match parse_result {

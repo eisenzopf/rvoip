@@ -938,18 +938,14 @@ impl RedisAuthProvider {
         let initialization = async {
             match &self.client {
                 RedisAuthClient::SingleNode { client, connection } => {
-                    let min_retry_wait =
-                        u64::try_from(self.runtime.min_retry_wait.as_millis()).unwrap_or(u64::MAX);
-                    let max_retry_wait =
-                        u64::try_from(self.runtime.max_retry_wait.as_millis()).unwrap_or(u64::MAX);
                     let manager = connection
                         .get_or_try_init(|| async {
                             let config = redis::aio::ConnectionManagerConfig::new()
                                 .set_number_of_retries(self.runtime.retry_attempts as usize)
-                                .set_factor(min_retry_wait)
-                                .set_max_delay(max_retry_wait)
-                                .set_connection_timeout(self.runtime.connection_timeout)
-                                .set_response_timeout(self.runtime.response_timeout);
+                                .set_min_delay(self.runtime.min_retry_wait)
+                                .set_max_delay(self.runtime.max_retry_wait)
+                                .set_connection_timeout(Some(self.runtime.connection_timeout))
+                                .set_response_timeout(Some(self.runtime.response_timeout));
                             redis::aio::ConnectionManager::new_with_config(client.clone(), config)
                                 .await
                         })
@@ -1585,7 +1581,7 @@ fn bounded_redis_future<'a, T: Send + 'a>(
 }
 
 fn redis_timeout_error(message: &'static str) -> redis::RedisError {
-    redis::RedisError::from((redis::ErrorKind::IoError, message))
+    redis::RedisError::from((redis::ErrorKind::Io, message))
 }
 
 fn invalid_client_config(message: &'static str) -> RedisAuthError {

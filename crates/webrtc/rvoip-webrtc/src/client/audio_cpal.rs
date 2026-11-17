@@ -92,7 +92,7 @@ impl CpalAudioSource {
     /// Open a specific input device.
     pub fn new_with_device(cfg: CpalAudioConfig, device: &cpal::Device) -> Result<Self> {
         let stream_cfg = pick_input_config(device)?;
-        let hw_rate = stream_cfg.sample_rate().0;
+        let hw_rate = stream_cfg.sample_rate();
         let hw_channels = stream_cfg.channels();
 
         let (pcm_tx, pcm_rx) = mpsc::channel::<Vec<i16>>(PCM_QUEUE_DEPTH);
@@ -105,7 +105,7 @@ impl CpalAudioSource {
 
         let cpal_stream = device
             .build_input_stream(
-                &stream_cfg.config(),
+                stream_cfg.config(),
                 move |data: &[f32], _: &cpal::InputCallbackInfo| {
                     // Downmix multi-channel to mono by averaging channels.
                     let chunk: Vec<i16> = if downmix_to_mono {
@@ -226,7 +226,7 @@ impl CpalSpeakerSink {
 
     pub fn new_with_device(device: &cpal::Device) -> Result<Self> {
         let stream_cfg = pick_output_config(device)?;
-        let hw_rate = stream_cfg.sample_rate().0;
+        let hw_rate = stream_cfg.sample_rate();
         let hw_channels = stream_cfg.channels();
 
         let (pcm_tx, mut pcm_rx) = mpsc::channel::<Vec<i16>>(PCM_QUEUE_DEPTH);
@@ -243,7 +243,7 @@ impl CpalSpeakerSink {
 
         let cpal_stream = device
             .build_output_stream(
-                &stream_cfg.config(),
+                stream_cfg.config(),
                 move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     while playback_buf.len() < out.len() {
                         match pcm_rx.try_recv() {
@@ -348,30 +348,22 @@ fn pick_compatible(
     // 48 kHz; finally pick the first config and adapt in software.
     for cfg in configs {
         if cfg.channels() == PCM_CHANNELS
-            && cfg.min_sample_rate().0 <= SAMPLE_RATE_HZ
-            && cfg.max_sample_rate().0 >= SAMPLE_RATE_HZ
+            && cfg.min_sample_rate() <= SAMPLE_RATE_HZ
+            && cfg.max_sample_rate() >= SAMPLE_RATE_HZ
         {
-            return Ok(cfg
-                .clone()
-                .with_sample_rate(cpal::SampleRate(SAMPLE_RATE_HZ)));
+            return Ok(cfg.clone().with_sample_rate(SAMPLE_RATE_HZ));
         }
     }
     for cfg in configs {
-        if cfg.min_sample_rate().0 <= SAMPLE_RATE_HZ && cfg.max_sample_rate().0 >= SAMPLE_RATE_HZ {
-            return Ok(cfg
-                .clone()
-                .with_sample_rate(cpal::SampleRate(SAMPLE_RATE_HZ)));
+        if cfg.min_sample_rate() <= SAMPLE_RATE_HZ && cfg.max_sample_rate() >= SAMPLE_RATE_HZ {
+            return Ok(cfg.clone().with_sample_rate(SAMPLE_RATE_HZ));
         }
     }
     let cfg = configs
         .first()
         .ok_or_else(|| WebRtcError::Adapter("device has no supported configs".into()))?;
-    let rate = cfg
-        .max_sample_rate()
-        .0
-        .min(48_000)
-        .max(cfg.min_sample_rate().0);
-    Ok(cfg.clone().with_sample_rate(cpal::SampleRate(rate)))
+    let rate = cfg.max_sample_rate().min(48_000).max(cfg.min_sample_rate());
+    Ok(cfg.clone().with_sample_rate(rate))
 }
 
 /// Owns a cpal::Stream. cpal::Stream is `!Send` on some platforms (CoreAudio),
