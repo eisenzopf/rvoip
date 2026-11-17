@@ -1729,10 +1729,40 @@ version = "{version}"
         args.profile = "release"
         args.receipt = Path("/e/perf.rfc7502-release/bench-receipt.json")
         self.assertNotIn("--record", bench.lane_command(args, Path("/t/dut"), "4242"))
-        # Without the lane orchestrator installed the gate fails as a usage error.
-        if not bench.RUN_LANE.exists():
+
+    def test_bench_gate_fails_closed_until_the_bench_environment_is_pinned(self) -> None:
+        bench = load_module("release_bench_gate", ROOT / "scripts/release/bench_gate.py")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            self.assertIn("run_lane.py is not installed", bench.preflight(root))
+            (root / "scripts/bench").mkdir(parents=True)
+            (root / "scripts/bench/run_lane.py").write_text("")
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["dut"]\nresolver = "2"\n')
+            (root / "dut/src").mkdir(parents=True)
+            (root / "dut/src/main.rs").write_text("fn main() {}\n")
+            (root / "dut/Cargo.toml").write_text('[package]\nname = "other"\nversion = "0.1.0"\nedition = "2021"\n')
+            subprocess.run(["cargo", "generate-lockfile", "-q"], cwd=root, check=True)
+            self.assertIn("rvoip-bench-uas, is not in the workspace", bench.preflight(root))
+            (root / "dut/Cargo.toml").write_text(
+                '[package]\nname = "rvoip-bench-uas"\nversion = "0.1.0"\nedition = "2021"\n'
+            )
+            subprocess.run(["cargo", "generate-lockfile", "-q"], cwd=root, check=True)
+            baselines = root / bench.BASELINES
+            # The state main is in between #425 and the bench environment PR.
+            self.assertIn("ENVIRONMENT is missing", bench.preflight(root))
+            baselines.mkdir(parents=True)
+            (baselines / "ENVIRONMENT").write_text("env-a\n")
+            self.assertIn("env-a/env.json is missing", bench.preflight(root))
+            (baselines / "env-a").mkdir()
+            (baselines / "env-a/env.json").write_text("{}")
+            self.assertIn("env-a/rates.json is missing", bench.preflight(root))
+            (baselines / "env-a/rates.json").write_text("{}")
+            self.assertIsNone(bench.preflight(root))
+        # In this checkout, until the environment lands, the gate stops before building.
+        if bench.preflight(ROOT):
             self.assertEqual(
-                bench.main(["--profile", "release", "--candidate", candidate, "--receipt", "x.json"]),
+                bench.main(["--profile", "minor", "--candidate", "c" * 40, "--receipt", "x.json"]),
                 bench.EXIT_USAGE,
             )
 
