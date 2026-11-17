@@ -218,10 +218,13 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
 
+      # workspace-all-features restores main-ci's cache for the same gate, so
+      # a PR's first run of the unified build starts warm (~15-20 min instead
+      # of ~35-45 min cold). Every other gate keeps its PR-only key.
       - name: Restore content-addressed Rust cache
         uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
-          shared-key: pr-specialty-${{ matrix.gate }}
+          shared-key: ${{ matrix.gate == 'workspace-all-features' && 'main' || 'pr' }}-specialty-${{ matrix.gate }}
 
       - name: Set up Node.js for browser gate
         if: matrix.gate == 'browser-smoke'
