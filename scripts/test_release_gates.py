@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -298,13 +299,16 @@ class GateFrameworkTests(unittest.TestCase):
             {gate for shard in soak_shards for gate in shard["gates"]},
         )
 
-    def test_release_requires_a_fresh_current_candidate_performance_evaluation(
+    def test_release_requires_a_current_candidate_performance_evaluation(
         self,
     ) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         gate = by_id["perf.canonical-2k-current"]
         self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
-        self.assertTrue(gate["always_fresh"])
+        # Reusable only by exact version-normalized inputs, so a bump commit
+        # carries its candidate's evaluation (bound to that ancestor by the
+        # report.performance-metrics reconciliation) instead of rerunning it.
+        self.assertFalse(gate["always_fresh"])
         self.assertEqual(gate["resource_class"], "ec2-performance-soak-long")
         self.assertEqual(gate["timeout_minutes"], 120)
         self.assertEqual(gate["estimated_seconds"], 4_500)
@@ -1290,6 +1294,436 @@ class GateFrameworkTests(unittest.TestCase):
                 gates.reconcile_performance_metrics(
                     ROOT, root, root / "artifact", "c" * 40
                 )
+
+    # ---- Version-normalized reuse (docs/RELEASE_PROCESS_PLAN.md, P2) ----
+
+    BUMP_ROOT_MANIFEST = """[workspace]
+members = ["crates/a"]
+
+[workspace.package]
+version = "{version}"
+edition = "2021"
+
+[workspace.dependencies]
+rvoip-a = {{ path = "crates/a", version = "{version}" }}
+renamed = {{ package = "rvoip-b", path = "crates/b", version = "{version}" }}
+serde = {{ version = "1.0.210", features = ["derive"] }}
+tokio = "1.40.0"
+"""
+    BUMP_MEMBER_MANIFEST = """[package]
+name = "rvoip-a"
+version.workspace = true
+
+[dependencies]
+rvoip-b = {{ path = "../b", version = "{version}" }}
+rvoip-c = "{version}"
+anyhow = "1.0.89"
+
+[dependencies.rvoip-d]
+path = "../d"
+version = "{version}"
+
+[target.'cfg(unix)'.dev-dependencies]
+rvoip-e = {{ path = "../e", version = "{version}" }}
+"""
+    BUMP_LOCKFILE = """version = 4
+
+[[package]]
+name = "anyhow"
+version = "1.0.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "{checksum}"
+
+[[package]]
+name = "rvoip-a"
+version = "{version}"
+dependencies = [
+ "anyhow",
+ "rvoip-b {version}",
+]
+
+[[package]]
+name = "rvoip-b"
+version = "{version}"
+"""
+
+    def write_bump_tree(self, root: Path, version: str, *, checksum: str = "a" * 64) -> list[str]:
+        files = {
+            "Cargo.toml": self.BUMP_ROOT_MANIFEST.format(version=version),
+            "crates/a/Cargo.toml": self.BUMP_MEMBER_MANIFEST.format(version=version),
+            "Cargo.lock": self.BUMP_LOCKFILE.format(version=version, checksum=checksum),
+            "README.md": f"Add `rvoip = \"{version}\"` (current release {version}).\n",
+            "CHANGELOG.md": f"## {version} \u2014 2026-11-16\n\n- notes for {version}\n",
+            "docs/release/RELEASE_NOTES_NEXT.md": f"# rvoip {version}\n",
+            "crates/a/src/lib.rs": "pub fn answer() -> u32 { 42 }\n",
+            "scripts/release/gates.py": "runner-v1\n",
+        }
+        for relative, text in files.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        return sorted(files)
+
+    def bump_record(self, root: Path, files: list[str], paths: list[str]) -> dict:
+        gate = {
+            "id": "gate-a",
+            "resource_class": "ec2-performance",
+            "affected_paths": paths,
+            "affected_crates": [],
+            "dependencies": [],
+            "command": ["true"],
+        }
+        return gates.input_record(
+            root=root,
+            gate=gate,
+            environment_id="environment-v1",
+            files=files,
+            package_roots={},
+            package_dependencies={},
+            gate_definitions={"gate-a": gate},
+        )
+
+    def test_version_bump_only_commit_keeps_every_gate_input_digest(self) -> None:
+        paths = ["**"]
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            parent = self.bump_record(Path(first), self.write_bump_tree(Path(first), "0.4.0"), paths)
+            bump = self.bump_record(Path(second), self.write_bump_tree(Path(second), "0.4.1"), paths)
+            self.assertEqual(parent["input_sha256"], bump["input_sha256"])
+            self.assertEqual(parent["input_normalization"], gates.INPUT_NORMALIZATION)
+            # Bookkeeping never reaches the digest; normalized files are marked.
+            self.assertNotIn("CHANGELOG.md", parent["files"])
+            self.assertNotIn("docs/release/RELEASE_NOTES_NEXT.md", parent["files"])
+            self.assertTrue(parent["files"]["Cargo.lock"].startswith("lockfile:"))
+            self.assertTrue(parent["files"]["Cargo.toml"].startswith("manifest:"))
+            self.assertTrue(parent["files"]["README.md"].startswith("document:"))
+
+    def test_version_normalization_still_sees_real_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
+            base = self.bump_record(Path(first), self.write_bump_tree(Path(first), "0.4.0"), ["**"])
+            root = Path(second)
+            files = self.write_bump_tree(root, "0.4.1", checksum="b" * 64)
+            # A registry dependency that moved in the same commit as the bump.
+            self.assertNotEqual(base["input_sha256"], self.bump_record(root, files, ["**"])["input_sha256"])
+            files = self.write_bump_tree(root, "0.4.1")
+            (root / "Cargo.toml").write_text(
+                (root / "Cargo.toml").read_text().replace('tokio = "1.40.0"', 'tokio = "1.41.0"')
+            )
+            self.assertNotEqual(base["input_sha256"], self.bump_record(root, files, ["**"])["input_sha256"])
+            files = self.write_bump_tree(root, "0.4.1")
+            (root / "crates/a/src/lib.rs").write_text("pub fn answer() -> u32 { 43 }\n")
+            self.assertNotEqual(base["input_sha256"], self.bump_record(root, files, ["**"])["input_sha256"])
+
+    def test_manifest_normalization_rewrites_only_internal_versions(self) -> None:
+        normalized = gates.normalize_manifest(
+            self.BUMP_ROOT_MANIFEST.format(version="9.8.7")
+            + self.BUMP_MEMBER_MANIFEST.format(version="9.8.7")
+            + '# Copying this example? Keep: rvoip-sip = "9.8.7"\n'
+        )
+        self.assertNotIn("9.8.7", normalized)
+        self.assertIn('serde = { version = "1.0.210"', normalized)
+        self.assertIn('tokio = "1.40.0"', normalized)
+        self.assertIn('anyhow = "1.0.89"', normalized)
+        lock = gates.normalize_lockfile(
+            self.BUMP_LOCKFILE.format(version="9.8.7", checksum="c" * 64)
+        )
+        self.assertNotIn("9.8.7", lock)
+        self.assertIn('version = "1.0.89"', lock)
+        self.assertIn('"rvoip-b <rvoip-version>"', lock)
+
+    def test_version_bearing_documents_follow_release_preparation(self) -> None:
+        release = load_module("release_tool_for_gates", ROOT / "scripts/release.py")
+        expected = {
+            path.as_posix()
+            for path in release.ACTIVE_RELEASE_METADATA_FILES
+            if path.name != "Cargo.toml"
+        }
+        self.assertEqual(gates.version_bearing_documents(), expected)
+        self.assertEqual(gates.normalization_kind("examples/01-quickstart-p2p/Cargo.toml"), "manifest")
+        self.assertEqual(gates.normalization_kind("examples/Cargo.lock"), "lockfile")
+        self.assertIsNone(gates.normalization_kind("crates/sip/rvoip-sip/src/lib.rs"))
+
+    def test_release_bookkeeping_is_neutral_for_changed_path_validation(self) -> None:
+        selected = [{"kind": "cargo", "always_fresh": False, "affected_paths": ["crates/a/**"]}]
+        self.assertEqual(
+            gates.unknown_change(
+                [
+                    "CHANGELOG.md",
+                    "README.md",
+                    "changes/414.md",
+                    "docs/release/RELEASE_NOTES_NEXT.md",
+                ],
+                selected,
+            ),
+            [],
+        )
+
+    def test_reuse_requires_a_receipt_from_the_candidates_chain(self) -> None:
+        inputs = {
+            "gate_definition_sha256": "d" * 64,
+            "input_sha256": "i" * 64,
+            "environment_sha256": "e" * 64,
+        }
+        receipt = {"status": "PASS", "candidate_sha": "a" * 40, **inputs}
+        gate = {"always_fresh": False}
+        self.assertIs(
+            gates.exact_reusable([receipt], gate, inputs, "env", lambda sha: sha == "a" * 40),
+            receipt,
+        )
+        self.assertIsNone(
+            gates.exact_reusable([receipt], gate, inputs, "env", lambda sha: False)
+        )
+
+    def test_chain_checker_accepts_only_ancestors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def git(*args: str) -> str:
+                return subprocess.run(
+                    ["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                    cwd=root, check=True, capture_output=True, text=True,
+                ).stdout.strip()
+            git("init", "-q", "-b", "main")
+            (root / "a").write_text("1\n")
+            git("add", "a"); git("commit", "-qm", "parent")
+            parent = git("rev-parse", "HEAD")
+            (root / "a").write_text("2\n")
+            git("commit", "-qam", "bump")
+            candidate = git("rev-parse", "HEAD")
+            git("checkout", "-q", "-b", "side", parent)
+            (root / "a").write_text("3\n")
+            git("commit", "-qam", "side")
+            side = git("rev-parse", "HEAD")
+            accepted = gates.chain_checker(root, candidate)
+            self.assertTrue(accepted(parent))
+            self.assertTrue(accepted(candidate))
+            self.assertFalse(accepted(side))
+            self.assertFalse(accepted("not-a-sha"))
+
+    def test_performance_gates_are_reused_whole_from_one_run(self) -> None:
+        by_id = {
+            "perf.a": {"resource_class": "ec2-performance"},
+            "perf.b": {"resource_class": "ec2-performance-soak-long"},
+            "core.x": {"resource_class": "github-standard"},
+        }
+        prior = Path("/prior")
+        def receipt(run: str) -> dict:
+            return {"_path": f"/prior/{run}/release-evidence/gate/receipt.json"}
+        reusable = {"perf.a": receipt("1"), "perf.b": receipt("1"), "core.x": receipt("1")}
+        gates.require_whole_performance_group(list(by_id), by_id, reusable, prior)
+        self.assertIsNotNone(reusable["perf.a"])
+        reusable = {"perf.a": receipt("1"), "perf.b": None, "core.x": receipt("1")}
+        gates.require_whole_performance_group(list(by_id), by_id, reusable, prior)
+        self.assertIsNone(reusable["perf.a"])
+        self.assertIsNotNone(reusable["core.x"])
+        reusable = {"perf.a": receipt("1"), "perf.b": receipt("2"), "core.x": receipt("1")}
+        gates.require_whole_performance_group(list(by_id), by_id, reusable, prior)
+        self.assertIsNone(reusable["perf.a"])
+
+    def reused_plan_fixture(self, root: Path) -> tuple[dict, Path, Path]:
+        prior = root / "prior"
+        gate_dir = prior / "4100" / "release-evidence" / "perf.example"
+        gate_dir.mkdir(parents=True)
+        (gate_dir / "command.log").write_text("pass\n")
+        (gate_dir / "artifact.json").write_text("{}\n")
+        perf = prior / "4100" / "release-evidence" / "_perf-results" / "ec2-performance-1"
+        perf.mkdir(parents=True)
+        (perf / "result.json").write_text("{}\n")
+        receipt = {
+            "schema": gates.RECEIPT_SCHEMA,
+            "gate_id": "perf.example",
+            "candidate_sha": "a" * 40,
+            "status": "PASS",
+            "gate_definition_sha256": "d" * 64,
+            "input_sha256": "i" * 64,
+            "environment_sha256": "e" * 64,
+            "log": {"path": "perf.example/command.log", "sha256": "0" * 64, "bytes": 5},
+        }
+        (gate_dir / "receipt.json").write_bytes(gates.canonical_bytes(receipt))
+        plan = {
+            "schema": gates.PLAN_SCHEMA,
+            "candidate_sha": "b" * 40,
+            "profile": "test",
+            "catalog_sha256": "x" * 64,
+            "environment_id": "test",
+            "gates": [
+                {
+                    "id": "perf.example",
+                    "decision": "REUSE",
+                    "executor": "argv",
+                    "resource_class": "ec2-performance",
+                    "dependencies": [],
+                    "gate_definition_sha256": "d" * 64,
+                    "input_sha256": "i" * 64,
+                    "environment_sha256": "e" * 64,
+                    "reuse_receipt": receipt,
+                    "reuse_receipt_sha256": gates.file_sha256(gate_dir / "receipt.json"),
+                    "reuse_receipt_path": "4100/release-evidence/perf.example/receipt.json",
+                }
+            ],
+        }
+        return plan, prior, root / "evidence"
+
+    def test_collector_stages_reused_evidence_for_reports_and_the_next_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, prior, evidence = self.reused_plan_fixture(Path(directory))
+            output = Path(directory) / "aggregate.json"
+            self.assertEqual(
+                gates.collect(plan=plan, evidence_root=evidence, output=output, prior_evidence=prior),
+                0,
+            )
+            result = json.loads(output.read_text())
+            self.assertEqual((result["fresh_count"], result["reused_count"]), (0, 1))
+            self.assertEqual(result["accepted_gates"][0]["receipt_candidate_sha"], "a" * 40)
+            self.assertTrue((evidence / "perf.example/artifact.json").is_file())
+            self.assertTrue((evidence / "_perf-results/ec2-performance-1/result.json").is_file())
+            # The staged copy is itself loadable as prior evidence for the next
+            # requalification in the chain.
+            self.assertEqual(
+                [item["candidate_sha"] for item in gates.load_prior_receipts(evidence)["perf.example"]],
+                ["a" * 40],
+            )
+
+    def test_collector_rejects_reuse_without_matching_prior_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            plan, prior, evidence = self.reused_plan_fixture(Path(directory))
+            output = Path(directory) / "aggregate.json"
+            self.assertEqual(gates.collect(plan=plan, evidence_root=evidence, output=output), 1)
+            receipt = prior / "4100/release-evidence/perf.example/receipt.json"
+            receipt.write_bytes(receipt.read_bytes().replace(b"PASS", b"FAIL"))
+            shutil.rmtree(evidence, ignore_errors=True)
+            self.assertEqual(
+                gates.collect(plan=plan, evidence_root=evidence, output=output, prior_evidence=prior),
+                1,
+            )
+            self.assertIn(
+                "reused evidence receipt digest changed",
+                " ".join(json.loads(output.read_text())["failures"]),
+            )
+
+    def test_collector_binds_bench_receipts_to_gate_profile_and_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            gate_dir = root / "perf.rfc7502-release"
+            gate_dir.mkdir()
+            log = gate_dir / "command.log"
+            log.write_text("pass\n")
+            bench = {
+                "schema": gates.BENCH_RECEIPT_SCHEMA,
+                "profile": "release",
+                "candidate_sha": "c" * 40,
+                "status": "PASS",
+                "failures": [],
+            }
+            (gate_dir / "bench-receipt.json").write_text(json.dumps(bench))
+            receipt = {
+                "schema": gates.RECEIPT_SCHEMA,
+                "gate_id": "perf.rfc7502-release",
+                "candidate_sha": "c" * 40,
+                "status": "PASS",
+                "gate_definition_sha256": "d" * 64,
+                "input_sha256": "i" * 64,
+                "environment_sha256": "e" * 64,
+                "log": {
+                    "path": "perf.rfc7502-release/command.log",
+                    "sha256": gates.file_sha256(log),
+                    "bytes": log.stat().st_size,
+                },
+            }
+            (gate_dir / "receipt.json").write_bytes(gates.canonical_bytes(receipt))
+            plan = {
+                "schema": gates.PLAN_SCHEMA,
+                "candidate_sha": "c" * 40,
+                "profile": "bench-release",
+                "catalog_sha256": "x" * 64,
+                "environment_id": "test",
+                "gates": [
+                    {
+                        "id": "perf.rfc7502-release",
+                        "decision": "RUN",
+                        "resource_class": "bench-lane",
+                        "gate_definition_sha256": "d" * 64,
+                        "input_sha256": "i" * 64,
+                        "environment_sha256": "e" * 64,
+                    }
+                ],
+            }
+            output = root / "aggregate.json"
+            self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 0)
+            for key, value in (("profile", "minor"), ("candidate_sha", "f" * 40), ("status", "FAIL")):
+                with self.subTest(key=key):
+                    (gate_dir / "bench-receipt.json").write_text(json.dumps({**bench, key: value}))
+                    self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 1)
+
+    def test_lab_teardowns_are_reused_with_their_chain_not_always_fresh(self) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        for gate_id in (
+            "interop.proxy-pbx.kamailio.down",
+            "interop.proxy-pbx.opensips.down",
+            "interop.amr-rate-sweep.down",
+            "interop.jambonz-down",
+        ):
+            with self.subTest(gate=gate_id):
+                self.assertFalse(by_id[gate_id]["always_fresh"])
+                self.assertTrue(by_id[gate_id]["dependencies"])
+        latest = by_id["interop.jambonz-latest"]
+        self.assertTrue(latest["always_fresh"])
+        self.assertEqual(latest["resource_class"], "github-evidence")
+        self.assertIn("interop.freeswitch-down-after", by_id["interop.jambonz-up"]["dependencies"])
+
+    def test_bump_requalification_needs_no_ec2_worker(self) -> None:
+        """Everything still always-fresh in a release profile runs hosted."""
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        for profile in ("remote-release", "release-patch", "release-minor"):
+            fresh = [
+                gate_id
+                for gate_id in self.catalog["profiles"][profile]
+                if by_id[gate_id].get("always_fresh")
+            ]
+            with self.subTest(profile=profile):
+                self.assertTrue(fresh)
+                self.assertEqual(
+                    {by_id[gate_id]["resource_class"] for gate_id in fresh},
+                    {"github-evidence"},
+                )
+
+    def test_bench_gates_are_release_only(self) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        profiles = self.catalog["profiles"]
+        bench = {"perf.rfc7502-release", "perf.rfc7502-minor"}
+        self.assertFalse(bench & set(profiles["remote-release"]))
+        self.assertFalse(bench & set(by_id["report.remote-aggregate"]["dependencies"]))
+        self.assertEqual(
+            set(profiles["release-patch"]) - set(profiles["remote-release"]),
+            {"perf.rfc7502-release"},
+        )
+        self.assertEqual(
+            set(profiles["release-minor"]) - set(profiles["remote-release"]),
+            {"perf.rfc7502-minor"},
+        )
+        for gate_id, profile in (("perf.rfc7502-release", "release"), ("perf.rfc7502-minor", "minor")):
+            gate = by_id[gate_id]
+            with self.subTest(gate=gate_id):
+                self.assertEqual(gate["resource_class"], "bench-lane")
+                self.assertFalse(gate["always_fresh"])
+                self.assertEqual(
+                    gate["command"],
+                    [
+                        "python3",
+                        "{workspace}/scripts/bench/run_lane.py",
+                        "--profile",
+                        profile,
+                        "--candidate",
+                        "{candidate}",
+                        "--receipt",
+                        "{artifact_dir}/bench-receipt.json",
+                    ],
+                )
+                self.assertIn("scripts/bench/**", gate["affected_paths"])
+        matrix = gates.matrix_for(
+            [{"id": "perf.rfc7502-release", "decision": "RUN"}], by_id
+        )
+        self.assertEqual(len(matrix), 1)
+        self.assertTrue(matrix[0]["bench"])
+        self.assertFalse(matrix[0]["hosted"])
 
 
 if __name__ == "__main__":

@@ -49,6 +49,18 @@ jobs:
             --name release-gate-evidence \
             --dir target/release-resume/evidence
 
+      - name: Extract the candidate's catalog and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          aggregate=target/release-resume/evidence/release-qualification/aggregate.json
+          candidate="$(jq -r .candidate_sha "$aggregate")"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$candidate^{commit}"
+          # The aggregate binds the candidate's catalog, not main's.
+          git show "$candidate:scripts/release/gates.json" > target/release-resume/catalog.json
+          git show "$candidate:Cargo.toml" > target/release-resume/Cargo.toml
+
       - name: Prove the source stopped only after all gates passed
         env:
           SOURCE_RUN_ID: ${{ inputs.qualification_run_id }}
@@ -98,23 +110,33 @@ jobs:
           if failed_steps != ["Render exact-candidate qualification reports"]:
               raise SystemExit(f"unexpected failed steps: {failed_steps!r}")
 
+          # The gate count comes from the candidate's own catalog profile; a
+          # hard-coded count went stale as soon as the catalog grew.
+          catalog = json.loads((root / "catalog.json").read_text())
+          profile = aggregate.get("profile")
+          if profile not in ("remote-release", "release-patch", "release-minor"):
+              raise SystemExit(f"aggregate profile {profile!r} is not a release profile")
+          expected_ids = catalog["profiles"][profile]
+          gate_count = len(expected_ids)
           expected_aggregate = {
               "schema": "rvoip-release-qualification-v1",
               "status": "PASS",
-              "profile": "remote-release",
-              "gate_count": 213,
-              "fresh_count": 213,
-              "reused_count": 0,
+              "gate_count": gate_count,
           }
           for key, expected in expected_aggregate.items():
               if aggregate.get(key) != expected:
                   raise SystemExit(
                       f"aggregate {key} is {aggregate.get(key)!r}, expected {expected!r}"
                   )
+          if aggregate.get("fresh_count", 0) + aggregate.get("reused_count", 0) != gate_count:
+              raise SystemExit("fresh and reused gates do not add up to the profile")
           if aggregate.get("failures") != []:
               raise SystemExit("the qualification aggregate contains failures")
-          if len(aggregate.get("accepted_gates", [])) != 213:
-              raise SystemExit("the qualification aggregate does not accept all 213 gates")
+          accepted_ids = [item.get("gate_id") for item in aggregate.get("accepted_gates", [])]
+          if len(accepted_ids) != gate_count or set(accepted_ids) != set(expected_ids):
+              raise SystemExit(
+                  f"the qualification aggregate does not accept all {gate_count} {profile} gates"
+              )
           candidate = aggregate.get("candidate_sha")
           if candidate != metadata.get("headSha") or candidate != plan.get("candidate_sha"):
               raise SystemExit("source run, plan, and aggregate candidate identities differ")
@@ -156,12 +178,13 @@ jobs:
         run: |
           set -euo pipefail
           evidence=target/release-resume/evidence
+          version="$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["workspace"]["package"]["version"])' target/release-resume/Cargo.toml)"
           python3 scripts/release/render_qualification_reports.py generate \
-            --catalog scripts/release/gates.json \
+            --catalog target/release-resume/catalog.json \
             --plan "$evidence/release-plan/plan.json" \
             --aggregate "$evidence/release-qualification/aggregate.json" \
             --evidence "$evidence/release-evidence" \
-            --version 0.3.10 \
+            --version "$version" \
             --run-id "$SOURCE_RUN_ID" \
             --run-url "https://github.com/${REPOSITORY}/actions/runs/${SOURCE_RUN_ID}" \
             --output-dir "$evidence/release-qualification/reports"

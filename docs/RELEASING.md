@@ -51,9 +51,10 @@ instead, as long as `## Unreleased` is then empty. Subsection headings and
 HTML comments alone do not count as entries.
 
 Verification and publication enforce the same rule: they reject a release
-whose `CHANGELOG.md` has no non-empty `## X.Y.Z` section. An edit to
-`CHANGELOG.md` invalidates reuse of earlier qualification evidence, so write
-the entries before qualification rather than after it.
+whose `CHANGELOG.md` has no non-empty `## X.Y.Z` section. `CHANGELOG.md`,
+`changes/**` and `docs/release/**` are release bookkeeping: they never enter a
+gate's input digest, so finishing the changelog or the release notes after
+qualification does not invalidate any evidence.
 
 ## Verify
 
@@ -67,16 +68,20 @@ transfer, controller reconciliation, and cleanup fail within a target of 15
 minutes.
 The preflight is deliberately non-publishing and is not release evidence.
 
-For `remote-release`, the planner waits up to one hour for all five CodeQL
-categories to bind to the exact protected-main commit. Its 75-minute job
-deadline intentionally outlives that poll window, so a qualification started
-immediately after merge fails with a policy receipt rather than being cancelled
-while the Rust analysis is still running. Release workflows also raise
+The release profiles include `security.codeql-exact`, which waits up to one
+hour for all five CodeQL categories to bind to the exact candidate commit and
+fails on any open alert. It is a gate in the hosted evidence shard, so the wait
+overlaps every other gate instead of holding the planner, and an analysis of an
+older main commit still counts after newer pushes. Release workflows also raise
 rustup's bounded download retry count to tolerate transient distribution-network
 resets without weakening any test or evidence requirement.
 
 Use `remote-core` for a hosted-runner dry run and `remote-release` for the
-complete release profile. Do not start the full profile unless the exact
+complete nightly profile. The release profiles `release-patch` and
+`release-minor` are `remote-release` plus the release-only RFC 7502 benchmark
+gate (see `docs/release/BENCH_GATE_INTERFACE.md`); from 0.5.0 publication
+accepts only those. The candidate may be any commit on `main`, not only its
+head, so a merge during qualification does not restart it. Do not start the full profile unless the exact
 release machinery has a recent successful preflight. The first candidate
 should set `first_candidate=true`; after a fix, provide the prior qualification
 run and the previous candidate SHA, and set `first_candidate=false`, so exact
@@ -87,10 +92,13 @@ qualification run.
 For a real EC2 performance, soak, or interoperability failure, dispatch
 `remote-diagnostic` on protected `main` and enter one or more exact catalog gate
 IDs in `diagnostic_gates`, separated by commas. The planner accepts only
-executable EC2 gates from `remote-release`, adds their declared dependencies,
-and forces them to run fresh with their release commands, machines, workloads,
-and thresholds. At most 20 gates may be requested. The resulting profile is
-non-publishing and cannot qualify a release.
+executable EC2 or bench-lane gates from the release profiles, adds their
+declared dependencies, and runs them fresh with their release commands,
+machines, workloads, and thresholds. At most 20 gates may be requested. The
+resulting profile is non-publishing and cannot qualify a release. A diagnostic
+given `prior_run_id` and `first_candidate=false` may reuse earlier diagnostic
+evidence, which is how receipt reuse across a version bump is demonstrated;
+its own evidence is still never reusable for release.
 
 The next complete qualification may combine up to five evidence runs by
 entering their comma-separated IDs in `prior_run_id`. This lets it consume the
@@ -103,10 +111,28 @@ fix; unknown mappings still invalidate the full profile.
 The workflow produces a candidate-bound plan, per-gate receipts, one aggregate
 qualification receipt, and a generated human-readable report bundle. A gate can be reused only when its source,
 transitive workspace dependency closure, gate definition, toolchain/container,
-resource class, and thresholds have identical SHA-256 inputs. Unknown changes
-fail closed to a full run. The aggregate is signed as a release evidence
-artifact and is the only qualification input accepted by protected
-publication.
+resource class, and thresholds have identical SHA-256 inputs, and only from a
+receipt whose candidate is the new candidate or one of its ancestors (the
+receipt chain; the plan and the run summary list each link and the files
+changed since it). Unknown changes fail closed to a full run. The aggregate is
+signed as a release evidence artifact and is the only qualification input
+accepted by protected publication.
+
+Input digests are version-normalized (`input_normalization`
+`rvoip-version-normalized-v1` in every plan). Cargo manifests hide the
+workspace version and every requirement on an rvoip package; lockfiles hide
+the versions of path packages, while registry and git packages keep their
+versions and checksums; and the documents `release.py prepare` rewrites hide
+their `X.Y.Z` tokens. A commit that only bumps the version therefore has its
+parent's gate inputs: requalifying it with `first_candidate=false` and the
+parent's run in `prior_run_id` reruns only the always-fresh bookkeeping gates
+(source fingerprints, package inventory, the Jambonz upstream check and the
+collector's reports), all on hosted runners. The collector stages each reused
+gate's evidence beside the fresh evidence, so the performance reports render
+from the reused results and the next run can reuse them again. Performance
+gates are reused as a group from one prior run, because their results are
+stored per worker; the canonical 2,000-CPS evaluation is bound to the ancestor
+commit that measured it.
 
 After collection, `scripts/release/render_qualification_reports.py` rejects any
 missing, duplicate, stale, cross-candidate, unclean, or hash-mismatched receipt,

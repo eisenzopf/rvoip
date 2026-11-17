@@ -17,6 +17,9 @@ release/
 # matches scripts/release/ — the gate catalog and runners that
 # .github/workflows/release-qualify.yml invokes. Keep them tracked.
 !scripts/release/
+# Likewise docs/release/: the release notes, the bench gate interface and other
+# release documents (docs/RELEASING.md).
+!docs/release/
 *.rs.bk
 *.pdb
 *.rlib

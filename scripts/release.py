@@ -119,6 +119,13 @@ LIVE_DEPENDENCY_SCAN_SUFFIXES = frozenset({".md", ".rs", ".toml"})
 LIVE_DEPENDENCY_SCAN_IGNORED_DIRS = frozenset({".git", "node_modules", "target"})
 VERIFICATION_RECEIPT_SCHEMA = "rvoip-unified-release-verification-v4"
 REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
+# Qualification profiles a release may be published from. `remote-release` is
+# the nightly profile; the release profiles add the release-only RFC 7502
+# benchmark gate (docs/release/BENCH_GATE_INTERFACE.md).
+RELEASE_QUALIFICATION_PROFILES = ("remote-release", "release-patch", "release-minor")
+# Decided 2026-11-16: from 0.5.0 every release carries the benchmark, the
+# minor profile for an X.Y.0 release and either profile for a patch.
+BENCH_REQUIRED_FROM = (0, 5, 0)
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
 REMOTE_REPORT_SUMMARY_SCHEMA = "rvoip-release-qualification-summary-v1"
 TARGETED_DELTA_ATTESTATION_SCHEMA = "rvoip-targeted-delta-attestation-v1"
@@ -1558,7 +1565,7 @@ def verify_beta_reporting(
             and isinstance(release.get("candidate_sha"), str)
             and COMMIT_SHA.fullmatch(release["candidate_sha"])
             and isinstance(qualification, dict)
-            and qualification.get("profile") == "remote-release"
+            and qualification.get("profile") in RELEASE_QUALIFICATION_PROFILES
             and qualification.get("status") == "PASS"
             and qualification.get("gate_count", 0) > 108
             and qualification.get("fresh_count", 0)
@@ -1694,6 +1701,17 @@ def canonical_json_sha256(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def required_qualification_profiles(version: str) -> tuple[str, ...]:
+    """The qualification profiles that may publish this version."""
+
+    parts = version_tuple(version)
+    if parts < BENCH_REQUIRED_FROM:
+        return RELEASE_QUALIFICATION_PROFILES
+    if parts[2] == 0:
+        return ("release-minor",)
+    return ("release-patch", "release-minor")
+
+
 def verify_remote_qualification(
     root: Path,
     version: str,
@@ -1711,7 +1729,14 @@ def verify_remote_qualification(
     catalog = load_json_object(catalog_path, "release gate catalog")
     if catalog.get("schema") != REMOTE_GATE_CATALOG_SCHEMA:
         raise ReleaseError("release gate catalog has an unsupported schema")
-    expected_gates = catalog.get("profiles", {}).get("remote-release")
+    profile = aggregate.get("profile")
+    allowed_profiles = required_qualification_profiles(version)
+    if profile not in allowed_profiles:
+        raise ReleaseError(
+            f"{version} must be qualified with one of {list(allowed_profiles)}, "
+            f"not {profile!r}"
+        )
+    expected_gates = catalog.get("profiles", {}).get(profile)
     coverage = catalog.get("remote_release_legacy_coverage", {})
     accepted = aggregate.get("accepted_gates")
     accepted_ids = (
@@ -1726,7 +1751,6 @@ def verify_remote_qualification(
         and aggregate.get("status") == "PASS"
         and aggregate.get("failures") == []
         and aggregate.get("candidate_sha") == head
-        and aggregate.get("profile") == "remote-release"
         and aggregate.get("catalog_sha256") == expected_catalog_hash
         and isinstance(expected_gates, list)
         and len(expected_gates) > 44
@@ -1743,7 +1767,7 @@ def verify_remote_qualification(
     )
     if not valid:
         raise ReleaseError(
-            "remote qualification does not bind the complete remote-release "
+            f"remote qualification does not bind the complete {profile} "
             "profile to this release commit"
         )
     aggregate_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1757,6 +1781,7 @@ def verify_remote_qualification(
     )
     return {
         "mode": "remote-release",
+        "profile": profile,
         "disposition": "RELEASE-CANDIDATE",
         "strict_automated_status": "PASS",
         "version": version,
