@@ -39,22 +39,12 @@ fn test_password() -> &'static str {
     PASSWORD.get_or_init(|| format!("pw-{:016x}", rand::random::<u64>()))
 }
 
-const REGISTRAR_PORT: u16 = 35180;
-const CLIENT_PORT: u16 = 35181;
 const SERVER_MIN_EXPIRES: u32 = 1800;
 const CLIENT_INITIAL_EXPIRES: u32 = 60;
 const CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35181";
-const AUTH_REGISTRAR_PORT: u16 = 35182;
-const AUTH_CLIENT_PORT: u16 = 35183;
 const AUTH_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35183";
-const INFO_REGISTRAR_PORT: u16 = 35184;
-const INFO_CLIENT_PORT: u16 = 35185;
 const INFO_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35185";
-const FAIL_REGISTRAR_PORT: u16 = 35186;
-const FAIL_CLIENT_PORT: u16 = 35187;
 const FAIL_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35187";
-const PROXY_AUTH_REGISTRAR_PORT: u16 = 35188;
-const PROXY_AUTH_CLIENT_PORT: u16 = 35189;
 const PROXY_AUTH_CLIENT_CONTACT: &str = "sip:alice@127.0.0.1:35189";
 
 /// Extract the `Expires` header value from a request as a u32.
@@ -130,12 +120,12 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
 
     // --- Mock registrar ------------------------------------------------------
 
-    let registrar_addr = format!("127.0.0.1:{}", REGISTRAR_PORT);
     let sock = Arc::new(
-        UdpSocket::bind(&registrar_addr)
+        UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("mock registrar bind"),
     );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
 
     let register_count = Arc::new(AtomicU32::new(0));
     let retry_expires_seen = Arc::new(Mutex::new(None::<u32>));
@@ -215,14 +205,14 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
 
     // Use `Config::local` as the base — TLS / SRTP / PAI / outbound
     // proxy etc. take their default-off values automatically.
-    let mut config = Config::local("alice", CLIENT_PORT);
+    let mut config = Config::local("alice", 0);
     config.media_port_start = 40000;
     config.media_port_end = 40100;
 
     let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
-            format!("sip:127.0.0.1:{}", REGISTRAR_PORT),
+            format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
             test_password(),
         )
@@ -325,12 +315,12 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let registrar_addr = format!("127.0.0.1:{}", AUTH_REGISTRAR_PORT);
     let sock = Arc::new(
-        UdpSocket::bind(&registrar_addr)
+        UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("auth mock registrar bind"),
     );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
 
     let register_count = Arc::new(AtomicU32::new(0));
     let register_headers_seen = Arc::new(Mutex::new(Vec::<(
@@ -415,14 +405,14 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
         }
     });
 
-    let mut config = Config::local("alice", AUTH_CLIENT_PORT);
+    let mut config = Config::local("alice", 0);
     config.media_port_start = 40110;
     config.media_port_end = 40120;
 
     let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
-            format!("sip:127.0.0.1:{}", AUTH_REGISTRAR_PORT),
+            format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
             test_password(),
         )
@@ -486,7 +476,7 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
     );
     assert_eq!(
         headers_seen[1].5.as_deref(),
-        Some(format!("sip:127.0.0.1:{}", AUTH_REGISTRAR_PORT).as_str()),
+        Some(format!("sip:127.0.0.1:{registrar_port}").as_str()),
         "auth retry Authorization uri should match REGISTER Request-URI"
     );
 
@@ -507,12 +497,12 @@ async fn register_407_retry_uses_proxy_authorization() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let registrar_addr = format!("127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT);
     let sock = Arc::new(
-        UdpSocket::bind(&registrar_addr)
+        UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("proxy auth mock registrar bind"),
     );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
 
     let register_count = Arc::new(AtomicU32::new(0));
     let register_headers_seen =
@@ -586,14 +576,14 @@ async fn register_407_retry_uses_proxy_authorization() {
         }
     });
 
-    let mut config = Config::local("alice", PROXY_AUTH_CLIENT_PORT);
+    let mut config = Config::local("alice", 0);
     config.media_port_start = 40130;
     config.media_port_end = 40140;
 
     let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
-            format!("sip:127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT),
+            format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
             test_password(),
         )
@@ -632,7 +622,7 @@ async fn register_407_retry_uses_proxy_authorization() {
     assert_eq!(headers_seen[1].2, Some(true));
     assert_eq!(
         headers_seen[1].3.as_deref(),
-        Some(format!("sip:127.0.0.1:{}", PROXY_AUTH_REGISTRAR_PORT).as_str())
+        Some(format!("sip:127.0.0.1:{registrar_port}").as_str())
     );
     assert!(
         peer.is_registered(&handle)
@@ -1164,12 +1154,12 @@ async fn registration_info_tracks_success_refresh_shape_and_unregister_wait() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let registrar_addr = format!("127.0.0.1:{}", INFO_REGISTRAR_PORT);
     let sock = Arc::new(
-        UdpSocket::bind(&registrar_addr)
+        UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("info mock registrar bind"),
     );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
     let register_count = Arc::new(AtomicU32::new(0));
     let unregister_seen = Arc::new(AtomicU32::new(0));
 
@@ -1211,14 +1201,14 @@ async fn registration_info_tracks_success_refresh_shape_and_unregister_wait() {
         }
     });
 
-    let mut config = Config::local("alice", INFO_CLIENT_PORT);
+    let mut config = Config::local("alice", 0);
     config.media_port_start = 40130;
     config.media_port_end = 40140;
 
     let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
-            format!("sip:127.0.0.1:{}", INFO_REGISTRAR_PORT),
+            format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
             test_password(),
         )
@@ -1252,7 +1242,7 @@ async fn registration_info_tracks_success_refresh_shape_and_unregister_wait() {
     assert_eq!(info.status, RegistrationStatus::Registered);
     assert_eq!(
         info.registrar.as_deref(),
-        Some(format!("sip:127.0.0.1:{}", INFO_REGISTRAR_PORT).as_str())
+        Some(format!("sip:127.0.0.1:{registrar_port}").as_str())
     );
     assert_eq!(info.contact.as_deref(), Some(INFO_CLIENT_CONTACT));
     assert_eq!(info.expires_secs, Some(300));
@@ -1309,12 +1299,12 @@ async fn registration_info_tracks_auth_failure_metadata() {
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    let registrar_addr = format!("127.0.0.1:{}", FAIL_REGISTRAR_PORT);
     let sock = Arc::new(
-        UdpSocket::bind(&registrar_addr)
+        UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("failure mock registrar bind"),
     );
+    let registrar_port = sock.local_addr().expect("registrar addr").port();
     let register_count = Arc::new(AtomicU32::new(0));
 
     let sock_task = sock.clone();
@@ -1349,14 +1339,14 @@ async fn registration_info_tracks_auth_failure_metadata() {
         }
     });
 
-    let mut config = Config::local("alice", FAIL_CLIENT_PORT);
+    let mut config = Config::local("alice", 0);
     config.media_port_start = 40150;
     config.media_port_end = 40160;
 
     let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
-            format!("sip:127.0.0.1:{}", FAIL_REGISTRAR_PORT),
+            format!("sip:127.0.0.1:{registrar_port}"),
             "alice",
             "wrong-password",
         )
