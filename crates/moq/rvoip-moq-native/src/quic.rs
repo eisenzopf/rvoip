@@ -872,9 +872,9 @@ impl Client {
         let cid_capture_clone = cid_capture.clone();
         config.initial_dst_cid_provider(Arc::new(move || {
             // Generate a random CID (Quinn's default behavior)
-            use rand::Rng;
-            let mut rng = rand::thread_rng();
-            let random_bytes: [u8; 16] = rng.gen();
+            use rand::RngExt;
+            let mut rng = rand::rng();
+            let random_bytes: [u8; 16] = rng.random();
             let cid = quinn::ConnectionId::new(&random_bytes);
             *cid_capture_clone.lock().unwrap() = Some(cid);
             cid

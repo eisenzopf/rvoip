@@ -4,7 +4,7 @@
 //! for conferencing scenarios where multiple sources are mixed together.
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::info;
@@ -53,10 +53,10 @@ impl SourceBuffer {
         self.samples.clear();
         if self.talking {
             // Generate "active" audio - just random values for simulation
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             for _ in 0..sample_count {
                 // Generate values between -3000 and 3000 to simulate moderate volume speech
-                self.samples.push(rng.gen_range(-3000..3000));
+                self.samples.push(rng.random_range(-3000..3000));
             }
         } else {
             // Generate silence (zeros)

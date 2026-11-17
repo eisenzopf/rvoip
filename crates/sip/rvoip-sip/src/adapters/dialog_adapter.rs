@@ -2034,8 +2034,8 @@ impl DialogAdapter {
         let jitter_secs = if jitter_cap_secs == 0 {
             0
         } else {
-            use rand::Rng;
-            rand::thread_rng().gen_range(0..=jitter_cap_secs)
+            use rand::RngExt;
+            rand::rng().random_range(0..=jitter_cap_secs)
         };
         now + Duration::from_secs(base_secs.saturating_sub(jitter_secs).max(1))
     }

@@ -12,13 +12,13 @@ use uuid::Uuid;
 /// PKCS#1 private-key PEM. JWT verification and JWKS publication both need
 /// the public key; the private PEM is not a usable verification key.
 fn rsa_public_components(signing_key: &str) -> Result<(String, String)> {
-    let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(signing_key)
-        .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(signing_key))
+    let private_key = rsa::PrivateKey::from_pkcs8_pem(signing_key)
+        .or_else(|_| rsa::PrivateKey::from_pkcs1_pem(signing_key))
         .map_err(|err| Error::Config(format!("invalid RSA signing key: {err}")))?;
     let public_key = private_key.to_public_key();
     Ok((
-        URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
-        URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
+        URL_SAFE_NO_PAD.encode(public_key.n().to_be_bytes_trimmed_vartime()),
+        URL_SAFE_NO_PAD.encode(public_key.e().to_be_bytes_trimmed_vartime()),
     ))
 }
 
@@ -461,10 +461,10 @@ impl JwtIssuer {
 
     fn generate_hs256_secret() -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        use rand::{rngs::OsRng, RngCore};
+        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 
         let mut secret = [0u8; 32];
-        OsRng.fill_bytes(&mut secret);
+        UnwrapErr(SysRng).fill_bytes(&mut secret);
         URL_SAFE_NO_PAD.encode(secret)
     }
 }

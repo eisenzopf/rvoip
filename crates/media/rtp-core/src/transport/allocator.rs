@@ -1498,10 +1498,10 @@ impl PortAllocator {
 
     /// Get a random port from the configured range
     async fn get_random_port(&self) -> u16 {
-        use rand::Rng;
+        use rand::RngExt;
 
         let range_size = self.config.port_range_end - self.config.port_range_start + 1;
-        let offset = rand::thread_rng().gen_range(0..range_size);
+        let offset = rand::rng().random_range(0..range_size);
 
         self.config.port_range_start + offset
     }
