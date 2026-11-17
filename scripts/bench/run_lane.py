@@ -576,7 +576,8 @@ def run_search_row(ctx, row_id, recorded, caps):
     row = profiles.ROWS[row_id]
     hosts = len(ctx.lane.info['callers'])
     cap = caps.get(row_id)
-    r0 = ctx.args.r0.get(row_id) or (recorded or {}).get('r') or (int(cap * 0.8) if cap else None)
+    r0 = (ctx.args.r0.get(row_id) or (recorded or {}).get('r') or p.get('r0', {}).get(row_id)
+          or (int(cap * 0.8) if cap else None))
     if not r0:
         raise Usage('no r0 for %s: pass --r0 %s=<sps>, a recorded R, or a tester cap' % (row_id, row_id))
     spec = {'row': row_id, 'criterion': 'rfc', 'r0': profiles.quantize(r0), 'n': profiles.TRIAL['n'],
@@ -607,8 +608,14 @@ def run_search_row(ctx, row_id, recorded, caps):
                                                       'old_r', 'halted', 'trials')},
               'trials': outcome.get('trials', [])}
     r = outcome.get('result')
+    stop = outcome.get('stop_reason') or ''
+    if r is None and ctx.lane.ea_uas and 'invalid' in stop and outcome.get('old_r'):
+        # §6.1 testbed baseline: the tester itself ran out (caller validity) above every passing rate.
+        # The baseline is then >= the highest passing rate (E74: "stopped: 3 consecutive invalid trials").
+        r = outcome['old_r']
+        outcome['tester_limited'] = True
     if r is None:
-        reason = outcome.get('halted') or outcome.get('stop_reason') or 'no result'
+        reason = outcome.get('halted') or stop or 'no result'
         result['verdict'] = 'infra' if 'invalid' in reason else 'fail'
         result['reason'] = '%s search: %s' % (row_id, reason)
         return result

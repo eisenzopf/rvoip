@@ -45,8 +45,11 @@ PROFILES = {
               'rates': {'R1': 400, 'R5': 400, 'R2': 200, 'R6': 200}, 'budget_hours': 1.5},
     # RFC 7502 §6.1 testbed baseline: the callers against ea-uas (no DUT).
     'baseline': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'search', 'algorithm': 'bisect',
-                 'confirmations': 3, 'resolution': 0.02, 'report': True, 'budget_hours': 5,
-                 'ea_uas': True, 'max_trials': 16},
+                 'confirmations': 1, 'resolution': 0.05, 'report': True, 'budget_hours': 6,
+                 'ea_uas': True, 'max_trials': 9,
+                 # Starting points from E74's EA-to-EA baselines (2 callers: TLS >= 9,426, UDP >= 8,548;
+                 # 4 callers: TLS/SRTP 10 s >= 4,992, UDP/RTP 10 s >= 5,488).
+                 'r0': {'R1': 8000, 'R5': 7200, 'R2': 2400, 'R6': 2400}},
 }
 
 TESTER_CAP_FRACTION = 0.67

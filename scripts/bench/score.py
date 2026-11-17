@@ -62,7 +62,7 @@ def ea_uas_config(row, ip, port):
     config = {
         'bind_ip': ip,
         'port': port,
-        'transport': 'tls' if tls else 'udp',
+        'transport': 'tls-srtp' if tls else 'udp-rtp',
         'contact_host': ip,
         'advertised_ip': ip,
         'sdp_port_range': [10000, 64999],
