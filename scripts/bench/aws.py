@@ -14,7 +14,7 @@ import time
 
 TRANSIENT = ('Throttling', 'RequestLimitExceeded', 'ServiceUnavailable', 'InternalError',
              'Connection was closed', 'Could not connect', 'timed out', 'SlowDown', 'RequestTimeout',
-             'InvalidInstanceId', 'TooManyUpdates')
+             'InvalidInstanceId', 'InvalidInstanceID.NotFound', 'TooManyUpdates')
 
 
 class AwsError(RuntimeError):
