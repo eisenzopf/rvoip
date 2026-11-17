@@ -21,7 +21,7 @@ async-trait = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "charset"] }
 
 # JWT handling
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
