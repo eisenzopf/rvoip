@@ -336,6 +336,36 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertIn("RVOIP_RELEASE_CANDIDATE", script)
         self.assertIn("RVOIP_RELEASE_ENVIRONMENT_ID", script)
 
+    def test_release_runs_the_invite_planner_retention_qualification(self) -> None:
+        # The test is `perf-tests`-gated and `#[ignore]`d, so only a release
+        # build that asks for ignored tests by exact name runs it.
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        gate = by_id["perf.invite-planner-retention"]
+        self.assertIn(gate["id"], self.catalog["profiles"]["remote-release"])
+        self.assertIn(gate["id"], by_id["report.remote-aggregate"]["dependencies"])
+        self.assertEqual(gate["resource_class"], "ec2-performance")
+        self.assertEqual(gate["dependencies"], ["source.remote-clean"])
+        self.assertFalse(gate["always_fresh"])
+        command = gate["command"]
+        self.assertEqual(command[:3], ["cargo", "test", "--locked"])
+        self.assertIn("--release", command)
+        self.assertEqual(command[command.index("--features") + 1], "perf-tests")
+        self.assertEqual(
+            command[command.index("--test") + 1],
+            "invite_planner_retention_qualification",
+        )
+        self.assertEqual(
+            command[command.index("--") :],
+            ["--", "--exact", "--ignored", "--nocapture"],
+        )
+        source = (
+            ROOT
+            / "crates/sip/rvoip-sip/tests/invite_planner_retention_qualification.rs"
+        ).read_text()
+        name = command[command.index("--test") + 2]
+        self.assertIn(f"async fn {name}()", source)
+        self.assertIn('#![cfg(feature = "perf-tests")]', source)
+
     def test_media_burst_scenarios_run_on_independent_workers(self) -> None:
         scenario_ids = {
             gate["id"]

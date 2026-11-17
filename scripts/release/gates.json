@@ -7445,6 +7445,55 @@
     {
       "affected_crates": [],
       "affected_paths": [
+        "Cargo.lock",
+        "crates/foundation/**",
+        "crates/media/**",
+        "crates/sip/**"
+      ],
+      "always_fresh": false,
+      "category": "Performance and resiliency",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "rvoip-sip",
+        "--release",
+        "--features",
+        "perf-tests",
+        "--test",
+        "invite_planner_retention_qualification",
+        "real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_zero",
+        "--",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "cargo test --locked -p rvoip-sip --release --features perf-tests --test invite_planner_retention_qualification real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_zero -- --exact --ignored --nocapture",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "perf.invite-planner-retention",
+      "kind": "performance",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "retained initial-INVITE planning at capacity 100 and 10 CPS past the retention horizon",
+      "resource_class": "ec2-performance",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 20,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
         ".github/workflows/release-qualify.yml",
         "infra/release-runners/aws-release-startup.sh",
         "infra/release-runners/release-infrastructure-preflight.sh",
@@ -11115,6 +11164,7 @@
         "package.archives",
         "package.inventory",
         "perf.canonical-2k-current",
+        "perf.invite-planner-retention",
         "perf.media-burst.access-edge-microburst",
         "perf.media-burst.buffer-ab-legacy",
         "perf.media-burst.carrier-smoke",
@@ -11565,6 +11615,7 @@
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",
+      "perf.invite-planner-retention",
       "perf.literal-all-config",
       "perf.long-duration",
       "perf.mass-teardown",
@@ -11787,6 +11838,7 @@
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",
+      "perf.invite-planner-retention",
       "perf.literal-all-config",
       "perf.long-duration",
       "perf.mass-teardown",
@@ -12145,6 +12197,7 @@
       "perf.capture-boundary",
       "perf.concurrent-calls",
       "perf.contact-center",
+      "perf.invite-planner-retention",
       "perf.literal-all-config",
       "perf.long-duration",
       "perf.mass-teardown",

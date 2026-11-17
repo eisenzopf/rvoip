@@ -431,6 +431,26 @@ version = "2.0.0"
                     "rustdoc", self.repository_policy_plan(path)["specialty_gates"]
                 )
 
+    def test_sip_test_change_selects_every_sip_codec_shard(self) -> None:
+        # The codec shards run rvoip-sip's test targets with the optional
+        # codec features on; a test behind one of those features compiles to
+        # nothing in the default shard, so editing only that test must still
+        # select the shards that build it.
+        sip_shards = {
+            "codec-features-sip",
+            "codec-features-sip-tests-2",
+            "codec-features-sip-tests-3",
+            "codec-features-sip-clippy",
+        }
+        for path in (
+            "crates/sip/rvoip-sip/tests/foo.rs",
+            "crates/sip/rvoip-sip/tests/common/mod.rs",
+        ):
+            with self.subTest(path=path):
+                selected = set(self.repository_policy_plan(path)["specialty_gates"])
+                self.assertLessEqual(sip_shards, selected)
+                self.assertNotIn("codec-features-codec-core", selected)
+
     def test_rename_records_old_and_new_paths(self) -> None:
         payload = b"R100\0crates/alpha/old.rs\0crates/beta/new.rs\0D\0crates/delta/gone.rs\0"
         self.assertEqual(

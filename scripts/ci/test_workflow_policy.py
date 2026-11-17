@@ -119,9 +119,22 @@ class WorkflowPolicyTests(unittest.TestCase):
                 # path would go unnoticed until main, so main runs the gates
                 # unconditionally.
                 self.assertIn(f"--specialty-gate {gate}", main)
-        # Identical patterns across the four, so splitting the job did not
-        # narrow what any one change verifies.
-        self.assertEqual(len({frozenset(rules[gate]) for gate in gates}), 1)
+        # Identical shared patterns across every codec gate, so splitting the
+        # job did not narrow what any one change verifies.
+        sip_shards = set(run_checks.CODEC_FEATURE_SIP_SHARDS)
+        sip_only = {"crates/sip/rvoip-sip/tests/**"}
+        self.assertEqual(
+            len({frozenset(rules[gate] - sip_only) for gate in gates}), 1
+        )
+        # The rvoip-sip shards also run every rvoip-sip test target with the
+        # codec features on, so a PR touching only a SIP test selects them;
+        # the other packages' gates never build those targets.
+        for gate in gates:
+            with self.subTest(gate=gate):
+                if gate in sip_shards:
+                    self.assertLessEqual(sip_only, rules[gate])
+                else:
+                    self.assertFalse(sip_only & rules[gate])
 
     def test_facade_feature_bundles_are_owned_by_a_gate_and_forced_on_main(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
