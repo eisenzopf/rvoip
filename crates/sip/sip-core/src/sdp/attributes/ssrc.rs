@@ -6,6 +6,7 @@
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
 use crate::types::sdp::{ParsedAttribute, SsrcAttribute};
+use nom::Parser;
 use nom::{
     bytes::complete::take_till1,
     character::complete::{char, space1},
@@ -36,7 +37,8 @@ fn attribute_pair_parser(input: &str) -> IResult<&str, (String, Option<String>)>
     let (input, attr_value) = opt(preceded(
         char(':'),
         map(attribute_value_parser, |s: &str| s.to_string()),
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     Ok((input, (attr_name.to_string(), attr_value)))
 }

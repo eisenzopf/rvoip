@@ -14,7 +14,8 @@ use nom::bytes::complete::take_while1;
 use nom::character::complete::char;
 use nom::combinator::{map, recognize};
 use nom::multi::separated_list1;
-use nom::sequence::{preceded, tuple};
+use nom::sequence::preceded;
+use nom::Parser;
 
 /// Check if a byte is valid for token-nodot (excludes '.')
 fn is_token_nodot_char(c: u8) -> bool {
@@ -34,12 +35,13 @@ fn token_nodot(input: &[u8]) -> ParseResult<'_, &[u8]> {
 /// event-type = event-package *( "." event-template )
 fn event_type(input: &[u8]) -> ParseResult<'_, String> {
     map(
-        recognize(tuple((
+        recognize((
             token_nodot,
             nom::multi::many0(preceded(char('.'), token_nodot)),
-        ))),
+        )),
         |bytes| std::str::from_utf8(bytes).unwrap_or("").to_string(),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse an Allow-Events header value
@@ -59,7 +61,7 @@ pub fn parse_allow_events(input: &[u8]) -> ParseResult<'_, AllowEvents> {
     let (input, _) = sws(input)?;
 
     // Parse comma-separated list of event types
-    let (input, events) = separated_list1(tuple((sws, char(','), sws)), event_type)(input)?;
+    let (input, events) = separated_list1((sws, char(','), sws), event_type).parse(input)?;
 
     // Parse any trailing whitespace
     let (input, _) = sws(input)?;

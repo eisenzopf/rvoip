@@ -401,6 +401,38 @@ class GateFrameworkTests(unittest.TestCase):
                     gate["command"],
                 )
 
+    def test_a_lab_chain_stays_on_one_worker(self) -> None:
+        # Diagnostic 43951452044 split Kamailio's up/matrix/down across the
+        # two proxy workers: the matrix found no lab env file, and the
+        # teardown ran before the lab came up.
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        profiles = {
+            "remote-release": self.catalog["profiles"]["remote-release"],
+            "kamailio only": [
+                "interop.proxy-pbx.kamailio.up",
+                "interop.proxy-pbx.kamailio.matrix",
+                "interop.proxy-pbx.kamailio.down",
+                "interop.remote-proxies.kamailio.rvoip-first.udp",
+            ],
+        }
+        for name, selected in profiles.items():
+            with self.subTest(profile=name):
+                matrix = gates.matrix_for(
+                    [{"id": gate_id, "decision": "RUN"} for gate_id in selected],
+                    by_id,
+                )
+                shard_of = {gate_id: shard["id"] for shard in matrix for gate_id in shard["gates"]}
+                for gate_id in shard_of:
+                    for dependency in by_id[gate_id].get("dependencies", []):
+                        if dependency in shard_of and by_id[dependency]["resource_class"] == by_id[gate_id]["resource_class"]:
+                            self.assertEqual(shard_of[dependency], shard_of[gate_id], (gate_id, dependency))
+        # Units still balance across the class's workers.
+        independent = [
+            {"id": f"g{index}", "resource_class": "ec2-proxy-interop", "estimated_seconds": 60, "dependencies": []}
+            for index in range(4)
+        ]
+        self.assertEqual([len(shard) for shard in gates.balance_gates(independent, 2)], [2, 2])
+
     def test_remote_release_uses_the_same_272_vcpu_ec2_shape(self) -> None:
         selected = self.catalog["profiles"]["remote-release"]
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
@@ -572,7 +604,7 @@ class GateFrameworkTests(unittest.TestCase):
                 manifest = ROOT / command[manifest_index].replace("{workspace}/", "")
                 lockfile = ROOT / "examples/Cargo.lock"
                 self.assertTrue(lockfile.is_file(), f"missing {lockfile}")
-                self.assertIn('rust-version = "1.91"', manifest.read_text())
+                self.assertIn('rust-version = "1.95"', manifest.read_text())
 
     def test_rvoip_sip_gates_build_the_test_hooks_their_targets_need(self) -> None:
         # Since 0.4.0 the RFC 4028 session-timer tests and their process
@@ -659,8 +691,8 @@ class GateFrameworkTests(unittest.TestCase):
         self.assertEqual(gate["command"][:2], ["cargo", "fmt"])
         self.assertNotIn("--locked", gate["command"])
         self.assertEqual(
-            builder.insert_locked(["cargo", "+1.91.0", "fmt", "--all"]),
-            ["cargo", "+1.91.0", "fmt", "--all"],
+            builder.insert_locked(["cargo", "+1.95.0", "fmt", "--all"]),
+            ["cargo", "+1.95.0", "fmt", "--all"],
         )
 
     def test_ec2_gates_allow_for_cold_release_builds(self) -> None:

@@ -563,7 +563,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         # proxy interop) before the prebuild, one for performance workers after.
         self.assertEqual(workflow.count("aws ec2 run-instances"), 3)
         self.assertIn(
-            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
             workflow,
         )
         self.assertIn("expected 48 publishable workspace packages", probe)
@@ -597,22 +597,19 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn(gate["id"], catalog["profiles"]["remote-release"])
         self.assertIn("GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}", workflow)
 
-    def test_nightly_qualifies_main_with_the_release_pipeline_and_no_benchmark(self) -> None:
-        nightly = (ROOT / ".github/workflows/nightly-qualification.yml").read_text()
+    def test_no_schedule_starts_an_ec2_qualification(self) -> None:
+        # The full fanout is 24 workers and 272 vCPUs; it runs only when
+        # someone dispatches it.
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = workflow.read_text()
+            if "schedule:" not in text:
+                continue
+            with self.subTest(workflow=workflow.name):
+                self.assertNotIn("release-qualify.yml", text)
+                self.assertNotIn("aws_fanout.py", text)
         interop = (ROOT / ".github/workflows/nightly-interop.yml").read_text()
-        qualify = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-
-        self.assertIn("schedule:", nightly)
-        self.assertIn("uses: ./.github/workflows/release-qualify.yml", nightly)
-        self.assertIn("profile: remote-release", nightly)
-        self.assertNotIn("bench", nightly.split("jobs:", 1)[1])
-        self.assertIn("uses: ./.github/workflows/nightly-interop.yml", nightly)
-        self.assertIn('select(.name == "release-gate-evidence" and .expired == false)', nightly)
-        self.assertIn("first_candidate: ${{ needs.chain.outputs.prior_run_id == '' }}", nightly)
-        # nightly-interop runs only inside the nightly qualification now.
-        self.assertIn("workflow_call:", interop)
-        self.assertNotIn("schedule:", interop)
-        self.assertIn("  workflow_call:\n", qualify)
+        self.assertIn("schedule:", interop)
+        self.assertNotIn("self-hosted", interop)
         catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
         self.assertFalse(
             {"perf.rfc7502-release", "perf.rfc7502-minor"} & set(catalog["profiles"]["remote-release"])

@@ -68,6 +68,7 @@ pub fn hostname(input: &[u8]) -> ParseResult<'_, Host> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nom::Parser;
 
     #[test]
     fn test_hostname_basic() {
@@ -146,7 +147,9 @@ mod tests {
         // RFC 1034/1035 edge cases
 
         // Labels should only contain alphanumeric characters and hyphens
-        assert!(nom::combinator::all_consuming(hostname)(b"invalid_underscore.com").is_err());
+        assert!(nom::combinator::all_consuming(hostname)
+            .parse(b"invalid_underscore.com")
+            .is_err());
 
         // Modern DNS implementations sometimes allow underscores in certain contexts
         // SIP hostnames are more strict and don't allow this

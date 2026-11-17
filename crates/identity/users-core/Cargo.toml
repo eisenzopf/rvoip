@@ -30,9 +30,9 @@ postgres = ["dep:sqlx-postgres"]
 tokio = { workspace = true, features = ["full"] }
 
 # Database
-sqlx-core = { version = "0.8", default-features = false, features = ["_rt-tokio", "json"] }
-sqlx-sqlite = { version = "0.8", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
-sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
+sqlx-core = { version = "0.9", default-features = false, features = ["_rt-tokio", "json"] }
+sqlx-sqlite = { version = "0.9", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
+sqlx-postgres = { version = "0.9", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
 
 # Password hashing
 argon2 = "0.5"

@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       candidate:
-        description: Main commit to release (a green nightly qualification candidate); defaults to the head of main
+        description: Main commit to release (one with a green remote-release qualification); defaults to the head of main
         required: true
         default: main
         type: string
@@ -75,7 +75,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
 
       - name: Install release validation dependencies
         run: >-

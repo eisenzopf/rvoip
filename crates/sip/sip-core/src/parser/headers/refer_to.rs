@@ -2,6 +2,7 @@
 // Refer-To = "Refer-To" HCOLON (name-addr / addr-spec) *( SEMI refer-param )
 // refer-param = generic-param
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -24,9 +25,11 @@ use std::str::{self};
 // Method parameter parser for Refer-To header
 // method-param = "method=" Method (Method token)
 fn method_param(input: &[u8]) -> ParseResult<'_, Param> {
-    map_res(preceded(tag_no_case(b"method="), token), |method_bytes| {
-        str::from_utf8(method_bytes).map(|s| Param::Method(s.to_string()))
-    })(input)
+    map_res(
+        preceded(tag_no_case(&b"method="[..]), token),
+        |method_bytes| str::from_utf8(method_bytes).map(|s| Param::Method(s.to_string())),
+    )
+    .parse(input)
 }
 
 // refer-param parser that handles specific params before falling back to generic
@@ -34,7 +37,8 @@ fn refer_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         method_param,  // First try method parameter
         generic_param, // Then generic parameters
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse a Refer-To header value according to RFC 3515
@@ -54,7 +58,8 @@ fn refer_to_spec(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params = params_vec; // Assign parsed parameters
             addr
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse a complete Refer-To header value

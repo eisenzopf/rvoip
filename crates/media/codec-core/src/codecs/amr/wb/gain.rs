@@ -368,13 +368,13 @@ impl GainDecoder {
     }
 
     /// Shift a new energy into the predictor's window.
-    fn push_energy(&mut self, energy: Word16) {
+    const fn push_energy(&mut self, energy: Word16) {
         self.past_energy.rotate_right(1);
         self.past_energy[0] = energy;
     }
 
     /// Shift new gains into the concealment history.
-    fn push_history(&mut self, pitch: Word16, code: Word16) {
+    const fn push_history(&mut self, pitch: Word16, code: Word16) {
         self.pitch_history.rotate_left(1);
         self.pitch_history[L_LTPHIST - 1] = pitch;
         self.code_history.rotate_left(1);
