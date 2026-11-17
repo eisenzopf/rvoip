@@ -236,7 +236,9 @@ class Lane:
     def install(self, s3_run):
         lane = self.info
         tls = self.args.local / 'tls'
-        if not (tls / 'dut.crt').exists():
+        if lane.get('tls_for') != lane['instances']:
+            shutil.rmtree(tls, ignore_errors=True)
+            lane['tls_for'] = lane['instances']
             make_tls(tls, [lane['dut']['ip']], [ip for c in lane['callers'] for ip in c['ips']])
         for f in tls.iterdir():
             self.aws.s3_cp(f, s3_run + 'tls/' + f.name)
@@ -350,7 +352,7 @@ class Trials:
         if local.exists():
             shutil.rmtree(local)
         local.mkdir(parents=True)
-        self.args.check_wall()
+        self.args.check_wall(sum(st['seconds'] for st in profile['stages']) + row['hold_ms'] / 1000 + 600)
         lane = self.lane.info
         callers = [c['id'] for c in lane['callers']]
         dut = lane['dut']['id']
@@ -624,8 +626,28 @@ class Context:
         self.args, self.aws, self.log = args, aws, log
         self.s3_run = 's3://%s/bench/%s/' % (args.bucket, args.run_id)
         self.state = args.load_state()
+
+        def mirror(path):
+            try:
+                aws.s3_cp(path, self.s3_run + 'state.json')
+            except AwsError as error:
+                log('WARNING state mirror:', error)
+
+        args.state_mirror = None if args.dry_run else mirror
         self.lane = Lane(args, aws, log, self.state)
         self.trials = Trials(args, aws, self.lane, log, self.s3_run)
+
+    def restore(self):
+        """Pull the run's small state (state, search states, trial summaries and verdicts) from S3,
+        so any leg on any machine resumes where the last one stopped. Unknown run-ids start fresh."""
+        if not self.aws.s3_list(self.s3_run + 'state.json'):
+            self.log('resume: no state for %s in S3; starting a new run' % self.args.run_id)
+            return
+        self.aws.s3_sync(self.s3_run, self.args.local, RESTORE_PATTERNS)
+        self.state = self.args.load_state()
+        self.lane.state = self.state
+        self.log('resume: restored %s (rows done: %s)' % (
+            self.args.run_id, sorted(k for k, v in self.state.get('rows', {}).items() if v.get('verdict'))))
 
     def persist_row(self, row_id, result):
         self.state.setdefault('rows', {})[row_id] = result
@@ -706,20 +728,23 @@ def parse_args(argv):
     p.add_argument('--profile', required=True, choices=sorted(profiles.PROFILES))
     p.add_argument('--candidate', required=True)
     p.add_argument('--receipt', required=True)
-    p.add_argument('--dut-bin')
-    p.add_argument('--caller-bin', required=True)
-    p.add_argument('--ea-uas-bin')
-    p.add_argument('--env-id')
+    p.add_argument('--dut-bin', help='rvoip-bench-uas built at --candidate (required except for baseline)')
+    p.add_argument('--caller-bin', help='rvoip-loadgen; default: the env-id-pinned build from S3 (env.json)')
+    p.add_argument('--ea-uas-bin', help='ea-uas for baseline; default: the env-id-pinned build from S3')
+    p.add_argument('--env-id', help='default: perf-baselines/rfc7502/ENVIRONMENT')
     p.add_argument('--region', default=os.environ.get('RVOIP_AWS_REGION', 'us-west-2'))
     p.add_argument('--bucket', default=os.environ.get('RVOIP_AWS_EVIDENCE_BUCKET'))
     p.add_argument('--lane-config', help='JSON of the infra/aws/bench outputs (default: terraform output)')
     p.add_argument('--callers', type=int, default=2)
     p.add_argument('--ea-host-type', default='c8i.12xlarge', help='baseline: ea-uas host type (E74 used c8i.12xlarge)')
     p.add_argument('--run-id')
-    p.add_argument('--resume', action='store_true')
-    p.add_argument('--max-wall', type=float, help='minutes; stop cleanly (exit 4) before this deadline')
+    p.add_argument('--resume', action='store_true',
+                   help='continue --run-id from its S3 state; a finished run rewrites its receipt and exits at once; '
+                        'an unknown run-id starts a new run')
+    p.add_argument('--max-wall', type=float, help='minutes from process start; no trial starts that would not '
+                                                   'finish before it (exit 4, resume later)')
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('--record', action='store_true', help='minor/full: write rates.json for the env-id from this run')
+    p.add_argument('--record', action='store_true', help='minor/full/baseline: write rates.json for the env-id')
     p.add_argument('--rows', help='comma list overriding the profile rows (debug)')
     p.add_argument('--r0', action='append', default=[], help='ROW=sps initial rate for a search row')
     p.add_argument('--cap', action='append', default=[], help='ROW=sps tester cap override')
@@ -729,17 +754,19 @@ def parse_args(argv):
     p.add_argument('--keep-local', action='store_true')
     p.add_argument('--break-lock', action='store_true')
     args = p.parse_args(argv)
+    args.started = time.time()
     if not re.fullmatch(r'[0-9a-f]{40}', args.candidate):
         raise Usage('--candidate must be a 40-hex sha')
     if not args.bucket:
         raise Usage('--bucket or RVOIP_AWS_EVIDENCE_BUCKET is required')
     ea = profiles.PROFILES[args.profile].get('ea_uas')
-    for name, path in (('--caller-bin', args.caller_bin), ('--ea-uas-bin' if ea else '--dut-bin',
-                                                            args.ea_uas_bin if ea else args.dut_bin)):
-        if not path or not Path(path).is_file():
-            raise Usage('%s: no such file %r' % (name, path))
-    args.r0 = dict(kv.split('=', 1) for kv in args.r0)
-    args.r0 = {k: int(v) for k, v in args.r0.items()}
+    if not ea and not args.dry_run and not (args.dut_bin and Path(args.dut_bin).is_file()):
+        raise Usage('--dut-bin: no such file %r' % args.dut_bin)
+    for name in ('caller_bin', 'ea_uas_bin', 'dut_bin'):
+        path = getattr(args, name)
+        if path and not Path(path).is_file():
+            raise Usage('--%s: no such file %r' % (name.replace('_', '-'), path))
+    args.r0 = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.r0)}
     args.cap = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.cap)}
     args.run_id = args.run_id or 'bench-%s-%s-%s' % (args.profile, args.candidate[:12], stamp())
     if not re.fullmatch(r'[A-Za-z0-9._-]{1,96}', args.run_id):
@@ -747,7 +774,7 @@ def parse_args(argv):
     args.local = WORKDIR / args.run_id
     args.local.mkdir(parents=True, exist_ok=True)
     state_path = args.local / 'state.json'
-    args.deadline = time.time() + args.max_wall * 60 if args.max_wall else None
+    args.deadline = args.started + args.max_wall * 60 if args.max_wall else None
 
     def load_state():
         return json.loads(state_path.read_text()) if state_path.exists() else {'run_id': args.run_id}
@@ -756,13 +783,57 @@ def parse_args(argv):
         tmp = state_path.with_suffix('.tmp')
         tmp.write_text(json.dumps(state, indent=1, sort_keys=True))
         tmp.replace(state_path)
+        if args.state_mirror:
+            args.state_mirror(state_path)
 
-    def check_wall():
-        if args.deadline and time.time() > args.deadline - 15 * 60:
-            raise WallClock('--max-wall reached')
+    def check_wall(need_seconds=TRIAL_ALLOWANCE_SECONDS):
+        """Raise WallClock when `need_seconds` more work would not finish before --max-wall."""
+        if args.deadline and time.time() + need_seconds > args.deadline:
+            raise WallClock('--max-wall: %.0f s left, the next step needs about %.0f s' % (
+                args.deadline - time.time(), need_seconds))
 
-    args.load_state, args.save_state, args.check_wall = load_state, save_state, check_wall
+    args.load_state, args.save_state, args.check_wall, args.state_mirror = load_state, save_state, check_wall, None
     return args
+
+
+# Launch, SSM-online and install of a lane; and a typical trial with its overhead.
+LAUNCH_ALLOWANCE_SECONDS = 20 * 60
+TRIAL_ALLOWANCE_SECONDS = 15 * 60
+RESTORE_PATTERNS = ('state.json', '*/search.json', '*/trials.jsonl', '*/merged/summary.json', '*/verdict.json',
+                    '*/plan.json', '*/evidence-manifest.json', 'report/*')
+
+
+def resolve_environment(args, aws):
+    """env-id and pinned tester builds (perf-baselines/rfc7502/ENVIRONMENT and <env-id>/env.json).
+
+    A missing --caller-bin / --ea-uas-bin is fetched from env.json's S3 copy and checked against its sha256."""
+    env_id = args.env_id
+    if not env_id and (BASELINES / 'ENVIRONMENT').exists():
+        env_id = (BASELINES / 'ENVIRONMENT').read_text().strip()
+    pinned = None
+    if env_id and (BASELINES / env_id / 'env.json').exists():
+        pinned = json.loads((BASELINES / env_id / 'env.json').read_text())
+        assert pinned.get('schema') == 'rvoip-rfc7502-env-v1', 'bad env.json for %s' % env_id
+    ea = profiles.PROFILES[args.profile].get('ea_uas')
+    for attr, key in (('caller_bin', 'rvoip-loadgen'), ('ea_uas_bin', 'ea-uas')):
+        if getattr(args, attr) or (attr == 'ea_uas_bin' and not ea):
+            continue
+        build = (pinned or {}).get('builds', {}).get(key)
+        if not build:
+            raise Usage('no --%s and no pinned %s build for env-id %r' % (attr.replace('_', '-'), key, env_id))
+        local = args.local / 'pinned' / key
+        if not local.exists() or sha256_file(local) != build['sha256']:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            aws.s3_cp(build['s3_uri'], local)
+        if sha256_file(local) != build['sha256']:
+            raise Infra('pinned %s at %s does not match sha256 %s' % (key, build['s3_uri'], build['sha256']))
+        local.chmod(0o755)
+        setattr(args, attr, str(local))
+    return env_id, pinned
+
+
+def outcome_code(status):
+    return {'PASS': EXIT_PASS, 'WARN': EXIT_PASS, 'FAIL': EXIT_FAIL}.get(status, EXIT_INFRA)
 
 
 def main(argv=None):
@@ -774,7 +845,7 @@ def main(argv=None):
     log = Log(args.local / 'run_lane.log')
     aws = Aws(args.region, log=log)
     ctx = Context(args, aws, log)
-    started = time.time()
+    started = args.started
     profile = profiles.PROFILES[args.profile]
     rows_wanted = args.rows.split(',') if args.rows else profile['rows']
     lock = 's3://%s/bench/lock.json' % args.bucket
@@ -787,6 +858,17 @@ def main(argv=None):
             log('dry run: quota', aws.vcpu_quota(), 'in use', aws.running_standard_vcpus(),
                 'outputs', ctx.lane.tf_outputs())
             return EXIT_PASS
+        if args.resume:
+            ctx.restore()
+            final = ctx.state.get('final')
+            if final:
+                log('run %s already finished (%s): rewriting the receipt' % (args.run_id, final['status']))
+                receipt = final['receipt']
+                Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.receipt).write_bytes(canonical(receipt))
+                return outcome_code(final['status'])
+        env_id, pinned = resolve_environment(args, aws)
+        args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
         if not aws.s3_create_exclusive(lock, {'run_id': args.run_id, 'at': utc(), 'profile': args.profile}):
             held = aws.s3_get_json(lock)
             if held and held.get('run_id') == args.run_id:
@@ -801,8 +883,10 @@ def main(argv=None):
             ctx.lane.launch(profile['budget_hours'])
             ctx.lane.install(ctx.s3_run)
         lane = ctx.lane.info
-        caller_sha = sha256_file(args.caller_bin)
-        env_id = env_id or env_id_for(lane, caller_sha)
+        if pinned and pinned.get('ami_id') and lane.get('ami_id') != pinned['ami_id'] and not args.dut_type:
+            raise Usage('lane AMI %s differs from the env-id %s AMI %s: re-pin the environment (pin_env.py)' % (
+                lane.get('ami_id'), env_id, pinned['ami_id']))
+        env_id = env_id or env_id_for(lane, sha256_file(args.caller_bin))
         if args.dut_type or args.caller_type:
             env_id = 'smoke-' + env_id
             if args.record:
@@ -829,7 +913,10 @@ def main(argv=None):
             rows.append(result)
         if profile.get('overload'):
             r2 = next((r for r in rows if r['id'] == 'R2' and r.get('r')), None)
-            if r2 and not ctx.state.get('rows', {}).get('R4', {}).get('verdict'):
+            done = ctx.state.get('rows', {}).get('R4')
+            if done and done.get('verdict'):
+                rows.append(done)
+            elif r2:
                 result = run_overload(ctx, profiles.quantize(r2['r']))
                 ctx.persist_row('R4', result)
                 rows.append(result)
@@ -848,7 +935,7 @@ def main(argv=None):
         if args.record and status in ('PASS', 'WARN'):
             score.record_rates(rows, env_id, BASELINES, ctx, args.profile)
     except WallClock as error:
-        log('stopping:', error)
+        log('stopping (exit 4, resume later):', error)
         return EXIT_WALL
     except Usage as error:
         log('usage:', error)
@@ -860,7 +947,7 @@ def main(argv=None):
         log('error:', ''.join(traceback.format_exception(error))[-3000:])
         status, reasons, code = 'INFRA', ['harness error: %s' % error], EXIT_INFRA
     finally:
-        if not args.dry_run:
+        if not args.dry_run and (have_lock or ctx.state.get('lane')):
             try:
                 ctx.lane.teardown()
             except Exception as error:  # noqa: BLE001
@@ -875,6 +962,10 @@ def main(argv=None):
         write_manifest(ctx, receipt)
     except Exception as error:  # noqa: BLE001
         log('WARNING manifest:', error)
+    if code in (EXIT_PASS, EXIT_FAIL):
+        # A verdict is final: a later --resume of this run-id only rewrites this receipt.
+        ctx.state['final'] = {'status': status, 'receipt': receipt, 'at': utc()}
+        args.save_state(ctx.state)
     Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
     Path(args.receipt).write_bytes(canonical(receipt))
     try:

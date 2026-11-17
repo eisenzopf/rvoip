@@ -25,30 +25,43 @@ python3 scripts/bench/run_lane.py \
   --profile release|minor|full|baseline \
   --candidate <40-hex sha> \
   --receipt <path/receipt.json> \
-  [--env-id <id>]              # default: from perf-baselines/rfc7502/ENVIRONMENT
-  [--evidence-bucket <name>]   # default: RVOIP_AWS_EVIDENCE_BUCKET
+  --dut-bin <rvoip-bench-uas built at the candidate>   # not used by baseline
+  [--caller-bin <rvoip-loadgen>] [--ea-uas-bin <ea-uas>] # default: the env-id-pinned builds
+  [--env-id <id>]              # default: crates/sip/rvoip-sip/perf-baselines/rfc7502/ENVIRONMENT
+  [--bucket <name>]            # default: RVOIP_AWS_EVIDENCE_BUCKET
   [--run-id <id>]              # default: bench-<profile>-<sha12>-<utc stamp>
-  [--resume]                   # continue a run-id from its S3 state
-  [--dry-run]                  # validate inputs, quota, plan; launch nothing
+  [--resume]                   # see below
+  [--max-wall <minutes>]       # from process start; see below
+  [--dry-run]
 ```
 
-- **Credentials**: the standard AWS CLI chain. The orchestrator calls `aws`
-  (EC2 launch/terminate from the bench launch templates, SSM SendCommand,
-  S3). It needs `aws` v2 on PATH and Python 3.10+, nothing else.
-- **Binaries** are inputs: `--dut-bin` (release build of `rvoip-bench-uas`
-  at `--candidate`), `--caller-bin` and, for `baseline`, `--ea-uas-bin`
-  (release builds of `rvoip-loadgen` / `ea-uas`, whose build is pinned by the
-  env-id, not by the candidate). The executor's performance prebuild is the
-  natural place to produce the DUT binary. run_lane refuses a DUT binary whose
-  embedded git sha differs from `--candidate`, and records every sha256.
-- **Duration**: `release` about 3.5 h, `minor` about 11 h. That exceeds the
-  6 h provisioner-role session and a hosted runner's 6 h job limit, so the
-  executor must either run `run_lane.py` on a host with refreshing
-  credentials (an instance role) or call it repeatedly with `--resume`
-  (state lives in S3; each call continues the next trial). `--max-wall
-  <minutes>` makes a call stop cleanly (exit 4) before a deadline.
+- **Credentials**: the standard AWS CLI chain (EC2 launch/terminate from the
+  bench launch templates, SSM SendCommand, S3). Needs `aws` v2, `openssl`
+  and Python 3.10+. The permissions are the `rvoip-bench-orchestrator` managed
+  policy from `infra/aws/bench`.
+- **Binaries**: the executor builds only the DUT (`rvoip-bench-uas` at the
+  candidate). The tester builds are pinned by the env-id:
+  `perf-baselines/rfc7502/<env-id>/env.json` names an immutable S3 copy and
+  sha256 of `rvoip-loadgen` and `ea-uas` (written by
+  `scripts/bench/pin_env.py`); run_lane fetches and verifies them when
+  `--caller-bin` / `--ea-uas-bin` are omitted. It refuses a lane whose AMI
+  differs from the env-id's (exit 2: re-pin and re-baseline).
+- **`--resume`**: state lives in S3 under the run-id, so a leg on any machine
+  continues where the last one stopped (finished rows are kept, a search
+  resumes its saved state, a trial with a summary is not rerun).
+  - A run-id whose verdict is already final rewrites the receipt and exits 0
+    or 1 at once, launching nothing.
+  - An unknown run-id starts a new run, so every leg can pass the same flags.
+- **`--max-wall`**: minutes from process start. No lane launch and no trial
+  starts unless it would finish before the limit (launch ~20 min, a trial is
+  its stages + hold + 10 min); the leg then tears the lane down and exits 4.
+  `release` is about 3.5 h, `minor` about 11 h.
 - **Concurrency**: one lane at a time per account. run_lane takes an S3 lock
-  (`bench/lock.json`, conditional put) and exits 3 if another lane holds it.
+  (`bench/lock.json`, conditional put) and exits 3 if another run holds it.
+- **Inputs that should invalidate a receipt**: the DUT's crates,
+  `scripts/bench/**`, `infra/aws/bench/**` and
+  `crates/sip/rvoip-sip/perf-baselines/rfc7502/**` (the recorded R values and
+  the pinned environment decide the verdict).
 
 ## Exit codes
 
@@ -58,7 +71,7 @@ python3 scripts/bench/run_lane.py \
 | 1 | `FAIL`: the DUT failed a confirmation trial or a latency budget | gate fails |
 | 2 | usage or input error (bad sha, missing baseline, missing binary) | gate fails, not retried |
 | 3 | `INFRA`: quota, capacity, lock held, SSM/S3 error, tester invalid three times | retry later (`retry_on_exit_codes: [3]`) |
-| 4 | stopped at `--max-wall`; call again with `--resume` | re-invoke |
+| 4 | stopped at `--max-wall` (lane torn down); call again with `--resume` | re-invoke |
 
 ## Receipt
 

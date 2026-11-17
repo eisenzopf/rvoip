@@ -201,6 +201,12 @@ class Aws:
         finally:
             tmp.unlink(missing_ok=True)
 
+    def s3_sync(self, src, dst, include_patterns):
+        args = ['s3', 'sync', '--only-show-errors', str(src), str(dst), '--exclude', '*']
+        for pattern in include_patterns:
+            args += ['--include', pattern]
+        self.call(*args, parse=False)
+
     def s3_rm(self, uri):
         self.call('s3', 'rm', '--only-show-errors', uri, parse=False)
 
