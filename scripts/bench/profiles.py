@@ -53,7 +53,8 @@ TESTER_CAP_FRACTION = 0.67
 
 # On-demand us-west-2 prices (AWS Pricing API, E74 plan 2026-11-01).
 PRICE_PER_HOUR = {'c8i.4xlarge': 0.74968, 'c8i.12xlarge': 2.24904, 'c8i.16xlarge': 2.99872,
-                  'c8in.24xlarge': 6.53184, 'c8in.16xlarge': 4.35456}
+                  'c8in.24xlarge': 6.53184, 'c8in.16xlarge': 4.35456,
+                  'c8in.12xlarge': 3.26592}
 
 
 def quantize(rate, quantum=TRIAL['quantum']):

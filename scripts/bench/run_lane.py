@@ -921,7 +921,10 @@ def main(argv=None):
                 lane.get('ami_id'), env_id, pinned['ami_id']))
         env_id = env_id or env_id_for(lane, sha256_file(args.caller_bin))
         if args.dut_type or args.caller_type:
-            env_id = 'smoke-' + env_id
+            # Overridden types: label the env-id with what actually ran; never recordable.
+            env_id = 'smoke-' + env_id_for(dict(lane, tf=dict(lane['tf'], dut_instance_type=lane['dut_type'],
+                                                              caller_instance_type=lane['caller_type'])),
+                                         sha256_file(args.caller_bin))
             if args.record:
                 raise Usage('--record is not allowed with --dut-type/--caller-type (smoke lane)')
         rates, rates_path = load_rates(env_id)
