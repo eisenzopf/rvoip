@@ -1131,6 +1131,7 @@ async fn wait_until_cooldown_deadline(deadline: Instant) {
     tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[test]
 fn perf_call_setup_cps() {
     let worker_threads = env_usize("RVOIP_PERF_WORKER_THREADS", 8).max(1);

@@ -342,6 +342,7 @@ async fn drive_resume(handle: &SessionHandle) -> rvoip_sip::Result<()> {
     handle.resume().await
 }
 
+#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_mid_call_signal_under_media() {
     let points = parse_sweep_env("RVOIP_PERF_SWEEP_MID_CALL_CALLS").unwrap_or_else(|| {
