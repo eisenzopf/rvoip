@@ -934,6 +934,11 @@ def main(argv=None):
                 receipt = final['receipt']
                 Path(args.receipt).parent.mkdir(parents=True, exist_ok=True)
                 Path(args.receipt).write_bytes(canonical(receipt))
+                if args.record and args.record_out and final['status'] in ('PASS', 'WARN'):
+                    # The leg that finished recorded the rates; hand the same file to this call's artifact.
+                    env = (receipt.get('environment') or {}).get('env_id')
+                    Path(args.record_out).parent.mkdir(parents=True, exist_ok=True)
+                    aws.s3_cp(ctx.s3_run + 'record/%s/rates.json' % env, args.record_out)
                 return outcome_code(final['status'])
         env_id, pinned = resolve_environment(args, aws)
         args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
