@@ -510,7 +510,9 @@ class GateFrameworkTests(unittest.TestCase):
         # 1345 to 1347 seconds while preserving the twelve-shard concurrency cap.
         # The 48th crate (rvoip-webex-byova) adds one more bounded two-minute
         # core gate, raising the longest planned shard from 1347 to 1359 seconds.
-        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1359)
+        # The unpublished benchmark DUT (rvoip-bench-uas) adds another, raising
+        # it from 1359 to 1365 seconds.
+        self.assertLessEqual(max(shard["estimated_seconds"] for shard in standard), 1365)
 
     def test_remote_diagnostic_runs_only_exact_ec2_gates_and_dependencies(self) -> None:
         requested = ["interop.remote-proxies", "perf.monolithic-soak"]

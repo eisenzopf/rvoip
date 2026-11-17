@@ -74,6 +74,9 @@ members = [
     "crates/extensions/rvoip-saml",
     "crates/extensions/rvoip-webauthn",
     "crates/extensions/rvoip-ims-aka",
+
+    # tools/ — benchmark tools, never published.
+    "crates/tools/rvoip-bench-uas",
 ]
 
 exclude = [

@@ -7472,6 +7472,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "rvoip-bench-uas"
+version = "0.4.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "rcgen 0.14.8",
+ "rvoip-core-traits",
+ "rvoip-media-core",
+ "rvoip-rtp-core",
+ "rvoip-sip",
+ "rvoip-sip-dialog",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rvoip-client"
 version = "0.4.0"
 dependencies = [
