@@ -22,11 +22,11 @@ pub use params::uri_parameters;
 pub use userinfo::{userinfo, userinfo_with_wire, UserInfoWithWire};
 
 // Add imports for combinators and types
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while},
     combinator::{opt, recognize},
-    sequence::tuple,
 };
 use std::collections::HashMap;
 
@@ -61,13 +61,14 @@ fn uri_user_fields(info: Option<UserInfoWithWire>) -> UriUserFields {
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
-    let res = tuple((
-        tag_no_case(b"sip:"),
+    let res = (
+        tag_no_case(&b"sip:"[..]),
         opt(userinfo_with_wire),
         hostport,
         opt(uri_parameters),
         opt(uri_headers),
-    ))(bytes_slice);
+    )
+        .parse(bytes_slice);
 
     match res {
         Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
@@ -96,13 +97,14 @@ pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
-    let res = tuple((
-        tag_no_case(b"sips:"),
+    let res = (
+        tag_no_case(&b"sips:"[..]),
         opt(userinfo_with_wire),
         hostport,
         opt(uri_parameters),
         opt(uri_headers),
-    ))(bytes_slice);
+    )
+        .parse(bytes_slice);
 
     match res {
         Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
@@ -147,7 +149,7 @@ fn hostport_extent(input: &[u8]) -> usize {
 /// Can be re-exported by the main parser mod.rs
 pub fn parse_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Use alt to try each parser
-    alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input)
+    alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri)).parse(input)
 }
 
 /// `SIP-URI / SIPS-URI / absoluteURI` (RFC 3261 §25.1, the Request-URI and
@@ -165,9 +167,9 @@ pub fn sip_or_absolute_uri(input: &[u8]) -> ParseResult<'_, Uri> {
         .iter()
         .any(|known| scheme.eq_ignore_ascii_case(known));
     if modelled {
-        return nom::combinator::all_consuming(parse_uri)(input);
+        return nom::combinator::all_consuming(parse_uri).parse(input);
     }
-    let (rest, absolute) = nom::combinator::all_consuming(parse_absolute_uri)(input)?;
+    let (rest, absolute) = nom::combinator::all_consuming(parse_absolute_uri).parse(input)?;
     let text = std::str::from_utf8(absolute)
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))?;
     Ok((rest, Uri::custom(text)))
@@ -178,7 +180,7 @@ pub fn sip_or_absolute_uri(input: &[u8]) -> ParseResult<'_, Uri> {
 /// such as in the macro builder or when processing messages from other systems
 pub fn parse_uri_lenient(input: &[u8]) -> ParseResult<'_, Uri> {
     // First try the standard parsers (SIP, SIPS, TEL)
-    let result = alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input);
+    let result = alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri)).parse(input);
 
     if result.is_ok() {
         return result;
@@ -236,7 +238,7 @@ fn parse_generic_uri(input: &[u8]) -> ParseResult<'_, Uri> {
 
 // Fixed implementation of SIP URI parser that correctly handles params and headers
 fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
-    let (input, _) = tag_no_case(b"sip:")(input)?;
+    let (input, _) = tag_no_case(&b"sip:"[..])(input)?;
 
     // Get the user info (if any)
     let mut userinfo_present = false;
@@ -410,7 +412,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
 
 // Fixed implementation of SIPS URI parser that correctly handles params and headers
 fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
-    let (input, _) = tag_no_case(b"sips:")(input)?;
+    let (input, _) = tag_no_case(&b"sips:"[..])(input)?;
 
     // Get the user info (if any)
     let mut userinfo_present = false;
@@ -586,7 +588,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
 // telephone-subscriber = global-number / local-number
 fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Tag for "tel:"
-    let (input, _) = tag_no_case(b"tel:")(input)?;
+    let (input, _) = tag_no_case(&b"tel:"[..])(input)?;
 
     // In our implementation, we store the telephone number as the host part of the URI
     // while marking the URI scheme as Tel
@@ -594,7 +596,8 @@ fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Capture everything until a parameter or end of input
     let (input, number) = recognize(take_while(|c| {
         c != b';' && c != b'?' // Stop at parameter or header delimiter
-    }))(input)?;
+    }))
+    .parse(input)?;
 
     // Convert number to string
     let number_str = std::str::from_utf8(number)

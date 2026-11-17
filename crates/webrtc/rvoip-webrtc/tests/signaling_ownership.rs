@@ -121,7 +121,7 @@ async fn fresh_whep_offer() -> String {
 }
 
 fn http() -> reqwest::Client {
-    reqwest::Client::builder()
+    ring_reqwest_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("http client")
@@ -519,4 +519,11 @@ async fn websocket_session_hint_becomes_single_take_inbound_context() {
     );
 
     server.shutdown().await;
+}
+
+/// reqwest is built with `rustls-no-provider`: install the workspace's ring
+/// provider as the process default before building a client.
+fn ring_reqwest_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
 }

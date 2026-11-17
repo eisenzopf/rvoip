@@ -26,7 +26,7 @@ pub(crate) struct VapiHttpClient {
 impl VapiHttpClient {
     pub(crate) fn new(config: &VapiConfig) -> Result<Self> {
         config.validate()?;
-        let client = Client::builder()
+        let client = crate::ring_http_client_builder()
             .timeout(config.http_timeout)
             .https_only(!config.allow_insecure_transport)
             .build()

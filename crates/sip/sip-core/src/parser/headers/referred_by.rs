@@ -2,6 +2,7 @@
 // Referred-By = "Referred-By" HCOLON (name-addr / addr-spec) *(SEMI referredby-param)
 // referredby-param = generic-param / "cid" EQUAL token
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while1},
@@ -25,14 +26,15 @@ use crate::types::param::Param;
 fn cid_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(
-            pair(tag_no_case(b"cid"), equal),
+            pair(tag_no_case(&b"cid"[..]), equal),
             take_while1(|c| {
                 // Token characters plus '@' for email-like identifiers
                 is_token_char(c) || c == b'@'
             }),
         ),
         |cid_bytes| std::str::from_utf8(cid_bytes).map(|s| Param::new("cid", Some(s.to_string()))),
-    )(input)
+    )
+    .parse(input)
 }
 
 // referredby-param parser that handles specific params before falling back to generic
@@ -40,7 +42,8 @@ fn referredby_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         cid_param,     // First try cid parameter
         generic_param, // Then generic parameters
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse a Referred-By header value according to RFC 3892
@@ -60,7 +63,8 @@ fn referred_by_spec(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params = params_vec; // Assign parsed parameters
             addr // Return Address directly
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parse a complete Referred-By header value

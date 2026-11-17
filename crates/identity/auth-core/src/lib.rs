@@ -91,3 +91,13 @@ pub use sip_digest::{
     DigestAlgorithm, DigestAuthenticator, DigestChallenge, DigestChallengeDetails, DigestClient,
     DigestComputed, DigestResponse,
 };
+
+/// Start a reqwest client builder on the workspace's ring rustls provider.
+///
+/// reqwest is built with `rustls-no-provider` and so uses the process-default
+/// rustls provider. Install the workspace's ring provider as that default
+/// first (a no-op when the application has already installed one).
+pub(crate) fn ring_http_client_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+}

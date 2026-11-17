@@ -1,6 +1,7 @@
 // Parser for URI query component (RFC 3261/2396)
 // query follows a '?' character in a URI
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -16,7 +17,7 @@ use crate::parser::ParseResult;
 
 // uric = reserved / unreserved / escaped
 fn uric(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((reserved, unreserved, escaped))(input)
+    alt((reserved, unreserved, escaped)).parse(input)
 }
 
 // Parse a single query parameter name or value
@@ -26,7 +27,7 @@ fn uric(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // query = *uric
 // Returns raw query string as bytes
 pub fn query_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(many0(uric))(input)
+    recognize(many0(uric)).parse(input)
 }
 
 // Parse a query string with key-value pairs into a HashMap
@@ -78,7 +79,7 @@ pub fn parse_query_params(input: &[u8]) -> ParseResult<'_, HashMap<String, Strin
 // Parse the entire query component of a URI, which may be preceded by '?'
 // Returns the raw bytes or optionally nothing if there is no query
 pub fn parse_query(input: &[u8]) -> ParseResult<'_, Option<&[u8]>> {
-    opt(preceded(tag(b"?"), query_raw))(input)
+    opt(preceded(tag(&b"?"[..]), query_raw)).parse(input)
 }
 
 #[cfg(test)]

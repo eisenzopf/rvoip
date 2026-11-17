@@ -231,3 +231,47 @@ async fn custom_service_without_security_store_returns_typed_lifecycle_errors() 
         })
     ));
 }
+
+/// axum 0.8 changed path parameters from `/:id` to `/{id}`; the old syntax
+/// panics when the router is built and a literal `:id` would never match.
+/// Build the router (`create_router` wraps `create_router_with_state`) and
+/// send every parameterised route an unauthenticated request: each must
+/// reach its handler (no 404/405).
+#[tokio::test]
+async fn every_path_parameter_route_matches() {
+    let (_temp_dir, service, _user) = service_with_security_store().await;
+    let routers = [("create_router", create_router(Arc::new(service)))];
+    let routes = [
+        ("GET", "/users/u-1"),
+        ("PUT", "/users/u-1"),
+        ("DELETE", "/users/u-1"),
+        ("POST", "/users/u-1/password"),
+        ("POST", "/users/u-1/roles"),
+        ("POST", "/users/u-1/api-keys"),
+        ("GET", "/users/u-1/api-keys"),
+        ("DELETE", "/api-keys/k-1"),
+    ];
+    for (name, router) in routers {
+        for (method, uri) in routes {
+            let response = router
+                .clone()
+                .oneshot(with_peer(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                ))
+                .await
+                .unwrap();
+            assert!(
+                !matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{name}: {method} {uri} did not reach its handler ({})",
+                response.status()
+            );
+        }
+    }
+}

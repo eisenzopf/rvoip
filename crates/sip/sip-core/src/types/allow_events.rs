@@ -31,6 +31,7 @@
 //! ```
 
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -106,8 +107,9 @@ impl FromStr for AllowEvents {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let (_, allow_events) =
-            all_consuming(parse_allow_events)(s.as_bytes()).map_err(Error::from)?;
+        let (_, allow_events) = all_consuming(parse_allow_events)
+            .parse(s.as_bytes())
+            .map_err(Error::from)?;
         Ok(allow_events)
     }
 }

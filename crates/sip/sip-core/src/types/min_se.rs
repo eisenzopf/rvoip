@@ -211,7 +211,7 @@ mod tests {
             MinSE::from_str("90;id=1").is_err(),
             "'90;id=1' (with param) should be an error, params not supported by current FromStr"
         );
-        // The parser for MinSE (parse_min_se_value) uses terminated(u32, tuple((multispace0, eof))).
+        // The parser for MinSE (parse_min_se_value) uses terminated(u32, (multispace0, eof)).
         // This means it consumes optional whitespace before EOF.
         // Therefore, FromStr which calls this parser will also succeed for "90 ".
         assert!(

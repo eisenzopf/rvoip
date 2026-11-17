@@ -51,7 +51,7 @@ async fn whip_inbound_flows_through_orchestrator() {
     let conn_id = handle.connection.id.clone();
     let offer_sdp = publisher.local_sdp(&conn_id).expect("offer sdp");
 
-    let client = reqwest::Client::builder()
+    let client = ring_reqwest_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("http client");
@@ -117,4 +117,11 @@ async fn whip_inbound_flows_through_orchestrator() {
     }
 
     server.shutdown().await;
+}
+
+/// reqwest is built with `rustls-no-provider`: install the workspace's ring
+/// provider as the process default before building a client.
+fn ring_reqwest_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
 }
