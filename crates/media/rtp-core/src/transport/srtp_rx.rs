@@ -342,12 +342,12 @@ mod tests {
     /// AES-256), generated at run time rather than hard-coded; every context
     /// built from one of them agrees with every other.
     fn test_keys() -> &'static (([u8; 16], [u8; 14]), ([u8; 32], [u8; 14])) {
-        use rand::Rng;
+        use rand::RngExt;
         type Keys = (([u8; 16], [u8; 14]), ([u8; 32], [u8; 14]));
         static KEYS: std::sync::OnceLock<Keys> = std::sync::OnceLock::new();
         KEYS.get_or_init(|| {
-            let mut rng = rand::thread_rng();
-            ((rng.gen(), rng.gen()), (rng.gen(), rng.gen()))
+            let mut rng = rand::rng();
+            ((rng.random(), rng.random()), (rng.random(), rng.random()))
         })
     }
 

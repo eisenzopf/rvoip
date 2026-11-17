@@ -555,9 +555,9 @@ mod tests {
     /// run time rather than hard-coded, and shared by every context a test
     /// builds so both ends of a call agree.
     fn test_srtp_key() -> &'static ([u8; 16], [u8; 14]) {
-        use rand::Rng;
+        use rand::RngExt;
         static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
-        KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()))
+        KEY.get_or_init(|| (rand::rng().random(), rand::rng().random()))
     }
 
     fn srtp_context() -> SrtpContext {
@@ -916,9 +916,9 @@ mod tests {
     /// The keys a rekey moves to: a second random master key and salt per
     /// test process, independent of [`test_srtp_key`].
     fn rekeyed_context() -> SrtpContext {
-        use rand::Rng;
+        use rand::RngExt;
         static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
-        let (key, salt) = KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()));
+        let (key, salt) = KEY.get_or_init(|| (rand::rng().random(), rand::rng().random()));
         SrtpContext::new(
             SRTP_AES128_CM_SHA1_80,
             SrtpCryptoKey::new(key.to_vec(), salt.to_vec()),

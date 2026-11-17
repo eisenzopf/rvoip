@@ -285,9 +285,9 @@ impl Dialog {
 
     /// Generate a local tag for this dialog
     pub fn generate_local_tag(&self) -> String {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        format!("{:08x}", rng.gen::<u32>())
+        use rand::RngExt;
+        let mut rng = rand::rng();
+        format!("{:08x}", rng.random::<u32>())
     }
 
     /// Confirm the dialog with a local tag

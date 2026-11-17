@@ -19,7 +19,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
-use rand::{rngs::OsRng, RngCore};
+use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
 use rcgen::{CertificateParams, KeyPair, PKCS_ECDSA_P256_SHA256};
 use rvoip_auth_core::{BearerValidator, JwtValidator};
 use rvoip_core_traits::broadcast::{BroadcastPublisher, BroadcastSubstrate};
@@ -195,8 +195,8 @@ fn mint_subscriber_token() -> HarnessResult<MintedSubscriberToken> {
     let expires_at = issued_at + TOKEN_LIFETIME;
     let mut secret = [0_u8; 32];
     let mut token_id = [0_u8; 16];
-    OsRng.fill_bytes(&mut secret);
-    OsRng.fill_bytes(&mut token_id);
+    UnwrapErr(SysRng).fill_bytes(&mut secret);
+    UnwrapErr(SysRng).fill_bytes(&mut token_id);
     let claims = SubscriberClaims {
         sub: "browser-test-listener",
         tenant_id: TENANT,

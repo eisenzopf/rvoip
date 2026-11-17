@@ -190,7 +190,7 @@ fn capture_source_provenance() -> SourceProvenance {
         git_commit,
         git_rev,
         git_dirty: !status.is_empty(),
-        source_fingerprint_sha256: format!("{:x}", fingerprint.finalize()),
+        source_fingerprint_sha256: hex::encode(fingerprint.finalize()),
     }
 }
 

@@ -1274,9 +1274,9 @@ mod tests {
             let key_len = suite.key_length;
             // Random keys and salts per run, shared by both contexts.
             let random = |len: usize| -> Vec<u8> {
-                use rand::RngCore;
+                use rand::Rng;
                 let mut bytes = vec![0u8; len];
-                rand::thread_rng().fill_bytes(&mut bytes);
+                rand::rng().fill_bytes(&mut bytes);
                 bytes
             };
             let (rtp_key, rtcp_key, rtp_salt, rtcp_salt) =
@@ -1638,9 +1638,8 @@ mod tests {
     }
 
     fn hot_keys(suite: &SrtpCryptoSuite) -> HotKeys {
-        use rand::Rng;
-        let random =
-            |len: usize| -> Vec<u8> { (0..len).map(|_| rand::thread_rng().gen()).collect() };
+        use rand::RngExt;
+        let random = |len: usize| -> Vec<u8> { (0..len).map(|_| rand::rng().random()).collect() };
         HotKeys {
             a_key: random(suite.key_length),
             b_key: random(suite.key_length),
@@ -2097,7 +2096,7 @@ mod tests {
 
     #[test]
     fn authenticated_cleartext_srtcp_is_rejected_without_state_mutation() {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         use sha1::Sha1;
 
         let (_, mut receiver) = contexts();

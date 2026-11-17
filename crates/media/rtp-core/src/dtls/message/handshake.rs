@@ -3,7 +3,7 @@
 //! This module contains the different handshake message types used in DTLS.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use rand::Rng;
+use rand::RngExt;
 use std::io::Cursor;
 
 use super::extension::Extension;
@@ -340,7 +340,7 @@ impl ClientHello {
         extensions: Vec<Extension>,
     ) -> Self {
         // Generate random data (4 bytes timestamp + 28 bytes random)
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut random = [0u8; 32];
 
         // First 4 bytes are timestamp in seconds since UNIX epoch
@@ -607,7 +607,7 @@ impl ServerHello {
         extensions: Vec<Extension>,
     ) -> Self {
         // Generate random data (4 bytes timestamp + 28 bytes random)
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let mut random = [0u8; 32];
 
         // First 4 bytes are timestamp in seconds since UNIX epoch

@@ -128,7 +128,7 @@ pub(crate) struct StateTableSelection {
 }
 
 fn yaml_sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn configured_state_table(

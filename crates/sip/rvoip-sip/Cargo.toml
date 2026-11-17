@@ -374,6 +374,7 @@ ipnet = "2.12"
 base64 = "0.23"
 rvoip-auth-core.workspace = true
 rvoip-sip-registrar.workspace = true
+hex = "0.4"
 sha2.workspace = true
 zeroize.workspace = true
 
@@ -393,7 +394,7 @@ bytes = "1.5"
 
 # Utility
 uuid = { version = "1.4", features = ["v4"] }
-rand = "0.8"
+rand = "0.10"
 # RFC 3261 §8.1 — state-machine `Action` variant reflection for the YAML
 # loader's drift-detection validation pass (see `state_table/yaml_loader.rs`
 # `parse_action_by_name`).
