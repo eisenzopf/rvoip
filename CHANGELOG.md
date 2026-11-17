@@ -116,28 +116,8 @@ Each item has a one-line migration.
 - The unreleased `rvoip-webex-byob` prototype crate is renamed
   `rvoip-webex-byova` (Cisco's term) before its first release. Migration for
   path or Git users: rename the dependency and `rvoip_webex_byob` paths.
-- **axum 0.7 → 0.8 and axum-server 0.8 → 0.9.** `rvoip-users-core`'s
-  `api::create_router` / `create_router_with_state` /
-  `into_peer_aware_make_service` / `ApiMakeService` and `rvoip-scim`'s
-  `ScimService::router` return axum 0.8 types. Routes now use axum 0.8's
-  `{id}` path syntax; the old `/:id` form panics when a router is built.
-  Migration: move your own axum dependency to 0.8 (and axum-server to 0.9)
-  before merging or nesting these routers, and write any routes you add as
-  `/{param}`.
 
 ### Dependencies
-
-**axum** 0.7 → 0.8 and **axum-server** 0.8 → 0.9 across users-core, scim,
-rvoip-webrtc (WHIP/WHEP signalling), the `rvoip` facade and vapi's test mock.
-The ten users-core routes, the two SCIM resource routes, the WHIP/WHEP
-resource routes and the browser-demo file route move from `/:id` to `/{id}`;
-new tests send every parameterised users-core and SCIM route a request and
-fail if any is unmatched. users-core's extractors drop `#[async_trait]`, and
-its rate-limit middleware reads `ConnectInfo` from the request extensions
-(axum 0.8 no longer extracts `Option<ConnectInfo<_>>`). The workspace
-axum-server uses its new `tls-rustls-ring` feature, so it no longer turns on
-rustls's aws-lc-rs provider next to the workspace's ring provider.
-
 
 The low-risk part of the grouped dependabot update (#298). No public API
 changes: none of the crates below has a type in a published rvoip API.
@@ -177,7 +157,7 @@ the OpenTelemetry globals have the same coupling. Both move in a later release
 together with the applications that consume them.
 
 Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
-and tower 0.5, as planned. Also held back:
+and axum 0.8 / tower 0.5, as planned. Also held back:
 jsonwebtoken 11, validator 0.21, ordered-float 5, prost 0.14, redis 1.x,
 quick-xml 0.42 and web-transport 0.13 (their types are in rvoip's public
 API); opus 0.4 and cpal 0.18 (bundled libopus 1.6 and changed audio-device

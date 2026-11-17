@@ -15,6 +15,28 @@ import tomllib
 from typing import Any, Iterable
 
 
+# Specialty gates a CI job runs as parallel parts. The gate name itself (the
+# policy rule, the `--specialty-gate` flag, and the release catalog's direct
+# `run_checks.py specialty --gate <name>` call) still runs every part; a PR
+# or main plan selects the parts instead, so the slow gate splits across jobs.
+SPECIALTY_PARTS = {
+    # Six independent `cargo test -p rvoip --features <bundle>` builds in
+    # series: 26-44 min, the PR Gate's long pole once codec-features-sip was
+    # sharded. Two parts of three interleaved bundles each.
+    "facade-feature-bundles": (
+        "facade-feature-bundles--part-1",
+        "facade-feature-bundles--part-2",
+    ),
+}
+
+
+def expand_specialty_parts(gates: Iterable[str]) -> list[str]:
+    expanded: set[str] = set()
+    for gate in gates:
+        expanded.update(SPECIALTY_PARTS.get(gate, (gate,)))
+    return sorted(expanded)
+
+
 SCHEMA = "rvoip-pr-test-plan-v1"
 
 
@@ -486,7 +508,7 @@ def make_plan(
             specialty_set.update(
                 f"example--{project}" for project in representative_projects
             )
-    specialty = sorted(specialty_set)
+    specialty = expand_specialty_parts(specialty_set)
 
     full_reasons = [
         path for path in normalized if matches_any(path, policy.get("full_paths", []))
@@ -816,7 +838,7 @@ def main(argv: list[str] | None = None) -> int:
         for gate in args.specialty_gate:
             if not gate or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for character in gate):
                 raise PlanError(f"invalid forced specialty gate: {gate!r}")
-        plan["specialty_gates"] = sorted(
+        plan["specialty_gates"] = expand_specialty_parts(
             set(plan["specialty_gates"]) | set(args.specialty_gate)
         )
         output = args.output if args.output.is_absolute() else root / args.output

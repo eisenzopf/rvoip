@@ -21,7 +21,7 @@ application-builder, and conversation-extension surfaces.
 >
 > Upgrading from 0.3? Read the [0.4 migration guide](../../docs/MIGRATING_0.4.md),
 > the [changelog](../../CHANGELOG.md) and the
-> [release notes](../sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md).
+> [release notes](../../docs/release/RELEASE_NOTES_NEXT.md).
 
 ## Quick start
 
@@ -255,7 +255,7 @@ example for a complete cross-transport application.
 - [SIP API](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)
 - [SIP beta evidence](../sip/rvoip-sip/docs/)
 - [Architecture and protocol design](../../docs/)
-- [Changelog](../../CHANGELOG.md), [release notes](../sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md)
+- [Changelog](../../CHANGELOG.md), [release notes](../../docs/release/RELEASE_NOTES_NEXT.md)
   and the [0.4 migration guide](../../docs/MIGRATING_0.4.md)
 
 ## License
