@@ -1691,6 +1691,12 @@ version = "{version}"
         self.assertEqual(command[command.index("--max-wall") + 1], "330")
         self.assertEqual(command[command.index("--run-id") + 1], "bench-minor-cccccccccccc-4242")
         self.assertNotIn("--caller-bin", command)
+        # The minor lane records R into the gate's evidence, never the checkout.
+        self.assertEqual(command[command.index("--record-out") + 1], "rates.json")
+        self.assertIn("--record", command)
+        args.profile = "release"
+        args.receipt = Path("/e/perf.rfc7502-release/bench-receipt.json")
+        self.assertNotIn("--record", bench.lane_command(args, Path("/t/dut"), "4242"))
         # Without the lane orchestrator installed the gate fails as a usage error.
         if not bench.RUN_LANE.exists():
             self.assertEqual(

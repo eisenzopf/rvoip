@@ -15,6 +15,13 @@ through `gates.py run-shard`, so the gate receipt is always the gate
 executor's, and run_lane, finding the lane complete, only rewrites its
 receipt.
 
+The minor lane also records: `--record --record-out <artifact dir>/rates.json`
+makes run_lane write the env-id's rates.json (the in-tree tester caps plus
+this run's measured R per row, each row's source_run and candidate_sha naming
+this run) into the gate's evidence instead of the checkout. The release ships
+the measured commit unchanged, and that file goes to main in a rates-only PR
+after the tag, for the next patch release's `release` lane to gate on.
+
 Exit codes follow run_lane: 0 PASS or WARN, 1 FAIL, 2 usage, 3 INFRA
 (retried), 4 stopped at the budget.
 """
@@ -33,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUN_LANE = ROOT / "scripts/bench/run_lane.py"
 DUT_PACKAGE = "rvoip-bench-uas"
 DEFAULT_MAX_WALL_MINUTES = 330
+RECORDED_RATES = "rates.json"
 EXIT_USAGE = 2
 EXIT_BUDGET = 4
 
@@ -51,6 +59,11 @@ def dut_binary(root: Path) -> Path:
 
 
 def lane_command(args: argparse.Namespace, dut: Path, run: str) -> list[str]:
+    record = (
+        ["--record", "--record-out", str(args.receipt.parent / RECORDED_RATES)]
+        if args.profile == "minor"
+        else []
+    )
     return [
         sys.executable,
         str(RUN_LANE),
@@ -67,6 +80,7 @@ def lane_command(args: argparse.Namespace, dut: Path, run: str) -> list[str]:
         "--max-wall",
         str(args.max_wall),
         "--resume",
+        *record,
     ]
 
 
