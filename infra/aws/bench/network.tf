@@ -17,6 +17,19 @@ data "aws_subnet" "lane" {
   }
 }
 
+# Every public subnet of the release VPC: run_lane.py --az launches a lane in any of them
+# (the templates name only data.aws_subnet.lane).
+data "aws_subnets" "release_public" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.release.id]
+  }
+
+  tags = {
+    Name = "${var.release_name_prefix}-public-*"
+  }
+}
+
 data "aws_ec2_instance_type_offerings" "lane" {
   location_type = "availability-zone"
 

@@ -82,3 +82,9 @@ variable "tags" {
     rvoip-bench = "true"
   }
 }
+
+variable "release_provisioner_role_name" {
+  description = "IAM role the Release qualification workflow assumes over OIDC (vars.RVOIP_AWS_PROVISIONER_ROLE_ARN). Its bench legs, gate-bench and the bench cleanup job run run_lane.py as this role, so the orchestrator policy is attached to it. Empty: attach nothing."
+  type        = string
+  default     = "rvoip-release-gh-provisioner"
+}

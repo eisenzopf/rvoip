@@ -87,14 +87,67 @@ data "aws_iam_policy_document" "orchestrator" {
     sid     = "LaunchSupportingResources"
     effect  = "Allow"
     actions = ["ec2:RunInstances"]
-    resources = [
-      "arn:${local.partition}:ec2:${var.region}::image/*",
-      "arn:${local.partition}:ec2:${var.region}:${local.account_id}:subnet/${data.aws_subnet.lane.id}",
-      "arn:${local.partition}:ec2:${var.region}:${local.account_id}:security-group/${aws_security_group.bench.id}",
-      "arn:${local.partition}:ec2:${var.region}:${local.account_id}:launch-template/${aws_launch_template.dut.id}",
-      "arn:${local.partition}:ec2:${var.region}:${local.account_id}:launch-template/${aws_launch_template.caller.id}",
-      aws_placement_group.lane.arn,
-    ]
+    resources = concat(
+      ["arn:${local.partition}:ec2:${var.region}::image/*"],
+      # Any release public subnet: run_lane.py --az moves a lane off the template AZ.
+      [for id in sort(data.aws_subnets.release_public.ids) : "arn:${local.partition}:ec2:${var.region}:${local.account_id}:subnet/${id}"],
+      [
+        "arn:${local.partition}:ec2:${var.region}:${local.account_id}:security-group/${aws_security_group.bench.id}",
+        "arn:${local.partition}:ec2:${var.region}:${local.account_id}:launch-template/${aws_launch_template.dut.id}",
+        "arn:${local.partition}:ec2:${var.region}:${local.account_id}:launch-template/${aws_launch_template.caller.id}",
+        aws_placement_group.lane.arn,
+      ],
+    )
+  }
+
+  # A targeted launch names the lane's capacity reservation: only bench reservations.
+  statement {
+    sid       = "LaunchIntoBenchReservations"
+    effect    = "Allow"
+    actions   = ["ec2:RunInstances"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:capacity-reservation/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/rvoip-bench"
+      values   = ["true"]
+    }
+  }
+
+  # minor/full reserve the lane (1 DUT + N callers) in its AZ and placement group.
+  statement {
+    sid       = "ReserveBenchCapacity"
+    effect    = "Allow"
+    actions   = ["ec2:CreateCapacityReservation"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:capacity-reservation/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestTag/rvoip-bench"
+      values   = ["true"]
+    }
+  }
+
+  statement {
+    sid       = "ReserveInTheLanePlacementGroup"
+    effect    = "Allow"
+    actions   = ["ec2:CreateCapacityReservation"]
+    resources = [aws_placement_group.lane.arn]
+  }
+
+  # Hold across a --max-wall stop (shorter end date), adopt on resume (longer), cancel on exit or in
+  # the workflow's cleanup job: bench reservations only.
+  statement {
+    sid       = "ManageBenchReservations"
+    effect    = "Allow"
+    actions   = ["ec2:ModifyCapacityReservation", "ec2:CancelCapacityReservation"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:capacity-reservation/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/rvoip-bench"
+      values   = ["true"]
+    }
   }
 
   statement {
@@ -106,7 +159,27 @@ data "aws_iam_policy_document" "orchestrator" {
     condition {
       test     = "StringEquals"
       variable = "ec2:CreateAction"
-      values   = ["RunInstances", "CreateImage"]
+      values   = ["RunInstances", "CreateImage", "CreateCapacityReservation"]
+    }
+  }
+
+  # The held-for-resume marker on an existing bench reservation, and nothing else.
+  statement {
+    sid       = "MarkHeldReservations"
+    effect    = "Allow"
+    actions   = ["ec2:CreateTags"]
+    resources = ["arn:${local.partition}:ec2:${var.region}:${local.account_id}:capacity-reservation/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:ResourceTag/rvoip-bench"
+      values   = ["true"]
+    }
+
+    condition {
+      test     = "ForAllValues:StringEquals"
+      variable = "aws:TagKeys"
+      values   = ["rvoip-held-for-resume"]
     }
   }
 
@@ -144,10 +217,13 @@ data "aws_iam_policy_document" "orchestrator" {
       "ec2:DescribeLaunchTemplateVersions",
       "ec2:DescribeSubnets",
       "ec2:DescribeNetworkInterfaces",
+      "ec2:DescribePlacementGroups",
+      "ec2:DescribeCapacityReservations",
       "servicequotas:GetServiceQuota",
       "ssm:DescribeInstanceInformation",
       "ssm:GetCommandInvocation",
       "ssm:ListCommandInvocations",
+      "ssm:CancelCommand",
     ]
     resources = ["*"]
   }
@@ -210,4 +286,17 @@ resource "aws_iam_policy" "orchestrator" {
   name        = "${var.name_prefix}-orchestrator"
   description = "Run one rvoip bench lane (scripts/bench/run_lane.py): launch from the bench templates, SSM to bench hosts, bench/ evidence."
   policy      = data.aws_iam_policy_document.orchestrator.json
+}
+
+# The Release qualification workflow's bench legs, gate-bench and its bench cleanup job run
+# run_lane.py (or cancel this run's reservations) as the provisioner role.
+data "aws_iam_role" "release_provisioner" {
+  count = var.release_provisioner_role_name == "" ? 0 : 1
+  name  = var.release_provisioner_role_name
+}
+
+resource "aws_iam_role_policy_attachment" "release_provisioner_orchestrator" {
+  count      = var.release_provisioner_role_name == "" ? 0 : 1
+  role       = data.aws_iam_role.release_provisioner[0].name
+  policy_arn = aws_iam_policy.orchestrator.arn
 }
