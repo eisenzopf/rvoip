@@ -40,6 +40,9 @@ PROFILES = {
     'full': {'rows': ['R1', 'R2', 'R5', 'R6'], 'method': 'search', 'algorithm': 'rfc7502',
              'confirmations': 10, 'overload': True, 'latency_at': 0.90, 'report': True,
              'budget_hours': 60, 'max_trials': 40},
+    # Functional check of a lane: one short trial per row (never a gate; --r0 ROW=sps overrides).
+    'smoke': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'smoke', 'seconds': 30, 'warmup_seconds': 10,
+              'rates': {'R1': 400, 'R5': 400, 'R2': 200, 'R6': 200}, 'budget_hours': 1.5},
     # RFC 7502 §6.1 testbed baseline: the callers against ea-uas (no DUT).
     'baseline': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'search', 'algorithm': 'bisect',
                  'confirmations': 3, 'resolution': 0.02, 'report': True, 'budget_hours': 5,

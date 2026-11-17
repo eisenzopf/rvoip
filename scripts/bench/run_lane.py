@@ -385,10 +385,15 @@ class Trials:
         try:
             ready = self.aws.run([dut], self.lane.agent(self.s3_run, 'dut-start', trial_prefix, dut_bin),
                                  'rvoip bench dut-start', 180)
-            (local / 'ready.json').write_text(ready[dut]['StandardOutputContent'].strip().splitlines()[-1] + '\n')
+            ready_line = ready[dut]['StandardOutputContent'].strip().splitlines()[-1]
+            (local / 'ready.json').write_text(ready_line + '\n')
         except AwsError as error:
             self.finish_dut(trial_prefix, dut_bin)
             return None, rel, local, 'DUT did not start: %s' % str(error)[-400:]
+        sha = (json.loads(ready_line).get('git_sha') or '') if not self.lane.ea_uas else None
+        if sha is not None and not self.args.candidate.startswith(sha[:12] or '-'):
+            self.finish_dut(trial_prefix, dut_bin)
+            raise Usage('the DUT binary is built at %r, not the candidate %s' % (sha, self.args.candidate))
         # 2. Callers, behind the S3 start barrier (one SSM command per caller: each has its own index).
         total = sum(s['seconds'] for s in profile['stages'])
         caller_timeout = int(total + row['hold_ms'] / 1000 + 900)
@@ -490,6 +495,28 @@ def compact(verdict, summary, **extra):
         out['dut_peak_cores'] = (summary.get('dut') or {}).get('peak_cpu_cores')
     out.update(extra)
     return out
+
+
+def run_smoke(ctx, row_id):
+    """smoke: one short trial per row at --r0 (functional check of a lane; never a gate)."""
+    p = profiles.PROFILES['smoke']
+    row = profiles.ROWS[row_id]
+    rate = profiles.quantize(ctx.args.r0.get(row_id) or p['rates'][row_id], profiles.TRIAL['quantum'] * 2)
+    profile = rfc7502.trial_profile(rate, rate * p['seconds'], p['warmup_seconds'], p['seconds'],
+                                    hosts=len(ctx.lane.info['callers']))
+    summary, rel, local, note = ctx.trials.run(row_id, row, rate, 0, profile)
+    verdict = ctx.trials.verdict(summary, rel, local, note)
+    result = {'id': row_id, 'transport': row['transport'], 'media': row['media'], 'hold_ms': row['hold_ms'],
+              'trials': [compact(verdict, summary, rate=rate, kind='smoke')]}
+    checks = (summary or {}).get('checks') or {}
+    bad = sorted(k for k, v in checks.items() if v is False)
+    if verdict['outcome'] == 'pass' and not verdict['halt'] and not bad:
+        result['verdict'] = 'pass'
+    else:
+        result['verdict'] = 'fail' if verdict['outcome'] == 'fail' else 'infra'
+        result['reason'] = '%s smoke at %d sps: %s; failed checks %s; halt %s' % (
+            row_id, rate, verdict['outcome'], bad, verdict['halt'])
+    return result
 
 
 def run_confirm(ctx, row_id, recorded):
@@ -908,7 +935,9 @@ def main(argv=None):
                 rows.append(done)
                 continue
             recorded = (rates or {}).get('rows', {}).get(row_id)
-            if profile['method'] == 'confirm':
+            if profile['method'] == 'smoke':
+                result = run_smoke(ctx, row_id)
+            elif profile['method'] == 'confirm':
                 if not recorded:
                     raise Usage('no recorded R for %s in %s' % (row_id, rates_path))
                 result = run_confirm(ctx, row_id, recorded)
