@@ -102,6 +102,26 @@ jobs:
           --name policy
           --output target/ci-receipts/policy.json
 
+      # Fragments are checked on every PR. On a version-bump PR (the
+      # "Prepare release PR" output) the changelog and release notes must
+      # already be final: this is publication's own finality check, run
+      # before qualification so "notes not final" cannot fail a qualified
+      # commit.
+      - name: Change fragments and release-notes finality
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release/notes.py check
+          base="${PR_BASE_SHA:-}"
+          if [[ -z "$base" ]]; then
+            git fetch --depth=1 origin main
+            base="$(git rev-parse FETCH_HEAD)"
+          else
+            git fetch --depth=1 origin "$base"
+          fi
+          python3 scripts/release.py notes-final --if-version-changed-since "$base"
+
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:

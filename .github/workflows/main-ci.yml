@@ -51,6 +51,9 @@ jobs:
             --specialty-gate codec-features-codec-core
             --specialty-gate codec-features-media-core
             --specialty-gate codec-features-sip
+            --specialty-gate codec-features-sip-tests-2
+            --specialty-gate codec-features-sip-tests-3
+            --specialty-gate codec-features-sip-clippy
             --specialty-gate codec-features-core
             --specialty-gate facade-feature-bundles
             --specialty-gate release-tooling

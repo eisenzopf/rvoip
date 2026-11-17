@@ -398,7 +398,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 Path("crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"): (
                     "Current candidate and runtime crate version: `0.3.5`.\n"
                 ),
-                Path("crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"): (
+                Path("docs/release/RELEASE_NOTES_NEXT.md"): (
                     "# rvoip 0.3.5 Release Candidate Notes\n"
                 ),
             }
@@ -553,7 +553,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
     def test_release_notes_reject_candidate_only_markers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+            path = root / "docs/release/RELEASE_NOTES_NEXT.md"
             path.parent.mkdir(parents=True)
             path.write_text(
                 "# rvoip 0.3.10 Candidate Release Notes\n"
@@ -645,7 +645,7 @@ rvoip-rtc = { path = "../rvoip-rtc" }
     def test_release_notes_accept_final_protected_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            path = root / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
+            path = root / "docs/release/RELEASE_NOTES_NEXT.md"
             path.parent.mkdir(parents=True)
             path.write_text(
                 "# rvoip 0.3.10 Release Notes\n"
@@ -1429,6 +1429,176 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                 execute=False,
                 qualified_head=head,
             )
+
+    def test_topological_levels_publish_dependencies_first(self) -> None:
+        def package(name: str, *deps: str) -> dict:
+            return {
+                "name": name,
+                "dependencies": [{"name": dep, "kind": None, "req": "^1.0.0"} for dep in deps],
+            }
+
+        packages = {
+            "core": package("core"),
+            "traits": package("traits"),
+            "sip": package("sip", "core", "traits"),
+            "media": package("media", "core"),
+            "facade": package("facade", "sip", "media"),
+        }
+        self.assertEqual(
+            release.topological_levels(packages),
+            [["core", "traits"], ["media", "sip"], ["facade"]],
+        )
+        packages["core"] = package("core", "facade")
+        with self.assertRaisesRegex(release.ReleaseError, "cycle"):
+            release.topological_levels(packages)
+
+    def test_release_packaging_assembles_while_the_gate_verifies(self) -> None:
+        source = SCRIPT.read_text()
+        package_release = source.split("def package_release(", 1)[1].split("\ndef ", 1)[0]
+        package_check = source.split("def package_check(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('"--no-verify"', package_release)
+        self.assertNotIn('"--no-verify"', package_check)
+        catalog = json.loads((SCRIPT.parent / "release/gates.json").read_text())
+        gate = next(g for g in catalog["gates"] if g["id"] == "package.archives")
+        self.assertEqual(gate["command"], ["python3", "scripts/release.py", "package-check"])
+        self.assertFalse(gate["always_fresh"])
+        self.assertIn("package.archives", catalog["profiles"]["remote-release"])
+
+    def test_execute_publishes_only_packaged_archives(self) -> None:
+        with (
+            mock.patch.object(release, "ensure_release_state", return_value="a" * 40),
+            mock.patch.object(release, "validate_workspace", return_value=({}, [])),
+            mock.patch.object(release, "validate_release_notes_final"),
+            self.assertRaisesRegex(release.ReleaseError, "pass --packages"),
+        ):
+            release.publish(Path("/repo"), "0.4.1", execute=True)
+
+    def packaged_dir(self, root: Path, head: str) -> Path:
+        output = root / "packages"
+        output.mkdir()
+        hashes = {}
+        for name in ("rvoip-a", "rvoip-b"):
+            archive = output / f"{name}-0.4.1.crate"
+            archive.write_bytes(name.encode())
+            hashes[name] = release.file_sha256(archive)
+        (output / "verification.json").write_text("{}\n")
+        manifest = {
+            "schema": release.PACKAGE_MANIFEST_SCHEMA,
+            "version": "0.4.1",
+            "git_commit": head,
+            "ordered_packages": ["rvoip-a", "rvoip-b"],
+            "levels": [["rvoip-a"], ["rvoip-b"]],
+            "package_sha256": hashes,
+            "package_file_manifest_sha256": {},
+            "verification_receipt_sha256": release.file_sha256(output / "verification.json"),
+        }
+        (output / release.PACKAGE_MANIFEST_NAME).write_text(json.dumps(manifest))
+        return output
+
+    def test_packaged_archives_are_bound_to_commit_and_bytes(self) -> None:
+        head = "a" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = self.packaged_dir(root, head)
+            ordered = ["rvoip-a", "rvoip-b"]
+            manifest = release.load_package_manifest(root, output, "0.4.1", head, ordered)
+            self.assertEqual(manifest["levels"], [["rvoip-a"], ["rvoip-b"]])
+            with self.assertRaisesRegex(release.ReleaseError, "do not belong"):
+                release.load_package_manifest(root, output, "0.4.1", "b" * 40, ordered)
+            (output / "rvoip-b-0.4.1.crate").write_bytes(b"tampered")
+            with self.assertRaisesRegex(release.ReleaseError, "missing or altered"):
+                release.load_package_manifest(root, output, "0.4.1", head, ordered)
+            release.install_packaged_verification(root, "0.4.1", output)
+            self.assertTrue((root / "target/release-logs/0.4.1/verification.json").is_file())
+            (output / "verification.json").write_text("{\"changed\": true}\n")
+            with self.assertRaisesRegex(release.ReleaseError, "verification receipt"):
+                release.install_packaged_verification(root, "0.4.1", output)
+
+    def test_level_publish_refuses_bytes_that_differ_from_the_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = release.ReleaseLog(Path(directory), "0.4.1", "test")
+            with (
+                mock.patch.object(release, "crates_io_version", return_value=None),
+                mock.patch.object(release, "package_artifact", return_value=(Path("x"), "f" * 64)),
+                mock.patch.object(release, "cargo_publish") as upload,
+                self.assertRaisesRegex(release.ReleaseError, "would not publish the dry-run archive"),
+            ):
+                release.publish_packaged_level(
+                    Path(directory), "0.4.1", ["rvoip-a"], {"rvoip-a": "0" * 64}, log, 4
+                )
+            upload.assert_not_called()
+
+    def test_level_publish_uploads_a_level_concurrently_and_resumes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            log = release.ReleaseLog(Path(directory), "0.4.1", "test")
+            hashes = {"rvoip-a": "a" * 64, "rvoip-b": "b" * 64, "rvoip-c": "c" * 64}
+            remote = {"rvoip-c": {"checksum": "c" * 64}}
+            with (
+                mock.patch.object(release, "crates_io_version", side_effect=lambda name, _: remote.get(name)),
+                mock.patch.object(
+                    release, "package_artifact", side_effect=lambda root, name, version, log: (Path(name), hashes[name])
+                ),
+                mock.patch.object(release, "cargo_publish") as upload,
+                mock.patch.object(release, "wait_for_version") as wait,
+            ):
+                release.publish_packaged_level(
+                    Path(directory), "0.4.1", ["rvoip-a", "rvoip-b", "rvoip-c"], hashes, log, 4
+                )
+            self.assertEqual(sorted(call.args[1] for call in upload.call_args_list), ["rvoip-a", "rvoip-b"])
+            self.assertEqual(
+                sorted(call.kwargs["local_sha256"] for call in wait.call_args_list), ["a" * 64, "b" * 64]
+            )
+
+    def test_cargo_publish_backs_off_on_crates_io_rate_limits(self) -> None:
+        limited = release.subprocess.CompletedProcess([], 101, stdout="error: 429 Too Many Requests")
+        accepted = release.subprocess.CompletedProcess([], 0, stdout="Uploaded")
+        with tempfile.TemporaryDirectory() as directory:
+            log = release.ReleaseLog(Path(directory), "0.4.1", "test")
+            with (
+                mock.patch.object(release.subprocess, "run", side_effect=[limited, accepted]) as run,
+                mock.patch.object(release.time, "sleep") as sleep,
+            ):
+                release.cargo_publish(Path(directory), "rvoip-a", log)
+            self.assertEqual(run.call_count, 2)
+            self.assertIn("--no-verify", run.call_args.args[0])
+            sleep.assert_called_once_with(60)
+            failed = release.subprocess.CompletedProcess([], 101, stdout="error: invalid manifest")
+            with (
+                mock.patch.object(release.subprocess, "run", return_value=failed),
+                mock.patch.object(release.time, "sleep") as sleep,
+                self.assertRaises(release.ReleaseError),
+            ):
+                release.cargo_publish(Path(directory), "rvoip-a", log)
+            sleep.assert_not_called()
+
+    def test_notes_final_skips_pull_requests_that_keep_the_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cargo.toml").write_text('[workspace.package]\nversion = "0.4.1"\n')
+            with (
+                mock.patch.object(release, "workspace_version_at", return_value="0.4.1"),
+                mock.patch.object(release, "validate_release_notes_final") as final,
+            ):
+                release.notes_final(root, None, "base")
+            final.assert_not_called()
+            with (
+                mock.patch.object(release, "workspace_version_at", return_value="0.4.0"),
+                mock.patch.object(release, "validate_changelog_release") as changelog,
+                mock.patch.object(release, "validate_release_notes_final") as final,
+            ):
+                release.notes_final(root, None, "base")
+            changelog.assert_called_once_with(root, "0.4.1")
+            final.assert_called_once_with(root, "0.4.1")
+
+    def test_release_profile_policy_requires_the_benchmark_from_0_5(self) -> None:
+        self.assertEqual(
+            release.required_qualification_profiles("0.4.7"),
+            ("remote-release", "release-patch", "release-minor"),
+        )
+        self.assertEqual(release.required_qualification_profiles("0.5.0"), ("release-minor",))
+        self.assertEqual(
+            release.required_qualification_profiles("0.5.3"), ("release-patch", "release-minor")
+        )
 
     def test_visibility_timeout_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

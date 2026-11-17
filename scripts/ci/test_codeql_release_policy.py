@@ -40,6 +40,15 @@ class CodeqlReleasePolicyTests(unittest.TestCase):
         self.assertTrue(any("missing" in failure for failure in result["failures"]))
         self.assertTrue(any("not bound" in failure for failure in result["failures"]))
 
+    def test_an_older_main_commit_stays_qualified_after_newer_analyses(self):
+        candidate = "e" * 40
+        newer = analyses("f" * 40)
+        result = evaluate(newer + analyses(candidate), [], candidate)
+        self.assertEqual(result["status"], "PASS")
+        self.assertEqual(
+            set(result["analysis_ids"]), set(DEFAULT_CATEGORIES)
+        )
+
     def test_every_open_alert_blocks_regardless_of_severity(self):
         candidate = "d" * 40
         result = evaluate(

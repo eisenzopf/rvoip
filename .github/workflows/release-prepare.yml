@@ -1,5 +1,17 @@
 name: Prepare release PR
 
+# Opens the version-bump pull request from a qualified main commit.
+#
+# The branch and pull request are created with the rvoip release GitHub App's
+# installation token, not GITHUB_TOKEN. Events caused by GITHUB_TOKEN do not
+# start workflows, so a bot-authored PR used to need a dispatched PR Gate copy
+# that did not count and a manual run approval (held 6 h 13 min for 0.4.0).
+# With the App token the bump PR's own PR Gate starts by itself.
+#
+# Repository configuration (docs/RELEASING.md, "Release App"):
+#   vars.RVOIP_RELEASE_APP_CLIENT_ID      the App's client ID
+#   secrets.RVOIP_RELEASE_APP_PRIVATE_KEY the App's private key
+
 on:
   workflow_dispatch:
     inputs:
@@ -7,11 +19,19 @@ on:
         description: Stable SemVer without a leading v (for example 0.3.8)
         required: true
         type: string
+      candidate:
+        description: Main commit to release (a green nightly qualification candidate); defaults to the head of main
+        required: true
+        default: main
+        type: string
+      qualification_run_id:
+        description: The candidate's passing remote-release qualification run, to fill the notes' qualification record (optional)
+        required: false
+        type: string
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
+  actions: read
 
 env:
   RUSTUP_MAX_RETRIES: "10"
@@ -26,11 +46,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - name: Check out current main
+      - name: Mint the release App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RVOIP_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out the candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: main
+          ref: ${{ inputs.candidate }}
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Require a candidate on main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git merge-base --is-ancestor HEAD origin/main || {
+            echo "the release candidate must be a commit on main" >&2
+            exit 1
+          }
+          echo "CANDIDATE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
@@ -43,8 +83,55 @@ jobs:
           libasound2-dev libopus-dev libssl-dev libvpx-dev
           protobuf-compiler pkg-config cmake
 
-      - name: Establish local main branch
-        run: git checkout -B main origin/main
+      - name: Commit as the release App
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          git switch -c "release/v$VERSION"
+
+      - name: Download the candidate's qualification evidence
+        if: inputs.qualification_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          [[ "$QUALIFICATION_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          gh run download "$QUALIFICATION_RUN_ID" \
+            --repo "$REPOSITORY" \
+            --name release-gate-evidence \
+            --dir target/candidate-qualification
+          test "$(jq -r .candidate_sha target/candidate-qualification/release-qualification/aggregate.json)" = "$CANDIDATE" || {
+            echo "qualification run $QUALIFICATION_RUN_ID did not qualify $CANDIDATE" >&2
+            exit 1
+          }
+
+      - name: Assemble change fragments into the changelog and release notes
+        env:
+          VERSION: ${{ inputs.version }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          args=(assemble --version "$VERSION")
+          if [[ -n "$QUALIFICATION_RUN_ID" ]]; then
+            args+=(
+              --qualification-evidence target/candidate-qualification
+              --run-url "https://github.com/${REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}"
+            )
+          fi
+          python3 scripts/release/notes.py "${args[@]}"
+          git add --all
+          if ! git diff --cached --quiet; then
+            git commit -m "Assemble v$VERSION changelog and release notes"
+          fi
 
       - name: Prepare all workspace versions
         env:
@@ -57,6 +144,7 @@ jobs:
             scripts/test_release.py \
             scripts/test_release_aws_fanout.py \
             scripts/test_release_gates.py \
+            scripts/test_release_notes.py \
             scripts/test_release_carry_forward_attestation.py \
             scripts/test_release_exception_attestation.py \
             scripts/test_render_qualification_reports.py
@@ -72,31 +160,31 @@ jobs:
             crates/sip/rvoip-sip/scripts/test_perf_cargo_artifact.py \
             crates/sip/rvoip-sip/scripts/test_docker_peer_snapshot.py
 
-      - name: Commit release preparation
+      - name: Commit and push the version bump
         env:
           VERSION: ${{ inputs.version }}
         run: |
-          branch="release/v$VERSION"
-          git switch -c "$branch"
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          set -euo pipefail
           git add --all
           git commit -m "Prepare v$VERSION"
-          git push --set-upstream origin "$branch"
+          git push --set-upstream origin "release/v$VERSION"
 
-      - name: Open draft release pull request
+      - name: Open the release pull request
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERSION: ${{ inputs.version }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          REPOSITORY: ${{ github.repository }}
         run: |
+          set -euo pipefail
           branch="release/v$VERSION"
-          body="Automated preparation of all 46 workspace crates for v$VERSION."$'\n\n'"The required PR Gate remains authoritative. After merge, run the protected release qualification workflow for this exact commit; publication will reject any other commit or incomplete aggregate."
+          qualification="none given; fill the qualification record before merging"
+          if [[ -n "$QUALIFICATION_RUN_ID" ]]; then
+            qualification="https://github.com/${REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}"
+          fi
+          body="Version bump of every workspace crate to v$VERSION on top of qualified candidate \`$CANDIDATE\`, with the changelog and release notes assembled from \`changes/\`."$'\n\n'"- Candidate qualification: $qualification"$'\n'"- The PR Gate runs on this PR by itself (release App), including the release-notes finality check."$'\n'"- After merge, requalify this PR's head commit with \`release-patch\` or \`release-minor\`, \`first_candidate=false\` and the candidate's runs as \`prior_run_id\`; only the bookkeeping gates run. Then publish that commit."
           gh pr create \
             --base main \
             --head "$branch" \
-            --draft \
             --title "Prepare v$VERSION" \
             --body "$body"
-          # Pull requests opened with GITHUB_TOKEN do not recursively trigger
-          # workflows, so dispatch the same required gate explicitly.
-          gh workflow run pr-gate.yml --ref "$branch"
