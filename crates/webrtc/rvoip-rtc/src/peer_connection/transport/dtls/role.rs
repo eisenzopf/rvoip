@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 /// assert!(!will_initiate_handshake(RTCDtlsRole::Server));
 /// ```
 ///
-/// # Specifications
+/// # Specification
 ///
 /// - [RFC 5763] - DTLS-SRTP Setup Attribute
 /// - [RFC 8122] - Connection-Oriented Media Transport over TLS
@@ -76,6 +76,7 @@ use serde::{Deserialize, Serialize};
 /// [RFC 5763]: https://datatracker.ietf.org/doc/html/rfc5763
 /// [RFC 8122]: https://datatracker.ietf.org/doc/html/rfc8122
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCDtlsRole {
     /// Role not specified. This should not occur in normal operation.
     #[default]
@@ -112,7 +113,7 @@ pub enum RTCDtlsRole {
     Server = 3,
 }
 
-/// <https://tools.ietf.org/html/rfc5763>
+/// <https://datatracker.ietf.org/doc/html/rfc5763>
 /// The answerer MUST use either a
 /// setup attribute value of setup:active or setup:passive.  Note that
 /// if the answerer uses setup:passive, then the DTLS handshake will

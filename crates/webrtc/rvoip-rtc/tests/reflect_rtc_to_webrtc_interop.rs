@@ -21,13 +21,14 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use rtc::interceptor::Registry as RtcRegistry;
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
 use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::RTCIceServer;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
@@ -51,11 +52,14 @@ use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
 use webrtc::track::track_remote::TrackRemote;
 
+mod common;
+
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
 /// Test reflect functionality: rtc sends RTP -> webrtc reflects -> rtc receives
 #[tokio::test]
 async fn test_reflect_rtc_to_webrtc() -> Result<()> {
+    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -93,7 +97,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
 
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
 
-    let registry = rtc::interceptor::Registry::new();
+    let registry = RtcRegistry::new();
 
     // Use the default set of Interceptors
     let registry =
@@ -114,7 +118,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build()?;
+        .build(Instant::now())?;
     log::info!("Created RTC peer connection");
 
     // Create output track on rtc for sending
@@ -156,7 +160,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
     log::info!("RTC created offer {}", offer);
 
     // Set local description on rtc
-    rtc_pc.set_local_description(offer.clone())?;
+    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
     log::info!("RTC set local description");
 
     // Create webrtc peer (will be the answerer and reflector)
@@ -241,7 +245,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
 
     // Set remote description on rtc
     log::info!("RTC set remote description {}", rtc_answer);
-    rtc_pc.set_remote_description(rtc_answer)?;
+    rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
 
     // Run event loops
     let rtc_socket = Arc::new(socket);
@@ -304,7 +308,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
         }
 
         // Process rtc reads (reflected packets from webrtc)
-        while let Some(message) = rtc_pc.poll_read() {
+        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_track_id, rtp_packet) => {
                     let mut count = received_packets_clone.lock().await;
@@ -319,6 +323,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
                     // RTCP packets are handled internally
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
+                _ => {}
             }
         }
 
@@ -367,6 +372,15 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
                 }
             }
 
+            // write_rtp requires the packet's PT to match a negotiated codec; derive it
+            // from the sender's parameters instead of hardcoding (single video codec).
+            let payload_type = params
+                .rtp_parameters
+                .codecs
+                .first()
+                .map(|codec| codec.payload_type)
+                .unwrap_or(96);
+
             let ssrc = rtp_sender
                 .track()
                 .ssrcs()
@@ -380,7 +394,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
                     padding: false,
                     extension: false,
                     marker: packets_sent == 0,
-                    payload_type: 96,
+                    payload_type,
                     sequence_number: packets_sent as u16,
                     timestamp: (Instant::now().duration_since(start_time).as_millis() * 90) as u32,
                     ssrc,
@@ -389,7 +403,7 @@ async fn test_reflect_rtc_to_webrtc() -> Result<()> {
                 payload: bytes::Bytes::from(dummy_frame.clone()),
             };
 
-            if let Err(e) = rtp_sender.write_rtp(packet) {
+            if let Err(e) = rtp_sender.write_rtp(Instant::now(), packet) {
                 log::warn!("Failed to send RTP packet: {}", e);
             } else {
                 packets_sent += 1;

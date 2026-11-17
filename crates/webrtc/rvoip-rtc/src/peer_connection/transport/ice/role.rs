@@ -9,10 +9,12 @@ use std::fmt;
 /// * [MDN]
 /// * [W3C]
 ///
-/// [MDN]: https://developer.mozilla.org/en-US/docs/Web/API/RTCIceTransport/role
-/// [W3C]: https://w3c.github.io/webrtc-pc/#dom-rtcicerole
+/// [MDN]: https://developer.mozilla.org/en-US/docs/Web/API/IceTransport/role
+/// [W3C]: https://www.w3.org/TR/webrtc/#dom-rtcicerole
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCIceRole {
+    /// The ICE role is unspecified.
     #[default]
     Unspecified,
 

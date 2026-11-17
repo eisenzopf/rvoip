@@ -1,42 +1,46 @@
 use crate::peer_connection::configuration::setting_engine::ReplayProtection;
-use crate::peer_connection::event::RTCEventInternal;
-use crate::peer_connection::handler::DEFAULT_TIMEOUT_DURATION;
+use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
 use crate::peer_connection::message::internal::{
     DTLSMessage, RTCMessageInternal, TaggedRTCMessageInternal,
 };
-use crate::peer_connection::transport::dtls::RTCDtlsTransport;
+use crate::peer_connection::transport::dtls::DtlsTransport;
 use crate::peer_connection::transport::dtls::role::RTCDtlsRole;
 use crate::peer_connection::transport::dtls::state::RTCDtlsTransportState;
 use crate::statistics::accumulator::{CertificateStatsAccumulator, RTCStatsAccumulator};
+use crypto::RTCCryptoProvider;
 use dtls::endpoint::EndpointEvent;
 use dtls::extension::extension_use_srtp::SrtpProtectionProfile;
 use dtls::state::State;
 use log::{debug, warn};
-use sha2::{Digest, Sha256};
 use shared::TransportContext;
 use shared::error::{Error, Result};
 use srtp::option::{srtcp_replay_protection, srtp_replay_protection};
 use srtp::protection_profile::ProtectionProfile;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
-#[derive(Default)]
 pub(crate) struct DtlsHandlerContext {
-    pub(crate) dtls_transport: RTCDtlsTransport,
+    pub(crate) dtls_transport: DtlsTransport,
 
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
-    pub(crate) event_outs: VecDeque<RTCEventInternal>,
+    pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+
+    /// Set by [`DtlsHandler::request_close`]: queue a `close_notify`, stamped with this instant,
+    /// at the next `poll_write`.
+    pub(crate) close_requested: Option<Instant>,
 }
 
 impl DtlsHandlerContext {
-    pub(crate) fn new(dtls_transport: RTCDtlsTransport) -> Self {
+    pub(crate) fn new(dtls_transport: DtlsTransport) -> Self {
         Self {
             dtls_transport,
             read_outs: VecDeque::new(),
             write_outs: VecDeque::new(),
             event_outs: VecDeque::new(),
+            close_requested: None,
         }
     }
 }
@@ -48,6 +52,38 @@ pub(crate) struct DtlsHandler<'a> {
 }
 
 impl<'a> DtlsHandler<'a> {
+    /// Asks for a `close_notify` alert (RFC 5246 §7.2.1) to be sent to the peer, so that closing
+    /// the connection tells the peer at once instead of leaving it to notice by timeout
+    /// (rtc#255).
+    ///
+    /// The alert is queued at this handler's next `poll_write`, not here. In a pipeline flush that
+    /// is after this handler has taken the writes still coming down from above, so they are
+    /// encrypted while the connection exists and go out before the alert, and before the ICE
+    /// handler routes them all.
+    pub(crate) fn request_close(&mut self, now: Instant) {
+        self.ctx.close_requested = Some(now);
+    }
+
+    /// Queues the `close_notify` for every connection and closes the endpoint. A no-op before
+    /// DTLS has started or once the transport is closed.
+    fn queue_close_notify(&mut self, now: Instant) -> Result<()> {
+        if self.ctx.dtls_transport.state == RTCDtlsTransportState::Closed {
+            return Ok(());
+        }
+        let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_mut() else {
+            return Ok(());
+        };
+        dtls_endpoint.close(now)?;
+        while let Some(transmit) = dtls_endpoint.poll_transmit() {
+            self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
+                now: transmit.now,
+                transport: transmit.transport,
+                message: RTCMessageInternal::Dtls(DTLSMessage::Raw(transmit.message)),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(ctx: &'a mut DtlsHandlerContext, stats: &'a mut RTCStatsAccumulator) -> Self {
         DtlsHandler { ctx, stats }
     }
@@ -62,11 +98,15 @@ impl<'a> DtlsHandler<'a> {
         srtp_profile: SrtpProtectionProfile,
         peer_certificates: &[Vec<u8>],
         dtls_cipher: Option<String>,
-    ) {
+    ) -> Result<()> {
         // Update transport DTLS state
         self.stats
             .transport
             .on_dtls_state_changed(RTCDtlsTransportState::Connected);
+
+        // Retain the peer's chain for `DtlsTransport::get_remote_certificates()`. The stats
+        // registration below keeps only a fingerprint-derived id, which is not reversible.
+        self.ctx.dtls_transport.remote_certificates = peer_certificates.to_vec();
 
         // Update DTLS role from transport
         self.stats.transport.dtls_role = self.ctx.dtls_transport.dtls_role;
@@ -91,7 +131,8 @@ impl<'a> DtlsHandler<'a> {
 
         // Register local certificate and set local_certificate_id
         if let Some(local_cert) = self.ctx.dtls_transport.certificates.first() {
-            let fingerprints = local_cert.get_fingerprints();
+            let fingerprints =
+                local_cert.get_fingerprints(self.ctx.dtls_transport.crypto_provider.crypto())?;
             if let Some(fp) = fingerprints.first() {
                 // Register certificate in accumulator
                 // Use hex encoding for certificate (base64 would need additional dependency)
@@ -115,9 +156,13 @@ impl<'a> DtlsHandler<'a> {
         // Register remote certificate and set remote_certificate_id
         if let Some(peer_cert_der) = peer_certificates.first() {
             // Compute fingerprint from peer certificate
-            let mut hasher = Sha256::new();
-            hasher.update(peer_cert_der);
-            let hash = hasher.finalize();
+            let hash = self
+                .ctx
+                .dtls_transport
+                .crypto_provider
+                .crypto()
+                .hash(crypto::HashAlgorithm::Sha256, peer_cert_der)
+                .map_err(|error| Error::Crypto(error.to_string()))?;
             let fingerprint: String = hash
                 .iter()
                 .map(|b| format!("{:02x}", b))
@@ -140,15 +185,17 @@ impl<'a> DtlsHandler<'a> {
             // Set remote certificate ID in transport stats
             self.stats.transport.remote_certificate_id = cert_id;
         }
+        Ok(())
     }
 }
 
-impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RTCEventInternal>
+impl<'a>
+    sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, TaggedRTCEventInternal>
     for DtlsHandler<'a>
 {
     type Rout = TaggedRTCMessageInternal;
     type Wout = TaggedRTCMessageInternal;
-    type Eout = RTCEventInternal;
+    type Eout = TaggedRTCEventInternal;
     type Error = Error;
     type Time = Instant;
 
@@ -156,7 +203,19 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
         if let RTCMessageInternal::Dtls(DTLSMessage::Raw(dtls_message)) = msg.message {
             debug!("recv dtls RAW {:?}", msg.transport.peer_addr);
 
+            // Once the transport is closed, by either side, nothing more is exchanged on it. A
+            // late datagram (the peer's close_notify reply, say) must not reach an endpoint whose
+            // connection is gone, where a server would take it for a new handshake.
+            if self.ctx.dtls_transport.state == RTCDtlsTransportState::Closed {
+                debug!(
+                    "drop dtls datagram from {:?} on a closed transport",
+                    msg.transport.peer_addr
+                );
+                return Ok(());
+            }
+
             let mut messages = vec![];
+            let mut peer_closed = false;
             let mut srtp_contexts = None;
             let mut srtp_profile_for_stats: Option<SrtpProtectionProfile> = None;
             let mut peer_certificates_for_stats: Vec<Vec<u8>> = vec![];
@@ -195,6 +254,7 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                                 DtlsHandler::update_srtp_contexts(
                                     state,
                                     &self.ctx.dtls_transport.replay_protection,
+                                    &self.ctx.dtls_transport.crypto_provider,
                                 )?;
                             srtp_contexts = Some((local_srtp_context, remote_srtp_context));
                         } else {
@@ -208,6 +268,11 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                         debug!("recv dtls application RAW {:?}", msg.transport.peer_addr);
                         messages.push(message);
                     }
+                    EndpointEvent::PeerClosed => {
+                        debug!("dtls closed by peer {:?}", msg.transport.peer_addr);
+                        peer_closed = true;
+                    }
+                    _ => {}
                 }
             }
 
@@ -224,12 +289,13 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                     .dtls_transport
                     .state_change(RTCDtlsTransportState::Connected);
 
-                self.ctx
-                    .event_outs
-                    .push_back(RTCEventInternal::DTLSHandshakeComplete(
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now: msg.now,
+                    event: RTCEventInternal::DTLSHandshakeComplete(
                         Some(local_srtp_context),
                         Some(remote_srtp_context),
-                    ));
+                    ),
+                });
             }
 
             // Update stats after dtls_endpoint borrow ends
@@ -238,7 +304,7 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                     srtp_profile,
                     &peer_certificates_for_stats,
                     dtls_cipher_for_stats,
-                );
+                )?;
             }
 
             for message in messages {
@@ -247,6 +313,19 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                     now: msg.now,
                     transport: msg.transport,
                     message: RTCMessageInternal::Dtls(DTLSMessage::Raw(message)),
+                });
+            }
+
+            // The peer closed the transport (close_notify). Its reply is already queued above.
+            // The SCTP association and every data channel run over this transport, so they end
+            // with it (rtc#255).
+            if peer_closed {
+                self.ctx
+                    .dtls_transport
+                    .state_change(RTCDtlsTransportState::Closed);
+                self.ctx.event_outs.push_back(TaggedRTCEventInternal {
+                    now: msg.now,
+                    event: RTCEventInternal::DTLSClosed,
                 });
             }
         } else {
@@ -272,7 +351,7 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                 .as_mut()
                 .ok_or(Error::ErrDtlsTransportNotStarted)?;
 
-            dtls_endpoint.write(msg.transport.peer_addr, &dtls_message)?;
+            dtls_endpoint.write(msg.now, msg.transport.peer_addr, &dtls_message)?;
             while let Some(transmit) = dtls_endpoint.poll_transmit() {
                 self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
                     now: transmit.now,
@@ -289,11 +368,17 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
+        if let Some(now) = self.ctx.close_requested.take()
+            && let Err(err) = self.queue_close_notify(now)
+        {
+            warn!("failed to queue dtls close_notify: {}", err);
+        }
         self.ctx.write_outs.pop_front()
     }
 
-    fn handle_event(&mut self, evt: RTCEventInternal) -> Result<()> {
-        if let RTCEventInternal::ICESelectedCandidatePairChange = evt {
+    fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> Result<()> {
+        let now = evt.now;
+        if let RTCEventInternal::ICESelectedCandidatePairChange = evt.event {
             if self.ctx.dtls_transport.dtls_role == RTCDtlsRole::Client {
                 // dtls_endpoint only connect once when acts as DTLSRole::Client
                 if let Some(dtls_handshake_config) =
@@ -306,6 +391,7 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
                         .as_mut()
                         .ok_or(Error::ErrDtlsTransportNotStarted)?;
                     dtls_endpoint.connect(
+                        now,
                         TransportContext::default().peer_addr, // always use default for transport to make DTLS tunneled
                         dtls_handshake_config,
                         None,
@@ -323,16 +409,13 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<()> {
-        let dtls_endpoint = self
-            .ctx
-            .dtls_transport
-            .dtls_endpoint
-            .as_mut()
-            .ok_or(Error::ErrDtlsTransportNotStarted)?;
+        let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_mut() else {
+            return Ok(());
+        };
 
         let remotes: Vec<SocketAddr> = dtls_endpoint.get_connections_keys().copied().collect();
         for remote in remotes {
-            let _ = dtls_endpoint.handle_timeout(remote, now);
+            dtls_endpoint.handle_timeout(remote, now)?;
         }
         while let Some(transmit) = dtls_endpoint.poll_transmit() {
             self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
@@ -347,15 +430,16 @@ impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RT
 
     fn poll_timeout(&mut self) -> Option<Instant> {
         if let Some(dtls_endpoint) = self.ctx.dtls_transport.dtls_endpoint.as_ref() {
-            let max_eto = Instant::now() + DEFAULT_TIMEOUT_DURATION;
-            let mut eto = max_eto;
+            let mut eto = None;
 
             let remotes = dtls_endpoint.get_connections_keys();
             for remote in remotes {
-                let _ = dtls_endpoint.poll_timeout(*remote, &mut eto);
+                if let Some(timeout) = dtls_endpoint.poll_timeout(remote) {
+                    eto = Some(eto.map_or(timeout, |e: Instant| e.min(timeout)));
+                }
             }
 
-            if eto != max_eto { Some(eto) } else { None }
+            eto
         } else {
             None
         }
@@ -372,6 +456,7 @@ impl<'a> DtlsHandler<'a> {
     pub(crate) fn update_srtp_contexts(
         state: &State,
         replay_protection: &ReplayProtection,
+        crypto_provider: &Arc<dyn RTCCryptoProvider>,
     ) -> Result<(srtp::context::Context, srtp::context::Context)> {
         let profile = match state.srtp_protection_profile() {
             SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm => ProtectionProfile::AeadAes128Gcm,
@@ -400,7 +485,13 @@ impl<'a> DtlsHandler<'a> {
             ));
         }
 
-        srtp_config.extract_session_keys_from_dtls(state, state.is_client())?;
+        let keying_material = state.export_keying_material(
+            srtp::config::LABEL_EXTRACTOR_DTLS_SRTP,
+            &[],
+            srtp_config.keying_material_len(),
+        )?;
+        srtp_config
+            .set_session_keys_from_keying_material(keying_material.as_ref(), state.is_client())?;
 
         let local_context = srtp::context::Context::new(
             &srtp_config.keys.local_master_key,
@@ -408,6 +499,7 @@ impl<'a> DtlsHandler<'a> {
             srtp_config.profile,
             srtp_config.local_rtp_options,
             srtp_config.local_rtcp_options,
+            crypto_provider.crypto(),
         )?;
 
         let remote_context = srtp::context::Context::new(
@@ -428,8 +520,90 @@ impl<'a> DtlsHandler<'a> {
             } else {
                 srtp_config.remote_rtcp_options
             },
+            crypto_provider.crypto(),
         )?;
 
         Ok((local_context, remote_context))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::peer_connection::transport::{RTCTransportId, TransportKind};
+
+    /// A fixed nonce keeps test ids deterministic while still distinguishing the kinds.
+    fn test_transport_id(kind: TransportKind) -> RTCTransportId {
+        RTCTransportId::new(0xabcd_ef01_2345_6789, kind)
+    }
+
+    #[test]
+    fn timeout_before_dtls_starts_is_a_noop() {
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let transport = DtlsTransport::new(
+            crate::peer_connection::transport::dtls::RTCDtlsTransportConfig {
+                id: test_transport_id(TransportKind::Dtls),
+                ice_transport_id: test_transport_id(TransportKind::Ice),
+                certificates: vec![],
+                answering_dtls_role: Default::default(),
+                srtp_protection_profiles: vec![],
+                dtls_cipher_suites: vec![],
+                allow_insecure_verification_algorithm: false,
+                disable_certificate_fingerprint_verification: false,
+                replay_protection: Default::default(),
+                crypto_provider: provider,
+            },
+        )
+        .expect("transport");
+        let mut context = DtlsHandlerContext::new(transport);
+        let mut stats = RTCStatsAccumulator::default();
+        let mut handler = DtlsHandler::new(&mut context, &mut stats);
+
+        sansio::Protocol::handle_timeout(&mut handler, Instant::now()).unwrap();
+    }
+
+    // The handshake path is the only writer of `remote_certificates`. A test that assigns the
+    // field and reads it back would keep passing if this assignment were deleted, so drive the
+    // writer instead.
+    #[test]
+    fn handshake_completion_retains_the_peer_certificate_chain() -> Result<()> {
+        let provider =
+            crypto::default_provider().expect("a built-in crypto provider is enabled for tests");
+        let transport = DtlsTransport::new(
+            crate::peer_connection::transport::dtls::RTCDtlsTransportConfig {
+                id: test_transport_id(TransportKind::Dtls),
+                ice_transport_id: test_transport_id(TransportKind::Ice),
+                certificates: vec![],
+                answering_dtls_role: Default::default(),
+                srtp_protection_profiles: vec![],
+                dtls_cipher_suites: vec![],
+                allow_insecure_verification_algorithm: false,
+                disable_certificate_fingerprint_verification: false,
+                replay_protection: Default::default(),
+                crypto_provider: provider,
+            },
+        )
+        .expect("transport");
+        let mut context = DtlsHandlerContext::new(transport);
+        let mut stats = RTCStatsAccumulator::default();
+
+        assert!(context.dtls_transport.get_remote_certificates().is_empty());
+
+        // The fingerprint is hashed from these bytes, so any content works.
+        let peer_chain = vec![vec![0x30u8, 0x82, 0x01, 0x0a], vec![0x30, 0x82, 0x02, 0x0b]];
+
+        DtlsHandler::new(&mut context, &mut stats).update_dtls_stats_from_profile(
+            SrtpProtectionProfile::Srtp_Aead_Aes_128_Gcm,
+            &peer_chain,
+            None,
+        )?;
+
+        assert_eq!(
+            peer_chain,
+            context.dtls_transport.get_remote_certificates(),
+            "the whole chain is retained, not just the first entry the stats path consumes"
+        );
+        Ok(())
     }
 }

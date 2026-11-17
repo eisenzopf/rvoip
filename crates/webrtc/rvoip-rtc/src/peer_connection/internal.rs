@@ -1,5 +1,10 @@
 use super::*;
 use crate::peer_connection::event::{RTCPeerConnectionEvent, RTCPeerConnectionIceEvent};
+use crate::peer_connection::handler::datachannel::DataChannelHandlerContext;
+use crate::peer_connection::handler::demuxer::DemuxerHandlerContext;
+use crate::peer_connection::handler::endpoint::EndpointHandlerContext;
+use crate::peer_connection::handler::interceptor::InterceptorHandlerContext;
+use crate::peer_connection::handler::srtp::SrtpHandlerContext;
 use crate::peer_connection::sdp::{
     MediaSection, PopulateSdpParams, TrackDetails, add_candidates_to_media_descriptions,
     get_by_mid, get_peer_direction, get_rids, have_data_channel, is_ext_map_allow_mixed_set,
@@ -11,17 +16,23 @@ use crate::peer_connection::transport::ice::candidate::{
     RTCIceCandidate, rtc_ice_candidates_from_ice_candidates,
 };
 use crate::peer_connection::transport::ice::candidate_type::RTCIceCandidateType;
+use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 use crate::rtp_transceiver::rtp_sender::RTCRtpCodec;
 use crate::rtp_transceiver::rtp_sender::rtp_coding_parameters::{
     RTCRtpCodingParameters, RTCRtpFecParameters, RTCRtpRtxParameters,
 };
 use crate::rtp_transceiver::rtp_sender::rtp_encoding_parameters::RTCRtpEncodingParameters;
-use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverId};
+use crate::rtp_transceiver::{PayloadType, RTCRtpTransceiverDirection, RTCRtpTransceiverId};
 use crate::statistics::accumulator::IceCandidateAccumulator;
 use ::sdp::description::session::*;
 use ::sdp::util::ConnectionRole;
+use rand::RngExt;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
+/// Groups the SDP-declared SSRCs that belong to one MediaStreamTrack (same MID,
+/// kind, stream id and track id), so a primary and its codec-distinct
+/// supplemental SSRCs (for example RFC 4733) land on one receiver track.
 fn group_track_details_by_media_stream(tracks: Vec<TrackDetails>) -> Vec<Vec<TrackDetails>> {
     let mut groups: Vec<Vec<TrackDetails>> = Vec::new();
     for track in tracks {
@@ -40,17 +51,33 @@ fn group_track_details_by_media_stream(tracks: Vec<TrackDetails>) -> Vec<Vec<Tra
     groups
 }
 
-impl<I> RTCPeerConnection<I>
-where
-    I: Interceptor,
-{
+impl RTCPeerConnection {
     pub(super) fn new(
+        now: Instant,
         mut configuration: RTCConfiguration,
         media_engine: MediaEngine,
-        setting_engine: SettingEngine,
-        interceptor: I,
+        mut setting_engine: SettingEngine,
+        interceptor: Box<dyn Interceptor>,
     ) -> Result<Self> {
         configuration.validate()?;
+
+        // The one place in `rtc` that resolves a default crypto provider. The application
+        // either supplies one through `SettingEngineBuilder::with_crypto_provider` — which is also how
+        // a wrapper crate injects a provider it resolved itself — or gets the feature-selected
+        // built-in here, once, at construction. Everything downstream —
+        // ICE, DTLS, SRTP, STUN, certificates — receives it explicitly, so no library code
+        // reaches for a default behind the caller's back.
+        let crypto_provider = match setting_engine.crypto_provider.take() {
+            Some(crypto_provider) => crypto_provider,
+            None => crypto::default_provider().map_err(|error| {
+                Error::Crypto(format!(
+                    "peer connection requires a crypto provider: {error}; configure one with SettingEngineBuilder::with_crypto_provider"
+                ))
+            })?,
+        };
+        // Record the resolution so `SettingEngine::crypto_provider` reports the provider this
+        // connection actually uses, not merely what was requested.
+        setting_engine.crypto_provider = Some(crypto_provider.clone());
 
         let mut candidate_types = vec![];
         if setting_engine.candidates.ice_lite {
@@ -81,6 +108,11 @@ where
             keepalive_interval: setting_engine.timeout.ice_keepalive_interval,
             candidate_types,
             network_types,
+            check_interval: setting_engine
+                .timeout
+                .ice_check_interval
+                .unwrap_or(std::time::Duration::from_millis(0)),
+            max_binding_requests: setting_engine.timeout.ice_max_binding_requests,
             host_acceptance_min_wait: setting_engine.timeout.ice_host_acceptance_min_wait,
             srflx_acceptance_min_wait: setting_engine.timeout.ice_srflx_acceptance_min_wait,
             prflx_acceptance_min_wait: setting_engine.timeout.ice_prflx_acceptance_min_wait,
@@ -95,33 +127,69 @@ where
             ..Default::default()
         };
 
+        // One random nonce per peer connection, combined with a per-transport discriminator to
+        // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
+        // a counter is ambient state, and `rtc` may be used many times over in one process.
+        // Randomness is what keeps two connections' transports from comparing equal — see
+        // `RTCTransportId`.
+        let transport_id_nonce: u64 = rand::rng().random();
+        let ice_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Ice);
+        let dtls_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Dtls);
+        let sctp_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Sctp);
+
         // Create the ICE transport
-        let ice_transport = RTCIceTransport::new(agent_config)?;
+        let ice_transport =
+            IceTransport::new(now, agent_config, crypto_provider.clone(), ice_transport_id)?;
 
         // Create the DTLS transport
-        let certificates = configuration.certificates.drain(..).collect();
-        let dtls_transport = RTCDtlsTransport::new(
+        let certificates = std::mem::take(&mut configuration.certificates);
+        let dtls_transport = DtlsTransport::new(RTCDtlsTransportConfig {
+            id: dtls_transport_id,
+            ice_transport_id,
             certificates,
-            setting_engine.answering_dtls_role,
-            setting_engine.srtp_protection_profiles.clone(),
-            setting_engine.allow_insecure_verification_algorithm,
-            setting_engine.replay_protection,
-        )?;
+            answering_dtls_role: setting_engine.answering_dtls_role,
+            srtp_protection_profiles: setting_engine.srtp_protection_profiles.clone(),
+            dtls_cipher_suites: setting_engine.dtls_cipher_suites.clone(),
+            allow_insecure_verification_algorithm: setting_engine
+                .allow_insecure_verification_algorithm,
+            disable_certificate_fingerprint_verification: setting_engine
+                .disable_certificate_fingerprint_verification,
+            replay_protection: setting_engine.replay_protection,
+            crypto_provider,
+        })?;
 
         // Create the SCTP transport
-        let sctp_transport = RTCSctpTransport::new(setting_engine.sctp_max_message_size);
+        let sctp_transport = SctpTransport::new(
+            setting_engine.sctp_max_message_size,
+            setting_engine.sctp_max_receive_buffer_size,
+            setting_engine.sctp_mtu,
+            sctp_transport_id,
+            dtls_transport_id,
+        );
 
         // Create Pipeline Context
         let ice_handler_context = IceHandlerContext::new(ice_transport);
         let dtls_handler_context = DtlsHandlerContext::new(dtls_transport);
-        let sctp_handler_context = SctpHandlerContext::new(sctp_transport);
+        let sctp_handler_context = SctpHandlerContext::new(now, sctp_transport);
 
+        // Listed in full rather than filled from `Default`: the ICE and DTLS handler contexts
+        // own a crypto provider, and deriving `Default` for them would mean resolving one
+        // implicitly. The provider is chosen once above and threaded from here.
         let pipeline_context = PipelineContext {
+            demuxer_handler_context: DemuxerHandlerContext::default(),
             ice_handler_context,
             dtls_handler_context,
             sctp_handler_context,
-
-            ..Default::default()
+            datachannel_handler_context: DataChannelHandlerContext::new(now),
+            srtp_handler_context: SrtpHandlerContext::default(),
+            interceptor_handler_context: InterceptorHandlerContext::default(),
+            endpoint_handler_context: EndpointHandlerContext::default(),
+            media_read_outs: VecDeque::new(),
+            data_read_outs: VecDeque::new(),
+            write_outs: VecDeque::new(),
+            event_outs: VecDeque::new(),
+            stats: RTCStatsAccumulator::default(),
+            now,
         };
 
         Ok(Self {
@@ -139,7 +207,7 @@ where
             peer_connection_state: RTCPeerConnectionState::New,
             can_trickle_ice_candidates: None,
             pipeline_context,
-            data_channels: HashMap::new(),
+            data_channels: DataChannelRegistry::new(),
             rtp_transceivers: Vec::new(),
             greater_mid: -1,
             sdp_origin: Origin::default(),
@@ -185,7 +253,7 @@ where
         }
 
         let dtls_fingerprints = if let Some(cert) = self.dtls_transport().certificates.first() {
-            cert.get_fingerprints()
+            cert.get_fingerprints(self.dtls_transport().crypto_provider.crypto())?
         } else {
             return Err(Error::ErrNonCertificate);
         };
@@ -231,7 +299,7 @@ where
 
         let mut media_sections = vec![];
         let mut already_have_application_media_section = false;
-        let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description.as_ref());
+        let is_extmap_allow_mixed = is_ext_map_allow_mixed_set(self.remote_description());
 
         // Extract media descriptions to avoid borrowing conflicts
         let media_descriptions = self
@@ -247,7 +315,7 @@ where
                         return Err(Error::ErrPeerConnRemoteDescriptionWithoutMidValue);
                     }
 
-                    if media.media_name.media == MEDIA_SECTION_APPLICATION {
+                    if media.is_webrtc_datachannel() {
                         media_sections.push(MediaSection {
                             mid: mid_value.to_owned(),
                             transceiver_index: usize::MAX,
@@ -290,10 +358,8 @@ where
 
         // If we are offering also include unmatched local transceivers
         let match_bundle_group = if include_unmatched {
-            let already_matched: HashSet<String> = media_sections
-                .iter()
-                .map(|section| section.mid.clone())
-                .collect();
+            let already_matched: HashSet<String> =
+                media_sections.iter().map(|s| s.mid.clone()).collect();
 
             for (i, t) in self.rtp_transceivers.iter_mut().enumerate() {
                 if let Some(mid) = t.mid().clone() {
@@ -332,7 +398,7 @@ where
         };
 
         let dtls_fingerprints = if let Some(cert) = self.dtls_transport().certificates.first() {
-            cert.get_fingerprints()
+            cert.get_fingerprints(self.dtls_transport().crypto_provider.crypto())?
         } else {
             return Err(Error::ErrNonCertificate);
         };
@@ -471,6 +537,9 @@ where
                             );
                             if next_state.is_ok() {
                                 self.pending_local_description = None;
+                                // Undo the transceiver associations/creations made by the
+                                // now-abandoned offer (RFC 9429, Section 5.7).
+                                self.rollback_transceivers()?;
                             }
                             next_state
                         }
@@ -539,6 +608,9 @@ where
                             );
                             if next_state.is_ok() {
                                 self.pending_remote_description = None;
+                                // Undo the transceiver associations/creations made by the
+                                // now-abandoned offer (RFC 9429, Section 5.7).
+                                self.rollback_transceivers()?;
                             }
                             next_state
                         }
@@ -564,11 +636,26 @@ where
         match next_state {
             Ok(next_state) => {
                 self.signaling_state = next_state;
-                if self.signaling_state == RTCSignalingState::Stable {
+                let reached_stable = self.signaling_state == RTCSignalingState::Stable;
+                if reached_stable {
                     self.is_negotiation_ongoing = false;
-                    self.trigger_negotiation_needed();
+                    // Negotiation has committed: any transceiver that was created while applying
+                    // a remote offer is now part of the stable state, so clear the
+                    // created-by-remote flag. This keeps the flag meaning exactly "created by the
+                    // current pending (uncommitted) offer", which is what rollback relies on.
+                    for t in &mut self.rtp_transceivers {
+                        t.set_created_by_remote_description(false);
+                    }
                 }
                 self.do_signaling_state_change(next_state);
+                if reached_stable {
+                    // W3C "update the negotiation-needed flag" is re-run each time the connection
+                    // returns to a stable signaling state. A transceiver added while the
+                    // connection was mid-negotiation (`negotiation_needed_op` step 2.3 bails out
+                    // when not stable) had its negotiation-needed check deferred; re-running it now
+                    // fires `OnNegotiationNeededEvent` if anything is still un-negotiated.
+                    self.trigger_negotiation_needed();
+                }
                 Ok(())
             }
             Err(err) => Err(err),
@@ -582,27 +669,27 @@ where
         );
     }
 
-    pub(crate) fn ice_transport(&self) -> &RTCIceTransport {
+    pub(crate) fn ice_transport(&self) -> &IceTransport {
         &self.pipeline_context.ice_handler_context.ice_transport
     }
 
-    pub(crate) fn ice_transport_mut(&mut self) -> &mut RTCIceTransport {
+    pub(crate) fn ice_transport_mut(&mut self) -> &mut IceTransport {
         &mut self.pipeline_context.ice_handler_context.ice_transport
     }
 
-    pub(crate) fn dtls_transport(&self) -> &RTCDtlsTransport {
+    pub(crate) fn dtls_transport(&self) -> &DtlsTransport {
         &self.pipeline_context.dtls_handler_context.dtls_transport
     }
 
-    pub(crate) fn dtls_transport_mut(&mut self) -> &mut RTCDtlsTransport {
+    pub(crate) fn dtls_transport_mut(&mut self) -> &mut DtlsTransport {
         &mut self.pipeline_context.dtls_handler_context.dtls_transport
     }
 
-    pub(crate) fn sctp_transport(&self) -> &RTCSctpTransport {
+    pub(crate) fn sctp_transport(&self) -> &SctpTransport {
         &self.pipeline_context.sctp_handler_context.sctp_transport
     }
 
-    pub(crate) fn sctp_transport_mut(&mut self) -> &mut RTCSctpTransport {
+    pub(crate) fn sctp_transport_mut(&mut self) -> &mut SctpTransport {
         &mut self.pipeline_context.sctp_handler_context.sctp_transport
     }
 
@@ -611,11 +698,87 @@ where
     /// caller of this method should hold `self.mu` lock
     pub(super) fn add_rtp_transceiver(
         &mut self,
-        t: RTCRtpTransceiverInternal<I>,
+        t: RTCRtpTransceiverInternal,
     ) -> RTCRtpTransceiverId {
         self.rtp_transceivers.push(t);
         self.trigger_negotiation_needed();
         self.rtp_transceivers.len() - 1
+    }
+
+    /// Undoes the transceiver changes made by an offer/answer transaction that is being rolled
+    /// back, as required by RFC 9429, Section 5.7.
+    ///
+    /// - Transceivers that were implicitly created by applying the remote offer now being rolled
+    ///   back are stopped and removed, unless a track has since been attached to them via
+    ///   `add_track` (i.e. they have a sender). The latter are kept but disassociated so a
+    ///   subsequent `create_offer` can re-add an "m=" section for the attached track.
+    /// - Any remaining transceiver that was associated with an "m=" section solely by the
+    ///   rolled-back description — i.e. its mid is not present in the current (last stable)
+    ///   local or remote description — is disassociated: its mid is cleared and the "m=" section
+    ///   index mapping is discarded. Transceivers associated by a prior, already-negotiated
+    ///   exchange keep their mid.
+    ///
+    /// The effect is identical regardless of whether the rollback was applied via
+    /// `set_local_description` or `set_remote_description`, as the spec requires.
+    pub(super) fn rollback_transceivers(&mut self) -> Result<()> {
+        // Mids that were associated by the last stable offer/answer exchange. A transceiver
+        // whose mid appears here was not associated by the rolled-back description and must be
+        // left untouched.
+        let negotiated_mids = self.current_description_mids();
+
+        // Stop and remove transceivers created by the rolled-back remote offer that have no
+        // attached track. `created_by_remote_description` is cleared once negotiation reaches
+        // stable, so a set flag denotes a transceiver created by the pending, not-yet-committed
+        // offer. Iterate in reverse so index-based removal is stable.
+        for i in (0..self.rtp_transceivers.len()).rev() {
+            let t = &self.rtp_transceivers[i];
+            if t.created_by_remote_description() && t.sender().is_none() {
+                self.rtp_transceivers[i].stop(&self.media_engine, &mut self.interceptor)?;
+                self.rtp_transceivers.remove(i);
+            }
+        }
+
+        // Disassociate any remaining transceiver that was associated with an "m=" section solely
+        // by the rolled-back description.
+        for t in &mut self.rtp_transceivers {
+            let associated_by_rolled_back_desc = t
+                .mid()
+                .as_ref()
+                .is_some_and(|mid| !negotiated_mids.contains(mid));
+            if associated_by_rolled_back_desc {
+                t.disassociate();
+            }
+        }
+
+        // The created-by-remote flag on any survivors is cleared by the caller once the state
+        // machine settles back to `stable` (see `set_description`).
+
+        Ok(())
+    }
+
+    /// Collects the set of mids associated by the current (last stable) local and remote
+    /// descriptions. Used by rollback to distinguish transceivers associated by a prior,
+    /// already-negotiated exchange from those associated only by the description being rolled back.
+    fn current_description_mids(&self) -> HashSet<String> {
+        let mut mids = HashSet::new();
+        for desc in [
+            self.current_local_description.as_ref(),
+            self.current_remote_description.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(parsed) = desc.parsed.as_ref() {
+                for media in &parsed.media_descriptions {
+                    if let Some(mid) = get_mid_value(media)
+                        && !mid.is_empty()
+                    {
+                        mids.insert(mid.clone());
+                    }
+                }
+            }
+        }
+        mids
     }
 
     fn start_rtp_senders(&mut self) -> Result<()> {
@@ -701,6 +864,7 @@ where
         } else {
             vec![]
         };
+
         let incoming_track_groups = group_track_details_by_media_stream(incoming_tracks);
 
         let only_one_rtp_transceiver = self.rtp_transceivers.len() == 1;
@@ -748,6 +912,9 @@ where
                     .iter()
                     .any(|track| track.ssrc.is_some())
                 {
+                    // Every SSRC declared for this MediaStreamTrack (the primary
+                    // plus any codec-distinct supplemental SSRC) is one coding of
+                    // one receiver track.
                     let mut codings = Vec::new();
                     for declared_track in incoming_track_group {
                         let Some(ssrc) = declared_track.ssrc else {
@@ -782,11 +949,14 @@ where
                         codings,
                     ));
 
-                    receiver.interceptor_remote_streams_op(
-                        &self.media_engine,
-                        &mut self.interceptor,
-                        true,
-                    );
+                    // Deliberately no `interceptor_remote_streams_op` here. It bound nothing: that
+                    // walks the track's codings and skips any whose codec does not resolve, and the
+                    // codec above is `Default::default()` — deferred until the first RTP packet
+                    // names a payload type. So the call read as "bound", always did nothing, and
+                    // the streams stayed unbound for the life of the connection.
+                    //
+                    // The bind happens once the codec is known, in the endpoint handler's
+                    // `find_track_id_by_ssrc`.
                 } else if only_one_rtp_transceiver {
                     // If the remote SDP has only one media rtp transceiver, the ssrc doesn't have to be explicitly declared
                     // here, we should add a track but with 0 ssrc. The reason is to provide stream_id and track_id information for later usage
@@ -836,8 +1006,8 @@ where
                 RTCPeerConnectionState::New
             } else if (self.ice_transport().ice_connection_state == RTCIceConnectionState::New || self.ice_transport().ice_connection_state == RTCIceConnectionState::Checking) ||
                 (self.dtls_transport().state == RTCDtlsTransportState::New || self.dtls_transport().state == RTCDtlsTransportState::Connecting) {
-                // None of the previous states apply and any RTCIceTransport is in the "new" or "checking" state or
-                // any RTCDtlsTransport is in the "new" or "connecting" state.
+                // None of the previous states apply and any IceTransport is in the "new" or "checking" state or
+                // any DtlsTransport is in the "new" or "connecting" state.
                 RTCPeerConnectionState::Connecting
             } else if (self.ice_transport().ice_connection_state == RTCIceConnectionState::Connected || self.ice_transport().ice_connection_state == RTCIceConnectionState::Completed || self.ice_transport().ice_connection_state == RTCIceConnectionState::Closed) &&
                 (self.dtls_transport().state == RTCDtlsTransportState::Connected || self.dtls_transport().state == RTCDtlsTransportState::Closed) {
@@ -860,24 +1030,15 @@ where
         );
     }
 
-    pub(crate) fn generate_data_channel_id(&self) -> Result<RTCDataChannelId> {
-        let mut id = 0u16;
-        if self.dtls_transport().role() != RTCDtlsRole::Client {
-            id += 1;
-        }
-
-        // Create map of ids so we can compare without double-looping each time.
-        let ids: HashSet<RTCDataChannelId> = self.data_channels.keys().cloned().collect();
-        let max = self.sctp_transport().max_channels();
-        while id < max - 1 {
-            if ids.contains(&id) {
-                id += 2;
-            } else {
-                return Ok(id);
-            }
-        }
-
-        Err(Error::ErrMaxDataChannelID)
+    /// Called by the public `RTCRtpTransceiver::set_direction` when a transceiver's preferred
+    /// direction actually changes, to update the connection's negotiation-needed flag.
+    ///
+    /// This is a narrow, purpose-specific entry point so the general-purpose
+    /// [`Self::trigger_negotiation_needed`] can stay `pub(super)`.
+    ///
+    /// See <https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-direction>.
+    pub(crate) fn on_transceiver_direction_changed(&mut self) {
+        self.trigger_negotiation_needed();
     }
 
     /// Helper to trigger a negotiation needed.
@@ -889,7 +1050,7 @@ where
     }
 
     fn do_negotiation_needed(&mut self) -> bool {
-        // https://w3c.github.io/webrtc-pc/#updating-the-negotiation-needed-flag
+        // https://www.w3.org/TR/webrtc/#updating-the-negotiation-needed-flag
         // non-canon step 1
         if self.negotiation_needed_state == NegotiationNeededState::Run {
             self.negotiation_needed_state = NegotiationNeededState::Queue;
@@ -984,18 +1145,21 @@ where
 
                 if let Some(m) = m {
                     // Step 5.3.1
-                    if transceiver.direction().has_send() {
-                        if let Some(sender) = transceiver.sender() {
-                            let dmsid = match m.attribute(ATTR_KEY_MSID).and_then(|o| o) {
-                                Some(msid) => msid,
-                                None => return true, // doesn't contain a single a=msid line
-                            };
+                    // A transceiver can carry a send direction without a sender: answering a
+                    // `recvonly` offer creates one implicitly, and `remove_track` leaves one
+                    // behind. There is then no track, so no msid for this step to compare, and
+                    // nothing a renegotiation could settle - claiming otherwise re-offers on
+                    // every return to a stable signaling state, forever.
+                    if transceiver.direction().has_send()
+                        && let Some(sender) = transceiver.sender()
+                    {
+                        let dmsid = match m.attribute(ATTR_KEY_MSID).and_then(|o| o) {
+                            Some(msid) => msid,
+                            None => return true, // doesn't contain a single a=msid line
+                        };
 
-                            let track = sender.track();
-                            if dmsid.split_whitespace().next() != Some(track.stream_id()) {
-                                return true;
-                            }
-                        } else {
+                        let track = sender.track();
+                        if dmsid.split_whitespace().next() != Some(track.stream_id()) {
                             return true;
                         }
                     }
@@ -1042,7 +1206,7 @@ where
         &self,
         track: MediaStreamTrack,
         mut init: RTCRtpTransceiverInit,
-    ) -> Result<RTCRtpTransceiverInternal<I>> {
+    ) -> Result<RTCRtpTransceiverInternal> {
         if init.direction == RTCRtpTransceiverDirection::Unspecified {
             Err(Error::ErrPeerConnAddTransceiverFromTrackSupport)
         } else {
@@ -1075,20 +1239,27 @@ where
                 rtp_coding_parameters: RTCRtpCodingParameters {
                     rid: coding.rtp_coding_parameters.rid.to_owned(),
                     ssrc: coding.rtp_coding_parameters.ssrc.to_owned(),
-                    rtx: if is_rtx_enabled {
-                        Some(RTCRtpRtxParameters {
-                            ssrc: rand::random::<u32>(),
+                    // Whether there is a repair flow at all is the media engine's call: without a
+                    // codec registered to carry it, an `a=ssrc-group` naming a repair SSRC has no
+                    // `a=rtpmap` to give it a format, and that is an offer no peer can act on.
+                    //
+                    // Given one, the SSRC follows the same rule as the media SSRC on the line
+                    // above: what the application named is what gets used, and one is minted only
+                    // when the track left it unset.
+                    rtx: is_rtx_enabled.then(|| {
+                        coding.rtp_coding_parameters.rtx.clone().unwrap_or_else(|| {
+                            RTCRtpRtxParameters {
+                                ssrc: rand::random::<u32>(),
+                            }
                         })
-                    } else {
-                        None
-                    },
-                    fec: if is_fec_enabled {
-                        Some(RTCRtpFecParameters {
-                            ssrc: rand::random::<u32>(),
+                    }),
+                    fec: is_fec_enabled.then(|| {
+                        coding.rtp_coding_parameters.fec.clone().unwrap_or_else(|| {
+                            RTCRtpFecParameters {
+                                ssrc: rand::random::<u32>(),
+                            }
                         })
-                    } else {
-                        None
-                    },
+                    }),
                 },
                 codec: coding.codec.clone(),
                 ..Default::default()
@@ -1104,21 +1275,25 @@ where
         &mut self.pipeline_context.stats
     }
 
-    /// Updates stats after ICE restart with the new credentials from the agent.
-    pub(super) fn ice_restart(&mut self) -> Result<()> {
-        let (local_ufrag, local_pwd, keep_local_candidates) = (
+    /// Stages an ICE restart so the next offer advertises fresh credentials.
+    ///
+    /// The live session is untouched: inbound STUN keeps validating against the current ufrag/pwd
+    /// until [`Self::apply_ice_restart`] runs at `set_local_description`. JSEP requires
+    /// `createOffer` to be free of side effects, and an offer that is created and then discarded
+    /// must leave a working connection working.
+    ///
+    /// The gathering state does move here, because SDP generation reads it and a restart offer
+    /// must not claim end-of-candidates.
+    pub(super) fn stage_ice_restart(&mut self) -> Result<()> {
+        let (local_ufrag, local_pwd) = (
             self.setting_engine.candidates.username_fragment.clone(),
             self.setting_engine.candidates.password.clone(),
-            !self
-                .setting_engine
-                .candidates
-                .discard_local_candidates_during_ice_restart,
         );
         self.ice_transport_mut()
-            .restart(local_ufrag, local_pwd, keep_local_candidates)?;
+            .generate_restart_credentials(local_ufrag, local_pwd)?;
         self.ice_transport_mut().ice_gathering_state = RTCIceGatheringState::Gathering;
 
-        // Update stats with new ICE credentials after restart
+        // Update stats with the credentials the offer will carry.
         if let Ok(params) = self.ice_transport().get_local_parameters() {
             self.pipeline_context
                 .stats
@@ -1129,18 +1304,32 @@ where
         Ok(())
     }
 
+    /// Applies a staged ICE restart, restarting the agent's timers at `now`.
+    ///
+    /// A no-op when nothing is staged, so `set_local_description` can call it unconditionally
+    /// without tearing down a session that was never asked to restart.
+    pub(super) fn apply_ice_restart(&mut self, now: Instant) -> Result<()> {
+        let keep_local_candidates = !self
+            .setting_engine
+            .candidates
+            .discard_local_candidates_during_ice_restart;
+        self.ice_transport_mut()
+            .apply_restart(now, keep_local_candidates)
+    }
+
     pub(super) fn start_transports(
         &mut self,
+        now: Instant,
         local_ice_role: RTCIceRole,
         remote_ice_parameters: RTCIceParameters,
-        remote_dtls_parameters: DTLSParameters,
+        remote_dtls_parameters: RTCDtlsParameters,
     ) -> Result<()> {
         // Update ICE role (may change after ICE restart if peer roles swap)
         self.pipeline_context.stats.transport.ice_role = local_ice_role;
 
         // Start the ice transport
         self.ice_transport_mut()
-            .start(local_ice_role, remote_ice_parameters)?;
+            .start(now, local_ice_role, remote_ice_parameters)?;
 
         // Start the dtls transport
         self.dtls_transport_mut()
@@ -1153,7 +1342,7 @@ where
 
     /// Converts an RTCIceCandidate to an IceCandidateAccumulator for stats collection.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `candidate` - The ICE candidate to convert.
     /// * `username_fragment` - The ICE username fragment.
@@ -1216,16 +1405,24 @@ where
         url: Option<&str>,
     ) -> Result<()> {
         let candidate: Candidate = unmarshal_candidate(candidate_value)?;
+        if !self.ice_transport_mut().add_local_candidate(candidate)? {
+            return Ok(());
+        }
+
+        let rtc_candidate = self
+            .ice_transport()
+            .agent
+            .get_local_candidates()
+            .last()
+            .map(RTCIceCandidate::from)
+            .ok_or_else(|| Error::Other("local candidate missing after registration".to_owned()))?;
 
         // Register local candidate with stats accumulator
-        let rtc_candidate: RTCIceCandidate = (&candidate).into();
         let candidate_id = format!("RTCLocalIceCandidate_{}", rtc_candidate.id);
         let (ufrag, _) = self.ice_transport().get_local_user_credentials();
         let accumulator = self.candidate_to_accumulator(&rtc_candidate, ufrag, url);
         self.stats_mut()
             .register_local_candidate(candidate_id, accumulator);
-
-        self.ice_transport_mut().add_local_candidate(candidate)?;
 
         // Emit OnIceCandidateEvent
         self.pipeline_context
@@ -1244,7 +1441,7 @@ where
     ///
     /// This is called automatically by `get_stats()` to ensure ICE candidate pair
     /// statistics (RTT, requests/responses sent/received) are up to date.
-    pub(super) fn update_ice_agent_stats(&mut self) {
+    pub(super) fn update_ice_agent_stats(&mut self, now: Instant) {
         if let Some((local, remote)) = self
             .pipeline_context
             .ice_handler_context
@@ -1260,7 +1457,7 @@ where
                 .ice_handler_context
                 .ice_transport
                 .agent
-                .get_candidate_pairs_stats()
+                .get_candidate_pairs_stats(now)
             {
                 let ice_pair_id = format!(
                     "RTCIceCandidatePair_{}_{}",
@@ -1357,6 +1554,92 @@ where
 
         // Clean up unreferenced codecs
         self.pipeline_context.stats.cleanup_unreferenced_codecs();
+    }
+
+    pub(super) fn codec_preferences_from_encodings(
+        &self,
+        kind: RtpCodecKind,
+        encodings: &[RTCRtpEncodingParameters],
+    ) -> Result<Vec<RTCRtpCodecParameters>> {
+        let media_engine_codecs = self.media_engine.get_codecs_by_kind(kind);
+        let mut codec_preferences = vec![];
+
+        for encoding in encodings {
+            if encoding.codec.mime_type.is_empty() {
+                continue;
+            }
+
+            let (codec, match_type) =
+                codec_parameters_fuzzy_search(&encoding.codec, &media_engine_codecs);
+            if match_type == CodecMatch::None {
+                return Err(Error::ErrRTPTransceiverCodecUnsupported);
+            }
+
+            if !codec_preferences
+                .iter()
+                .any(|preference: &RTCRtpCodecParameters| {
+                    preference.payload_type == codec.payload_type
+                })
+            {
+                codec_preferences.push(codec);
+            }
+        }
+
+        Ok(codec_preferences)
+    }
+
+    pub(super) fn normalize_sender_track(
+        &self,
+        track: MediaStreamTrack,
+        mut send_encodings: Vec<RTCRtpEncodingParameters>,
+    ) -> Result<(
+        MediaStreamTrack,
+        Vec<RTCRtpEncodingParameters>,
+        Vec<RTCRtpCodecParameters>,
+    )> {
+        for encoding in &mut send_encodings {
+            if encoding.rtp_coding_parameters.ssrc.is_none() {
+                encoding.rtp_coding_parameters.ssrc = Some(rand::random::<u32>());
+            }
+        }
+
+        let codec_preferences =
+            self.codec_preferences_from_encodings(track.kind(), &send_encodings)?;
+        let has_rid = send_encodings
+            .iter()
+            .any(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
+        let all_have_rid = send_encodings
+            .iter()
+            .all(|encoding| !encoding.rtp_coding_parameters.rid.is_empty());
+        if send_encodings.len() > 1 && has_rid && !all_have_rid {
+            return Err(Error::ErrRTPSenderRidNil);
+        }
+
+        let is_simulcast = send_encodings.len() > 1 && all_have_rid;
+        // rvoip: an audio sender may carry codec-distinct supplemental
+        // encodings (Opus plus an RFC 4733 telephone-event SSRC) without RIDs.
+        // They are not simulcast layers; keep them so each binds its own codec.
+        let is_supplemental_audio =
+            track.kind() == RtpCodecKind::Audio && send_encodings.len() > 1 && !has_rid;
+        if !is_simulcast && !is_supplemental_audio {
+            send_encodings.truncate(1);
+        }
+
+        let track = MediaStreamTrack::new(
+            track.stream_id().clone(),
+            track.track_id().clone(),
+            track.label().clone(),
+            track.kind(),
+            send_encodings.clone(),
+        );
+
+        // rvoip: the track's codecs are validated above but do not narrow the
+        // transceiver's codec preferences. Offers and answers keep every codec
+        // the MediaEngine registered (alternative audio codecs, RFC 4733
+        // telephone-event, further video codecs), as `rtc` 0.20 did; the
+        // sender still binds each encoding to its own codec.
+        let _ = codec_preferences;
+        Ok((track, send_encodings, vec![]))
     }
 }
 

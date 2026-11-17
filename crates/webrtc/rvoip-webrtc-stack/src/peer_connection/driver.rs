@@ -15,11 +15,10 @@ use crate::runtime::{AsyncUdpSocket, Receiver, channel};
 use bytes::BytesMut;
 use futures::FutureExt; // For .fuse() in futures::select!
 use futures::stream::{FuturesUnordered, StreamExt};
-use log::{error, trace};
-use rtc::interceptor::{Interceptor, NoopInterceptor};
+use log::{debug, error, trace};
 use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::RTCMessage;
+use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCIceGatheringState;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
@@ -58,11 +57,8 @@ pub(crate) enum PeerConnectionDriverEvent {
 /// The driver for a peer connection
 ///
 /// Runs the event loop following rtc's EventLoop pattern with select!
-pub(crate) struct PeerConnectionDriver<I = NoopInterceptor>
-where
-    I: Interceptor,
-{
-    inner: Arc<PeerConnectionRef<I>>,
+pub(crate) struct PeerConnectionDriver {
+    inner: Arc<PeerConnectionRef>,
     /// ICE gatherer for managing ICE candidate gathering
     ice_gatherer: RTCIceGatherer,
     sockets: HashMap<SocketAddr, Arc<dyn AsyncUdpSocket>>,
@@ -74,13 +70,10 @@ where
     deadline_override: Option<Instant>,
 }
 
-impl<I> PeerConnectionDriver<I>
-where
-    I: Interceptor,
-{
+impl PeerConnectionDriver {
     /// Create a new driver for the given peer connection
     pub(crate) async fn new(
-        inner: Arc<PeerConnectionRef<I>>,
+        inner: Arc<PeerConnectionRef>,
         ice_gatherer: RTCIceGatherer,
         sockets: HashMap<SocketAddr, Arc<dyn AsyncUdpSocket>>,
         advertised_to_socket: HashMap<SocketAddr, SocketAddr>,
@@ -181,7 +174,7 @@ where
             // 3.b peer_connection poll_read() - Process incoming messages
             {
                 let mut core = self.inner.core.lock().await;
-                while let Some(message) = core.poll_read() {
+                while let Some(TaggedRTCMessage { message, .. }) = core.poll_read() {
                     drop(core);
                     self.handle_rtc_message(message).await;
                     core = self.inner.core.lock().await;
@@ -382,6 +375,10 @@ where
                     RTCDataChannelEvent::OnClose(id) => id,
                     RTCDataChannelEvent::OnBufferedAmountLow(id) => id,
                     RTCDataChannelEvent::OnBufferedAmountHigh(id) => id,
+                    other => {
+                        debug!("Ignoring unsupported RTCDataChannelEvent {:?}", other);
+                        return;
+                    }
                 };
 
                 if let RTCDataChannelEvent::OnOpen(_) = &evt {
@@ -425,6 +422,8 @@ where
                         RTCDataChannelEvent::OnBufferedAmountHigh(_) => {
                             evt_tx.try_send(DataChannelEvent::OnBufferedAmountHigh)
                         }
+                        // Unknown kinds were filtered out when resolving channel_id.
+                        _ => return,
                     };
                     if let Err(err) = result {
                         error!(
@@ -445,6 +444,10 @@ where
                     RTCTrackEvent::OnError(id) => id,
                     RTCTrackEvent::OnClosing(id) => id,
                     RTCTrackEvent::OnClose(id) => id,
+                    other => {
+                        debug!("Ignoring unsupported RTCTrackEvent {:?}", other);
+                        return;
+                    }
                 };
 
                 if let RTCTrackEvent::OnOpen(init) = &evt {
@@ -550,6 +553,8 @@ where
                         RTCTrackEvent::OnClose(track_id) => {
                             (track_id, evt_tx.try_send(TrackRemoteEvent::OnEnded))
                         }
+                        // Unknown kinds were filtered out when resolving track_id.
+                        _ => return,
                     };
                     if let Err(err) = result {
                         error!(
@@ -563,6 +568,9 @@ where
                         track_id
                     );
                 }
+            }
+            other => {
+                debug!("Ignoring unsupported RTCPeerConnectionEvent {:?}", other);
             }
         }
     }
@@ -611,6 +619,9 @@ where
                     error!("Failed to get track_remote: {:?} for RtcpPacket", track_id);
                 }
             }
+            other => {
+                debug!("Ignoring unsupported RTCMessage {:?}", other);
+            }
         }
     }
 
@@ -619,7 +630,7 @@ where
             PeerConnectionDriverEvent::SenderRtp(sender_id, packet) => {
                 let mut core = self.inner.core.lock().await;
                 if let Some(mut sender) = core.rtp_sender(sender_id) {
-                    if let Err(err) = sender.write_rtp(packet) {
+                    if let Err(err) = sender.write_rtp(Instant::now(), packet) {
                         error!("Failed to send RTP: {}", err);
                     }
                 } else {
@@ -632,7 +643,7 @@ where
             PeerConnectionDriverEvent::SenderRtcp(sender_id, rtcp_packets) => {
                 let mut core = self.inner.core.lock().await;
                 if let Some(mut sender) = core.rtp_sender(sender_id) {
-                    if let Err(err) = sender.write_rtcp(rtcp_packets) {
+                    if let Err(err) = sender.write_rtcp(Instant::now(), rtcp_packets) {
                         error!("Failed to send RTCP: {}", err);
                     }
                 } else {
@@ -645,7 +656,7 @@ where
             PeerConnectionDriverEvent::ReceiverRtcp(receiver_id, rtcp_packets) => {
                 let mut core = self.inner.core.lock().await;
                 if let Some(mut receiver) = core.rtp_receiver(receiver_id) {
-                    if let Err(err) = receiver.write_rtcp(rtcp_packets) {
+                    if let Err(err) = receiver.write_rtcp(Instant::now(), rtcp_packets) {
                         error!("Failed to send RTCP feedback: {}", err);
                     }
                 } else {
@@ -695,16 +706,25 @@ mod event_loop_tests {
         let socket = runtime.wrap_udp_socket(socket).unwrap();
         // Negotiate first so the core's transports exist and handle_timeout
         // succeeds; a fresh core fails it and would end the loop early.
-        let mut core = RTCPeerConnectionBuilder::new().build().unwrap();
-        let mut remote = RTCPeerConnectionBuilder::new().build().unwrap();
+        let mut core = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .unwrap();
+        let mut remote = RTCPeerConnectionBuilder::new()
+            .build(Instant::now())
+            .unwrap();
         core.create_data_channel("event-loop-regression", None)
             .unwrap();
         let offer = core.create_offer(None).unwrap();
-        core.set_local_description(offer.clone()).unwrap();
-        remote.set_remote_description(offer).unwrap();
+        core.set_local_description(Instant::now(), offer.clone())
+            .unwrap();
+        remote
+            .set_remote_description(Instant::now(), offer)
+            .unwrap();
         let answer = remote.create_answer(None).unwrap();
-        remote.set_local_description(answer.clone()).unwrap();
-        core.set_remote_description(answer).unwrap();
+        remote
+            .set_local_description(Instant::now(), answer.clone())
+            .unwrap();
+        core.set_remote_description(Instant::now(), answer).unwrap();
         core.handle_timeout(Instant::now()).unwrap();
         let (driver_event_tx, driver_event_rx) =
             channel(PEER_CONNECTION_DRIVER_EVENT_CHANNEL_CAPACITY);
