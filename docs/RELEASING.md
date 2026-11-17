@@ -12,19 +12,22 @@ remain experimental.
 ## Release day
 
 A patch release takes about four hours of machine time and one human
-approval:
+approval. No qualification runs on a schedule; the EC2 fanout runs only on
+release day:
 
-1. Pick a `main` commit `C` whose nightly `remote-release` qualification
-   passed.
-2. Dispatch **Release qualification** with `profile=bench-release` (or
-   `bench-minor` for a minor release) on `C`, and at the same time **Prepare
-   release PR** with `candidate=C` and `qualification_run_id=<C's nightly run>`.
+1. Pick a `main` commit `C`. Dispatch **Release qualification** on `C` twice,
+   at the same time: `profile=remote-release` (with
+   `prior_run_id=<the previous release's qualification run>`, so gates whose
+   exact inputs did not change are reused) and `profile=bench-release` (or
+   `bench-minor` for a minor release).
+2. When the `remote-release` run is green, dispatch **Prepare release PR**
+   with `candidate=C` and `qualification_run_id=<that run>`.
 3. The bump PR's PR Gate starts by itself and also checks that the changelog
    and release notes are final. Merge it with a merge commit once it and the
    benchmark are green.
 4. Dispatch **Release qualification** with `profile=release-patch` (or
    `release-minor`), `candidate=<the bump PR's head commit>`,
-   `first_candidate=false` and `prior_run_id=<nightly run>,<bench run>`. It
+   `first_candidate=false` and `prior_run_id=<C's qualification run>,<bench run>`. It
    reuses every receipt and runs only the bookkeeping gates.
 5. Dispatch **Publish protected release** with that run and `execute=true`,
    and approve the `release-publish` environment once.

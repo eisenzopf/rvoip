@@ -9,7 +9,7 @@ on:
         default: main
         type: string
       profile:
-        description: Preflight, exact-gate diagnosis, core dry run, nightly qualification, release benchmark, or release qualification
+        description: Preflight, exact-gate diagnosis, core dry run, full qualification, release benchmark, or release qualification
         required: true
         default: remote-core
         type: choice
@@ -39,8 +39,8 @@ on:
         description: Optional prior candidate SHA for fail-closed changed-path validation
         required: false
         type: string
-  # The nightly qualification (nightly-qualification.yml) runs this same
-  # workflow on main, chained to the previous night's receipts.
+  # Callable from another workflow with the same inputs. Nothing schedules a
+  # qualification: an EC2 fanout runs only when someone dispatches it.
   workflow_call:
     inputs:
       candidate:

@@ -233,17 +233,14 @@ Cleanup runs in three layers as before: worker self-termination after
 evidence upload, controller terminate on `always()`, and the scheduled
 janitor.
 
-## Nightly qualification
+## No scheduled qualification
 
-`nightly-qualification.yml` runs this workflow every night on the head of
-`main` with the `remote-release` profile (never the RFC 7502 benchmark, which
-runs only for a release), as a reusable workflow call. It passes the last two
-nightly runs that kept their evidence as `prior_run_id`, so gates whose exact
-inputs did not change are reused and a quiet night reruns only the bookkeeping
-gates. The browser interop and credential-timing jobs (`nightly-interop.yml`)
-run inside it, so a failure there fails the nightly instead of going unnoticed.
-A release starts from a `main` commit with a green nightly
-(`docs/RELEASING.md`, "Release day").
+Nothing runs this workflow on a schedule: the full fanout (up to 24 workers
+and 272 vCPUs) runs only when someone dispatches it, normally on release day
+(`docs/RELEASING.md`, "Release day"). `scripts/ci/test_workflow_policy.py`
+fails if a scheduled workflow calls it. The browser interop and
+credential-timing jobs (`nightly-interop.yml`) keep their own nightly
+schedule on a hosted runner.
 
 ## What was removed
 
