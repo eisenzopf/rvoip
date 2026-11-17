@@ -120,6 +120,13 @@ pub fn rvoip_config(dut: &DutConfig, media_lanes: usize) -> Result<Config, Strin
         };
         config.media_runtime = Some(MediaRuntimeConfig::new(lanes));
         config.media_executor = Some(MediaExecutorConfig::v2());
+    } else {
+        // No media, but the answer keeps the offer's profile (RFC 3264 §6):
+        // an SDES offer (the TLS rows offer RTP/SAVP) is answered RTP/SAVP
+        // with an answer key on the signaling-only port; RTP/AVP stays
+        // RTP/AVP. Without this rvoip declines an SRTP m-line (port 0).
+        config.offer_srtp = true;
+        config.srtp_required = false;
     }
 
     // Addressing.
@@ -421,6 +428,8 @@ mod tests {
         assert!(config.server_call_admission_lock_free);
         assert!(!config.inbound_session_history);
         assert_eq!(config.media_executor, None);
+        // An SDES offer is answered RTP/SAVP; plain offers stay RTP/AVP.
+        assert!(config.offer_srtp && !config.srtp_required);
         assert_eq!(config.sip_tls_mode, SipTlsMode::Disabled);
         assert_eq!(
             config.contact_uri.as_deref(),

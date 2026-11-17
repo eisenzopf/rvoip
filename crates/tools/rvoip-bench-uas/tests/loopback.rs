@@ -86,6 +86,31 @@ async fn signaling_only(transport: &str) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signaling_only_answers_an_sdes_offer_with_rtp_savp() {
+    // The TLS rows offer SDES-SRTP and send no media: the answer keeps the
+    // offer's RTP/SAVP with an answer key (RFC 3264 §6) on port 9.
+    let dut = Dut::start("tls-none-sdes", "tls", "none", "");
+    assert_ready(&dut, "tls", "none");
+    let mut peer = uac(&dut, "none-srtp").await;
+    let handle = call(&mut peer, &dut).await;
+    let lifecycle = handle.lifecycle().await.expect("lifecycle");
+    let sdp = lifecycle.answered.and_then(|a| a.sdp).expect("SDP answer");
+    let audio = sdp
+        .lines()
+        .find(|l| l.starts_with("m=audio "))
+        .expect("m=audio");
+    assert!(audio.starts_with("m=audio 9 RTP/SAVP "), "{sdp}");
+    assert!(sdp.lines().any(|l| l.starts_with("a=crypto:")), "{sdp}");
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(10)))
+        .await
+        .expect("BYE completes");
+    let counters = drain_cleanly(dut);
+    assert_eq!(counters["byes_answered_total"]["200"], 1);
+    assert_eq!(counters["rtp_packets_received_total"], 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn udp_signaling_only_calls_answer_and_drain_to_true_zero() {
     signaling_only("udp").await;
 }

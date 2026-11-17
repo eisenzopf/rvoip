@@ -261,6 +261,12 @@ pub async fn uac(dut: &Dut, media: &str) -> StreamPeer {
     config = config.with_media_ports(start, end);
     match media {
         "none" => config = config.with_signaling_only_media(9),
+        // Signaling only, offering SDES-SRTP (as the benchmark caller does on TLS rows).
+        "none-srtp" => {
+            config = config.with_signaling_only_media(9);
+            config.offer_srtp = true;
+            config.srtp_required = true;
+        }
         "srtp" => {
             config.offer_srtp = true;
             config.srtp_required = true;

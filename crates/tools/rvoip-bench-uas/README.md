@@ -18,10 +18,13 @@ and exits. The orchestrator archives `run_dir` with the trial evidence.
 
 - Answers every INVITE with 200 OK, on rvoip's fast auto-accept path (the
   200 OK is sent on the INVITE's own path, before any application callback;
-  no 100 Trying, no 180 Ringing). The SDP answer is `RTP/AVP` for `rtp` and
-  `none`, `RTP/SAVP` with one `a=crypto` (the answer key, RFC 4568) for
-  `srtp`, and carries `a=rtcp-mux` when the offer does.
-- `media: none` answers SDP on port 9 and allocates no RTP socket.
+  no 100 Trying, no 180 Ringing). The SDP answer is `RTP/AVP` for `rtp`,
+  `RTP/SAVP` with one `a=crypto` (the answer key, RFC 4568) for `srtp`, and
+  carries `a=rtcp-mux` when the offer does.
+- `media: none` answers SDP on port 9 in the offer's profile (RFC 3264 §6):
+  an SDES offer (`RTP/SAVP`, as the caller sends on the TLS rows) gets
+  `RTP/SAVP` with an answer key, an `RTP/AVP` offer gets `RTP/AVP`. It
+  allocates no RTP socket.
 - With media, every inbound RTP media frame is echoed to the caller's
   (latched) RTP address: rvoip receives the packet (SRTP: authenticates and
   decrypts it), hands the G.711 payload to the echo, which writes it back;
