@@ -217,23 +217,23 @@ For complete API documentation including request/response schemas, see the [Open
 ### Authentication
 - `POST /auth/login` - Login with username/password
 - `POST /auth/logout` - Logout and revoke a presented JWT session. API keys are
-  rejected; revoke them explicitly with `DELETE /api-keys/:id`.
+  rejected; revoke them explicitly with `DELETE /api-keys/{id}`.
 - `POST /auth/refresh` - Get new access token
 - `GET /auth/jwks.json` - Public keys for token validation
 
 ### Users
 - `POST /users` - Create user (admin only)
 - `GET /users` - List all users
-- `GET /users/:id` - Get user details
-- `PUT /users/:id` - Update user
-- `DELETE /users/:id` - Delete user (admin only)
-- `POST /users/:id/password` - Change password
-- `POST /users/:id/roles` - Update roles (admin only)
+- `GET /users/{id}` - Get user details
+- `PUT /users/{id}` - Update user
+- `DELETE /users/{id}` - Delete user (admin only)
+- `POST /users/{id}/password` - Change password
+- `POST /users/{id}/roles` - Update roles (admin only)
 
 ### API Keys
-- `POST /users/:id/api-keys` - Create API key
-- `GET /users/:id/api-keys` - List user's keys
-- `DELETE /api-keys/:id` - Revoke API key
+- `POST /users/{id}/api-keys` - Create API key
+- `GET /users/{id}/api-keys` - List user's keys
+- `DELETE /api-keys/{id}` - Revoke API key
 
 ### Monitoring
 - `GET /health` - Health check
