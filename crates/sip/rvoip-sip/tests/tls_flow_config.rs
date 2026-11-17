@@ -1,9 +1,11 @@
-//! `Config::sip_tls_flow` reaches the SIP TLS listener.
+//! `Config::sip_tls_flow` reaches the SIP TLS listener, and
+//! `Config::with_sip_bind_outbound_to_local_ip` sets the TCP and TLS flows.
 use rvoip_sip::api::unified::{Config, SipTlsMode};
 use rvoip_sip_core::builder::SimpleResponseBuilder;
 use rvoip_sip_core::{Message, StatusCode};
 use rvoip_sip_transport::{
-    IngressAdmissionHook, IngressVerdict, TlsFlowConfig, TlsReceiveBackpressurePolicy,
+    IngressAdmissionHook, IngressVerdict, TcpFlowConfig, TlsFlowConfig,
+    TlsReceiveBackpressurePolicy,
 };
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,6 +42,31 @@ fn sip_tls_flow_defaults_to_pause_with_nodelay_and_is_configurable() {
     );
     assert!(!tuned.sip_tls_flow.tcp_nodelay);
     assert!(format!("{tuned:?}").contains("sip_tls_flow"));
+}
+
+#[test]
+fn outbound_source_bind_is_off_by_default_and_set_for_tcp_and_tls_together() {
+    let config = Config::local("alice", 5060);
+    assert!(!config.sip_tls_flow.bind_outbound_to_local_ip);
+    assert!(!config.sip_tcp_flow.bind_outbound_to_local_ip);
+
+    let bound = Config::local("alice", 5060)
+        .with_sip_tls_flow(TlsFlowConfig::default().with_tcp_nodelay(false))
+        .with_sip_bind_outbound_to_local_ip(true);
+    assert!(bound.sip_tls_flow.bind_outbound_to_local_ip);
+    assert!(bound.sip_tcp_flow.bind_outbound_to_local_ip);
+    // The convenience setter keeps the flows' other settings.
+    assert!(!bound.sip_tls_flow.tcp_nodelay);
+    assert!(format!("{bound:?}").contains("sip_tcp_flow"));
+
+    let cleared = bound.with_sip_bind_outbound_to_local_ip(false);
+    assert!(!cleared.sip_tls_flow.bind_outbound_to_local_ip);
+    assert!(!cleared.sip_tcp_flow.bind_outbound_to_local_ip);
+
+    let tcp_only = Config::local("alice", 5060)
+        .with_sip_tcp_flow(TcpFlowConfig::default().with_bind_outbound_to_local_ip(true));
+    assert!(tcp_only.sip_tcp_flow.bind_outbound_to_local_ip);
+    assert!(!tcp_only.sip_tls_flow.bind_outbound_to_local_ip);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
