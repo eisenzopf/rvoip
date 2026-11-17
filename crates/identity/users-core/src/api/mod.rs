@@ -353,15 +353,15 @@ pub fn create_router_with_state(state: ApiState) -> Router {
         // User management endpoints (protected)
         .route("/users", post(create_user))
         .route("/users", get(list_users))
-        .route("/users/:id", get(get_user))
-        .route("/users/:id", put(update_user))
-        .route("/users/:id", delete(delete_user))
-        .route("/users/:id/password", post(change_password))
-        .route("/users/:id/roles", post(update_roles))
+        .route("/users/{id}", get(get_user))
+        .route("/users/{id}", put(update_user))
+        .route("/users/{id}", delete(delete_user))
+        .route("/users/{id}/password", post(change_password))
+        .route("/users/{id}/roles", post(update_roles))
         // API key management (protected)
-        .route("/users/:id/api-keys", post(create_api_key))
-        .route("/users/:id/api-keys", get(list_api_keys))
-        .route("/api-keys/:id", delete(revoke_api_key))
+        .route("/users/{id}/api-keys", post(create_api_key))
+        .route("/users/{id}/api-keys", get(list_api_keys))
+        .route("/api-keys/{id}", delete(revoke_api_key))
         // Health and metrics
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
@@ -1079,7 +1079,6 @@ impl From<anyhow::Error> for AppError {
 
 // Authentication middleware
 
-#[axum::async_trait]
 impl<S> axum::extract::FromRequestParts<S> for AuthContext
 where
     S: Send + Sync,
@@ -1095,7 +1094,6 @@ where
     }
 }
 
-#[axum::async_trait]
 impl<S> axum::extract::FromRequestParts<S> for LogoutAuthentication
 where
     S: Send + Sync,

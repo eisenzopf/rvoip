@@ -8,6 +8,7 @@
 
 #[cfg(test)]
 use super::uri_with_params::uri_with_generic_params;
+use nom::Parser;
 use nom::{
     bytes::complete::{tag_no_case, take_while1},
     multi::many0,
@@ -120,7 +121,8 @@ fn alert_param(input: &[u8]) -> ParseResult<'_, AlertInfoValue> {
         laquot,
         take_while1(|c| c != b'>'), // Take everything until closing angle bracket
         raquot,
-    )(input)?;
+    )
+    .parse(input)?;
 
     // Convert URI bytes to string
     let uri_str = match std::str::from_utf8(uri_bytes) {
@@ -134,7 +136,7 @@ fn alert_param(input: &[u8]) -> ParseResult<'_, AlertInfoValue> {
     };
 
     // Parse any parameters
-    let (input, params) = many0(preceded(semi, generic_param))(input)?;
+    let (input, params) = many0(preceded(semi, generic_param)).parse(input)?;
 
     // Create AlertInfoUri with safer non-recursive approach
     let uri = match create_alert_info_uri(uri_str) {
@@ -178,7 +180,11 @@ pub fn parse_alert_info(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoValue>> {
 ///
 /// This function parses the full header including the "Alert-Info:" prefix.
 pub fn parse_alert_info_header(input: &[u8]) -> ParseResult<'_, Vec<AlertInfoValue>> {
-    preceded(pair(tag_no_case(b"Alert-Info"), hcolon), parse_alert_info)(input)
+    preceded(
+        pair(tag_no_case(&b"Alert-Info"[..]), hcolon),
+        parse_alert_info,
+    )
+    .parse(input)
 }
 
 #[cfg(test)]

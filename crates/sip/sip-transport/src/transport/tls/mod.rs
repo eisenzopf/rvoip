@@ -34,7 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    next_transport_flow_id,
+    connect_stream_from, next_transport_flow_id,
     runtime::{
         next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
         OutboundDialCoordinator, TransportTaskSet,
@@ -405,6 +405,15 @@ pub struct TlsFlowConfig {
     pub tcp_nodelay: bool,
     /// Hook consulted for every parsed inbound message. Default: `None`.
     pub ingress_admission: Option<IngressAdmissionHook>,
+    /// Bind every dialed TLS socket to the transport's local IP address
+    /// before connecting, so the flow leaves from that address instead of
+    /// the one the kernel's routing table picks. Use it on a host with
+    /// several addresses where each transport (listener and Contact) owns
+    /// one of them, such as a multi-source load generator. The local port is
+    /// chosen by the kernel. Has no effect when the transport's local IP is
+    /// unspecified (`0.0.0.0` / `::`) or of a different address family than
+    /// the destination. Default: `false` (the kernel picks the source).
+    pub bind_outbound_to_local_ip: bool,
     counters: Arc<TlsFlowCounters>,
 }
 
@@ -415,6 +424,7 @@ impl Default for TlsFlowConfig {
             receive_pause_max: DEFAULT_TLS_RECEIVE_PAUSE_MAX,
             tcp_nodelay: true,
             ingress_admission: None,
+            bind_outbound_to_local_ip: false,
             counters: Arc::default(),
         }
     }
@@ -444,6 +454,19 @@ impl TlsFlowConfig {
     pub fn with_ingress_admission(mut self, hook: IngressAdmissionHook) -> Self {
         self.ingress_admission = Some(hook);
         self
+    }
+
+    /// Bind dialed TLS sockets to the transport's local IP address. See
+    /// [`TlsFlowConfig::bind_outbound_to_local_ip`].
+    pub fn with_bind_outbound_to_local_ip(mut self, enabled: bool) -> Self {
+        self.bind_outbound_to_local_ip = enabled;
+        self
+    }
+
+    /// Source address for a dialed socket of a transport whose local address
+    /// is `local_addr`, or `None` to let the kernel choose.
+    fn outbound_source(&self, local_addr: SocketAddr) -> Option<std::net::IpAddr> {
+        self.bind_outbound_to_local_ip.then(|| local_addr.ip())
     }
 
     /// Snapshot of the counters shared by every transport built from this
@@ -1772,9 +1795,12 @@ impl TlsTransport {
                                 .try_acquire_owned()
                                 .map_err(|_| Error::ConnectionPoolExhausted)?;
                             let tls_stream = tokio::time::timeout_at(deadline, async {
-                                let tcp_stream = TcpStream::connect(remote_addr)
-                                    .await
-                                    .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
+                                let tcp_stream = connect_stream_from(
+                                    remote_addr,
+                                    flow.outbound_source(local_addr),
+                                )
+                                .await
+                                .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
                                 flow.apply_socket_options(&tcp_stream);
                                 connector
                                     .connect(server_name, tcp_stream)
@@ -2225,6 +2251,7 @@ mod auth_boundary_tests {
         assert_eq!(flow.receive_pause_max, Duration::from_secs(600));
         assert!(flow.tcp_nodelay);
         assert!(flow.ingress_admission.is_none());
+        assert!(!flow.bind_outbound_to_local_ip);
         assert_eq!(flow.stats(), TlsFlowStats::default());
 
         let lifecycle =
@@ -2821,6 +2848,89 @@ mod auth_boundary_tests {
         )
         .await;
         assert!(matches!(result, Err(Error::InvalidState(_))));
+    }
+
+    /// Linux routes all of 127.0.0.0/8 to loopback; other hosts (macOS) only
+    /// answer on 127.0.0.1 unless an alias is configured.
+    fn second_loopback_address() -> Option<std::net::IpAddr> {
+        let address: std::net::IpAddr = "127.0.0.2".parse().unwrap();
+        std::net::TcpListener::bind((address, 0))
+            .is_ok()
+            .then_some(address)
+    }
+
+    #[tokio::test]
+    async fn dialed_tls_flow_leaves_from_local_ip_only_when_configured() {
+        let Some(source_ip) = second_loopback_address() else {
+            eprintln!("skipping: 127.0.0.2 is not a local address on this host");
+            return;
+        };
+        let (_directory, cert_path, key_path) = write_test_certificate();
+        let client_config = TlsClientConfig {
+            extra_ca_path: Some(cert_path.clone()),
+            ..TlsClientConfig::default()
+        };
+        let (server, mut server_events) = TlsTransport::bind_with_client_config(
+            "127.0.0.1:0".parse().unwrap(),
+            &cert_path,
+            &key_path,
+            None,
+            client_config.clone(),
+        )
+        .await
+        .unwrap();
+        let destination = server.local_addr().unwrap();
+
+        for (bind_outbound, expected_ip) in [
+            (true, source_ip),
+            (false, "127.0.0.1".parse::<std::net::IpAddr>().unwrap()),
+        ] {
+            let (client, _client_events) = TlsTransport::client_only_with_flow_config(
+                SocketAddr::new(source_ip, 0),
+                None,
+                None,
+                client_config.clone(),
+                HandshakeAdmissionConfig::default(),
+                TlsFlowConfig::default().with_bind_outbound_to_local_ip(bind_outbound),
+            )
+            .await
+            .unwrap();
+            let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
+                .unwrap()
+                .from("alice", "sips:alice@localhost", Some("tag"))
+                .to("service", "sips:service@localhost", None)
+                .call_id(&format!("tls-source-bind-{bind_outbound}"))
+                .cseq(1)
+                .build();
+            client
+                .send_message_on_route(
+                    Message::Request(request),
+                    TransportRoute::new(destination)
+                        .with_transport_type(TransportType::Tls)
+                        .with_authority(TransportAuthority::dns("localhost").unwrap()),
+                )
+                .await
+                .unwrap();
+            // Skip lifecycle events, such as the previous client's close.
+            let source = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match server_events.recv().await {
+                        Some(TransportEvent::MessageReceived { source, .. }) => break source,
+                        Some(_) => continue,
+                        None => panic!("server event channel closed"),
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                source.ip(),
+                expected_ip,
+                "bind_outbound_to_local_ip = {bind_outbound}"
+            );
+            client.close().await.unwrap();
+        }
+        server.close().await.unwrap();
     }
 
     fn write_test_certificate() -> (tempfile::TempDir, PathBuf, PathBuf) {

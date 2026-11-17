@@ -271,7 +271,7 @@ apt-get install -y --no-install-recommends \
 
 curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
   https://sh.rustup.rs -o /tmp/rustup-init.sh
-sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.91.0
+sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.95.0
 export PATH=/root/.cargo/bin:$PATH
 command -v ld.lld >/dev/null
 ld.lld --version
@@ -305,7 +305,7 @@ if curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
   # sccache authenticates to S3 through the same instance role as the CLI.
   export SCCACHE_BUCKET="$CACHE_BUCKET"
   export SCCACHE_REGION="$AWS_REGION"
-  export SCCACHE_S3_KEY_PREFIX=rvoip-release-v2-lld/rust-1.91.0/x86_64-unknown-linux-gnu
+  export SCCACHE_S3_KEY_PREFIX=rvoip-release-v2-lld/rust-1.95.0/x86_64-unknown-linux-gnu
   export SCCACHE_S3_USE_SSL=true
   export SCCACHE_IDLE_TIMEOUT=0
   export SCCACHE_MULTILEVEL_CHAIN=disk,s3

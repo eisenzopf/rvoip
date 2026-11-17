@@ -35,6 +35,7 @@ use crate::error::{Error, Result};
 use crate::parser::headers::accept_encoding::{parse_accept_encoding, EncodingInfo};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -275,7 +276,7 @@ fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<EncodingInfo>> {
         &bytes
     };
 
-    match all_consuming(parse_accept_encoding)(bytes_to_parse) {
+    match all_consuming(parse_accept_encoding).parse(bytes_to_parse) {
         Ok((_, encodings)) => Ok(encodings),
         Err(e) => Err(Error::ParseError(format!(
             "Failed to parse Accept-Encoding header: {:?}",

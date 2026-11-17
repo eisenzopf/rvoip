@@ -30,15 +30,15 @@ postgres = ["dep:sqlx-postgres"]
 tokio = { workspace = true, features = ["full"] }
 
 # Database
-sqlx-core = { version = "0.8", default-features = false, features = ["_rt-tokio", "json"] }
-sqlx-sqlite = { version = "0.8", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
-sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
+sqlx-core = { version = "0.9", default-features = false, features = ["_rt-tokio", "json"] }
+sqlx-sqlite = { version = "0.9", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
+sqlx-postgres = { version = "0.9", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
 
 # Password hashing
 argon2 = "0.6"
 
 # JWT
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
@@ -56,8 +56,8 @@ thiserror = { workspace = true }
 async-trait = "0.1"
 
 # Web framework (for REST API)
-axum = { version = "0.7", features = ["http2", "json", "tokio", "macros"] }
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+axum = { version = "0.8", features = ["http2", "json", "tokio", "macros"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Logging

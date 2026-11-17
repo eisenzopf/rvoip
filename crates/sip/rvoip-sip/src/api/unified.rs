@@ -2655,7 +2655,27 @@ pub struct Config {
     /// 600 s instead of closing a shared flow, sets `TCP_NODELAY`, and
     /// installs no hook. Keep a clone to read
     /// [`TlsFlowConfig::stats`](rvoip_sip_transport::TlsFlowConfig::stats).
+    ///
+    /// Set
+    /// [`bind_outbound_to_local_ip`](rvoip_sip_transport::TlsFlowConfig::bind_outbound_to_local_ip)
+    /// to make dialed TLS connections leave from the TLS listener's IP
+    /// address; [`Config::with_sip_bind_outbound_to_local_ip`] sets it
+    /// together with the TCP equivalent in [`Config::sip_tcp_flow`].
     pub sip_tls_flow: rvoip_sip_transport::TlsFlowConfig,
+
+    /// Outbound behaviour of the SIP TCP transport.
+    ///
+    /// With
+    /// [`bind_outbound_to_local_ip`](rvoip_sip_transport::TcpFlowConfig::bind_outbound_to_local_ip)
+    /// set, every TCP connection this endpoint dials is bound to the IP
+    /// address of [`Config::bind_addr`] before it connects, so the flow
+    /// leaves from that address rather than the one the kernel's routing
+    /// table picks. Use it when one host runs several endpoints, each bound
+    /// to its own address (for example a multi-source load generator). It
+    /// has no effect when the bind address is unspecified (`0.0.0.0` /
+    /// `::`). Default: [`TcpFlowConfig::default`](rvoip_sip_transport::TcpFlowConfig),
+    /// the kernel picks the source address.
+    pub sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig,
 
     /// **Dev only.** When `true`, server certs are accepted without
     /// identity verification. Required for self-signed test certs. The
@@ -3722,6 +3742,7 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("sip_tls_flow", &self.sip_tls_flow)
+            .field("sip_tcp_flow", &self.sip_tcp_flow)
             .field("offer_srtp", &self.offer_srtp)
             .field("offer_rtcp_mux", &self.offer_rtcp_mux)
             .field("rtcp_mux_required", &self.rtcp_mux_required)
@@ -3944,6 +3965,7 @@ impl Config {
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
+            sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -4094,6 +4116,7 @@ impl Config {
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
+            sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -5721,6 +5744,28 @@ impl Config {
     /// and an optional ingress admission hook. See [`Config::sip_tls_flow`].
     pub fn with_sip_tls_flow(mut self, flow: rvoip_sip_transport::TlsFlowConfig) -> Self {
         self.sip_tls_flow = flow;
+        self
+    }
+
+    /// Configure the SIP TCP transport's outbound behaviour. See
+    /// [`Config::sip_tcp_flow`].
+    pub fn with_sip_tcp_flow(mut self, flow: rvoip_sip_transport::TcpFlowConfig) -> Self {
+        self.sip_tcp_flow = flow;
+        self
+    }
+
+    /// Bind every SIP TCP and TLS connection this endpoint dials to the
+    /// local IP address of the transport that dials it, instead of letting
+    /// the kernel pick the source address. TCP uses the IP of
+    /// [`Config::bind_addr`]; TLS uses the IP of the TLS listener
+    /// ([`Config::tls_bind_addr`], or `bind_addr` when it is unset). Has no
+    /// effect for an unspecified address (`0.0.0.0` / `::`). Sets
+    /// `bind_outbound_to_local_ip` on both [`Config::sip_tcp_flow`] and
+    /// [`Config::sip_tls_flow`], keeping their other settings. Default:
+    /// off.
+    pub fn with_sip_bind_outbound_to_local_ip(mut self, enabled: bool) -> Self {
+        self.sip_tcp_flow = self.sip_tcp_flow.with_bind_outbound_to_local_ip(enabled);
+        self.sip_tls_flow = self.sip_tls_flow.with_bind_outbound_to_local_ip(enabled);
         self
     }
 
@@ -15114,6 +15159,7 @@ impl UnifiedCoordinator {
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_server_client_auth: config.tls_server_client_auth.clone(),
             tls_flow: config.sip_tls_flow.clone(),
+            tcp_flow: config.sip_tcp_flow.clone(),
             new_call_admission: config.sip_new_call_admission,
             tls_extra_ca_path: config
                 .tls_extra_ca_path

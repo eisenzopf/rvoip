@@ -1,6 +1,7 @@
 // Parser for MIME-Version header (RFC 3261 Section 20.26)
 // MIME-Version = "MIME-Version" HCOLON 1*DIGIT "." 1*DIGIT
 
+use nom::Parser;
 use nom::{
     bytes::complete as bytes,
     character::complete::{digit1, space0},
@@ -25,7 +26,7 @@ pub fn parse_mime_version(input: &[u8]) -> ParseResult<'_, MimeVersion> {
         space0,
         // Parse the actual version
         map_res(
-            separated_pair(digit1, bytes::tag(b"."), digit1),
+            separated_pair(digit1, bytes::tag(&b"."[..]), digit1),
             |(major_bytes, minor_bytes)| {
                 // Parse major version
                 let major_str = str::from_utf8(major_bytes).map_err(|_| {
@@ -55,7 +56,8 @@ pub fn parse_mime_version(input: &[u8]) -> ParseResult<'_, MimeVersion> {
             },
         ),
         space0,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]

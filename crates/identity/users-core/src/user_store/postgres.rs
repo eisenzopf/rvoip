@@ -3,7 +3,7 @@
 use crate::{CreateUserRequest, Error, Result, UpdateUserRequest, User, UserFilter};
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
+use sqlx_core::{query::query, raw_sql::raw_sql, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::{PgPool, PgRow};
 
 const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
@@ -72,7 +72,7 @@ async fn run_postgres_migrations(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    for (id, sql) in POSTGRES_MIGRATIONS {
+    for &(id, sql) in POSTGRES_MIGRATIONS {
         let applied = query("SELECT 1 FROM schema_migrations WHERE id = $1")
             .bind(id)
             .fetch_optional(pool)
@@ -268,7 +268,9 @@ impl crate::UserStore for PostgresUserStore {
             params.push(PostgresParam::I64(offset as i64));
         }
 
-        let mut query = query(&query_str);
+        // Only fixed SQL fragments and numbered placeholders are appended to
+        // `query_str`; every filter value is bound below.
+        let mut query = query(AssertSqlSafe(query_str));
         for param in params {
             query = match param {
                 PostgresParam::Text(value) => query.bind(value),

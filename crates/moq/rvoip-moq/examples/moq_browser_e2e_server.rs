@@ -210,9 +210,9 @@ fn mint_subscriber_token() -> HarnessResult<MintedSubscriberToken> {
     let encoded = jsonwebtoken::encode(
         &Header::new(Algorithm::HS256),
         &claims,
-        &EncodingKey::from_secret(&secret),
+        &EncodingKey::from_secret(&secret)?,
     )?;
-    let validator: Arc<dyn BearerValidator> = JwtValidator::from_hmac_secret(&secret)
+    let validator: Arc<dyn BearerValidator> = JwtValidator::from_hmac_secret(&secret)?
         .with_issuer([TOKEN_ISSUER])
         .with_audience([TOKEN_AUDIENCE])
         .with_required_jti()

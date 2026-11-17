@@ -563,7 +563,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         # proxy interop) before the prebuild, one for performance workers after.
         self.assertEqual(workflow.count("aws ec2 run-instances"), 3)
         self.assertIn(
-            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
+            "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
             workflow,
         )
         self.assertIn("expected 48 publishable workspace packages", probe)
@@ -597,22 +597,19 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn(gate["id"], catalog["profiles"]["remote-release"])
         self.assertIn("GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}", workflow)
 
-    def test_nightly_qualifies_main_with_the_release_pipeline_and_no_benchmark(self) -> None:
-        nightly = (ROOT / ".github/workflows/nightly-qualification.yml").read_text()
+    def test_no_schedule_starts_an_ec2_qualification(self) -> None:
+        # The full fanout is 24 workers and 272 vCPUs; it runs only when
+        # someone dispatches it.
+        for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            text = workflow.read_text()
+            if "schedule:" not in text:
+                continue
+            with self.subTest(workflow=workflow.name):
+                self.assertNotIn("release-qualify.yml", text)
+                self.assertNotIn("aws_fanout.py", text)
         interop = (ROOT / ".github/workflows/nightly-interop.yml").read_text()
-        qualify = (ROOT / ".github/workflows/release-qualify.yml").read_text()
-
-        self.assertIn("schedule:", nightly)
-        self.assertIn("uses: ./.github/workflows/release-qualify.yml", nightly)
-        self.assertIn("profile: remote-release", nightly)
-        self.assertNotIn("bench", nightly.split("jobs:", 1)[1])
-        self.assertIn("uses: ./.github/workflows/nightly-interop.yml", nightly)
-        self.assertIn('select(.name == "release-gate-evidence" and .expired == false)', nightly)
-        self.assertIn("first_candidate: ${{ needs.chain.outputs.prior_run_id == '' }}", nightly)
-        # nightly-interop runs only inside the nightly qualification now.
-        self.assertIn("workflow_call:", interop)
-        self.assertNotIn("schedule:", interop)
-        self.assertIn("  workflow_call:\n", qualify)
+        self.assertIn("schedule:", interop)
+        self.assertNotIn("self-hosted", interop)
         catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
         self.assertFalse(
             {"perf.rfc7502-release", "perf.rfc7502-minor"} & set(catalog["profiles"]["remote-release"])
@@ -692,22 +689,54 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_release_prepare_opens_the_pr_as_the_release_app(self) -> None:
         text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
 
-        # Events caused by GITHUB_TOKEN start no workflows; the App token lets
-        # the bump PR's PR Gate start by itself, with no dispatched copy and
-        # no held run approval.
-        self.assertIn("actions/create-github-app-token@", text)
-        self.assertIn("client-id: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID }}", text)
-        self.assertIn("private-key: ${{ secrets.RVOIP_RELEASE_APP_PRIVATE_KEY }}", text)
-        self.assertIn("token: ${{ steps.app-token.outputs.token }}", text)
-        self.assertIn("GH_TOKEN: ${{ steps.app-token.outputs.token }}", text.split("Open the release pull request", 1)[1])
-        self.assertNotIn("gh workflow run pr-gate.yml", text)
-        # GITHUB_TOKEN itself stays read-only; only the App token writes.
+        # The App path is the default whenever both App settings exist: its
+        # token checks out, pushes and opens the PR, and the PR's own PR Gate
+        # starts by itself.
+        self.assertIn(
+            "APP_CONFIGURED: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID != '' && "
+            "secrets.RVOIP_RELEASE_APP_PRIVATE_KEY != '' }}",
+            text,
+        )
+        mint = text.split("- name: Mint the release App token", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: env.APP_CONFIGURED == 'true'", mint)
+        self.assertIn("actions/create-github-app-token@", mint)
+        self.assertIn("client-id: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID }}", mint)
+        self.assertIn("private-key: ${{ secrets.RVOIP_RELEASE_APP_PRIVATE_KEY }}", mint)
+        self.assertIn("token: ${{ steps.app-token.outputs.token || github.token }}", text)
+        self.assertIn(
+            "GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}",
+            text.split("- name: Open the release pull request", 1)[1],
+        )
+        # The workflow-wide default stays read-only; only this job may write.
         self.assertIsNone(re.search(r"(?m)^  contents: write", text))
         self.assertIn("git merge-base --is-ancestor HEAD origin/main", text)
         self.assertLess(
             text.index("python3 scripts/release/notes.py"),
             text.index("python3 scripts/release.py prepare"),
         )
+
+    def test_release_prepare_fallback_needs_a_maintainer_approval(self) -> None:
+        text = (ROOT / ".github/workflows/release-prepare.yml").read_text()
+
+        # Without the App, GITHUB_TOKEN opens the PR and GitHub holds the PR's
+        # own PR Gate run for a maintainer; a dispatched copy does not unblock
+        # the merge (0.4.0). The workflow warns, dispatches the gate as an early
+        # signal, and links the held run. It never approves a run itself.
+        warn = text.split("- name: Warn when the release App is not configured", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("if: env.APP_CONFIGURED != 'true'", warn)
+        self.assertIn("::warning title=Prepare release PR fallback::", warn)
+        fallback = text.split('- name: "Fallback: dispatch the PR Gate and link the held run to approve"', 1)[1]
+        self.assertIn("if: env.APP_CONFIGURED != 'true'", fallback)
+        self.assertIn('gh workflow run pr-gate.yml --repo "$REPOSITORY" --ref "$branch"', fallback)
+        self.assertIn("event=pull_request", fallback)
+        self.assertIn("Approve and run", fallback)
+        self.assertIn('gh pr comment "$branch"', fallback)
+        self.assertEqual(text.count("gh workflow run pr-gate.yml"), 1)
+        for forbidden in ("/approve", "pending_deployments", "--admin"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+        pr_gate = (ROOT / ".github/workflows/pr-gate.yml").read_text()
+        self.assertIn("workflow_dispatch:", pr_gate)
 
     def test_pr_gate_checks_fragments_and_bump_notes_finality(self) -> None:
         text = (ROOT / ".github/workflows/pr-gate.yml").read_text()

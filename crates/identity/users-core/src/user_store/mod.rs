@@ -3,7 +3,7 @@
 use crate::{CreateUserRequest, Error, Result, UpdateUserRequest, User, UserFilter};
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
+use sqlx_core::{query::query, raw_sql::raw_sql, row::Row, sql_str::AssertSqlSafe};
 use sqlx_sqlite::{SqlitePool, SqliteRow};
 
 #[cfg(feature = "postgres")]
@@ -81,7 +81,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    for (id, sql) in MIGRATIONS {
+    for &(id, sql) in MIGRATIONS {
         let applied = query("SELECT 1 FROM schema_migrations WHERE id = ?")
             .bind(id)
             .fetch_optional(pool)
@@ -283,7 +283,9 @@ impl UserStore for SqliteUserStore {
         }
 
         // Execute with proper parameter binding
-        let mut query = query(&query_str);
+        // Only fixed SQL fragments and numbered placeholders are appended to
+        // `query_str`; every filter value is bound below.
+        let mut query = query(AssertSqlSafe(query_str));
         for param in params {
             query = query.bind(param);
         }

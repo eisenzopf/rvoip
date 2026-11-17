@@ -446,8 +446,9 @@ production Cisco authentication currently requires `grpc` alone.
 ### 20.1 Wire contract and dependency boundary
 
 Vendor Cisco's `voicevirtualagent.proto` and `byova_common.proto` from the same
-pinned schema repository revision listed in section 2. Generate with prost 0.13,
-tonic 0.12 and a vendored protoc at build time, behind the crate feature. The
+pinned schema repository revision listed in section 2. Generate with prost 0.14,
+tonic 0.14 (tonic-prost-build) and a vendored protoc at build time, behind the
+crate feature. The
 package is `com.cisco.wcc.ccai.media.v1`; implement `VoiceVirtualAgent` methods
 `ListVirtualAgents` and `ProcessCallerInput`, plus standard gRPC health Check.
 No Vapi dependency belongs in the wire crate. Preserve upstream files and record

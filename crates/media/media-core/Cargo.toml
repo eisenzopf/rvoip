@@ -35,7 +35,7 @@ dashmap = "6"
 # Lock-free / lighter mutexes for the hot media-plane paths
 # (jitter buffer, mixer cache, codec). `parking_lot` is faster than
 # `std::sync::Mutex` and never blocks on `.await`.
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Lock-free MPMC queue used as the backing store for AudioFramePool
 # and RtpBufferPool — replaces a Mutex<VecDeque> with a wait-free
 # pop/push so 16 concurrent per-frame tasks no longer serialise
@@ -102,7 +102,7 @@ amr = ["amr-nb", "amr-wb"]
 all-codecs = ["pcmu", "pcma", "g729", "opus", "amr"]
 
 [dev-dependencies]
-serial_test = "3.0"
+serial_test = "4.0"
 tempfile = "3.8"
 criterion = { workspace = true }
 futures = "0.3"
