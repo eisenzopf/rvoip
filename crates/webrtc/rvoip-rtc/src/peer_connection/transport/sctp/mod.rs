@@ -213,7 +213,7 @@ mod tests {
 
     use crate::peer_connection::transport::{RTCTransportId, TransportKind};
 
-    /// A fixed nonce keeps test ids deterministic while still distinguishing the kinds.
+    /// A fixed connection tag keeps test ids deterministic while still distinguishing the kinds.
     fn test_transport_id(kind: TransportKind) -> RTCTransportId {
         RTCTransportId::new(0xabcd_ef01_2345_6789, kind)
     }

@@ -210,7 +210,7 @@ pub use ice::component::RTCIceComponent;
 ///
 /// - **The value is opaque.** Do not parse, order, or persist it; assert `a == b`, never
 ///   `a == 3`.
-/// - **It is not reproducible across runs.** It is seeded from a per-connection random nonce,
+/// - **It is not reproducible across runs.** It is derived from a per-connection random connection tag,
 ///   because distinctness across connections and reproducibility are mutually exclusive: two
 ///   connections built from identical inputs would otherwise produce identical ids.
 /// - **It is unrelated to `RTCStatsId`.** Stats ids name entries in a stats report; there is one
@@ -230,13 +230,13 @@ pub(crate) enum TransportKind {
 }
 
 impl RTCTransportId {
-    /// Builds the id for one transport of the connection identified by `nonce`.
+    /// Builds the id for one transport of the connection identified by `connection_tag`.
     ///
-    /// The nonce is drawn once per peer connection (see `RTCPeerConnection::new`); the low two
+    /// The connection tag is drawn once per peer connection (see `RTCPeerConnection::new`); the low two
     /// bits it loses to the kind leave 62 bits of entropy, which puts a collision at around two
     /// billion concurrent connections in one process.
-    pub(crate) fn new(nonce: u64, kind: TransportKind) -> Self {
-        Self((nonce << 2) | (kind as u64))
+    pub(crate) fn new(connection_tag: u64, kind: TransportKind) -> Self {
+        Self((connection_tag << 2) | (kind as u64))
     }
 }
 
@@ -428,10 +428,10 @@ mod tests {
 
     #[test]
     fn the_three_transports_of_one_connection_are_distinct() {
-        let nonce = 0x0123_4567_89ab_cdef;
-        let ice = RTCTransportId::new(nonce, TransportKind::Ice);
-        let dtls = RTCTransportId::new(nonce, TransportKind::Dtls);
-        let sctp = RTCTransportId::new(nonce, TransportKind::Sctp);
+        let connection_tag = 0x0123_4567_89ab_cdef;
+        let ice = RTCTransportId::new(connection_tag, TransportKind::Ice);
+        let dtls = RTCTransportId::new(connection_tag, TransportKind::Dtls);
+        let sctp = RTCTransportId::new(connection_tag, TransportKind::Sctp);
 
         assert_ne!(ice, dtls);
         assert_ne!(dtls, sctp);
@@ -449,22 +449,22 @@ mod tests {
 
     #[test]
     fn the_same_transport_of_one_connection_compares_equal() {
-        let nonce = 0xfeed_face_dead_beef;
+        let connection_tag = 0xfeed_face_dead_beef;
         assert_eq!(
-            RTCTransportId::new(nonce, TransportKind::Dtls),
-            RTCTransportId::new(nonce, TransportKind::Dtls)
+            RTCTransportId::new(connection_tag, TransportKind::Dtls),
+            RTCTransportId::new(connection_tag, TransportKind::Dtls)
         );
     }
 
-    // The kind occupies the low two bits, so a nonce differing only in its top two bits must not
+    // The kind occupies the low two bits, so a connection tag differing only in its top two bits must not
     // alias — those are the bits the shift discards.
     #[test]
-    fn nonces_differing_only_in_discarded_bits_still_collide_knowingly() {
+    fn connection_tags_differing_only_in_discarded_bits_still_collide_knowingly() {
         let a = RTCTransportId::new(u64::MAX, TransportKind::Ice);
         let b = RTCTransportId::new(u64::MAX >> 2, TransportKind::Ice);
         assert_eq!(
             a, b,
-            "documented: the top two bits of the nonce are not part of the id, \
+            "documented: the top two bits of the connection tag are not part of the id, \
              leaving 62 bits of entropy rather than 64"
         );
     }

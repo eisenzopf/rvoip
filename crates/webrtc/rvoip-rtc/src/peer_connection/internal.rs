@@ -127,15 +127,15 @@ impl RTCPeerConnection {
             ..Default::default()
         };
 
-        // One random nonce per peer connection, combined with a per-transport discriminator to
+        // One random connection tag per peer connection, combined with a per-transport discriminator to
         // form the three `RTCTransportId`s. Drawn here rather than from a process-wide counter:
         // a counter is ambient state, and `rtc` may be used many times over in one process.
         // Randomness is what keeps two connections' transports from comparing equal — see
         // `RTCTransportId`.
-        let transport_id_nonce: u64 = rand::rng().random();
-        let ice_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Ice);
-        let dtls_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Dtls);
-        let sctp_transport_id = RTCTransportId::new(transport_id_nonce, TransportKind::Sctp);
+        let transport_id_tag: u64 = rand::rng().random();
+        let ice_transport_id = RTCTransportId::new(transport_id_tag, TransportKind::Ice);
+        let dtls_transport_id = RTCTransportId::new(transport_id_tag, TransportKind::Dtls);
+        let sctp_transport_id = RTCTransportId::new(transport_id_tag, TransportKind::Sctp);
 
         // Create the ICE transport
         let ice_transport =
