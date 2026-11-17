@@ -18,6 +18,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fetch_webex_byova_protos as webex_byova_protos  # noqa: E402
+import sip_test_partitions  # noqa: E402
 
 
 SCHEMA = "rvoip-ci-command-receipt-v1"
@@ -35,6 +36,25 @@ CODEC_FEATURE_GATES = {
     "codec-features-sip": "rvoip-sip",
     "codec-features-core": "rvoip-core",
 }
+
+# `codec-features-sip` was the PR Gate's long pole (46-55 min). Cold, its
+# test build took 23 min, its test run 14 min (8.4 of them one target,
+# audio_roundtrip_integration) and its clippy 16.5 min, all in one job. It now
+# runs as four concurrent jobs over the same commands and features: clippy
+# alone, and the test targets in three duration-balanced partitions, each job
+# compiling only its own targets. The first partition also runs the library,
+# binary and example tests. Every listed gate shares codec-features-sip's
+# `policy.json` patterns and main-ci flag, so any change that selected the
+# old gate selects all four.
+CODEC_FEATURE_SIP_SHARDS = {
+    "codec-features-sip": ("test", 0),
+    "codec-features-sip-tests-2": ("test", 1),
+    "codec-features-sip-tests-3": ("test", 2),
+    "codec-features-sip-clippy": ("clippy", None),
+}
+CODEC_FEATURE_SIP_TEST_PARTITIONS = 3
+# Every gate that runs optional-codec tests, including the rvoip-sip shards.
+ALL_CODEC_FEATURE_GATES = tuple(sorted({*CODEC_FEATURE_GATES, *CODEC_FEATURE_SIP_SHARDS}))
 
 # Every `rvoip-sip` feature except the release-only `perf-*` harness. Written
 # out rather than computed so the command is inspectable from here; the
@@ -134,9 +154,21 @@ def package_args(packages_csv: str) -> list[str]:
     return selected
 
 
+# The examples workspace has its own lockfile, which no PR shard resolves:
+# a crate manifest change left it stale until release preparation refreshed
+# it, hiding the drift until release day. Every PR now checks it with the
+# same command release.py uses to validate release lockfiles.
+EXAMPLES_LOCK_COMMAND = (
+    "bash",
+    "-c",
+    "cargo metadata --manifest-path examples/Cargo.toml --format-version 1 --locked > /dev/null",
+)
+
+
 def policy_commands() -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
     return [
         (["cargo", "fmt", "--all", "--", "--check"], None, None),
+        (list(EXAMPLES_LOCK_COMMAND), None, None),
         (
             [
                 "python3",
@@ -295,6 +327,72 @@ def sip_fixture_commands(
     return [(build, None, None), (test, None, fixture_env)]
 
 
+def codec_sip_test_targets(root: Path) -> list[str]:
+    """rvoip-sip test targets that `cargo test --tests` builds with the codec features."""
+
+    completed = subprocess.run(
+        [
+            "cargo",
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            str(root / "crates/sip/rvoip-sip/Cargo.toml"),
+        ],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode:
+        raise CheckError(completed.stderr.strip() or "cargo metadata failed")
+    enabled = set(NON_PERF_SIP_FEATURES.split(","))
+    packages = [
+        package
+        for package in json.loads(completed.stdout)["packages"]
+        if package["name"] == "rvoip-sip"
+    ]
+    if len(packages) != 1:
+        raise CheckError("expected exactly one rvoip-sip package")
+    targets = sorted(
+        target["name"]
+        for target in packages[0]["targets"]
+        if "test" in target["kind"]
+        and set(target.get("required-features", [])) <= enabled
+    )
+    if not targets or any(not TARGET.fullmatch(name) for name in targets):
+        raise CheckError("rvoip-sip test target inventory is empty or unsafe")
+    return targets
+
+
+def codec_sip_shard_commands(
+    gate: str, root: Path
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    kind, partition = CODEC_FEATURE_SIP_SHARDS[gate]
+    selection = ["--features", NON_PERF_SIP_FEATURES]
+    if kind == "clippy":
+        return [
+            (
+                ["cargo", "clippy", "--locked", *selection, "--all-targets", "-p", "rvoip-sip"],
+                None,
+                None,
+            )
+        ]
+    partitions = sip_test_partitions.partition_targets(
+        codec_sip_test_targets(root), CODEC_FEATURE_SIP_TEST_PARTITIONS
+    )
+    tests = [arg for name in partitions[partition]["targets"] for arg in ("--test", name)]
+    scope = ["--lib", "--bins", "--examples"] if partition == 0 else []
+    return [
+        (
+            ["cargo", "test", "--locked", *selection, *scope, *tests, "-p", "rvoip-sip"],
+            None,
+            None,
+        )
+    ]
+
+
 def specialty_commands(
     gate: str, root: Path
 ) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
@@ -416,19 +514,29 @@ def specialty_commands(
                 None,
             ),
         ]
-    if gate == "facade-feature-bundles":
-        commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = [
-            (
-                [
-                    "python3",
-                    "scripts/ci/check_facade_feature_bundles.py",
-                    "--verify-resolved",
-                ],
-                None,
-                None,
+    facade_part = re.fullmatch(r"facade-feature-bundles(?:--part-([12]))?", gate)
+    if facade_part:
+        # The whole gate, or one of the two parts the PR and main plans run
+        # in parallel (pr_plan.SPECIALTY_PARTS): bundles interleaved so each
+        # part gets one of the two full bundles.
+        part = int(facade_part.group(1)) if facade_part.group(1) else None
+        bundles = facade_bundle_names(root)
+        if part is not None:
+            bundles = bundles[part - 1 :: 2]
+        commands: list[tuple[list[str], Path | None, dict[str, str] | None]] = []
+        if part in (None, 1):
+            commands.append(
+                (
+                    [
+                        "python3",
+                        "scripts/ci/check_facade_feature_bundles.py",
+                        "--verify-resolved",
+                    ],
+                    None,
+                    None,
+                )
             )
-        ]
-        for feature in facade_bundle_names(root):
+        for feature in bundles:
             commands.append(
                 (
                     [
@@ -447,6 +555,8 @@ def specialty_commands(
                 )
             )
         return commands
+    if gate in CODEC_FEATURE_SIP_SHARDS:
+        return codec_sip_shard_commands(gate, root)
     if gate in CODEC_FEATURE_GATES:
         # The shards run `cargo test -p <crate>` with default features only.
         # `rvoip-codec-core` defaults to `["g711"]` and `rvoip-media-core` to
