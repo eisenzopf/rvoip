@@ -95,8 +95,10 @@ rvoip-bench-uas --config <dut.json>
 Behaviour:
 
 - Answers every INVITE with 200 OK (SDP answer: `RTP/SAVP` + `a=crypto` for
-  `srtp`, `RTP/AVP` for `rtp` and `none`; `a=rtcp-mux` when offered and
-  enabled). `media: none` still answers SDP but allocates no RTP socket.
+  `srtp`, `RTP/AVP` for `rtp`; `a=rtcp-mux` when offered and enabled).
+  `media: none` still answers SDP, in the offer's profile (RFC 3264 §6: the
+  TLS rows' SDES offer gets `RTP/SAVP` + an answer `a=crypto`, an `RTP/AVP`
+  offer gets `RTP/AVP`) on port 9, and allocates no RTP socket.
 - With media, echoes every received RTP packet back to its source (SRTP:
   decrypt and re-encrypt with the answer key), so the caller validates its own
   tone. RTCP is muxed on the RTP port.

@@ -63,6 +63,11 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(caller_policy.thread_group('loadgen-call-7'), 'loadgen-call')
         self.assertEqual(caller_policy.thread_group('loadgen-signaling'), 'loadgen-signaling')
         self.assertEqual(caller_policy.thread_group('tokio-x'), 'tokio-x')
+        # /proc comm keeps 15 bytes.
+        self.assertEqual(caller_policy.thread_group('loadgen-signali'), 'loadgen-signaling')
+        self.assertEqual(caller_policy.thread_group('loadgen-validat'), 'loadgen-validation')
+        self.assertEqual(caller_policy.thread_group('loadgen-call-12'), 'loadgen-call')
+        self.assertEqual(caller_policy.thread_group('loadgen-sig'), 'loadgen-sig')
         self.assertEqual(caller_policy.observed_thread_groups(samples(0, 2)), {'loadgen-call': 1, 'loadgen-signaling': 1})
 
 

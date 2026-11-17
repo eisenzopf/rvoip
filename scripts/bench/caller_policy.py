@@ -48,6 +48,7 @@ POLICY_192 = {'RVOIP_LOADGEN_SIGNALING_THREADS': '16', 'RVOIP_LOADGEN_LANES': '8
               'RVOIP_LOADGEN_WORKERS_PER_LANE': '14', 'RVOIP_MEDIA_WORKER_THREADS': '64',
               'RVOIP_MEDIA_RUNTIME_LANES': '8'}
 POLICY_BY_CPUS = {48: POLICY_48, 96: POLICY_96, 192: POLICY_192}
+LINUX_COMM_LEN = 15   # TASK_COMM_LEN - 1: the longest thread name /proc shows
 THREAD_GROUPS = ('loadgen-signaling', 'loadgen-call', 'loadgen-validation', 'rvoip-media')
 DISPATCH_TOLERANCE = 0.01
 SCHEDULE_P99_LIMIT_MS = 5.0
@@ -92,10 +93,16 @@ def expected_thread_groups(env):
 
 
 def thread_group(name):
-    """The policy group of a thread name (loadgen-call-3 -> loadgen-call), else the name itself."""
+    """The policy group of a thread name (loadgen-call-3 -> loadgen-call), else the name itself.
+
+    Linux keeps the first 15 bytes of a thread name (/proc comm), so a sampled
+    `loadgen-signali` is `loadgen-signaling` and `loadgen-validat` is
+    `loadgen-validation`."""
     name = name or 'unknown'
     for group in THREAD_GROUPS:
         if name == group or name.startswith(group + '-'):
+            return group
+        if len(name) == LINUX_COMM_LEN and (group + '-').startswith(name):
             return group
     return name
 

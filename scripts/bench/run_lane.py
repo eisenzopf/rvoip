@@ -341,6 +341,19 @@ class Trials:
                 output='/var/lib/rvoip-bench/caller-%d' % (i + 1)))
         return configs
 
+    def plan(self, row_id, row, rate, index, profile, rel, admission=None):
+        """The trial's plan.json: what summarize_trial scores against, with the DUT and caller configs."""
+        lane = self.lane.info
+        run_id = re.sub(r'[^A-Za-z0-9_.-]', '-', '%s-%s' % (self.args.run_id[-24:], rel))[-80:]
+        return {'row': row_id, 'rate': rate, 'index': index, 'criterion': 'rfc', 'media': row['media'],
+                'transport': row['transport'], 'hold_ms': row['hold_ms'],
+                'dut_kind': 'ea-uas' if self.lane.ea_uas else 'dut', 'profile': profile, 'admission': admission,
+                'caller_hosts': {'caller-%d' % (i + 1): {'physical_cores': c.get('physical_cores', 48),
+                                                         'instance_id': c['id'], 'sources': c['ips']}
+                                 for i, c in enumerate(lane['callers'])},
+                'dut_config': self.dut_config(row, admission),
+                'caller_configs': self.caller_configs(row, run_id, profile)}
+
     def run(self, row_id, row, rate, index, profile, admission=None, rel=None):
         """Run one trial. Returns (summary or None, trial_rel, local_dir, note)."""
         rel = rel or evidence.trial_path(row_id, index, rate)
@@ -357,15 +370,7 @@ class Trials:
         callers = [c['id'] for c in lane['callers']]
         dut = lane['dut']['id']
         dut_bin = 'ea-uas' if self.lane.ea_uas else 'rvoip-bench-uas'
-        run_id = re.sub(r'[^A-Za-z0-9_.-]', '-', '%s-%s' % (self.args.run_id[-24:], rel))[-80:]
-        plan = {'row': row_id, 'rate': rate, 'index': index, 'criterion': 'rfc', 'media': row['media'],
-                'transport': row['transport'], 'hold_ms': row['hold_ms'],
-                'dut_kind': 'ea-uas' if self.lane.ea_uas else 'dut', 'profile': profile, 'admission': admission,
-                'caller_hosts': {'caller-%d' % (i + 1): {'physical_cores': c.get('physical_cores', 48),
-                                                         'instance_id': c['id'], 'sources': c['ips']}
-                                 for i, c in enumerate(lane['callers'])},
-                'dut_config': self.dut_config(row, admission),
-                'caller_configs': self.caller_configs(row, run_id, profile)}
+        plan = self.plan(row_id, row, rate, index, profile, rel, admission)
         (local / 'plan.json').write_text(json.dumps(plan, indent=1, sort_keys=True))
         self.aws.s3_cp(local / 'plan.json', trial_prefix + 'plan.json')
         self.aws.s3_put_json(trial_prefix + 'dut.json', plan['dut_config'])
