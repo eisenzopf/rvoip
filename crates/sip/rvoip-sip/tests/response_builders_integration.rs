@@ -696,25 +696,31 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
     let mut alice_events = alice.events().await.expect("alice events");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let target = format!("sip:bob@127.0.0.1:{bob_port}");
-    let first = alice
-        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+    // Fill Bob's retained lifecycle bound with one ended lifetime while his
+    // active capacity is free. A finished inbound call cannot do this:
+    // * its stack-minted session identifier is unique, so its anti-reuse
+    //   fence is reclaimed as soon as the call is removed from the store;
+    // * its INVITE server transaction holds the RFC 6026 Timer L retention
+    //   lane, bounded by the same configured capacity, for 64*T1, so a
+    //   second INVITE inside that window is refused statelessly by the
+    //   transaction layer before session admission is consulted.
+    // An outbound session keeps a reusable identity, and with it its fence,
+    // for the full anti-reuse horizon. Bob has no TLS transport, so this one
+    // fails before reaching the wire and holds no transaction retention.
+    let unsendable = bob_coordinator
+        .invite(
+            Some(format!("sip:bob@127.0.0.1:{bob_port}")),
+            "sip:carol@127.0.0.1:17999;transport=tls".to_string(),
+        )
         .send()
-        .await
-        .expect("first invite");
-    alice
-        .session(&first)
-        .wait_for_answered(Some(Duration::from_secs(8)))
-        .await
-        .expect("first call should be active");
-    alice
-        .session(&first)
-        .hangup_and_wait(Some(Duration::from_secs(8)))
-        .await
-        .expect("first call should retire its server lifecycle");
+        .await;
+    assert!(
+        matches!(unsendable, Err(SessionError::InviteNotSent(_))),
+        "an INVITE over a transport Bob does not run must fail before the wire: {unsendable:?}"
+    );
     assert!(
         wait_for_no_sessions(&bob_coordinator, Duration::from_secs(3)).await,
-        "first server call must leave the active session store before retained-capacity test"
+        "the failed outbound setup must leave the active session store before retained-capacity test"
     );
 
     #[cfg(feature = "perf-tests")]
@@ -727,7 +733,7 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
                 "/session_store/lifecycle/authority/active_capacity_in_use"
             ),
             0,
-            "first call still occupied active lifecycle capacity: {snapshot}"
+            "ended outbound lifetime still occupied active lifecycle capacity: {snapshot}"
         );
         assert_eq!(
             snapshot_u64(
@@ -735,7 +741,7 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
                 "/session_store/lifecycle/authority/retained_total"
             ),
             1,
-            "first call did not fill the retained lifecycle bound: {snapshot}"
+            "ended outbound lifetime did not fill the retained lifecycle bound: {snapshot}"
         );
         assert_eq!(
             snapshot_u64(&snapshot, "/session_store/lifecycle/authority/retired"),
@@ -745,6 +751,7 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
         snapshot
     };
 
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
     let rejected = alice
         .invite(Some("sip:alice@127.0.0.1".to_string()), target)
         .send()
