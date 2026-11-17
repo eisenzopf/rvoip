@@ -132,6 +132,11 @@ JSON style as `gates.py` (sorted keys, no whitespace).
 }
 ```
 
+`environment.capacity_reservations[].ends_at` is the end the run last set.
+The reservation's EC2 `EndDate` is authoritative, because holding and adopting
+a reservation move it. Its `rvoip-expires-at` tag keeps the end set when it
+was created.
+
 ### Verdict rules (`release` profile)
 
 - `FAIL` if any valid confirmation trial at 0.95 x R fails (any Session

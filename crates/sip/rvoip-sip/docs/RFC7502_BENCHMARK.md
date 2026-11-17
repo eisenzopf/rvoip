@@ -249,7 +249,11 @@ resumed run's own hold, so a crashed orchestrator cannot keep billing. A
 `--max-wall` stop writes no receipt; the hold is recorded in the run state and
 in the final receipt (`held_for_resume`, `ends_at`). A reservation in use
 costs nothing beyond the instances it holds. The receipt lists the
-reservations under `environment.capacity_reservations`. The orchestrator
+reservations under `environment.capacity_reservations`. A reservation's EC2
+`EndDate` is authoritative: holds and adoption move it, while the
+`rvoip-expires-at` tag keeps the end set when it was created.
+`scripts/bench/odcr_probe.py` exercises the whole cycle on real EC2 for about
+$0.05 (one `c8i.large`). The orchestrator
 policy has no Capacity Reservation actions yet (the same Terraform item as the
 subnets).
 
