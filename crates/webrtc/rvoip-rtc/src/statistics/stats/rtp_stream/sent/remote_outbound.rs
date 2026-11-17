@@ -6,7 +6,7 @@
 use super::RTCSentRtpStreamStats;
 use ::serde::{Deserialize, Serialize};
 use shared::serde::instant_to_epoch;
-use std::time::Instant;
+use shared::time::SystemInstant;
 
 /// Statistics for a remote outbound RTP stream.
 ///
@@ -16,7 +16,7 @@ use std::time::Instant;
 ///
 /// This provides insight into the remote peer's transmission characteristics.
 ///
-/// # W3C Reference
+/// # Specification
 ///
 /// See [RTCRemoteOutboundRtpStreamStats](https://www.w3.org/TR/webrtc-stats/#remoteoutboundrtpstats-dict*)
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,7 +35,7 @@ pub struct RTCRemoteOutboundRtpStreamStats {
     ///
     /// This is the NTP timestamp from the sender report.
     #[serde(with = "instant_to_epoch")]
-    pub remote_timestamp: Instant,
+    pub remote_timestamp: SystemInstant,
 
     /// Number of RTCP Sender Reports sent.
     pub reports_sent: u64,

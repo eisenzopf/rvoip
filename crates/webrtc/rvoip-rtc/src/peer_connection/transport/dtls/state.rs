@@ -75,16 +75,17 @@ use std::fmt;
 /// assert_eq!(parsed, RTCDtlsTransportState::Connecting);
 /// ```
 ///
-/// # Specifications
+/// # Specification
 ///
-/// - [W3C RTCDtlsTransport.state]
-/// - [MDN RTCDtlsTransport.state]
+/// - [W3C DtlsTransport.state]
+/// - [MDN DtlsTransport.state]
 /// - [RFC 6347] - DTLS 1.2
 ///
-/// [W3C RTCDtlsTransport.state]: https://w3c.github.io/webrtc-pc/#dom-rtcdtlstransportstate
-/// [MDN RTCDtlsTransport.state]: https://developer.mozilla.org/en-US/docs/Web/API/RTCDtlsTransport/state
+/// [W3C DtlsTransport.state]: https://www.w3.org/TR/webrtc/#dom-rtcdtlstransportstate
+/// [MDN DtlsTransport.state]: https://developer.mozilla.org/en-US/docs/Web/API/DtlsTransport/state
 /// [RFC 6347]: https://datatracker.ietf.org/doc/html/rfc6347
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCDtlsTransportState {
     /// State not specified. This should not occur in normal operation.
     #[default]

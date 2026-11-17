@@ -9,7 +9,7 @@ pub(crate) mod srtp;
 
 use crate::peer_connection::RTCPeerConnection;
 use crate::peer_connection::event::RTCPeerConnectionEvent;
-use crate::peer_connection::event::{RTCEvent, RTCEventInternal};
+use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEvent};
 use crate::peer_connection::handler::datachannel::{DataChannelHandler, DataChannelHandlerContext};
 use crate::peer_connection::handler::demuxer::{DemuxerHandler, DemuxerHandlerContext};
 use crate::peer_connection::handler::dtls::{DtlsHandler, DtlsHandlerContext};
@@ -19,7 +19,7 @@ use crate::peer_connection::handler::interceptor::{InterceptorHandler, Intercept
 use crate::peer_connection::handler::sctp::{SctpHandler, SctpHandlerContext};
 use crate::peer_connection::handler::srtp::{SrtpHandler, SrtpHandlerContext};
 use crate::peer_connection::message::{
-    RTCMessage,
+    RTCMessage, TaggedRTCMessage,
     internal::{
         ApplicationMessage, DTLSMessage, DataChannelEvent, RTCMessageInternal, RTPMessage,
         TaggedRTCMessageInternal,
@@ -28,15 +28,12 @@ use crate::peer_connection::message::{
 use crate::peer_connection::state::peer_connection_state::RTCPeerConnectionState;
 use crate::peer_connection::state::signaling_state::RTCSignalingState;
 use crate::statistics::accumulator::RTCStatsAccumulator;
-use ::interceptor::Interceptor;
 use ::interceptor::Packet;
 use log::warn;
 use shared::TaggedBytesMut;
 use shared::error::{Error, flatten_errs};
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
-
-pub(crate) const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(86400); // 1 day duration
+use std::time::Instant;
 
 /// Forward handler list - invokes callback with handler list
 macro_rules! forward_handlers {
@@ -101,7 +98,6 @@ macro_rules! for_each_handler {
     };
 }
 
-#[derive(Default)]
 pub(crate) struct PipelineContext {
     // Handler contexts
     pub(crate) demuxer_handler_context: DemuxerHandlerContext,
@@ -114,18 +110,41 @@ pub(crate) struct PipelineContext {
     pub(crate) endpoint_handler_context: EndpointHandlerContext,
 
     // Pipeline
-    pub(crate) read_outs: VecDeque<RTCMessage>,
+    /// Media (RTP/RTCP) ready for the application.
+    ///
+    /// Split from data-channel output deliberately. Back-pressure is applied by *not draining
+    /// a queue* — that is what grows [`Self::data_read_outs`], bounds the SCTP drain,
+    /// lowers `a_rwnd` and throttles the peer. While both kinds shared one queue, a caller
+    /// applying that back-pressure necessarily stopped draining media too, so a slow
+    /// data-channel consumer froze video on the same connection for as long as it stalled —
+    /// video that arrives over SRTP and is subject to none of SCTP's flow control.
+    pub(crate) media_read_outs: VecDeque<TaggedRTCMessage>,
+    /// Data-channel messages ready for the application.
+    ///
+    /// Its length *is* the back-pressure signal the SCTP handler bounds against, so a caller
+    /// that declines to drain it throttles the peer — and nothing else. No counter to keep in
+    /// step with it: the queue is the count.
+    pub(crate) data_read_outs: VecDeque<TaggedRTCMessage>,
     pub(crate) write_outs: VecDeque<TaggedBytesMut>,
     pub(crate) event_outs: VecDeque<RTCPeerConnectionEvent>,
 
     // Statistics accumulator
     pub(crate) stats: RTCStatsAccumulator,
+
+    /// The newest instant the pipeline has been given, through a datagram, a write or a timeout.
+    ///
+    /// `close()` takes no time of its own, and this crate reads no clock, so the `close_notify`
+    /// it sends is stamped with this.
+    pub(crate) now: Instant,
 }
 
-impl<I> RTCPeerConnection<I>
-where
-    I: Interceptor,
-{
+impl PipelineContext {
+    fn observe(&mut self, now: Instant) {
+        self.now = self.now.max(now);
+    }
+}
+
+impl RTCPeerConnection {
     /*
      Pipeline Flow (Read Path):
      Raw Bytes -> Demuxer -> ICE -> DTLS -> SCTP -> DataChannel -> SRTP -> Interceptor -> Endpoint -> Application
@@ -155,15 +174,61 @@ where
         )
     }
 
+    /// Next media (RTP/RTCP) message for the application, if any.
+    ///
+    /// Never affected by data-channel back-pressure. Media arrives over SRTP and is subject to
+    /// none of SCTP's flow control, so a caller throttling a slow data-channel consumer must
+    /// still be able to deliver video — draining this is how.
+    ///
+    /// Most callers should use [`poll_read`](sansio::Protocol::poll_read), which interleaves
+    /// media and data-channel messages by the instant each was observed. Reach for this split
+    /// pair only to drain one kind without the other.
+    #[doc(hidden)]
+    pub fn poll_media_read(&mut self) -> Option<TaggedRTCMessage> {
+        self.pipeline_context.media_read_outs.pop_front()
+    }
+
+    /// Next data-channel message for the application, if any.
+    ///
+    /// **Declining to call this is how back-pressure is applied.** Undrained messages leave
+    /// bytes in SCTP's reassembly queue, which lowers the receiver-window credit advertised in
+    /// every SACK, which tells the peer to slow down. Stop calling it while the application is
+    /// behind, resume when it catches up.
+    ///
+    /// Most callers should use [`poll_read`](sansio::Protocol::poll_read), which interleaves
+    /// media and data-channel messages by the instant each was observed; declining to call
+    /// *that* applies the same back-pressure. Reach for this split pair only to drain one kind
+    /// without the other.
+    #[doc(hidden)]
+    pub fn poll_data_read(&mut self) -> Option<TaggedRTCMessage> {
+        self.pipeline_context.data_read_outs.pop_front()
+    }
+
     pub(crate) fn get_sctp_handler(&mut self) -> SctpHandler<'_> {
-        SctpHandler::new(&mut self.pipeline_context.sctp_handler_context)
+        // The SCTP handler bounds how much it pulls out of the reassembly queues against what
+        // the application has not yet consumed. That backlog lives here, not in the handler's
+        // own `read_outs` — the pipeline empties that within a single `handle_read` — and it
+        // is data-channel output only, so unrelated media cannot throttle SCTP.
+        let downstream_backlog = self.pipeline_context.data_read_outs.len();
+        SctpHandler::new(
+            &mut self.pipeline_context.sctp_handler_context,
+            downstream_backlog,
+        )
     }
 
     pub(crate) fn get_datachannel_handler(&mut self) -> DataChannelHandler<'_> {
+        // Read the Copy values before `&mut self.data_channels` borrows self mutably. The
+        // handler needs the DTLS role to give stream ids the parity RFC 8832 §6 requires, and
+        // the negotiated stream count to bound them.
+        let dtls_role = self.dtls_transport().role();
+        let max_channels = self.sctp_transport().max_channels();
         DataChannelHandler::new(
             &mut self.pipeline_context.datachannel_handler_context,
             &mut self.data_channels,
             &mut self.pipeline_context.stats,
+            self.setting_engine.data_channel.dcep_handshake_timeout,
+            dtls_role,
+            max_channels,
         )
     }
 
@@ -171,43 +236,62 @@ where
         SrtpHandler::new(&mut self.pipeline_context.srtp_handler_context)
     }
 
-    pub(crate) fn get_interceptor_handler(&mut self) -> InterceptorHandler<'_, I> {
+    pub(crate) fn get_interceptor_handler(&mut self) -> InterceptorHandler<'_> {
         InterceptorHandler::new(
             &mut self.pipeline_context.interceptor_handler_context,
-            &mut self.interceptor,
-            &mut self.pipeline_context.stats,
-        )
-    }
-
-    pub(crate) fn get_endpoint_handler(&mut self) -> EndpointHandler<'_, I> {
-        EndpointHandler::new(
-            &mut self.pipeline_context.endpoint_handler_context,
             &mut self.rtp_transceivers,
             &self.media_engine,
             &mut self.interceptor,
             &mut self.pipeline_context.stats,
         )
     }
-}
 
-impl<I> sansio::Protocol<TaggedBytesMut, RTCMessage, RTCEvent> for RTCPeerConnection<I>
-where
-    I: Interceptor,
-{
-    type Rout = RTCMessage;
-    type Wout = TaggedBytesMut;
-    type Eout = RTCPeerConnectionEvent;
-    type Error = Error;
-    type Time = Instant;
+    pub(crate) fn get_endpoint_handler(&mut self) -> EndpointHandler<'_> {
+        EndpointHandler::new(
+            &mut self.pipeline_context.endpoint_handler_context,
+            &mut self.rtp_transceivers,
+            &mut self.pipeline_context.stats,
+        )
+    }
 
-    fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
-        let mut intermediate_routs = VecDeque::new();
-        intermediate_routs.push_back(TaggedRTCMessageInternal {
-            now: msg.now,
-            transport: msg.transport,
-            message: RTCMessageInternal::Raw(msg.message),
-        });
+    /// Runs every handler's pending writes down the pipeline into `write_outs`, where
+    /// [`poll_write`](sansio::Protocol::poll_write) hands them out.
+    fn flush_writes(&mut self) {
+        use sansio::Protocol;
 
+        let mut intermediate_wouts = VecDeque::new();
+
+        for_each_handler!(reverse: process_handler!(self, handler, {
+            while let Some(msg) = intermediate_wouts.pop_front() {
+                if let Err(err) = handler.handle_write(msg) {
+                    warn!("{}.handle_write got error: {}", handler.name(), err);
+                }
+            }
+            while let Some(msg) = handler.poll_write() {
+                intermediate_wouts.push_back(msg);
+            }
+        }));
+
+        // Final poll write out to pipeline's write out
+        while let Some(msg) = intermediate_wouts.pop_front() {
+            if let RTCMessageInternal::Raw(message) = msg.message {
+                self.pipeline_context.write_outs.push_back(TaggedBytesMut {
+                    now: msg.now,
+                    transport: msg.transport,
+                    message,
+                });
+            }
+        }
+    }
+
+    fn pump_reads(&mut self, msg: Option<TaggedRTCMessageInternal>) {
+        let mut intermediate_routs = VecDeque::<TaggedRTCMessageInternal>::new();
+
+        if let Some(msg) = msg {
+            intermediate_routs.push_back(msg);
+        }
+
+        use sansio::Protocol;
         for_each_handler!(forward: process_handler!(self, handler, {
             while let Some(msg) = intermediate_routs.pop_front() {
                 if let Err(err) = handler.handle_read(msg) {
@@ -242,25 +326,113 @@ where
                         Packet::Rtcp(packet) => {
                             Some(RTCMessage::RtcpPacket(track_packet.track_id, packet))
                         }
+                        _ => None,
                     }
                 }
                 _ => None,
             };
 
             if let Some(rtc_message) = rtc_message {
-                self.pipeline_context.read_outs.push_back(rtc_message);
+                // The instant travels with the message: the application learns when the packet
+                // was observed at the socket, not when it happened to drain it.
+                let tagged = TaggedRTCMessage {
+                    now: msg.now,
+                    message: rtc_message,
+                };
+                // Routed by kind, so a caller can decline data-channel output — the only way
+                // to apply SCTP back-pressure — without also declining media.
+                match &tagged.message {
+                    RTCMessage::DataChannelMessage(..) => {
+                        self.pipeline_context.data_read_outs.push_back(tagged)
+                    }
+                    _ => self.pipeline_context.media_read_outs.push_back(tagged),
+                }
+            }
+        }
+    }
+
+    /// Returns whether any handler raised an event during the sweep.
+    fn pump_events(&mut self) -> bool {
+        let mut intermediate_eouts = VecDeque::new();
+        let mut raised = false;
+
+        use sansio::Protocol;
+
+        for_each_handler!(forward: process_handler!(self, handler, {
+            while let Some(evt) = intermediate_eouts.pop_front() {
+                if let Err(err) = handler.handle_event(evt) {
+                    warn!("{}.handle_event got error: {}", handler.name(), err);
+                }
+            }
+            while let Some(msg) = handler.poll_event() {
+                raised = true;
+                intermediate_eouts.push_back(msg);
+            }
+        }));
+
+        // Finally, put intermediate_eouts into RTCPeerConnection's eouts
+        while let Some(evt_internal) = intermediate_eouts.pop_front() {
+            match &evt_internal.event {
+                RTCEventInternal::RTCPeerConnectionEvent(
+                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(_),
+                )
+                | RTCEventInternal::DTLSHandshakeComplete(_, _)
+                | RTCEventInternal::DTLSClosed => {
+                    self.update_connection_state(false);
+                }
+                _ => {}
+            };
+
+            if let RTCEventInternal::RTCPeerConnectionEvent(evt) = evt_internal.event {
+                self.pipeline_context.event_outs.push_back(evt);
             }
         }
 
+        raised
+    }
+}
+
+impl sansio::Protocol<TaggedBytesMut, TaggedRTCMessage, TaggedRTCEvent> for RTCPeerConnection {
+    type Rout = TaggedRTCMessage;
+    type Wout = TaggedBytesMut;
+    type Eout = RTCPeerConnectionEvent;
+    type Error = Error;
+    type Time = Instant;
+
+    fn handle_read(&mut self, msg: TaggedBytesMut) -> Result<(), Self::Error> {
+        self.pipeline_context.observe(msg.now);
+        let msg = TaggedRTCMessageInternal {
+            now: msg.now,
+            transport: msg.transport,
+            message: RTCMessageInternal::Raw(msg.message),
+        };
+        self.pump_reads(Some(msg));
         Ok(())
     }
 
     fn poll_read(&mut self) -> Option<Self::Rout> {
-        self.pipeline_context.read_outs.pop_front()
+        self.pump_reads(None);
+
+        if let (Some(data), Some(media)) = (
+            self.pipeline_context.data_read_outs.front(),
+            self.pipeline_context.media_read_outs.front(),
+        ) {
+            if data.now <= media.now {
+                self.pipeline_context.data_read_outs.pop_front()
+            } else {
+                self.pipeline_context.media_read_outs.pop_front()
+            }
+        } else if self.pipeline_context.data_read_outs.front().is_some() {
+            self.pipeline_context.data_read_outs.pop_front()
+        } else {
+            self.pipeline_context.media_read_outs.pop_front()
+        }
     }
 
-    fn handle_write(&mut self, msg: RTCMessage) -> Result<(), Self::Error> {
-        let rtc_message_internal = match msg {
+    fn handle_write(&mut self, msg: TaggedRTCMessage) -> Result<(), Self::Error> {
+        let now = msg.now;
+        self.pipeline_context.observe(now);
+        let rtc_message_internal = match msg.message {
             RTCMessage::DataChannelMessage(data_channel_id, data_channel_message) => {
                 RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
                     data_channel_id,
@@ -278,81 +450,46 @@ where
         // Only endpoint can handle user write message
         let mut endpoint_handler = self.get_endpoint_handler();
         endpoint_handler.handle_write(TaggedRTCMessageInternal {
-            now: Instant::now(),
+            now,
             transport: Default::default(),
             message: rtc_message_internal,
         })
     }
 
     fn poll_write(&mut self) -> Option<Self::Wout> {
-        let mut intermediate_wouts = VecDeque::new();
-
-        for_each_handler!(reverse: process_handler!(self, handler, {
-            while let Some(msg) = intermediate_wouts.pop_front() {
-                if let Err(err) = handler.handle_write(msg) {
-                    warn!("{}.handle_write got error: {}", handler.name(), err);
-                }
-            }
-            while let Some(msg) = handler.poll_write() {
-                intermediate_wouts.push_back(msg);
-            }
-        }));
-
-        // Final poll write out to pipeline's write out
-        while let Some(msg) = intermediate_wouts.pop_front() {
-            if let RTCMessageInternal::Raw(message) = msg.message {
-                self.pipeline_context.write_outs.push_back(TaggedBytesMut {
-                    now: msg.now,
-                    transport: msg.transport,
-                    message,
-                });
-            }
-        }
-
+        self.flush_writes();
         self.pipeline_context.write_outs.pop_front()
     }
 
-    fn handle_event(&mut self, evt: RTCEvent) -> Result<(), Self::Error> {
-        // Only endpoint can handle user event
-        let mut endpoint_handler = self.get_endpoint_handler();
-        endpoint_handler.handle_event(RTCEventInternal::RTCEvent(evt))
+    fn handle_event(&mut self, evt: TaggedRTCEvent) -> Result<(), Self::Error> {
+        // `RTCEvent` is `pub enum RTCEvent {}` — uninhabited, reserved for future use — so no
+        // caller can construct one and this arm is unreachable. Diverging on the empty match
+        // keeps that fact in the type system, and avoids inventing an instant to wrap the
+        // event with when there is none to be had. C3-03 replaces this with `evt.now` once
+        // the public channel carries a timestamp.
+        match evt.event {}
     }
 
     fn poll_event(&mut self) -> Option<Self::Eout> {
-        let mut intermediate_eouts = VecDeque::new();
+        // Drain the backlog before sweeping the pipeline again: anything a sweep adds lands
+        // behind it anyway, and the sweep runs once the backlog is empty.
+        if let Some(evt) = self.pipeline_context.event_outs.pop_front() {
+            return Some(evt);
+        }
 
-        for_each_handler!(forward: process_handler!(self, handler, {
-            while let Some(evt) = intermediate_eouts.pop_front() {
-                if let Err(err) = handler.handle_event(evt) {
-                    warn!("{}.handle_event got error: {}", handler.name(), err);
-                }
-            }
-            while let Some(msg) = handler.poll_event() {
-                intermediate_eouts.push_back(msg);
-            }
-        }));
-
-        // Finally, put intermediate_eouts into RTCPeerConnection's eouts
-        while let Some(evt_internal) = intermediate_eouts.pop_front() {
-            match &evt_internal {
-                RTCEventInternal::RTCPeerConnectionEvent(
-                    RTCPeerConnectionEvent::OnIceConnectionStateChangeEvent(_),
-                )
-                | RTCEventInternal::DTLSHandshakeComplete(_, _) => {
-                    self.update_connection_state(false);
-                }
-                _ => {}
-            };
-
-            if let RTCEventInternal::RTCPeerConnectionEvent(evt) = evt_internal {
-                self.pipeline_context.event_outs.push_back(evt);
-            }
+        // Handling an event can queue read messages, like the open of a negotiated data channel
+        // on `SCTPHandshakeComplete`. Deliver them, and the events they raise, now rather than
+        // on the next incoming packet.
+        if self.pump_events() {
+            self.pump_reads(None);
+            self.pump_events();
         }
 
         self.pipeline_context.event_outs.pop_front()
     }
 
     fn handle_timeout(&mut self, now: Instant) -> Result<(), Self::Error> {
+        self.pipeline_context.observe(now);
         for_each_handler!(forward: process_handler!(self, handler, {
             handler.handle_timeout(now)?;
         }));
@@ -377,6 +514,19 @@ where
 
         // https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-close (step #3)
         self.signaling_state = RTCSignalingState::Closed;
+
+        // Tell the peer before tearing anything down, so it can close at once instead of waiting
+        // for its ICE consent checks to time out (rtc#255). During this flush the SCTP handler
+        // sends the data it still holds and then an ABORT for each association (W3C close():
+        // "tear down the underlying SCTP association by sending an SCTP ABORT chunk"), and the
+        // DTLS handler queues a close_notify behind them, so nothing pending is dropped or sent
+        // after it. They are routed now because closing the ICE handler below forgets the
+        // selected candidate pair every outbound packet is addressed with; the packets wait in
+        // `write_outs` for the caller's next `poll_write`.
+        let now = self.pipeline_context.now;
+        self.get_sctp_handler().request_abort();
+        self.get_dtls_handler().request_close(now);
+        self.flush_writes();
 
         // Try closing everything and collect the errors
         // Shutdown strategy:
@@ -436,5 +586,248 @@ where
         self.update_connection_state(true);
 
         flatten_errs(close_errs)
+    }
+}
+
+#[cfg(test)]
+mod handler_test {
+    use super::*;
+    use crate::data_channel::message::RTCDataChannelMessage;
+    use crate::peer_connection::RTCPeerConnectionBuilder;
+    use crate::peer_connection::event::RTCDataChannelEvent;
+    use bytes::BytesMut;
+    use sansio::Protocol;
+    use shared::{TransportContext, TransportProtocol};
+    use std::net::Ipv4Addr;
+    use std::time::Duration;
+
+    /// Media must be drainable while data-channel output is held back.
+    ///
+    /// That is the whole point of the split: back-pressure is applied by declining to drain
+    /// the data-channel queue, and while both kinds shared one queue that also stopped media.
+    /// A slow signalling channel froze video on the same connection for as long as it stalled.
+    #[test]
+    fn media_drains_while_data_channel_output_is_held_back() {
+        let base = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(base)
+            .expect("build peer connection");
+
+        // Media outnumbering data, the shape of a real SFU connection.
+        for i in 0..10 {
+            let message = if i % 5 == 0 {
+                RTCMessage::DataChannelMessage(0, RTCDataChannelMessage::default())
+            } else {
+                RTCMessage::RtpPacket(Default::default(), ::rtp::packet::Packet::default())
+            };
+            let tagged = TaggedRTCMessage { now: base, message };
+            match tagged.message {
+                RTCMessage::DataChannelMessage(..) => {
+                    pc.pipeline_context.data_read_outs.push_back(tagged)
+                }
+                _ => pc.pipeline_context.media_read_outs.push_back(tagged),
+            }
+        }
+
+        // Drain media only — as a caller applying data-channel back-pressure would.
+        let mut media = 0;
+        while let Some(msg) = pc.poll_media_read() {
+            assert!(
+                !matches!(msg.message, RTCMessage::DataChannelMessage(..)),
+                "poll_media_read must never yield data-channel output"
+            );
+            media += 1;
+        }
+
+        assert_eq!(
+            media, 8,
+            "all media must be deliverable while data is held back"
+        );
+        assert_eq!(
+            pc.pipeline_context.data_read_outs.len(),
+            2,
+            "held-back data-channel output must stay queued — its length is the signal the \
+             SCTP drain is bounded against, so losing it would drop the back-pressure"
+        );
+
+        // And releasing it hands over exactly what was held.
+        let mut data = 0;
+        while let Some(msg) = pc.poll_data_read() {
+            assert!(matches!(msg.message, RTCMessage::DataChannelMessage(..)));
+            data += 1;
+        }
+        assert_eq!(data, 2);
+    }
+
+    /// `poll_read` still yields both kinds, so the callers that predate the split — 58 files
+    /// across tests and examples — behave exactly as before.
+    #[test]
+    fn poll_read_still_yields_both_kinds() {
+        let base = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(base)
+            .expect("build peer connection");
+
+        pc.pipeline_context
+            .data_read_outs
+            .push_back(TaggedRTCMessage {
+                now: base,
+                message: RTCMessage::DataChannelMessage(0, RTCDataChannelMessage::default()),
+            });
+        pc.pipeline_context
+            .media_read_outs
+            .push_back(TaggedRTCMessage {
+                now: base,
+                message: RTCMessage::RtpPacket(
+                    Default::default(),
+                    ::rtp::packet::Packet::default(),
+                ),
+            });
+
+        let mut kinds = vec![];
+        while let Some(msg) = pc.poll_read() {
+            kinds.push(matches!(msg.message, RTCMessage::DataChannelMessage(..)));
+        }
+        assert_eq!(kinds.len(), 2, "poll_read must still drain everything");
+        assert!(kinds.contains(&true) && kinds.contains(&false));
+    }
+
+    /// The instant the application supplies on `handle_write` is the one the core stamps the
+    /// resulting internal message with — not a reading the core took for itself. Before C3-03
+    /// the public `Win` was a bare `RTCMessage`, so this entry point had no time source and
+    /// stamped `Instant::now()`.
+    #[test]
+    fn handle_write_stamps_from_the_caller_not_the_clock() {
+        let base = Instant::now();
+        let t = |secs| base + Duration::from_secs(secs);
+
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(t(0))
+            .expect("a default peer connection builds");
+
+        pc.handle_write(TaggedRTCMessage {
+            now: t(5),
+            message: RTCMessage::DataChannelMessage(
+                1,
+                RTCDataChannelMessage {
+                    is_string: true,
+                    data: BytesMut::from(&b"hello"[..]),
+                },
+            ),
+        })
+        .expect("handle_write queues the message");
+
+        let queued = pc
+            .pipeline_context
+            .endpoint_handler_context
+            .write_outs
+            .front()
+            .expect("the message reaches the endpoint handler");
+
+        assert_eq!(
+            queued.now,
+            t(5),
+            "the internal message carries the caller's instant, not an ambient reading"
+        );
+        assert_ne!(queued.now, t(0), "and not the construction instant either");
+    }
+
+    /// The open of a negotiated data channel is queued as a read message while
+    /// `SCTPHandshakeComplete` is being handled, i.e. inside `poll_event`. That same `poll_event`
+    /// call must return the `OnOpen`: the async `webrtc` driver drains events until `poll_event`
+    /// returns `None` and then waits for the next packet or timer.
+    #[test]
+    fn negotiated_channel_opens_within_the_same_poll_event() {
+        use crate::data_channel::RTCDataChannelInit;
+        use crate::peer_connection::event::TaggedRTCEventInternal;
+        use crate::peer_connection::transport::RTCDtlsRole;
+
+        let base = Instant::now();
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(base)
+            .expect("a default peer connection builds");
+        let id = pc
+            .create_data_channel(
+                "negotiated",
+                Some(RTCDataChannelInit {
+                    negotiated: Some(1),
+                    ..Default::default()
+                }),
+            )
+            .expect("a negotiated data channel is created")
+            .id();
+
+        // Drain what creating the channel raised (`OnNegotiationNeeded`): an unrelated event
+        // returned alongside would keep the loop below polling and hide a stuck open.
+        while pc.poll_event().is_some() {}
+
+        // Resolved by the DTLS handshake, which precedes the association.
+        pc.dtls_transport_mut().dtls_role = RTCDtlsRole::Client;
+
+        // What the SCTP handler emits once the association is up.
+        pc.pipeline_context
+            .sctp_handler_context
+            .event_outs
+            .push_back(TaggedRTCEventInternal {
+                now: base,
+                event: RTCEventInternal::SCTPHandshakeComplete(0),
+            });
+
+        let mut opened = false;
+        while let Some(event) = pc.poll_event() {
+            if matches!(
+                event,
+                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(opened_id)) if opened_id == id
+            ) {
+                opened = true;
+            }
+        }
+        assert!(
+            opened,
+            "the open must not wait for the next incoming packet"
+        );
+    }
+
+    /// Check that messages in the `read_out` queues don't get stuck until the next incoming packet triggers `handle_read`.
+    #[test]
+    fn pump_read_outs() {
+        let base = Instant::now();
+        let t = |secs| base + Duration::from_secs(secs);
+
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .build(t(0))
+            .expect("a default peer connection builds");
+
+        // drop a message into the data channel handler read outs, like DataChannel::emit_data_channel_opened() does
+        pc.pipeline_context
+            .datachannel_handler_context
+            .read_outs
+            .push_back(TaggedRTCMessageInternal {
+                now: t(5),
+                transport: TransportContext {
+                    local_addr: (Ipv4Addr::LOCALHOST, 0).into(),
+                    peer_addr: (Ipv4Addr::LOCALHOST, 0).into(),
+                    transport_protocol: TransportProtocol::UDP,
+                    ecn: None,
+                },
+                message: RTCMessageInternal::Dtls(DTLSMessage::DataChannel(ApplicationMessage {
+                    data_channel_id: 42,
+                    data_channel_event: DataChannelEvent::Open,
+                })),
+            });
+
+        // call `poll_read` to pump the read outs
+        let msg = pc.poll_read();
+        assert!(
+            msg.is_none(),
+            "The message should be consumed by the enpoint handler"
+        );
+
+        // we should get a channel opened event
+        let event = pc.poll_event().expect("should have an event");
+        assert!(matches!(
+            event,
+            RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(42))
+        ));
     }
 }

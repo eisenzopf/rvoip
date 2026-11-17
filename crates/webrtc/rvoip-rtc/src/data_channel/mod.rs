@@ -1,7 +1,7 @@
 //! Peer-to-peer Data API
 //!
 //! This module implements the RTCDataChannel interface as defined in the
-//! [W3C WebRTC specification](https://w3c.github.io/webrtc-pc/#rtcdatachannel).
+//! [W3C WebRTC specification](https://www.w3.org/TR/webrtc/#rtcdatachannel).
 //!
 //! Data channels enable peer-to-peer exchange of arbitrary application data with low latency
 //! and optional reliability. They are useful for scenarios like gaming, real-time text chat,
@@ -10,11 +10,12 @@
 //! # Examples
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! use rtc::data_channel::RTCDataChannelInit;
 //!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut pc = RTCPeerConnectionBuilder::new().build()?;
+//! let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! let init = RTCDataChannelInit {
 //!     ordered: true,
@@ -28,29 +29,53 @@
 //! # }
 //! ```
 //!
-//! # Specifications
+//! # Specification
 //!
-//! * [W3C WebRTC - RTCDataChannel](https://w3c.github.io/webrtc-pc/#rtcdatachannel)
-//! * [RFC 8831 - WebRTC Data Channels](https://www.rfc-editor.org/rfc/rfc8831.html)
-//! * [RFC 8832 - WebRTC Data Channel Establishment Protocol](https://www.rfc-editor.org/rfc/rfc8832.html)
+//! * [W3C WebRTC - RTCDataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
+//! * [RFC 8831 - WebRTC Data Channels](https://datatracker.ietf.org/doc/html/rfc8831)
+//! * [RFC 8832 - WebRTC Data Channel Establishment Protocol](https://datatracker.ietf.org/doc/html/rfc8832)
 
 use crate::peer_connection::RTCPeerConnection;
-use crate::peer_connection::message::RTCMessage;
+use crate::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use bytes::BytesMut;
-use interceptor::{Interceptor, NoopInterceptor};
 use sansio::Protocol;
 use shared::error::{Error, Result};
+use std::time::Instant;
 
 pub(crate) mod init;
 pub(crate) mod internal;
 pub(crate) mod message;
 pub(crate) mod parameters;
+pub(crate) mod registry;
 pub(crate) mod state;
 
-/// Identifier for a data channel within a particular peer connection.
+/// Handle identifying a data channel within a particular peer connection.
 ///
-/// Each data channel has a unique 16-bit identifier within its peer connection.
-pub type RTCDataChannelId = u16;
+/// This is a connection-local handle, not the SCTP stream identifier the channel occupies on
+/// the wire — for that, see [`RTCDataChannel::stream_id`]. It is assigned when the channel is
+/// created, is stable for the channel's lifetime, and is never reused by a later channel.
+///
+/// The two are separate because they become known at different times. RFC 8832 §6 makes the
+/// parity of a stream identifier depend on the DTLS role — even for the client, odd for the
+/// server — and that role is not resolved until a remote description has been applied. A
+/// channel created before then has no stream id yet, but the application still needs a way to
+/// name it: to hold on to it, to match it against events, and to pass to
+/// [`RTCPeerConnection::data_channel`]. That is this handle.
+///
+/// It is a `usize`, like [`RTCRtpTransceiverId`], both to match the crate's convention for
+/// connection-local handles and so that it cannot be silently confused with a
+/// [`sctp::StreamId`], which is a `u16`.
+///
+/// [`RTCPeerConnection::data_channel`]: crate::peer_connection::RTCPeerConnection::data_channel
+/// [`RTCRtpTransceiverId`]: crate::rtp_transceiver::RTCRtpTransceiverId
+pub type RTCDataChannelId = usize;
+
+/// The SCTP stream identifier a data channel occupies on the wire.
+///
+/// Re-exported next to [`RTCDataChannelId`] because the two are easy to confuse and the
+/// distinction matters: this is the RFC 8832 §6 wire value, that is a connection-local handle.
+/// See [`RTCDataChannel::stream_id`].
+pub use sctp::StreamId;
 
 pub use init::RTCDataChannelInit;
 
@@ -65,25 +90,20 @@ pub use state::RTCDataChannelState;
 /// with an [`RTCPeerConnection`] and provides configurable delivery semantics including
 /// ordered/unordered delivery and reliable/unreliable transport.
 ///
-/// # Specifications
+/// # Specification
 ///
-/// * [W3C WebRTC - RTCDataChannel](https://w3c.github.io/webrtc-pc/#dom-rtcdatachannel)
+/// * [W3C WebRTC - RTCDataChannel](https://www.w3.org/TR/webrtc/#dom-rtcdatachannel)
 /// * [MDN - RTCDataChannel](https://developer.mozilla.org/en-US/docs/Web/API/RTCDataChannel)
-pub struct RTCDataChannel<'a, I = NoopInterceptor>
-where
-    I: Interceptor,
-{
+pub struct RTCDataChannel<'a> {
     pub(crate) id: RTCDataChannelId,
-    pub(crate) peer_connection: &'a mut RTCPeerConnection<I>,
+    pub(crate) peer_connection: &'a mut RTCPeerConnection,
 }
 
-impl<I> RTCDataChannel<'_, I>
-where
-    I: Interceptor,
-{
-    /// label represents a label that can be used to distinguish this
-    /// DataChannel object from other DataChannel objects. Scripts are
-    /// allowed to create multiple DataChannel objects with the same label.
+impl RTCDataChannel<'_> {
+    /// The label distinguishing this DataChannel from others on the same peer connection.
+    ///
+    /// Labels are not required to be unique: an application may create several channels with
+    /// the same label.
     pub fn label(&self) -> &str {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -95,8 +115,9 @@ where
             .as_str()
     }
 
-    /// Ordered returns true if the DataChannel is ordered, and false if
-    /// out-of-order delivery is allowed.
+    /// Whether the DataChannel delivers messages in order.
+    ///
+    /// `false` means out-of-order delivery is allowed.
     pub fn ordered(&self) -> bool {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -107,8 +128,8 @@ where
             .ordered
     }
 
-    /// max_packet_lifetime represents the length of the time window (msec) during
-    /// which transmissions and retransmissions may occur in unreliable mode.
+    /// The length of the time window, in milliseconds, during which transmissions and
+    /// retransmissions may occur in unreliable mode, or `None` if the channel is reliable.
     pub fn max_packet_life_time(&self) -> Option<u16> {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -119,8 +140,8 @@ where
             .max_packet_life_time
     }
 
-    /// max_retransmits represents the maximum number of retransmissions that are
-    /// attempted in unreliable mode.
+    /// The maximum number of retransmissions attempted in unreliable mode, or `None` if the
+    /// channel is reliable.
     pub fn max_retransmits(&self) -> Option<u16> {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -131,8 +152,8 @@ where
             .max_retransmits
     }
 
-    /// protocol represents the name of the sub-protocol used with this
-    /// DataChannel.
+    /// The name of the sub-protocol used with this DataChannel, or the empty string if none
+    /// was negotiated.
     pub fn protocol(&self) -> &str {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -144,8 +165,8 @@ where
             .as_str()
     }
 
-    /// negotiated represents whether this DataChannel was negotiated by the
-    /// application (true), or not (false).
+    /// Whether this DataChannel was negotiated out-of-band by the application (`true`), or
+    /// established in-band over DCEP (`false`).
     pub fn negotiated(&self) -> bool {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -156,17 +177,46 @@ where
             .negotiated
     }
 
-    /// ID represents the ID for this DataChannel. The value is initially
-    /// null, which is what will be returned if the ID was not provided at
-    /// channel creation time, and the DTLS role of the SCTP transport has not
-    /// yet been negotiated. Otherwise, it will return the ID that was either
-    /// selected by the script or generated. After the ID is set to a non-null
-    /// value, it will not change.
+    /// The handle identifying this DataChannel within its peer connection.
+    ///
+    /// Available immediately, stable for the channel's lifetime, and never reused by a later
+    /// channel. Use it to address this channel — pass it to
+    /// [`RTCPeerConnection::data_channel`], or match it against the id carried by an
+    /// [`RTCDataChannelEvent`].
+    ///
+    /// This is **not** the SCTP stream identifier: see [`Self::stream_id`], which is what
+    /// W3C's `RTCDataChannel.id` and RFC 8832 §6 refer to.
+    ///
+    /// [`RTCPeerConnection::data_channel`]: crate::peer_connection::RTCPeerConnection::data_channel
+    /// [`RTCDataChannelEvent`]: crate::peer_connection::event::RTCDataChannelEvent
     pub fn id(&self) -> RTCDataChannelId {
         self.id
     }
 
-    /// ready_state represents the state of the DataChannel object.
+    /// The SCTP stream identifier carrying this DataChannel, or `None` if one has not been
+    /// assigned yet.
+    ///
+    /// This is W3C's `RTCDataChannel.id`: "The value is initially null, which is what will be
+    /// returned if the ID was not provided at channel creation time, and the DTLS role of the
+    /// SCTP transport has not yet been negotiated."
+    ///
+    /// It is `Some` from the outset for a channel negotiated out-of-band (created with
+    /// [`RTCDataChannelInit::negotiated`]) and for one opened by the remote peer, since both
+    /// already have a stream id. For a channel this endpoint opens in-band it stays `None`
+    /// until the SCTP connected procedure assigns one, because RFC 8832 §6 requires an even
+    /// identifier from the DTLS client and an odd one from the DTLS server, and which of those
+    /// this endpoint is may still be unknown. Once set it does not change.
+    pub fn stream_id(&self) -> Option<StreamId> {
+        // peer_connection is mutable borrow, its data_channels won't be resized,
+        // so, unwrap() here is safe.
+        self.peer_connection
+            .data_channels
+            .get(&self.id)
+            .unwrap()
+            .stream_id
+    }
+
+    /// The current state of the DataChannel.
     pub fn ready_state(&self) -> RTCDataChannelState {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -177,12 +227,12 @@ where
             .ready_state
     }
 
-    /// buffered_amount_high_threshold represents the threshold at which the
-    /// bufferedAmount is considered to be high. When the bufferedAmount increases
-    /// from below this threshold to equal or above it, the BufferedAmountHigh
-    /// event fires. buffered_amount_high_threshold is initially u32::MAX on each new
-    /// DataChannel, but the application may change its value at any time.
-    /// The threshold is set to u32::MAX by default.
+    /// The threshold at which the buffered amount is considered high.
+    ///
+    /// When the buffered amount rises from below this threshold to at or above it, the
+    /// `BufferedAmountHigh` event fires. It is `u32::MAX` on a new DataChannel — that is,
+    /// effectively disabled — and the application may change it at any time with
+    /// [`Self::set_buffered_amount_high_threshold`].
     pub fn buffered_amount_high_threshold(&self) -> u32 {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -193,8 +243,9 @@ where
             .buffered_amount_high_threshold
     }
 
-    /// set_buffered_amount_high_threshold sets the threshold at which the
-    /// bufferedAmount is considered to be high.
+    /// Sets the threshold at which the buffered amount is considered high.
+    ///
+    /// See [`Self::buffered_amount_high_threshold`].
     pub fn set_buffered_amount_high_threshold(&mut self, threshold: u32) {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -209,12 +260,11 @@ where
         }
     }
 
-    /// buffered_amount_low_threshold represents the threshold at which the
-    /// bufferedAmount is considered to be low. When the bufferedAmount decreases
-    /// from above this threshold to equal or below it, the BufferedAmountLow
-    /// event fires. buffered_amount_low_threshold is initially zero on each new
-    /// DataChannel, but the application may change its value at any time.
-    /// The threshold is set to 0 by default.
+    /// The threshold at which the buffered amount is considered low.
+    ///
+    /// When the buffered amount falls from above this threshold to at or below it, the
+    /// `BufferedAmountLow` event fires. It is `0` on a new DataChannel, and the application
+    /// may change it at any time with [`Self::set_buffered_amount_low_threshold`].
     pub fn buffered_amount_low_threshold(&self) -> u32 {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -225,8 +275,9 @@ where
             .buffered_amount_low_threshold
     }
 
-    /// set_buffered_amount_low_threshold sets the threshold at which the
-    /// bufferedAmount is considered to be low.
+    /// Sets the threshold at which the buffered amount is considered low.
+    ///
+    /// See [`Self::buffered_amount_low_threshold`].
     pub fn set_buffered_amount_low_threshold(&mut self, threshold: u32) {
         // peer_connection is mutable borrow, its data_channels won't be resized,
         // so, unwrap() here is safe.
@@ -241,38 +292,126 @@ where
         }
     }
 
-    /// send sends the binary message to the DataChannel peer
-    pub fn send(&mut self, data: BytesMut) -> Result<()> {
-        if self.peer_connection.data_channels.contains_key(&self.id) {
-            self.peer_connection
-                .handle_write(RTCMessage::DataChannelMessage(
-                    self.id,
-                    RTCDataChannelMessage {
-                        is_string: false,
-                        data,
-                    },
-                ))
-        } else {
-            Err(Error::ErrDataChannelClosed)
+    /// Rejects a send the write path could not carry out.
+    ///
+    /// The condition mirrors what `DataChannelHandler::handle_write` requires: the channel
+    /// must be registered *and* its SCTP stream established. Checking it here, synchronously,
+    /// is what makes the failure visible — the handler runs later, on the pipeline's write
+    /// pass, where an `Err` is only logged and cannot reach the caller. The same holds for
+    /// `SctpHandler::handle_write`'s max-message-size check.
+    fn ensure_sendable(&self, data_len: usize) -> Result<()> {
+        let dc = self
+            .peer_connection
+            .data_channels
+            .get(&self.id)
+            .ok_or(Error::ErrDataChannelClosed)?;
+
+        if dc.data_channel.is_none() {
+            // No stream yet: either it is still being negotiated, or it is already gone.
+            return Err(if dc.ready_state == RTCDataChannelState::Connecting {
+                Error::ErrDataChannelNotOpen
+            } else {
+                Error::ErrDataChannelClosed
+            });
         }
+
+        // W3C `send()`: data larger than `maxMessageSize` throws.
+        if let Some(max_message_size) = self.peer_connection.sctp_transport().max_message_size()
+            && data_len > max_message_size as usize
+        {
+            return Err(Error::ErrOutboundPacketTooLarge);
+        }
+
+        Ok(())
     }
 
-    /// send_text sends the text message to the DataChannel peer
-    pub fn send_text(&mut self, s: impl Into<String>) -> Result<()> {
-        if self.peer_connection.data_channels.contains_key(&self.id) {
-            self.peer_connection
-                .handle_write(RTCMessage::DataChannelMessage(
-                    self.id,
-                    RTCDataChannelMessage {
-                        is_string: true,
-                        data: BytesMut::from(s.into().as_str()),
-                    },
-                ))
-        } else {
-            Err(Error::ErrDataChannelClosed)
+    /// Sends a binary message to the DataChannel peer.
+    ///
+    /// # Parameters
+    ///
+    /// - `now`: The instant the send is issued; it travels with the message through the pipeline.
+    /// - `data`: The payload, taken by value so it can be enqueued without a copy.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ErrDataChannelNotOpen`] if the channel's SCTP stream has not been established
+    ///   yet — wait for the channel's open event before sending.
+    /// - [`Error::ErrDataChannelClosed`] once the channel is gone.
+    /// - [`Error::ErrOutboundPacketTooLarge`] if `data` is larger than the negotiated
+    ///   [`max_message_size`](crate::peer_connection::transport::RTCSctpTransport::max_message_size).
+    ///
+    /// The check is made here, synchronously, rather than deeper in the pipeline where an error
+    /// could only be logged. A rejected send never charges [`Self::outstanding_bytes`].
+    pub fn send(&mut self, now: Instant, data: BytesMut) -> Result<()> {
+        let data_len = data.len();
+        self.ensure_sendable(data_len)?;
+        self.peer_connection.handle_write(TaggedRTCMessage {
+            now,
+            message: RTCMessage::DataChannelMessage(
+                self.id,
+                RTCDataChannelMessage {
+                    is_string: false,
+                    data,
+                },
+            ),
+        })?;
+        // Count only after a successful enqueue, so a failed send never leaks the
+        // counter upward (those bytes never entered the SCTP send pipeline). This
+        // is the synchronous send-boundary accounting used for back-pressure.
+        if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
+            dc.outstanding_bytes += data_len;
         }
+        Ok(())
     }
 
+    /// Sends a text message to the DataChannel peer.
+    ///
+    /// # Errors
+    ///
+    /// Identical to [`Self::send`].
+    pub fn send_text(&mut self, now: Instant, s: impl Into<String>) -> Result<()> {
+        let s = s.into();
+        self.ensure_sendable(s.len())?;
+        let data = BytesMut::from(s.as_str());
+        let data_len = data.len();
+        self.peer_connection.handle_write(TaggedRTCMessage {
+            now,
+            message: RTCMessage::DataChannelMessage(
+                self.id,
+                RTCDataChannelMessage {
+                    is_string: true,
+                    data,
+                },
+            ),
+        })?;
+        if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
+            dc.outstanding_bytes += data_len;
+        }
+        Ok(())
+    }
+
+    /// Bytes handed to [`send`](Self::send)/[`send_text`](Self::send_text) that
+    /// SCTP has not yet released (acknowledged or abandoned) — the true amount of
+    /// outstanding send-side memory for this channel, including bytes still queued
+    /// in the app→core→SCTP pipeline (the SCTP stream's own `buffered_amount`
+    /// counts only post-packetization). Used for synchronous send back-pressure.
+    pub fn outstanding_bytes(&self) -> usize {
+        self.peer_connection
+            .data_channels
+            .get(&self.id)
+            .map(|dc| dc.outstanding_bytes)
+            .unwrap_or(0)
+    }
+
+    /// Closes the data channel.
+    ///
+    /// Moves the channel to `Closing` and starts the DCEP/SCTP teardown. Closing a channel that
+    /// is already `Closed` is a no-op and succeeds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ErrDataChannelClosed`] if no channel with this id is registered on the
+    /// peer connection any more.
     pub fn close(&mut self) -> Result<()> {
         if let Some(dc) = self.peer_connection.data_channels.get_mut(&self.id) {
             if dc.ready_state == RTCDataChannelState::Closed {

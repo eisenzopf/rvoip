@@ -18,9 +18,10 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+use rtc::data_channel::RTCDataChannelId;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngine;
+use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::RTCIceConnectionState;
@@ -39,11 +40,14 @@ use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfigu
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState as WebrtcRTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as WebrtcRTCSessionDescription;
 
+mod common;
+
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
 /// Test data channel close behavior with RTC sending periodic messages and closing
 #[tokio::test]
 async fn test_data_channel_close_interop() -> Result<()> {
+    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -64,8 +68,9 @@ async fn test_data_channel_close_interop() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let mut setting_engine = SettingEngine::default();
-    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
+    let setting_engine = SettingEngineBuilder::new()
+        .with_answering_dtls_role(RTCDtlsRole::Server)
+        .build();
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -77,7 +82,7 @@ async fn test_data_channel_close_interop() -> Result<()> {
     let mut rtc_pc = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
         .with_setting_engine(setting_engine)
-        .build()?;
+        .build(Instant::now())?;
     log::info!("Created RTC peer connection");
 
     // Create a data channel from RTC side
@@ -106,7 +111,7 @@ async fn test_data_channel_close_interop() -> Result<()> {
     log::info!("RTC created offer");
 
     // Set local description on rtc peer
-    rtc_pc.set_local_description(offer.clone())?;
+    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
     log::info!("RTC set local description");
 
     // Convert rtc offer to webrtc SDP
@@ -182,7 +187,7 @@ async fn test_data_channel_close_interop() -> Result<()> {
     )?;
 
     // Set remote description on rtc (the answer from webrtc)
-    rtc_pc.set_remote_description(rtc_answer)?;
+    rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
     log::info!("RTC set remote description");
 
     // Run event loops for both peers
@@ -190,7 +195,7 @@ async fn test_data_channel_close_interop() -> Result<()> {
     let mut rtc_connected = false;
     let mut webrtc_connected = false;
     let mut rtc_data_channel_opened = false;
-    let mut rtc_dc_id: Option<u16> = None;
+    let mut rtc_dc_id: Option<RTCDataChannelId> = None;
     let mut last_message_time = Instant::now();
     let message_interval = Duration::from_millis(500); // Send every 500ms for testing
 
@@ -279,7 +284,7 @@ async fn test_data_channel_close_interop() -> Result<()> {
                 if messages_to_send > 0 {
                     let message = format!("Message #{}", 4 - messages_to_send);
                     log::info!("RTC sending: '{}'", message);
-                    dc.send_text(message)?;
+                    dc.send_text(Instant::now(), message)?;
                     last_message_time = Instant::now();
 
                     messages_to_send -= 1;

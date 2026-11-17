@@ -12,17 +12,27 @@ pub use ice::candidate::{
     candidate_server_reflexive::CandidateServerReflexiveConfig,
 };
 
+/// The role an ICE-TCP candidate takes when a pair is checked (RFC 6544 §4.5).
+///
+/// Carried by [`RTCIceCandidate::tcp_type`]; meaningless for UDP candidates, which leave it
+/// [`Unspecified`](RTCIceTcpCandidateType::Unspecified).
 #[derive(Default, PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCIceTcpCandidateType {
+    /// Not a TCP candidate, or the type was absent.
     #[default]
     Unspecified,
 
+    /// Opens the connection. Its port is the discard placeholder 9, not a bound one, since an
+    /// active candidate listens on nothing.
     #[serde(rename = "active")]
     Active,
 
+    /// Accepts the connection; its port is the local listener's.
     #[serde(rename = "passive")]
     Passive,
 
+    /// Both ends open simultaneously.
     #[serde(rename = "so")]
     SimultaneousOpen,
 }
@@ -34,11 +44,13 @@ impl From<TcpType> for RTCIceTcpCandidateType {
             TcpType::Active => RTCIceTcpCandidateType::Active,
             TcpType::Passive => RTCIceTcpCandidateType::Passive,
             TcpType::SimultaneousOpen => RTCIceTcpCandidateType::SimultaneousOpen,
+            _ => RTCIceTcpCandidateType::Unspecified,
         }
     }
 }
 
 impl RTCIceTcpCandidateType {
+    /// Converts to the ICE agent's own representation.
     pub fn to_ice(self) -> TcpType {
         match self {
             RTCIceTcpCandidateType::Unspecified => TcpType::Unspecified,
@@ -49,15 +61,23 @@ impl RTCIceTcpCandidateType {
     }
 }
 
+/// The protocol used to reach the STUN/TURN server that produced a candidate.
+///
+/// Carried by [`RTCIceCandidate::relay_protocol`]; only meaningful for relay candidates.
 #[derive(Default, PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum RTCIceServerTransportProtocol {
+    /// Not a relay candidate, or the protocol was absent.
     #[default]
     Unspecified,
 
+    /// Reached over UDP.
     #[serde(rename = "udp")]
     Udp,
+    /// Reached over TCP.
     #[serde(rename = "tcp")]
     Tcp,
+    /// Reached over TLS.
     #[serde(rename = "tls")]
     Tls,
 }
@@ -70,21 +90,34 @@ pub enum RTCIceServerTransportProtocol {
 /// * [W3C]
 ///
 /// [MDN]: https://developer.mozilla.org/en-US/docs/Web/API/RTCIceCandidate
-/// [W3C]: https://w3c.github.io/webrtc-pc/#rtcicecandidate-interface
+/// [W3C]: https://www.w3.org/TR/webrtc/#rtcicecandidate-interface
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RTCIceCandidate {
+    /// The unique identifier of this candidate.
     pub id: String,
+    /// The foundation of the candidate, used to group candidates of the same type.
     pub foundation: String,
+    /// The priority of this candidate.
     pub priority: u32,
+    /// The IP address of the candidate.
     pub address: String,
+    /// The transport protocol (UDP or TCP) used by this candidate.
     pub protocol: RTCIceProtocol,
+    /// The port number of the candidate.
     pub port: u16,
+    /// The candidate type (host, srflx, prflx, relay).
     pub typ: RTCIceCandidateType,
+    /// The ICE component (1 for RTP, 2 for RTCP).
     pub component: u16,
+    /// The related IP address, if this is a reflexive or relay candidate.
     pub related_address: String,
+    /// The related port number, if this is a reflexive or relay candidate.
     pub related_port: u16,
+    /// The TCP candidate type (active, passive, so), if this is a TCP candidate.
     pub tcp_type: RTCIceTcpCandidateType,
+    /// The relay protocol (UDP, TCP, TLS), if this is a relay candidate.
     pub relay_protocol: RTCIceServerTransportProtocol,
+    /// The URL of the STUN/TURN server used to gather this candidate, if any.
     pub url: Option<String>,
 }
 
@@ -176,8 +209,16 @@ impl RTCIceCandidate {
         Ok(c)
     }
 
-    /// to_json returns an ICECandidateInit
-    /// as indicated by the spec <https://w3c.github.io/webrtc-pc/#dom-rtcicecandidate-tojson>
+    /// Converts this candidate into an [`RTCIceCandidateInit`] suitable for signaling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if this candidate's type is not one this crate can serialize
+    /// (`ErrICECandidateTypeUnknown`), or if its address cannot be re-encoded.
+    ///
+    /// # Specification
+    ///
+    /// See [RTCIceCandidate.toJSON()](https://www.w3.org/TR/webrtc/#dom-rtcicecandidate-tojson)
     pub fn to_json(&self) -> Result<RTCIceCandidateInit> {
         let candidate = self.to_ice()?;
 
@@ -205,10 +246,14 @@ impl fmt::Display for RTCIceCandidate {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RTCIceCandidateInit {
+    /// The candidate-attribute string as defined in RFC 8839 §5.1.
     pub candidate: String,
+    /// The identifier of the "m=" section in the SDP that this candidate is associated with.
     pub sdp_mid: Option<String>,
+    /// The index of the "m=" section in the SDP that this candidate is associated with.
     #[serde(rename = "sdpMLineIndex")]
     pub sdp_mline_index: Option<u16>,
+    /// The username fragment used for ICE authentication.
     pub username_fragment: Option<String>,
     /// The URL of the STUN or TURN server used to gather this candidate.
     ///

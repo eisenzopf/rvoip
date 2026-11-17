@@ -20,7 +20,7 @@ use rtc::rtp_transceiver::rtp_sender::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{
     fs,
     fs::{File, OpenOptions},
@@ -380,6 +380,8 @@ fn should_skip_timing(nal: &H26xNAL) -> bool {
                 | H265NalUnitType::SuffixSEI
                 | H265NalUnitType::AUD
         ),
+        // `H26xNAL` is non-exhaustive; time any other NAL kind normally.
+        _ => false,
     }
 }
 
@@ -417,7 +419,7 @@ async fn stream_video(
             .write_sample(&Sample {
                 data: nal.data().clone().freeze(),
                 duration: Duration::from_secs(1),
-                ..Default::default()
+                ..Sample::new(Instant::now())
             })
             .await?;
 
@@ -467,7 +469,7 @@ async fn stream_audio(
             .write_sample(&Sample {
                 data: page_data.freeze(),
                 duration: sample_duration,
-                ..Default::default()
+                ..Sample::new(Instant::now())
             })
             .await?;
 
