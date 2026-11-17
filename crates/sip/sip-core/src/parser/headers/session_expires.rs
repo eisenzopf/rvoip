@@ -15,6 +15,7 @@
 //! delta-seconds = 1*DIGIT
 //! ```
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -37,15 +38,16 @@ fn delta_seconds(input: &[u8]) -> ParseResult<'_, u32> {
     map_res(digit1, |digits: &[u8]| {
         let s = str::from_utf8(digits).map_err(|_| "UTF-8 error")?;
         s.parse::<u32>().map_err(|_| "Invalid delta-seconds")
-    })(input)
+    })
+    .parse(input)
 }
 
 // Parse refresher parameter (refresher=uac|uas)
 fn refresher_param(input: &[u8]) -> ParseResult<'_, Refresher> {
     map_res(
         preceded(
-            pair(tag_no_case(b"refresher"), equal),
-            alt((tag_no_case(b"uac"), tag_no_case(b"uas"))),
+            pair(tag_no_case(&b"refresher"[..]), equal),
+            alt((tag_no_case(&b"uac"[..]), tag_no_case(&b"uas"[..]))),
         ),
         |val| match str::from_utf8(val)
             .map_err(|_| "UTF-8 error")?
@@ -56,7 +58,8 @@ fn refresher_param(input: &[u8]) -> ParseResult<'_, Refresher> {
             "uas" => Ok(Refresher::Uas),
             _ => Err("Invalid refresher value"),
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Parse a session-expires parameter (either refresher or generic)
@@ -66,7 +69,8 @@ fn se_param(input: &[u8]) -> ParseResult<'_, (Option<Refresher>, Option<Param>)>
         map(refresher_param, |refresher| (Some(refresher), None)),
         // Then try generic parameter
         map(generic_param, |param: Param| (None, Some(param))),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 /// Parse a Session-Expires header value according to RFC 4028
@@ -83,7 +87,7 @@ pub fn parse_session_expires(
     let (remaining_input, expires) = delta_seconds(input)?;
 
     // Parse any parameters
-    let (remaining_input, params_data) = many0(preceded(semi, se_param))(remaining_input)?;
+    let (remaining_input, params_data) = many0(preceded(semi, se_param)).parse(remaining_input)?;
 
     // Extract refresher (take the last one if multiple are specified)
     let mut parsed_refresher: Option<Refresher> = None;
@@ -120,13 +124,14 @@ pub fn parse_session_expires_header(
     preceded(
         pair(
             alt((
-                tag_no_case(b"Session-Expires"),
-                tag_no_case(b"x"), // Compact form
+                tag_no_case(&b"Session-Expires"[..]),
+                tag_no_case(&b"x"[..]), // Compact form
             )),
             hcolon,
         ),
         parse_session_expires,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]
@@ -286,7 +291,7 @@ mod tests {
         let inputs = [b"" as &[u8], b"abc", b"-1", b"3600;refresher=invalid"];
 
         for input in &inputs {
-            let result = all_consuming(parse_session_expires)(*input);
+            let result = all_consuming(parse_session_expires).parse(*input);
             assert!(result.is_err());
         }
     }

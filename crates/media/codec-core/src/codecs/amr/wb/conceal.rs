@@ -260,7 +260,7 @@ impl LagHistory {
     }
 
     /// Shift a good subframe in.
-    fn push(&mut self, lag: Word16, pitch_gain: Word16) {
+    const fn push(&mut self, lag: Word16, pitch_gain: Word16) {
         self.lags.rotate_right(1);
         self.lags[0] = lag;
         self.gains.rotate_left(1);

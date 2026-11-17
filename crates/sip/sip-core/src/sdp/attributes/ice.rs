@@ -6,6 +6,7 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::to_result;
+use nom::Parser;
 use nom::{bytes::complete::take_while1, combinator::verify, IResult};
 
 /// Parser for ICE username fragment (ufrag)
@@ -14,7 +15,8 @@ fn ice_ufrag_parser(input: &str) -> IResult<&str, &str> {
     verify(
         take_while1(|c: char| c.is_ascii() && !c.is_ascii_control() && !c.is_whitespace()),
         |s: &str| s.len() >= 4 && s.len() <= 256,
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parser for ICE password
@@ -23,7 +25,8 @@ fn ice_pwd_parser(input: &str) -> IResult<&str, &str> {
     verify(
         take_while1(|c: char| c.is_ascii() && !c.is_ascii_control() && !c.is_whitespace()),
         |s: &str| s.len() >= 22 && s.len() <= 256,
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parses ice-ufrag attribute: `a=ice-ufrag:<ufrag>`

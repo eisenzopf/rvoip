@@ -51,6 +51,7 @@ use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::uri::Host;
 use crate::types::uri::Uri;
 use nom::combinator::all_consuming;
+use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::from_utf8;
@@ -229,7 +230,7 @@ impl FromStr for Warning {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         use crate::error::Error; // Ensure Error is in scope
 
-        match all_consuming(parse_warning_value_list)(s.as_bytes()) {
+        match all_consuming(parse_warning_value_list).parse(s.as_bytes()) {
             Ok((_, values)) => {
                 // Get the first warning value from the list
                 if let Some(value) = values.first() {
@@ -389,7 +390,7 @@ impl FromStr for WarningHeader {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         use crate::error::Error;
 
-        match all_consuming(parse_warning_value_list)(s.as_bytes()) {
+        match all_consuming(parse_warning_value_list).parse(s.as_bytes()) {
             Ok((_, values)) => {
                 let mut warnings = Vec::with_capacity(values.len());
 

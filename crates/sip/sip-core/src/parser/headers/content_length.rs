@@ -1,6 +1,7 @@
 // Parser for Content-Length header (RFC 3261 Section 20.14)
 // Content-Length = ( "Content-Length" / "l" ) HCOLON 1*DIGIT
 
+use nom::Parser;
 use nom::{
     character::complete::digit1,
     combinator::{map_res, opt},
@@ -21,15 +22,17 @@ use crate::parser::ParseResult; // Import whitespace handling functions
 pub fn parse_content_length(input: &[u8]) -> ParseResult<'_, u32> {
     // Handle optional leading whitespace (which is technically not part of the ABNF
     // but commonly found in real-world messages)
-    let (input, _) = opt(owsp)(input)?;
+    let (input, _) = opt(owsp).parse(input)?;
 
     // Parse the digits - this is the actual Content-Length value
     let (input, length) = map_res(digit1, |bytes| {
-        let s = str::from_utf8(bytes)
-            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))?;
+        let s = str::from_utf8(bytes).map_err(|_| {
+            nom::Err::<_>::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit))
+        })?;
         s.parse::<u32>()
             .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))
-    })(input)?;
+    })
+    .parse(input)?;
 
     // Handle optional trailing whitespace (also not in ABNF but common in practice)
     // This doesn't consume any input, just makes the parser more lenient
@@ -42,9 +45,10 @@ pub fn parse_content_length(input: &[u8]) -> ParseResult<'_, u32> {
 pub fn parse_full_content_length(input: &[u8]) -> ParseResult<'_, u32> {
     // Parse the header name (case-insensitive)
     let (input, _) = nom::branch::alt((
-        nom::bytes::complete::tag_no_case(b"Content-Length"),
-        nom::bytes::complete::tag_no_case(b"l"),
-    ))(input)?;
+        nom::bytes::complete::tag_no_case(&b"Content-Length"[..]),
+        nom::bytes::complete::tag_no_case(&b"l"[..]),
+    ))
+    .parse(input)?;
 
     // Parse the colon
     let (input, _) = hcolon(input)?;

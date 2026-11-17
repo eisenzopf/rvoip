@@ -7,11 +7,12 @@ use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, token};
 use crate::types::sdp::ParsedAttribute;
 use crate::types::sdp::RtpMapAttribute;
+use nom::Parser;
 use nom::{
     bytes::complete::take_while1,
     character::complete::{char, space1},
     combinator::{map, map_res, verify},
-    sequence::{preceded, tuple},
+    sequence::preceded,
     IResult,
 };
 
@@ -40,13 +41,14 @@ fn encoding_params(input: &str) -> IResult<&str, String> {
             },
         ),
         |s: &String| !s.is_empty(),
-    )(input)
+    )
+    .parse(input)
 }
 
 /// Parser for the entire encoding part: <encoding name>/<clock rate>[/<encoding parameters>]
 fn encoding_parser(input: &str) -> IResult<&str, (String, u32, Option<String>)> {
     // First parse the encoding name and clock rate which are mandatory
-    let (input, name) = map(encoding_name, |s: &str| s.to_string())(input)?;
+    let (input, name) = map(encoding_name, |s: &str| s.to_string()).parse(input)?;
     let (input, _) = char('/')(input)?;
     let (input, rate) = clock_rate(input)?;
 
@@ -74,7 +76,7 @@ fn encoding_parser(input: &str) -> IResult<&str, (String, u32, Option<String>)> 
 
 /// Parser for the complete rtpmap attribute: <payload type> <encoding>
 fn rtpmap_parser(input: &str) -> IResult<&str, (u8, String, u32, Option<String>)> {
-    tuple((
+    (
         // Payload type (0-127)
         map_res(positive_integer, |pt| {
             if pt <= 127 {
@@ -88,12 +90,13 @@ fn rtpmap_parser(input: &str) -> IResult<&str, (u8, String, u32, Option<String>)
             space1,
             map(encoding_parser, |(name, rate, params)| (name, rate, params)),
         ),
-    ))(input)
-    .map(
-        |(remaining, (pt, (encoding_name, clock_rate, encoding_params)))| {
-            (remaining, (pt, encoding_name, clock_rate, encoding_params))
-        },
     )
+        .parse(input)
+        .map(
+            |(remaining, (pt, (encoding_name, clock_rate, encoding_params)))| {
+                (remaining, (pt, encoding_name, clock_rate, encoding_params))
+            },
+        )
 }
 
 /// Parses rtpmap attribute: `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`

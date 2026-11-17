@@ -191,7 +191,7 @@ pub fn header(input: &[u8]) -> ParseResult<'_, (String, String)> {
         )));
     }
 
-    let (remaining, _) = tag(b"=")(remaining)?;
+    let (remaining, _) = tag(&b"="[..])(remaining)?;
     let (remaining, value) = hvalue(remaining)?;
 
     // Ensure the header name is not empty after parsing
@@ -223,7 +223,7 @@ pub fn uri_headers(input: &[u8]) -> ParseResult<'_, HashMap<String, String>> {
         )));
     }
 
-    let (mut remaining, _) = tag(b"?")(input)?;
+    let (mut remaining, _) = tag(&b"?"[..])(input)?;
     let mut headers = HashMap::new();
 
     // Parse first header
@@ -240,7 +240,7 @@ pub fn uri_headers(input: &[u8]) -> ParseResult<'_, HashMap<String, String>> {
     // Parse additional headers
     while !remaining.is_empty() && remaining[0] == b'&' {
         // Skip '&'
-        let (new_remaining, _) = tag(b"&")(remaining)?;
+        let (new_remaining, _) = tag(&b"&"[..])(remaining)?;
 
         match header(new_remaining) {
             Ok((next_remaining, (name, value))) => {

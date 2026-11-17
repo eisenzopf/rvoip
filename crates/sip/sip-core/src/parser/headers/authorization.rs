@@ -8,6 +8,7 @@ use crate::types::auth::Authorization as AuthorizationHeader;
 use crate::types::auth::Credentials;
 use nom::combinator::opt;
 use nom::error::{Error as NomError, ErrorKind};
+use nom::Parser;
 
 // Authorization = "Authorization" HCOLON credentials
 // Note: HCOLON is handled by the top-level message_header parser.
@@ -15,7 +16,7 @@ use nom::error::{Error as NomError, ErrorKind};
 // Make this function public
 pub fn parse_authorization(input: &[u8]) -> ParseResult<'_, AuthorizationHeader> {
     // Handle any leading whitespace, including line folding
-    let (input, _) = opt(lws)(input)?;
+    let (input, _) = opt(lws).parse(input)?;
 
     // Check for empty input
     if input.is_empty() {

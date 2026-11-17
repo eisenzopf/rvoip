@@ -4,23 +4,23 @@
 
 use crate::error::{Error, Result};
 use crate::types::sdp::Origin;
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till},
     character::complete::{digit1, space1},
     combinator::opt,
-    sequence::tuple,
     IResult,
 };
 
 /// Use nom to parse the origin line
 pub fn parse_origin_nom(input: &str) -> IResult<&str, Origin> {
     // Format: o=<username> <sess-id> <sess-version> <nettype> <addrtype> <unicast-address>
-    let (input, _) = opt(tag("o="))(input)?;
+    let (input, _) = opt(tag("o=")).parse(input)?;
 
     // Parse each field with strict whitespace between them
     let (remainder, (username, _, sess_id, _, sess_version, _, net_type, _, addr_type, _, addr)) =
-        tuple((
+        (
             take_till(|c| c == ' '),
             space1,
             digit1,
@@ -32,7 +32,8 @@ pub fn parse_origin_nom(input: &str) -> IResult<&str, Origin> {
             alt((tag("IP4"), tag("IP6"))),
             space1,
             take_till(|c| c == ' ' || c == '\r' || c == '\n'),
-        ))(input)?;
+        )
+            .parse(input)?;
 
     // Check that there's no extra content (extra fields would be separated by spaces)
     let remainder_trimmed = remainder.trim();

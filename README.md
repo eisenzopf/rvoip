@@ -5,7 +5,7 @@
 
 **A Rust library for building communications applications. SIP, RTP, WebRTC, QUIC/WebTransport/WebSocket conversations, Media over QUIC, and voice-AI agents share one call model, and the whole stack is in the box: no external SIP server, media server, or RTP engine to install and wire together.**
 
-[![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
 [![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.4.0)](https://crates.io/crates/rvoip/0.4.0)
 [![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.4.0)](https://crates.io/crates/rvoip-sip/0.4.0)
