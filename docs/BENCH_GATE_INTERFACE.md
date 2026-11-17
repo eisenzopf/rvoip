@@ -104,7 +104,7 @@ JSON style as `gates.py` (sorted keys, no whitespace).
         {"factor": 0.95, "rate": 4748, "attempted": 904000, "established": 904000,
          "attempt_failures": 0, "disconnect_failures": 0, "status_counts": {"200": 904000},
          "outcome": "pass | fail | invalid", "invalid_reason": null,
-         "evidence": "s3://.../R1/t0-r4748/", "verdict_sha256": "..."}
+         "evidence": "s3://.../R1/t0-r4748/"}
       ],
       "latency": {
         "rate": 4500,
@@ -121,7 +121,7 @@ JSON style as `gates.py` (sorted keys, no whitespace).
   "evidence": {
     "s3_prefix": "s3://<bucket>/bench/<run-id>/",
     "manifest_sha256": "<sha256 of manifest.json listing every object + sha256>",
-    "report": {"md": "s3://.../report/rfc7502-report.md", "html": "...", "md_sha256": "..."}
+    "report": {"md": "s3://.../report/rfc7502-report.md", "html": "..."}
   },
   "cost": {"instance_hours": {"c8i.4xlarge": 3.6, "c8in.24xlarge": 7.2}, "estimated_usd": 49.7},
   "tool": {"run_lane_sha256": "...", "repo_sha": "<sha the orchestrator ran from>"}
