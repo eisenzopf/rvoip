@@ -23,7 +23,13 @@ class WorkflowPolicyTests(unittest.TestCase):
             with self.subTest(workflow=workflow.name):
                 self.assertNotIn("pull_request_target", text)
                 uses = [line for line in text.splitlines() if "uses:" in line]
-                self.assertTrue(all(SHA_ACTION.search(line) for line in uses))
+                # A local reusable workflow is pinned by the commit it runs from.
+                self.assertTrue(
+                    all(
+                        SHA_ACTION.search(line) or "uses: ./.github/workflows/" in line
+                        for line in uses
+                    )
+                )
 
     def test_every_runner_job_declares_a_timeout(self) -> None:
         # GitHub's default job timeout is six hours; every hosted job sets
@@ -590,6 +596,37 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(gate["timeout_minutes"], 61)
         self.assertIn(gate["id"], catalog["profiles"]["remote-release"])
         self.assertIn("GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}", workflow)
+
+    def test_nightly_qualifies_main_with_the_release_pipeline_and_no_benchmark(self) -> None:
+        nightly = (ROOT / ".github/workflows/nightly-qualification.yml").read_text()
+        interop = (ROOT / ".github/workflows/nightly-interop.yml").read_text()
+        qualify = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+
+        self.assertIn("schedule:", nightly)
+        self.assertIn("uses: ./.github/workflows/release-qualify.yml", nightly)
+        self.assertIn("profile: remote-release", nightly)
+        self.assertNotIn("bench", nightly.split("jobs:", 1)[1])
+        self.assertIn("uses: ./.github/workflows/nightly-interop.yml", nightly)
+        self.assertIn('select(.name == "release-gate-evidence" and .expired == false)', nightly)
+        self.assertIn("first_candidate: ${{ needs.chain.outputs.prior_run_id == '' }}", nightly)
+        # nightly-interop runs only inside the nightly qualification now.
+        self.assertIn("workflow_call:", interop)
+        self.assertNotIn("schedule:", interop)
+        self.assertIn("  workflow_call:\n", qualify)
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        self.assertFalse(
+            {"perf.rfc7502-release", "perf.rfc7502-minor"} & set(catalog["profiles"]["remote-release"])
+        )
+
+    def test_hosted_release_shards_restore_a_compiler_cache(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        hosted = workflow.split("\n  gate-hosted:\n", maxsplit=1)[1].split("\n  gate-bench:\n", maxsplit=1)[0]
+        self.assertIn("Swatinem/rust-cache@", hosted)
+        self.assertIn("shared-key: release-hosted-${{ matrix.id }}", hosted)
+
+    def test_early_failure_cutoff_is_scoped_by_the_catalog(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        self.assertIn("--catalog scripts/release/gates.json)", workflow)
 
     def test_release_candidate_is_any_main_commit_with_a_receipt_chain(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()

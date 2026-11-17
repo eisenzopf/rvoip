@@ -1,9 +1,8 @@
 # Release benchmark gate interface (RFC 7501/7502)
 
-Status: stub interface, 2026-11-16. The release tooling side is implemented.
-The lane itself (`scripts/bench/`) is built separately; anything marked
-**open** below is for that work to settle, and this file should be updated
-when it does.
+Status: agreed with the benchmark work, 2026-11-16. The release tooling side
+is implemented; the lane itself (`scripts/bench/`) is built separately and
+owns the receipt's full schema.
 
 Ownership: `scripts/bench/` belongs to the benchmark work. `scripts/release/`,
 the gate catalog and the workflows belong to the release tooling.
@@ -34,22 +33,37 @@ publish from `remote-release`.
 
 ## How it runs
 
-`release-qualify.yml` runs every `bench-lane` shard in the `gate-bench` job:
-`ubuntu-latest`, 360-minute limit, with the provisioner role assumed through
-OIDC. The job runs the standard gate executor:
+The gate command is the release tooling's wrapper:
 
 ```sh
-python3 scripts/release/gates.py run-shard --candidate <sha> \
-  --environment-id <RELEASE_ENVIRONMENT_ID> --gates perf.rfc7502-release \
-  --output target/release-shard
-```
-
-which runs the catalogued command from the repository root:
-
-```sh
-python3 scripts/bench/run_lane.py --profile release|minor \
+python3 scripts/release/bench_gate.py --profile release|minor \
   --candidate <40-hex sha> --receipt <artifact_dir>/bench-receipt.json
 ```
+
+It builds the device under test from the exact candidate
+(`cargo build --release --locked -p rvoip-bench-uas`) and runs the lane
+orchestrator the benchmark work owns:
+
+```sh
+python3 scripts/bench/run_lane.py --profile <p> --candidate <sha> \
+  --receipt <path> --dut-bin <built binary> \
+  --run-id bench-<p>-<sha12>-<github run id> --max-wall <minutes> --resume
+```
+
+`--caller-bin` and `--ea-uas-bin` are omitted: they are pinned by the env-id,
+not by the candidate, and run_lane fetches and hash-checks them itself
+(requested of the benchmark work).
+
+`release-qualify.yml` runs the gate in the `gate-bench` job (`ubuntu-latest`,
+350 minutes, the provisioner role through OIDC, a 330-minute `--max-wall`).
+`bench-release` (about 3.5 h) fits in that one job. `bench-minor` (about
+11 h) does not, so two earlier jobs, `bench-leg-1` and `bench-leg-2`, call
+the wrapper with `--advance` to continue the same lane: same run id,
+`--resume`, a fresh role session and a 330-minute budget each. The final
+`gate-bench` call finds the lane complete or nearly so and, through
+`gates.py run-shard`, records the gate receipt. A lane that finishes early
+makes the later calls cheap: run_lane, resuming a complete run id, only
+rewrites its receipt (requested of the benchmark work).
 
 Environment available to `run_lane.py`:
 
@@ -57,108 +71,44 @@ Environment available to `run_lane.py`:
 |---|---|
 | AWS credentials | the provisioner role session (6 h) |
 | `RVOIP_AWS_REGION` | region |
-| `RVOIP_AWS_EVIDENCE_BUCKET` | bucket for trial evidence; write under `release/<RVOIP_RELEASE_RUN_ID>/bench/` |
-| `RVOIP_AWS_SUBNET_ID`, `RVOIP_AWS_SECURITY_GROUP_ID`, `RVOIP_AWS_RUNNER_INSTANCE_PROFILE` | the release worker network and profile (a lane may need its own; **open**) |
-| `RVOIP_RELEASE_RUN_ID` | `<github run id>-<attempt>`, for tags and evidence prefixes |
+| `RVOIP_AWS_EVIDENCE_BUCKET` | evidence bucket |
+| `RVOIP_AWS_SUBNET_ID`, `RVOIP_AWS_SECURITY_GROUP_ID`, `RVOIP_AWS_RUNNER_INSTANCE_PROFILE` | the release worker network and profile |
+| `RVOIP_RELEASE_RUN_ID` | `<github run id>-<attempt>`, for tags |
 
-Contract for `run_lane.py`:
+Exit codes (run_lane's, passed through):
 
-- Exit `0` only when the lane passes (`status` `PASS` or `WARN`). Any other
-  exit fails the gate. Exit `75` marks an infrastructure failure, which the
-  executor retries once (`retry_on_exit_codes`).
-- Always write the receipt, even on failure, before exiting.
-- Write anything else (summaries, the rendered IETF report) into the same
-  directory as the receipt; it becomes part of the gate's evidence artifact.
-- Tag and terminate everything it creates. The janitor's
-  `rvoip-expires-at` tag convention applies.
-- Measure the candidate it is given and nothing else.
+| Code | Meaning | Release tooling |
+|---|---|---|
+| 0 | PASS or WARN (the receipt says which) | gate passes |
+| 1 | FAIL | gate fails |
+| 2 | usage or input error | gate fails, not retried |
+| 3 | INFRA: quota, capacity, lane lock, tester invalid three times | retried once (`retry_on_exit_codes: [3, 75]`) |
+| 4 | stopped at `--max-wall` | an earlier leg: progress; the final gate call: fails, rerun the job |
 
-**Open:** `bench-minor` takes 10 to 12 hours and a hosted job stops at 6.
-Either `run_lane.py` detaches (an EC2 lane controller that uploads the
-receipt to S3, with `--detach` / `--attach <state-uri>` split across two
-jobs), or bench-minor runs as its own workflow. Patch releases (about 3.5 h)
-fit as is.
+Only one lane runs per account at a time (an S3 lock in run_lane).
 
 ## Receipt schema (`rvoip-bench-lane-receipt-v1`)
 
+The benchmark work owns the lane's CLI, exit codes, receipt schema and verdict
+rules: see `docs/BENCH_GATE_INTERFACE.md` (it lands with the harness PR).
+This file is only the release side of that contract.
+
 The collector (`gates.py collect`) rejects the gate unless the receipt has
-the schema, the gate's profile, the measured commit equal to the gate
-receipt's candidate, status `PASS` or `WARN`, and an empty `failures`. The
-rest of the schema is for the reports; field names below are the proposal.
+the schema, the gate's profile (`release` or `minor`), `candidate_sha` equal
+to the gate receipt's candidate, and `status` `PASS` or `WARN`. WARN, a likely
+improvement with a proposed new R, passes the gate; the receipt's `reasons`
+say why.
 
-```json
-{
-  "schema": "rvoip-bench-lane-receipt-v1",
-  "profile": "release",
-  "candidate_sha": "<40-hex commit measured>",
-  "status": "PASS | WARN | FAIL",
-  "failures": [],
-  "warnings": ["R1: 1.05 x R trial passed; record a new R after review"],
-  "started_at": "<ISO 8601 UTC>",
-  "ended_at": "<ISO 8601 UTC>",
-  "environment": {
-    "env_id": "<instance types + AMI + caller build, the baseline key>",
-    "dut_instance_type": "c8i.4xlarge",
-    "caller_instance_type": "c8in.24xlarge",
-    "caller_count": 2,
-    "ami_id": "ami-...",
-    "caller_build_sha256": "<64-hex>",
-    "dut_build_sha256": "<64-hex>"
-  },
-  "baseline": {
-    "path": "crates/sip/rvoip-sip/perf-baselines/rfc7502/<env-id>/<file>.json",
-    "sha256": "<64-hex>"
-  },
-  "rows": [
-    {
-      "id": "R1",
-      "transport": "tls",
-      "media": "none",
-      "hold_seconds": 0,
-      "recorded_rate_cps": 5384,
-      "result": "PASS | WARN | FAIL",
-      "trials": [
-        {
-          "rate_factor": 0.95,
-          "rate_cps": 5114,
-          "duration_seconds": 180,
-          "valid": true,
-          "attempts": 920520,
-          "failures": 0,
-          "result": "PASS",
-          "evidence_uri": "s3://<bucket>/release/<run>/bench/R1/t1.tar.gz",
-          "evidence_sha256": "<64-hex>"
-        }
-      ],
-      "latency": {
-        "rate_factor": 0.9,
-        "srd_ms": {"p50": 0.0, "p99": 0.0, "p99_9": 0.0},
-        "sdd_ms": {"p50": 0.0, "p99": 0.0, "p99_9": 0.0},
-        "tolerance_pct": 25,
-        "floor_ms": 10,
-        "result": "PASS"
-      }
-    }
-  ],
-  "deviations": [
-    "10 s establishment threshold",
-    "warm-up at r/2, unscored",
-    "fresh DUT process per trial",
-    "rate quantum 4",
-    "503 with Retry-After counted as DUT failure"
-  ],
-  "report": {"path": "rfc7502-report.md", "sha256": "<64-hex>"}
-}
-```
-
-`report` is required for the `minor` profile and is attached to the GitHub
-release.
+The tester builds (`rvoip-loadgen`, `ea-uas`) and the lane AMI are pinned per
+env-id in `crates/sip/rvoip-sip/perf-baselines/rfc7502/<env-id>/env.json`;
+`perf-baselines/rfc7502/ENVIRONMENT` names the current env-id. run_lane
+fetches and verifies those builds and exits 2 if the lane's AMI differs.
 
 ## Reuse
 
 The bench gates hash `Cargo.toml`, `Cargo.lock`, `crates/foundation/**`,
-`crates/media/**`, `crates/sip/**`, `crates/tools/**`, `scripts/bench/**`
-and `infra/aws/bench/**`, plus what every gate hashes: `rust-toolchain.toml`,
+`crates/media/**`, `crates/sip/**` (which includes the recorded rates and pinned environment under `crates/sip/rvoip-sip/perf-baselines/rfc7502/**`), `crates/tools/**`, `scripts/bench/**`
+`infra/aws/bench/**` and `scripts/release/bench_gate.py`, plus what every gate hashes: `rust-toolchain.toml`,
 `scripts/release/gates.py`, `.config/**`, `.github/workflows/**` and
 `deny.toml`. Hashing is version-normalized, so the bump commit's
 `release-patch` run reuses the candidate's `bench-release` receipt (and its

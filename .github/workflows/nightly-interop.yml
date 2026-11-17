@@ -19,9 +19,11 @@
 
 name: nightly-interop
 
+# Runs inside the nightly qualification (nightly-qualification.yml), whose
+# result is the one place a nightly failure shows up, instead of on its own
+# schedule where it failed silently for a week.
 on:
-  schedule:
-    - cron: "17 3 * * *"
+  workflow_call: {}
   workflow_dispatch: {}
 
 permissions:

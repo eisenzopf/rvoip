@@ -256,6 +256,32 @@ class AwsReleaseFanoutTests(unittest.TestCase):
             }
             self.assertEqual(set(decision["deferred_running"]), deferred_names)
 
+    def test_scoped_cutoff_stops_only_workers_that_depend_on_the_failure(self) -> None:
+        manifest = self.cutoff_manifest()
+        states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}
+        bounded = next(w for w in manifest["workers"] if w["id"] == "bounded")
+        deferred = [w for w in manifest["workers"] if w["resource_class"] in fanout.DEFERRED_RESOURCE_CLASSES]
+        dependent, independent = deferred[0], deferred[1]
+        dependencies = {gate: set() for worker in manifest["workers"] for gate in worker["gates"]}
+        dependencies[dependent["gates"][0]] = {bounded["gates"][0]}
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            self.write_result_only(downloads, manifest, "bounded", status="FAIL")
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states, dependencies=dependencies
+            )
+            self.assertTrue(decision["scoped"])
+            self.assertTrue(decision["should_stop"])
+            self.assertEqual(decision["deferred_running"], [dependent["name"]])
+            self.assertEqual(decision["deferred_independent"], [independent["name"]])
+            # No dependency on the failure: nothing is stopped at all.
+            del dependencies[dependent["gates"][0]]
+            decision = fanout.early_failure_decision(
+                manifest=manifest, downloads=downloads, states=states, dependencies=dependencies
+            )
+            self.assertFalse(decision["should_stop"])
+            self.assertEqual(len(decision["deferred_independent"]), 2)
+
     def test_early_failure_cutoff_never_stops_a_clean_candidate(self) -> None:
         manifest = self.cutoff_manifest()
         states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}

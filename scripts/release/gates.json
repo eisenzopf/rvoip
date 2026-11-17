@@ -2758,6 +2758,7 @@
         "command.log"
       ],
       "id": "interop.freeswitch-down-before-asterisk",
+      "interop_lane": "asterisk",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -2801,6 +2802,7 @@
         "command.log"
       ],
       "id": "interop.asterisk-up",
+      "interop_lane": "asterisk",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -2853,6 +2855,7 @@
         "command.log"
       ],
       "id": "interop.asterisk-matrix",
+      "interop_lane": "asterisk",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -2896,6 +2899,7 @@
         "command.log"
       ],
       "id": "interop.asterisk-down-after",
+      "interop_lane": "asterisk",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -2928,8 +2932,7 @@
         "asterisk-down"
       ],
       "dependencies": [
-        "source.clean-start",
-        "interop.asterisk-down-after"
+        "source.clean-start"
       ],
       "display_command": "<local-path>",
       "estimated_seconds": 1,
@@ -2939,6 +2942,7 @@
         "command.log"
       ],
       "id": "interop.asterisk-down-before-freeswitch",
+      "interop_lane": "freeswitch",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -2982,6 +2986,7 @@
         "command.log"
       ],
       "id": "interop.freeswitch-up",
+      "interop_lane": "freeswitch",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3034,6 +3039,7 @@
         "command.log"
       ],
       "id": "interop.freeswitch-matrix",
+      "interop_lane": "freeswitch",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3077,6 +3083,7 @@
         "command.log"
       ],
       "id": "interop.freeswitch-down-after",
+      "interop_lane": "freeswitch",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3120,6 +3127,7 @@
         "command.log"
       ],
       "id": "interop.restore-asterisk-down",
+      "interop_lane": "freeswitch",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3163,6 +3171,7 @@
         "command.log"
       ],
       "id": "interop.restore-freeswitch-down",
+      "interop_lane": "freeswitch",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3202,8 +3211,7 @@
         "perf_listener"
       ],
       "dependencies": [
-        "source.clean-start",
-        "interop.restore-freeswitch-down"
+        "source.clean-start"
       ],
       "display_command": "cargo build -p rvoip-sip --release --example perf_listener",
       "estimated_seconds": 429,
@@ -3213,6 +3221,7 @@
         "command.log"
       ],
       "id": "interop.sipp-build",
+      "interop_lane": "sipp",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3256,6 +3265,7 @@
         "command.log"
       ],
       "id": "interop.sipp-start",
+      "interop_lane": "sipp",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3304,6 +3314,7 @@
         "command.log"
       ],
       "id": "interop.sipp-matrix",
+      "interop_lane": "sipp",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3347,6 +3358,7 @@
         "command.log"
       ],
       "id": "interop.sipp-stop",
+      "interop_lane": "sipp",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -3390,6 +3402,7 @@
         "command.log"
       ],
       "id": "interop.strict-ua",
+      "interop_lane": "sipp",
       "kind": "interop",
       "legacy": {
         "mode": "interop",
@@ -5529,6 +5542,7 @@
         "command.log"
       ],
       "id": "interop.remote-libsrtp",
+      "interop_lane": "libsrtp",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -5625,6 +5639,43 @@
         75
       ],
       "timeout_minutes": 75,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/**",
+        "scripts/release.py"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "python3",
+        "scripts/release.py",
+        "package-check"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "python3 scripts/release.py package-check",
+      "estimated_seconds": 3600,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "package.archives",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "every publishable crate builds from its packaged archive",
+      "resource_class": "github-evidence",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 180,
       "working_directory": "."
     },
     {
@@ -6528,8 +6579,7 @@
         "jambonz-up"
       ],
       "dependencies": [
-        "interop.jambonz-latest",
-        "interop.freeswitch-down-after"
+        "interop.jambonz-latest"
       ],
       "display_command": "env JAMBONZ_RECEIPT_DIR={artifact_dir} bash infra/release-runners/interop-lifecycle.sh jambonz-up",
       "estimated_seconds": 240,
@@ -6539,6 +6589,7 @@
         "command.log"
       ],
       "id": "interop.jambonz-up",
+      "interop_lane": "jambonz",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6586,6 +6637,7 @@
         "command.log"
       ],
       "id": "interop.jambonz-matrix",
+      "interop_lane": "jambonz",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6625,6 +6677,7 @@
         "command.log"
       ],
       "id": "interop.jambonz-down",
+      "interop_lane": "jambonz",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6663,6 +6716,7 @@
         "command.log"
       ],
       "id": "interop.amr-rate-sweep.up",
+      "interop_lane": "amr-sweep",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6709,6 +6763,7 @@
         "command.log"
       ],
       "id": "interop.amr-rate-sweep.amrnb-udp",
+      "interop_lane": "amr-sweep",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6755,6 +6810,7 @@
         "command.log"
       ],
       "id": "interop.amr-rate-sweep.amrwb-udp",
+      "interop_lane": "amr-sweep",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6801,6 +6857,7 @@
         "command.log"
       ],
       "id": "interop.amr-rate-sweep.amrnb-tls",
+      "interop_lane": "amr-sweep",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6847,6 +6904,7 @@
         "command.log"
       ],
       "id": "interop.amr-rate-sweep.amrwb-tls",
+      "interop_lane": "amr-sweep",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -6888,6 +6946,7 @@
         "command.log"
       ],
       "id": "interop.amr-rate-sweep.down",
+      "interop_lane": "amr-sweep",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
@@ -8031,10 +8090,211 @@
         "command.log"
       ],
       "id": "preflight.interop-01",
+      "interop_lane": "interop-01",
       "kind": "remote",
       "legacy": null,
       "max_infrastructure_retries": 1,
       "name": "ec2-interop worker 01 infrastructure acceptance",
+      "resource_class": "ec2-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/aws-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/aws_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "ec2-interop",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-interop {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.interop-02",
+      "interop_lane": "interop-02",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "ec2-interop worker 02 infrastructure acceptance",
+      "resource_class": "ec2-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/aws-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/aws_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "ec2-interop",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-interop {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.interop-03",
+      "interop_lane": "interop-03",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "ec2-interop worker 03 infrastructure acceptance",
+      "resource_class": "ec2-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/aws-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/aws_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "ec2-interop",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-interop {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.interop-04",
+      "interop_lane": "interop-04",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "ec2-interop worker 04 infrastructure acceptance",
+      "resource_class": "ec2-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/aws-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/aws_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "ec2-interop",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-interop {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.interop-05",
+      "interop_lane": "interop-05",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "ec2-interop worker 05 infrastructure acceptance",
+      "resource_class": "ec2-interop",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        ".github/workflows/release-qualify.yml",
+        "infra/release-runners/aws-release-startup.sh",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "scripts/release/build_gate_catalog.py",
+        "scripts/release/gates.py",
+        "scripts/release/gates.json",
+        "scripts/release/aws_fanout.py"
+      ],
+      "always_fresh": true,
+      "category": "Remote release framework",
+      "command": [
+        "bash",
+        "infra/release-runners/release-infrastructure-preflight.sh",
+        "ec2-interop",
+        "{artifact_dir}"
+      ],
+      "dependencies": [],
+      "display_command": "bash infra/release-runners/release-infrastructure-preflight.sh ec2-interop {artifact_dir}",
+      "estimated_seconds": 1,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "preflight.interop-06",
+      "interop_lane": "interop-06",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "ec2-interop worker 06 infrastructure acceptance",
       "resource_class": "ec2-interop",
       "retry_on_exit_codes": [
         75
@@ -10803,6 +11063,7 @@
         "interop.remote-proxies.opensips.rvoip-first.tcp",
         "interop.remote-proxies.opensips.rvoip-first.tls",
         "interop.remote-proxies.opensips.rvoip-first.udp",
+        "package.archives",
         "package.inventory",
         "perf.canonical-2k-current",
         "perf.media-burst.access-edge-microburst",
@@ -10888,13 +11149,14 @@
         "crates/sip/**",
         "crates/tools/**",
         "scripts/bench/**",
-        "infra/aws/bench/**"
+        "infra/aws/bench/**",
+        "scripts/release/bench_gate.py"
       ],
       "always_fresh": false,
       "category": "Performance and resiliency",
       "command": [
         "python3",
-        "{workspace}/scripts/bench/run_lane.py",
+        "{workspace}/scripts/release/bench_gate.py",
         "--profile",
         "release",
         "--candidate",
@@ -10905,7 +11167,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "python3 {workspace}/scripts/bench/run_lane.py --profile release --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
+      "display_command": "python3 {workspace}/scripts/release/bench_gate.py --profile release --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
       "estimated_seconds": 14400,
       "executor": "argv",
       "expected_outputs": [
@@ -10920,9 +11182,10 @@
       "name": "patch-release RFC 7502 confirmation trials",
       "resource_class": "bench-lane",
       "retry_on_exit_codes": [
+        3,
         75
       ],
-      "timeout_minutes": 300,
+      "timeout_minutes": 350,
       "working_directory": "."
     },
     {
@@ -10935,13 +11198,14 @@
         "crates/sip/**",
         "crates/tools/**",
         "scripts/bench/**",
-        "infra/aws/bench/**"
+        "infra/aws/bench/**",
+        "scripts/release/bench_gate.py"
       ],
       "always_fresh": false,
       "category": "Performance and resiliency",
       "command": [
         "python3",
-        "{workspace}/scripts/bench/run_lane.py",
+        "{workspace}/scripts/release/bench_gate.py",
         "--profile",
         "minor",
         "--candidate",
@@ -10952,7 +11216,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "python3 {workspace}/scripts/bench/run_lane.py --profile minor --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
+      "display_command": "python3 {workspace}/scripts/release/bench_gate.py --profile minor --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
       "estimated_seconds": 43200,
       "executor": "argv",
       "expected_outputs": [
@@ -10967,9 +11231,10 @@
       "name": "minor-release RFC 7502 search and overload report",
       "resource_class": "bench-lane",
       "retry_on_exit_codes": [
+        3,
         75
       ],
-      "timeout_minutes": 780,
+      "timeout_minutes": 350,
       "working_directory": "."
     }
   ],
@@ -11238,6 +11503,7 @@
       "interop.sipp-start",
       "interop.sipp-stop",
       "interop.strict-ua",
+      "package.archives",
       "package.inventory",
       "perf.ai-agent",
       "perf.b2bua",
@@ -11458,6 +11724,7 @@
       "interop.sipp-start",
       "interop.sipp-stop",
       "interop.strict-ua",
+      "package.archives",
       "package.inventory",
       "perf.ai-agent",
       "perf.b2bua",
@@ -11671,6 +11938,11 @@
     ],
     "remote-preflight": [
       "preflight.interop-01",
+      "preflight.interop-02",
+      "preflight.interop-03",
+      "preflight.interop-04",
+      "preflight.interop-05",
+      "preflight.interop-06",
       "preflight.performance-01",
       "preflight.performance-02",
       "preflight.performance-03",
@@ -11808,6 +12080,7 @@
       "interop.sipp-start",
       "interop.sipp-stop",
       "interop.strict-ua",
+      "package.archives",
       "package.inventory",
       "perf.ai-agent",
       "perf.b2bua",

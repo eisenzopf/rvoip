@@ -2269,11 +2269,17 @@ def package_release(
     """Package and build-verify every crate once, for the protected publish.
 
     One `cargo package` invocation over every publishable package uses
-    Cargo's local registry overlay, so dependents package and verify against
-    the target-version archives of their workspace dependencies before any
-    of them is on crates.io. The archives, their SHA-256 and the topological
+    Cargo's local registry overlay, so dependents package against the
+    target-version archives of their workspace dependencies before any of
+    them is on crates.io. The archives, their SHA-256 and the topological
     levels go to `output`; `publish --execute --packages output` uploads
     exactly these bytes and nothing it has not seen here.
+
+    Building every archive (`cargo package` without `--no-verify`) takes
+    about 30 minutes on 16 vCPUs, so it is the `package.archives`
+    qualification gate (`package-check`), which the version-bump commit
+    reuses by version-normalized inputs. Here packaging only assembles the
+    same archives, in seconds.
     """
 
     head = ensure_release_state(
@@ -2284,7 +2290,13 @@ def package_release(
     log = ReleaseLog(root, version, "package")
     log.event("start", operation="package", version=version, git_commit=head)
     log.command(
-        ["cargo", "package", "--locked", *[arg for name in ordered for arg in ("-p", name)]],
+        [
+            "cargo",
+            "package",
+            "--locked",
+            "--no-verify",
+            *[arg for name in ordered for arg in ("-p", name)],
+        ],
         root,
     )
     output.mkdir(parents=True, exist_ok=True)
@@ -2328,6 +2340,25 @@ def package_release(
         f"packaged and verified {len(ordered)} crates at {version} in "
         f"{len(manifest['levels'])} topological levels"
     )
+
+
+def package_check(root: Path) -> None:
+    """Build every publishable crate from its packaged archive (a release gate).
+
+    The archives are verified against Cargo's local registry overlay, so the
+    check needs nothing on crates.io and runs on any qualification candidate.
+    It catches files a package forgets to include, which building from the
+    source tree cannot.
+    """
+
+    packages = publishable_packages(cargo_metadata(root, locked=True))
+    ordered = topological_order(packages)
+    run(
+        ["cargo", "package", "--locked", *[arg for name in ordered for arg in ("-p", name)]],
+        cwd=root,
+        capture=False,
+    )
+    print(f"packaged and build-verified {len(ordered)} crates from their archives")
 
 
 def load_package_manifest(
@@ -2722,6 +2753,9 @@ def parser() -> argparse.ArgumentParser:
     )
     commands = result.add_subparsers(dest="command", required=True)
     commands.add_parser("audit", help="read-only local/crates.io version audit")
+    commands.add_parser(
+        "package-check", help="build every crate from its packaged archive (release gate)"
+    )
     notes = commands.add_parser(
         "notes-final", help="require final changelog and release notes on a version bump"
     )
@@ -2797,6 +2831,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "audit":
             audit(root)
+        elif args.command == "package-check":
+            package_check(root)
         elif args.command == "notes-final":
             notes_final(root, args.version, args.if_version_changed_since)
         else:
