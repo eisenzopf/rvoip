@@ -21,10 +21,17 @@ and cryptography goes through a per-connection `RTCCryptoProvider`. The
 `DataChannel::stream_id` returns the SCTP stream id both peers share.
 
 Two behaviours change for every user, including code that only uses
-`rvoip-webrtc`: a relay-only ICE transport policy without a TURN server is
-rejected when the peer connection is built, and a data channel opens only on a
-session whose offer carried it (create it before the offer, or renegotiate),
-because SCTP is no longer started for a media-only session.
+`rvoip-webrtc`:
+
+- **Create data channels before the offer.** SCTP is no longer started for a
+  media-only session, so a data channel opens only on a session whose offer
+  carried it. Migration: call `create_data_channel` before
+  `create_offer`; a channel added to an established media-only session needs
+  a renegotiation (a new offer/answer) before it opens.
+- **Relay-only ICE needs a TURN server.** A peer connection with
+  `IceTransportPolicy::Relay` and no TURN server is rejected when it is
+  built. Migration: configure a TURN server with the relay policy, or use the
+  default `All` policy.
 
 To migrate code that uses `rvoip-rtc` directly, follow upstream's
 [crypto-provider migration guide](https://github.com/webrtc-rs/rtc/blob/master/docs/crypto-provider-migration.md):

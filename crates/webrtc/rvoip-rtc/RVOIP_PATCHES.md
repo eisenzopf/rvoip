@@ -66,6 +66,10 @@ Applied fixes:
    encodings (patch 3). An application that wants a narrowed offer calls
    `RTCRtpTransceiver::set_codec_preferences`; upstream's
    `rtx_codec_for_an_unoffered_primary_is_not_offered` test does so.
+   Kept for 0.5 because rvoip-webrtc's DTMF and codec-negotiation paths (20
+   tests) depend on it. Cleanup candidate for 0.5.x: drop this patch and have
+   rvoip-webrtc set its codec preferences itself, which returns the fork to
+   upstream's `add_track` behaviour.
 
 The supplemental-SSRC fix is applied at the receive path's MID/PT
 demultiplexing boundary. rvoip does not rewrite generated SDP or add a
