@@ -22,8 +22,9 @@ release day:
    `bench-minor` for a minor release).
 2. When the `remote-release` run is green, dispatch **Prepare release PR**
    with `candidate=C` and `qualification_run_id=<that run>`.
-3. The bump PR's PR Gate starts by itself and also checks that the changelog
-   and release notes are final. Merge it with a merge commit once it and the
+3. The bump PR's PR Gate starts by itself (with the release App; without it,
+   approve the held PR Gate run Prepare links to, see "Without the App") and
+   also checks that the changelog and release notes are final. Merge it with a merge commit once it and the
    benchmark are green.
 4. Dispatch **Release qualification** with `profile=release-patch` (or
    `release-minor`), `candidate=<the bump PR's head commit>`,
@@ -83,6 +84,19 @@ by a repository admin:
    secret `RVOIP_RELEASE_APP_PRIVATE_KEY` (the whole `.pem` file).
 7. If a branch ruleset restricts who may push `release/**` branches or open
    pull requests, add the App to its bypass or actor list.
+
+#### Without the App
+
+The App is optional. When either setting is unset, Prepare warns ("Prepare
+release PR fallback") and uses `GITHUB_TOKEN` to push the branch and open the
+PR. GitHub then holds the PR's own `pull_request` PR Gate run until a
+maintainer approves it, because a bot opened the PR, and the PR cannot merge
+until that run passes; a dispatched copy of the gate does not count. Prepare
+dispatches one anyway as an early signal, then writes the held run's link to
+its job summary, a warning annotation and a comment on the PR. A maintainer
+opens the link and clicks **Approve and run** (about 25 minutes of gate after
+that). The workflow never approves runs itself, and no repository approval
+setting changes.
 
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
