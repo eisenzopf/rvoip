@@ -615,6 +615,28 @@ class WorkflowPolicyTests(unittest.TestCase):
             {"perf.rfc7502-release", "perf.rfc7502-minor"} & set(catalog["profiles"]["remote-release"])
         )
 
+    def test_bench_reservations_are_released_after_the_last_bench_job(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        jobs = dict(
+            (block.split(":\n", 1)[0], block)
+            for block in re.split(r"\n(?=  [a-z0-9-]+:\n)", workflow.split("\njobs:\n", 1)[1])
+        )
+        cleanup = jobs["  cleanup-bench"]
+        self.assertIn("if: always() && needs.plan.outputs.bench_shard_count != '0'", cleanup)
+        self.assertIn("needs: [plan, bench-leg-1, bench-leg-2, gate-bench]", cleanup)
+        self.assertIn("role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}", cleanup)
+        self.assertIn("LANE_RUN_IDS: bench-*-${{ github.run_id }}", cleanup)
+        self.assertIn("Name=tag:rvoip-bench,Values=true", cleanup)
+        self.assertIn("aws ec2 cancel-capacity-reservation", cleanup)
+        self.assertIn("aws ec2 terminate-instances", cleanup)
+        self.assertIn('test -z "$remaining"', cleanup)
+        # A reservation held for the next leg must survive the earlier legs.
+        for name, block in jobs.items():
+            if name.strip() != "cleanup-bench":
+                with self.subTest(job=name.strip()):
+                    self.assertNotIn("cancel-capacity-reservation", block)
+        self.assertIn("cleanup-bench", jobs["  collect"].split("\n    needs:", 1)[1].split("\n", 1)[0])
+
     def test_hosted_release_shards_restore_a_compiler_cache(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         hosted = workflow.split("\n  gate-hosted:\n", maxsplit=1)[1].split("\n  gate-bench:\n", maxsplit=1)[0]

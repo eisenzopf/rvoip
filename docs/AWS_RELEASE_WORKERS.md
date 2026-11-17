@@ -225,6 +225,12 @@ rvoip-expires-at=<ISO 8601 UTC, creation + 4h>
   (`docs/release/BENCH_GATE_INTERFACE.md`). It runs only for the
   `bench-release`, `bench-minor`, `release-patch` and `release-minor` profiles
   and only when the bench receipt cannot be reused.
+- `cleanup-bench` runs after the last bench job, even on cancel, and cancels
+  the capacity reservations (and terminates any bench host) tagged with this
+  run's lane run id `bench-*-<run id>`. Earlier legs never cancel: a
+  reservation held at `--max-wall` must survive for the next leg. Each
+  reservation also has a limited end date, so a missed cleanup expires on
+  its own. The job fails if an active reservation remains.
 
 A requalification whose plan reuses every EC2 gate (a version-only bump on top
 of a qualified candidate) creates no worker at all: `aws_shard_count` is zero,
