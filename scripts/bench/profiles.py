@@ -43,6 +43,9 @@ PROFILES = {
     # Functional check of a lane: one short trial per row (never a gate; --r0 ROW=sps overrides).
     'smoke': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'smoke', 'seconds': 30, 'warmup_seconds': 10,
               'rates': {'R1': 400, 'R5': 400, 'R2': 200, 'R6': 200}, 'budget_hours': 1.5},
+    # Tester diagnostics: smoke-style trials against ea-uas (no DUT), e.g. the callers' receive path.
+    'diag': {'rows': ['R2'], 'method': 'smoke', 'seconds': 120, 'warmup_seconds': 30,
+             'rates': {'R1': 9600, 'R5': 9600, 'R2': 2400, 'R6': 2400}, 'budget_hours': 1.5, 'ea_uas': True},
     # RFC 7502 §6.1 testbed baseline: the callers against ea-uas (no DUT).
     'baseline': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'search', 'algorithm': 'bisect',
                  'confirmations': 1, 'resolution': 0.05, 'report': True, 'budget_hours': 6,

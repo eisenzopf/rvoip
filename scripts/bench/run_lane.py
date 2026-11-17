@@ -521,7 +521,7 @@ def search_record(trial, s3_run):
 
 def run_smoke(ctx, row_id):
     """smoke: one short trial per row at --r0 (functional check of a lane; never a gate)."""
-    p = profiles.PROFILES['smoke']
+    p = profiles.PROFILES[ctx.args.profile]
     row = profiles.ROWS[row_id]
     rate = profiles.quantize(ctx.args.r0.get(row_id) or p['rates'][row_id], profiles.TRIAL['quantum'] * 2)
     seconds = ctx.args.smoke_seconds or p['seconds']
@@ -841,7 +841,7 @@ def parse_args(argv):
     args = p.parse_args(argv)
     args.started = time.time()
     args.diag_variants = args.diag_variants or ['none']
-    if args.diag_variants != ['none'] and (args.profile != 'smoke' or args.record):
+    if args.diag_variants != ['none'] and (args.profile not in ('smoke', 'diag') or args.record):
         raise Usage('--diag-variant is a smoke-only diagnostic and is never recorded')
     if not re.fullmatch(r'[0-9a-f]{40}', args.candidate):
         raise Usage('--candidate must be a 40-hex sha')
