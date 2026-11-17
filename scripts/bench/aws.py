@@ -108,7 +108,11 @@ class Aws:
     # ---- SSM
     def send(self, ids, script, comment, timeout_s):
         """Run a bash script on instances; returns the command id."""
-        params = {'commands': [script], 'executionTimeout': [str(int(timeout_s))]}
+        # AWS-RunShellScript runs /bin/sh (dash on Ubuntu): run the script under bash.
+        wrapped = ("f=$(mktemp /tmp/rvoip-bench-ssm-XXXXXX.sh)\n"
+                   "cat > \"$f\" <<'RVOIP_BENCH_SSM_EOF'\n%s\nRVOIP_BENCH_SSM_EOF\n"
+                   "bash \"$f\"; rc=$?; rm -f \"$f\"; exit $rc" % script)
+        params = {'commands': [wrapped], 'executionTimeout': [str(int(timeout_s))]}
         out = self.call('ssm', 'send-command', '--instance-ids', *ids, '--document-name', 'AWS-RunShellScript',
                         '--comment', comment[:100], '--timeout-seconds', '600',
                         '--parameters', json.dumps(params))
