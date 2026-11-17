@@ -5,7 +5,8 @@
 ### Highlights
 
 0.5.0 is a breaking minor release about carrier-scale throughput and overload
-behaviour. A new opt-in media executor, `MediaExecutorConfig::v2()`, runs
+behaviour, and it moves the whole dependency set forward. A new opt-in media
+executor, `MediaExecutorConfig::v2()`, runs
 media on dedicated, CPU-pinned lanes sized by a host plan. Receive loops and
 paced sends run inside one poller per lane; inbound SRTP is authenticated,
 decoded and delivered inline on the socket owner and RTP is sent
@@ -25,6 +26,39 @@ call, and media graphs that bridge a SIP leg to an in-process AI run on that
 leg's media lane. The executor v2 CPU-per-call figures below were measured on
 Xeon 6 SMT in production; load qualification of executor v2 is part of the
 0.5.0 release run.
+
+0.5.0 is the first release gated on an RFC 7501/7502 SIP benchmark. The
+release qualification measures the Session Establishment Rate and the
+RFC 6076 latencies of `rvoip-bench-uas`, a terminating UAS on executor v2,
+on a pinned AWS testbed, and renders an RFC 7502-style report. From 0.5.0
+every release must pass it.
+
+Two contact-centre adapters arrive: the experimental `rvoip-webex-byova` for
+Webex Contact Center BYOVA, and the developer-preview `rvoip-amazon-a2a` for
+Amazon Connect external agents (A2A). Neither has been qualified against live
+Cisco or Amazon traffic yet.
+
+The minimum supported Rust version is 1.95 (was 1.91), and the dependencies
+held back in 0.4 move in this release, among them nom 8, axum 0.8, the
+RustCrypto wave with rand 0.10, prost and tonic 0.14, jsonwebtoken 12,
+reqwest 0.13, sqlx 0.9 and web-transport 0.13. Where their types are in
+rvoip's public API, Breaking changes has an entry with the migration. Three
+changes matter even to code that never names those crates:
+
+- **metrics 0.24 and OpenTelemetry 0.33.** rvoip emits into the recorder and
+  global provider the application installs. Install a metrics 0.24 recorder
+  and an OpenTelemetry 0.33 provider, or rvoip's metrics and spans silently
+  disappear.
+- **WebRTC on `rtc` 0.21.1.** `rvoip-rtc` is rebased onto upstream `rtc`
+  0.21.1. Create data channels before the offer, and give the relay-only ICE
+  policy a TURN server.
+- **An explicit rustls provider.** Every rustls client and server rvoip
+  builds names ring, so an application that links both rustls providers no
+  longer panics at its first TLS connection.
+
+CI runs more of the test suite: `cargo test --workspace --all-features`
+passes again, and a policy test checks that the sharded SIP codec gate runs
+every eligible test target.
 
 ### Breaking changes
 
@@ -99,10 +133,15 @@ Each item has a one-line migration.
   terminal event was already published. Migration: add an arm (or a
   wildcard) to exhaustive `match`es on `RvoipError`, and do not report a
   second failure for that connection.
-- **`Transport` gains `WebexByova`** for the new Webex Contact Center BYOVA
-  adapter. `rvoip-core-traits`' `Transport` is not `#[non_exhaustive]`.
+- **`RvoipError` gains `OutboundPeerUnavailableBeforeWrite`.** The enum is
+  not `#[non_exhaustive]`. rvoip-sip returns it when an outbound call's
+  `OutboundPeerLease` refuses dispatch, before any INVITE is sent.
   Migration: add an arm (or a wildcard) to exhaustive `match`es on
-  `Transport`.
+  `RvoipError`.
+- **`Transport` gains `WebexByova` and `AmazonA2a`** for the new Webex
+  Contact Center BYOVA and Amazon Connect A2A adapters. Migration: add a
+  wildcard arm to `match`es on `Transport`, which is now
+  `#[non_exhaustive]`.
 - **`rvoip_vapi::raw_session` is removed** (`RawVapiSession`,
   `RawVapiItem`). It opened an ordered, unpaced Vapi socket outside the
   Orchestrator. Migration: originate or attach the call through
@@ -120,8 +159,11 @@ Each item has a one-line migration.
 
 ### Dependencies
 
-The low-risk part of the grouped dependabot update (#298). No public API
-changes: none of the crates below has a type in a published rvoip API.
+0.5.0 takes the full dependency set. The upgrades whose types are in rvoip's
+public API, and the larger ones, have their own entries under Breaking
+changes and Changed. This section is the low-risk part of the grouped
+dependabot update (#298). No public API changes: none of the crates below
+has a type in a published rvoip API.
 
 - **thiserror** 1.0 → 2.0 across the workspace.
 - **base64** 0.22 → 0.23 and **pem** 3 → 4 (pem 4 only moves to base64 0.23).
@@ -147,30 +189,9 @@ changes: none of the crates below has a type in a published rvoip API.
   quinn 0.11.12, tokio-rustls 0.26.6, http 1.5.0, hickory-server 0.26.3,
   serde_with 3.24.0, moka 0.12.16 and others in #298.
 
-Not in this release, coordinated with downstream applications: **metrics**
-0.23 → 0.24 with **metrics-exporter-prometheus** 0.16 → 0.18, and
-**opentelemetry** / **opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33
-with **tracing-opentelemetry** 0.33 → 0.34. rvoip emits into whatever metrics
-recorder and OpenTelemetry global provider the application installs, and those
-are keyed to the crate's semver line. Moving rvoip alone would make its metrics
-silently disappear for applications whose recorder is still on metrics 0.23, and
-the OpenTelemetry globals have the same coupling. Both move in a later release
-together with the applications that consume them.
-
-Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
-and axum 0.8 / tower 0.5, as planned. Also held back:
-jsonwebtoken 11, validator 0.21, ordered-float 5, prost 0.14, redis 1.x,
-quick-xml 0.42 and web-transport 0.13 (their types are in rvoip's public
-API); opus 0.4 and cpal 0.18 (bundled libopus 1.6 and changed audio-device
-behavior); sqlx 0.9, serial_test 4, sysinfo 0.39 and aws-smithy-types 1.8
-(they need a newer Rust than the 1.91 MSRV); password-hash 0.6 (argon2 0.5
-needs 0.5); and the webrtc-util 0.17, webrtc 0.21 and hyper 1 dev-dependency
-bumps (they break the test fixtures and examples built on the older APIs).
-- **`RvoipError` gains `OutboundPeerUnavailableBeforeWrite`.** The enum is
-  not `#[non_exhaustive]`. rvoip-sip returns it when an outbound call's
-  `OutboundPeerLease` refuses dispatch, before any INVITE is sent.
-  Migration: add an arm (or a wildcard) to exhaustive `match`es on
-  `RvoipError`.
+Nothing on 0.4's held-back list is still held back in a published crate.
+The one remaining old line is test-only: rvoip-webrtc's TURN test fixtures
+keep their `webrtc-util` 0.12 dev-dependency.
 
 ### SIP
 
@@ -1272,7 +1293,7 @@ outcome unchanged, and add no configuration.
   `rvoip_core::Config::lane_inline_graph_delivery`, caller audio reaches the
   AI session from the SIP leg's lane without any task hop (#363).
 
-### Webex BYOVA and Vapi
+### Webex BYOVA, Amazon Connect A2A and Vapi
 
 - New experimental `rvoip-webex-byova` adapter for Webex Contact Center BYOVA
   (Bring Your Own Virtual Agent), built on the prototype protocol engine from
@@ -1323,6 +1344,11 @@ outcome unchanged, and add no configuration.
   publish every event on an exclusive ordered channel stamped with the audio
   bytes forwarded before it (`VapiOrderedEvent::audio_offset`). This replaces
   the removed `raw_session` bypass.
+- New developer-preview `rvoip-amazon-a2a` adapter for Amazon Connect
+  external agents (A2A), with native rvoip media bridging, bounded A2A
+  WebSocket framing, turn traces, interruption and hand-back, as
+  `Transport::AmazonA2a`. Exposed by the optional `amazon-a2a` facade
+  feature. Not yet qualified against live Amazon Connect traffic.
 
 ### WebRTC
 
@@ -1500,6 +1526,17 @@ outcome unchanged, and add no configuration.
   four minutes to the Asterisk gate and two to the FreeSWITCH gate. The
   compatibility and RFC matrices list them as release-gated with protected
   evidence pending the first qualification run.
+- CI test coverage (#418, #436–#440). The `codec-features-sip` PR gate runs
+  as four concurrent shards, and a policy test checks that together they run
+  every eligible test target exactly once and one clippy over every target.
+  `cargo test --workspace --all-features` passes again. The facade bundle
+  contracts now check each bundle's declared feature closure, read from the
+  manifest, instead of `cfg!`, so they hold when every feature is on. The
+  rvoip-sip perf scenarios report as ignored in debug builds instead of
+  panicking; release builds still run them. Fixtures that failed only under
+  all features or on busy runners are fixed in the tests, not the library: a
+  reused RTP sequence space, a stale retained-capacity snapshot, and fixed
+  ports inside the ephemeral range.
 
 ### Documentation
 
@@ -1529,11 +1566,6 @@ outcome unchanged, and add no configuration.
 - The Webex BYOVA implementation specification moves to
   `docs/WEBEX_BYOVA_IMPLEMENTATION_SPEC.md` and records the 0.5 adapter
   integration, its JWS assumptions and the remaining gates.
-- Add the developer-preview `rvoip-amazon-a2a` Connect external-agent adapter,
-  with native rvoip media bridging, bounded A2A WebSocket framing, turn traces,
-  interruption, and hand-back. Exposed by the optional `amazon-a2a` facade
-  feature. Adds `Transport::AmazonA2a`; downstream exhaustive transport matches
-  must handle the new variant. Live Connect qualification remains pending.
 
 ## 0.4.0 — 2026-10-11
 
