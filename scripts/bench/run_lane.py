@@ -809,6 +809,8 @@ def parse_args(argv):
                                                    'finish before it (exit 4, resume later)')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--record', action='store_true', help='minor/full/baseline: write rates.json for the env-id')
+    p.add_argument('--record-out', help='with --record: write rates.json to this path instead of into the checkout '
+                                        '(also uploaded beside the receipt)')
     p.add_argument('--rows', help='comma list overriding the profile rows (debug)')
     p.add_argument('--r0', action='append', default=[], help='ROW=sps initial rate for a search row')
     p.add_argument('--cap', action='append', default=[], help='ROW=sps tester cap override')
@@ -1005,7 +1007,7 @@ def main(argv=None):
         if profile.get('report'):
             report = score.render_report(ctx, rows, env_id, (rates or {}).get('baseline_sps'))
         if args.record and status in ('PASS', 'WARN'):
-            score.record_rates(rows, env_id, BASELINES, ctx, args.profile)
+            score.record_rates(rows, env_id, BASELINES, ctx, args.profile, out=args.record_out)
     except WallClock as error:
         log('stopping (exit 4, resume later):', error)
         return EXIT_WALL

@@ -226,10 +226,14 @@ def render_report(ctx, rows, env_id, baseline=None):
     return paths
 
 
-def record_rates(rows, env_id, baselines, ctx, profile):
-    """Write perf-baselines/rfc7502/<env-id>/rates.json from a minor/full (R) or baseline (tester caps) run."""
-    path = Path(baselines) / env_id / 'rates.json'
-    current = json.loads(path.read_text()) if path.exists() else {
+def record_rates(rows, env_id, baselines, ctx, profile, out=None):
+    """Write perf-baselines/rfc7502/<env-id>/rates.json from a minor/full (R) or baseline (tester caps) run.
+
+    `out` writes the result there instead of into the checkout (a release gate must not modify its tree);
+    the in-tree file is still the starting point that gets merged with this run's rows."""
+    source = Path(baselines) / env_id / 'rates.json'
+    path = Path(out) if out else source
+    current = json.loads(source.read_text()) if source.exists() else {
         'schema': 'rvoip-rfc7502-rates-v1', 'env_id': env_id, 'rows': {}, 'tester_caps': {}, 'baseline_sps': {}}
     now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     for r in rows:
