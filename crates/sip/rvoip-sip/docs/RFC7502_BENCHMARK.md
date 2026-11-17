@@ -227,6 +227,23 @@ AZs mid-environment. The CI orchestrator policy allows `RunInstances` only in
 the template subnet, so `--az` works from an admin session until that policy
 lists the other subnets (a Terraform change).
 
+`minor` and `full` also hold an On-Demand Capacity Reservation while each leg
+runs (`--reserve-capacity`; on by default for those two, off for the others,
+`--no-reserve-capacity` turns it off). Before a leg launches, the orchestrator
+creates one targeted reservation per instance type (1 DUT + N callers; one
+reservation when the types match) in the lane's AZ and cluster placement group,
+and launches only into it. A capacity miss while reserving is INFRA before
+anything is recorded, exactly like a launch miss; there is no fallback to
+unreserved launches. Every exit path cancels the reservations: a verdict,
+INFRA, a `--max-wall` stop, and SIGINT/SIGTERM. A resumed leg reserves again.
+Each reservation also ends by itself at the lane's `rvoip-expires-at`, and
+every lane start cancels reservations tagged for its env-id that no live run
+holds, so a crashed orchestrator cannot keep billing. A reservation in use
+costs nothing beyond the instances it holds. The receipt lists the
+reservations under `environment.capacity_reservations`. The orchestrator
+policy has no Capacity Reservation actions yet (the same Terraform item as the
+subnets).
+
 The AMI (`scripts/bench/ami/bake.py`) is Ubuntu 24.04 plus the E74 host
 tuning, applied at every boot by `rvoip-bench-tune.service`: XPS, NIC IRQs on
 the SMT sibling of the busy core, 500 us RX/TX coalescing, RX ring 8,192,

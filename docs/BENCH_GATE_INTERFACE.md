@@ -93,6 +93,10 @@ JSON style as `gates.py` (sorted keys, no whitespace).
     "dut_instance_type": "c8i.4xlarge", "caller_instance_type": "c8in.24xlarge",
     "caller_count": 2, "sources_per_caller": 2, "connections_per_source": 8,
     "ami_id": "ami-...", "kernel": "6.8.0-...",
+    "capacity_reservations": [
+      {"id": "cr-...", "instance_type": "c8in.24xlarge", "count": 2, "az": "us-west-2b",
+       "created_at": "...Z", "cancelled_at": "...Z"}
+    ],
     "dut_sha256": "...", "caller_sha256": "...", "ea_uas_sha256": null
   },
   "baseline": {"path": "crates/sip/rvoip-sip/perf-baselines/rfc7502/<env-id>/rates.json", "sha256": "..."},

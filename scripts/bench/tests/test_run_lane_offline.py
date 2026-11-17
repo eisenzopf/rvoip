@@ -19,7 +19,9 @@ import json
 from pathlib import Path
 import re
 import shlex
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -77,6 +79,8 @@ class World:
         self.dut_git_sha = CANDIDATE[:16]
         self.dut_starts = True         # False: dut-start fails (the process never writes ready.json)
         self.dut_clean_shutdown = True
+        self.reserve_short = ()        # instance types create-capacity-reservation has no capacity for
+        self.signal_on = None          # (agent command, signum): the orchestrator gets that signal there
         self.__dict__.update(kw)
 
 
@@ -102,6 +106,7 @@ class Cloud:
     def __init__(self, root, world, clock):
         self.root, self.world, self.clock = Path(root), world, clock
         self.instances, self.commands = {}, {}
+        self.reservations, self.tokens = {}, {}
         self.launched = []          # instance ids, in launch order
         self.calls = []             # every argv
         self.summarized = []        # trial prefixes the fake agent summarized
@@ -196,8 +201,15 @@ class Cloud:
         for _ in range(int(opt(args, '--count'))):
             n = len(self.instances) + 1
             iid = 'i-%017x' % n
+            target = json.loads(opt(args, '--capacity-reservation-specification') or '{}')
+            reserved = target.get('CapacityReservationTarget', {}).get('CapacityReservationId')
+            if reserved:
+                r = self.reservations[reserved]
+                assert r['State'] == 'active' and r['InstanceType'] == itype and r['AvailableInstanceCount'] > 0, r
+                r['AvailableInstanceCount'] -= 1
             self.instances[iid] = {
                 'InstanceId': iid, 'InstanceType': itype, 'ImageId': AMI, 'State': {'Name': 'running'},
+                'CapacityReservationId': reserved,
                 'Placement': {'AvailabilityZone': json.loads(opt(args, '--placement') or '{}').get(
                     'AvailabilityZone', 'us-west-2b'), 'GroupName': 'rvoip-bench'},
                 'NetworkInterfaces': [{'PrivateIpAddresses': [
@@ -238,7 +250,60 @@ class Cloud:
     def ec2_terminate_instances(self, args):
         for iid in multi(args, '--instance-ids'):
             self.instances[iid]['State'] = {'Name': 'terminated'}
+            reserved = self.reservations.get(self.instances[iid].get('CapacityReservationId'))
+            if reserved and reserved['State'] == 'active':
+                reserved['AvailableInstanceCount'] += 1
         return {}
+
+    def ec2_describe_placement_groups(self, args):
+        name = opt(args, '--group-names')
+        return {'PlacementGroups': [{'GroupName': name, 'GroupArn': 'arn:aws:ec2:us-west-2:1:placement-group/' + name}]}
+
+    def add_reservation(self, itype, count, tags, az='us-west-2b', pg=None, end=None):
+        cid = 'cr-%017x' % (len(self.reservations) + 1)
+        self.reservations[cid] = {
+            'CapacityReservationId': cid, 'InstanceType': itype, 'AvailabilityZone': az, 'State': 'active',
+            'TotalInstanceCount': count, 'AvailableInstanceCount': count, 'PlacementGroupArn': pg, 'EndDate': end,
+            'Tags': [{'Key': k, 'Value': v} for k, v in tags.items()]}
+        return cid
+
+    def ec2_create_capacity_reservation(self, args):
+        itype = opt(args, '--instance-type')
+        if itype in self.world.reserve_short:
+            raise aws_mod.AwsError('aws ec2 create-capacity-reservation: An error occurred (InsufficientInstanceCapacity) '
+                                   'when calling the CreateCapacityReservation operation: no %s capacity' % itype)
+        assert opt(args, '--instance-match-criteria') == 'targeted' and opt(args, '--end-date-type') == 'limited'
+        token = opt(args, '--client-token')
+        if token not in self.tokens:
+            tags = {t['Key']: t['Value'] for t in json.loads(opt(args, '--tag-specifications'))[0]['Tags']}
+            self.tokens[token] = self.add_reservation(itype, int(opt(args, '--instance-count')), tags,
+                                                      opt(args, '--availability-zone'),
+                                                      opt(args, '--placement-group-arn'), opt(args, '--end-date'))
+        return {'CapacityReservation': dict(self.reservations[self.tokens[token]])}
+
+    def ec2_describe_capacity_reservations(self, args):
+        found = list(self.reservations.values())
+        ids = multi(args, '--capacity-reservation-ids')
+        if ids:
+            found = [r for r in found if r['CapacityReservationId'] in ids]
+        for f in multi(args, '--filters'):
+            name, values = f[len('Name='):].split(',Values=')
+            values = values.split(',')
+            if name == 'state':
+                found = [r for r in found if r['State'] in values]
+            elif name.startswith('tag:'):
+                found = [r for r in found if any(t['Key'] == name[4:] and t['Value'] in values for t in r['Tags'])]
+        return {'CapacityReservations': [dict(r) for r in found]}
+
+    def ec2_cancel_capacity_reservation(self, args):
+        r = self.reservations[opt(args, '--capacity-reservation-id')]
+        if r['State'] != 'active':
+            raise aws_mod.AwsError('IncorrectState: %s is %s' % (r['CapacityReservationId'], r['State']))
+        r['State'] = 'cancelled'
+        return {'Return': True}
+
+    def held_reservations(self):
+        return sorted(cid for cid, r in self.reservations.items() if r['State'] == 'active')
 
     def ssm_describe_instance_information(self, args):
         return {'InstanceInformationList': [{'InstanceId': i, 'PingStatus': 'Online'} for i in self.instances]}
@@ -276,6 +341,10 @@ class Cloud:
 
     def agent(self, inst, argv):
         cmd, rest = argv[0], argv[1:]
+        if self.world.signal_on and self.world.signal_on[0] == cmd:
+            signum = self.world.signal_on[1]
+            self.world.signal_on = None
+            os.kill(os.getpid(), signum)
         if cmd == 'install':
             self.clock.advance(60)
             facts = {'instance_id': inst['InstanceId'], 'kernel': '6.8.0-1015-aws', 'tuning': {'applied': ['sysctl']},
@@ -959,6 +1028,149 @@ class ChainTests(LaneCase):
                                           world=world_for(tester_capacity=TESTER))
         self.check(code, receipt, log, 0, 'PASS')
         self.assertIn('starting a new run', log)
+
+
+class ReservationTests(LaneCase):
+    """On-Demand Capacity Reservations: created before a leg launches, every launch targets them, cancelled on
+    every exit path, and orphans of a crashed run swept at the next lane start."""
+
+    def setUp(self):
+        self.bed = Bed()
+
+    def tearDown(self):
+        self.bed.close()
+
+    def creates(self):
+        return [list(c) for c in self.bed.cloud.calls if c[:2] == ('ec2', 'create-capacity-reservation')]
+
+    def launches(self, run_id=None):
+        return [list(c) for c in self.bed.cloud.calls if c[:2] == ('ec2', 'run-instances')
+                and (run_id is None or '"rvoip-run-id", "Value": "%s"' % run_id in opt(list(c), '--tag-specifications'))]
+
+    def assert_all_cancelled(self, receipt):
+        self.assertEqual(self.bed.cloud.held_reservations(), [], 'no reservation outlives the leg')
+        held = receipt['environment']['capacity_reservations']
+        self.assertTrue(held, 'the receipt records the reservations')
+        for r in held:
+            self.assertTrue(r['cancelled_at'], r)
+        self.assertFalse(self.bed.cloud.path('s3://%s/bench/lock.json' % BUCKET).exists(), 'lock released')
+        self.assertEqual(self.bed.alive(), [], 'lane torn down')
+
+    def test_minor_reserves_the_lane_targets_every_launch_and_cancels(self):
+        code, receipt, log = self.bed.run('minor', 'min-cr', '--rows', 'R1', '--r0', 'R1=3000', world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        reserved = {r['instance_type']: r for r in receipt['environment']['capacity_reservations']}
+        self.assertEqual({t: r['count'] for t, r in reserved.items()}, {'c8i.4xlarge': 1, 'c8in.24xlarge': 2})
+        for call in self.creates():
+            self.assertEqual(opt(call, '--availability-zone'), 'us-west-2b')
+            self.assertEqual(opt(call, '--placement-group-arn'), 'arn:aws:ec2:us-west-2:1:placement-group/rvoip-bench')
+            tags = {t['Key']: t['Value'] for t in json.loads(opt(call, '--tag-specifications'))[0]['Tags']}
+            self.assertEqual(tags['rvoip-run-id'], 'min-cr')
+            self.assertEqual(opt(call, '--end-date'), tags['rvoip-expires-at'], 'ends by itself at the lane expiry')
+        launches = self.launches()
+        self.assertEqual(len(launches), 2)
+        for call in launches:
+            target = json.loads(opt(call, '--capacity-reservation-specification'))
+            itype = opt(call, '--instance-type') or TEMPLATES[re.match(r'LaunchTemplateName=([^,]+)',
+                                                                      opt(call, '--launch-template')).group(1)]
+            self.assertEqual(target['CapacityReservationTarget']['CapacityReservationId'], reserved[itype]['id'])
+        self.assert_all_cancelled(receipt)
+
+    def test_same_type_lane_shares_one_reservation(self):
+        code, receipt, log = self.bed.run('smoke', 'smoke-cr-one', '--rows', 'R1', '--reserve-capacity',
+                                          '--dut-type', 'c8in.24xlarge', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual([(r['instance_type'], r['count']) for r in receipt['environment']['capacity_reservations']],
+                         [('c8in.24xlarge', 3)])
+        self.assert_all_cancelled(receipt)
+
+    def test_smoke_and_diag_do_not_reserve_by_default(self):
+        code, receipt, log = self.bed.run('smoke', 'smoke-nocr', '--rows', 'R1', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        code, receipt, log = self.bed.run('diag', 'diag-nocr', '--smoke-seconds', '30', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(self.creates(), [])
+        for call in self.launches():
+            self.assertNotIn('--capacity-reservation-specification', call)
+        self.assertEqual(receipt['environment']['capacity_reservations'], [])
+
+    def test_no_reserve_capacity_turns_minor_off(self):
+        code, receipt, log = self.bed.run('minor', 'min-nocr', '--rows', 'R1', '--r0', 'R1=3000', '--no-reserve-capacity',
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(self.creates(), [])
+
+    def test_cancelled_on_a_fail_verdict(self):
+        code, receipt, log = self.bed.run('smoke', 'smoke-cr-fail', '--rows', 'R1', '--reserve-capacity',
+                                          world=World(dut_capacity={'R1': 200}))
+        self.check(code, receipt, log, 1, 'FAIL')
+        self.assert_all_cancelled(receipt)
+
+    def test_cancelled_on_infra(self):
+        code, receipt, log = self.bed.run('smoke', 'smoke-cr-infra', '--rows', 'R1', '--reserve-capacity',
+                                          world=World(dut_git_sha='feedfacecafe'))
+        self.assertEqual(code, 2, log)
+        self.assert_all_cancelled(receipt)
+
+    def test_cancelled_at_max_wall_and_the_resumed_leg_reserves_again(self):
+        world = world_for(tester_capacity=TESTER)
+        code, receipt, log = self.bed.run('minor', 'min-cr-wall', '--rows', 'R1', '--max-wall', '40', '--r0', 'R1=3000', world=world)
+        self.assertEqual(code, 4, log)
+        self.assertEqual(self.bed.cloud.held_reservations(), [], 'cancelled at the --max-wall stop')
+        self.assertEqual(self.bed.alive(), [])
+        first = {cid for cid in self.bed.cloud.reservations}
+        self.assertEqual(len(first), 2)
+        code, receipt, log = self.bed.run('minor', 'min-cr-wall', '--rows', 'R1', '--r0', 'R1=3000', '--resume')
+        self.check(code, receipt, log, 0, 'PASS')
+        second = set(self.bed.cloud.reservations) - first
+        self.assertEqual(len(second), 2, 'the resumed leg holds its own reservations')
+        legs = self.launches('min-cr-wall')
+        self.assertEqual(len(legs), 4)
+        for call in legs[2:]:
+            target = json.loads(opt(call, '--capacity-reservation-specification'))
+            self.assertIn(target['CapacityReservationTarget']['CapacityReservationId'], second)
+        self.assertEqual(len(receipt['environment']['capacity_reservations']), 4)
+        self.assert_all_cancelled(receipt)
+
+    def check_signal(self, signum, name):
+        code, receipt, log = self.bed.run('smoke', 'smoke-cr-%s' % name, '--rows', 'R1', '--reserve-capacity',
+                                          world=World(signal_on=('caller-run', signum)))
+        self.assertEqual(code, 3, log)
+        self.assertEqual(receipt['status'], 'INFRA')
+        self.assertIn('interrupted by %s' % name, ' '.join(receipt['reasons']))
+        self.assert_all_cancelled(receipt)
+        self.assertIs(signal.getsignal(signum), self.saved[signum], 'main() restores the handler')
+
+    def test_cancelled_on_sigterm(self):
+        self.saved = {signal.SIGTERM: signal.getsignal(signal.SIGTERM)}
+        self.check_signal(signal.SIGTERM, 'SIGTERM')
+
+    def test_cancelled_on_sigint(self):
+        self.saved = {signal.SIGINT: signal.getsignal(signal.SIGINT)}
+        self.check_signal(signal.SIGINT, 'SIGINT')
+
+    def test_capacity_miss_on_reserve_is_infra_and_launches_nothing(self):
+        code, receipt, log = self.bed.run('minor', 'min-cr-short', '--rows', 'R1', '--r0', 'R1=3000',
+                                          world=world_for(tester_capacity=TESTER, reserve_short=('c8in.24xlarge',)))
+        self.assertEqual(code, 3, log)
+        self.assertEqual(receipt['status'], 'INFRA')
+        self.assertIn('reserve 2 x c8in.24xlarge', ' '.join(receipt['reasons']))
+        self.assertEqual(self.bed.cloud.launched, [], 'no unreserved fallback')
+        self.assertEqual(self.bed.cloud.held_reservations(), [], 'the DUT reservation made first is cancelled')
+        self.assertEqual(receipt['rows'], [])
+
+    def test_orphans_of_this_env_id_are_swept_at_lane_start(self):
+        env_id = self.bed.env_id()
+        orphan = self.bed.cloud.add_reservation('c8in.24xlarge', 2, {'rvoip-bench': 'true', 'rvoip-env-id': env_id,
+                                                                     'rvoip-run-id': 'crashed'})
+        other_env = self.bed.cloud.add_reservation('c8in.24xlarge', 2, {'rvoip-bench': 'true',
+                                                                        'rvoip-env-id': 'aws-other'})
+        not_bench = self.bed.cloud.add_reservation('c8in.24xlarge', 2, {'rvoip-env-id': env_id})
+        code, receipt, log = self.bed.run('smoke', 'smoke-sweep', '--rows', 'R1', '--env-id', env_id, world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertIn('cancelling orphaned capacity reservation %s (run crashed' % orphan, log)
+        self.assertEqual(self.bed.cloud.reservations[orphan]['State'], 'cancelled')
+        self.assertEqual(self.bed.cloud.held_reservations(), sorted([other_env, not_bench]))
 
 
 if __name__ == '__main__':

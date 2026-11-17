@@ -25,8 +25,10 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 import traceback
 
@@ -60,6 +62,14 @@ class Usage(RuntimeError):
 
 class WallClock(RuntimeError):
     """Exit 4: --max-wall reached; resume later."""
+
+
+class Interrupted(Infra):
+    """SIGINT/SIGTERM: unwind through the normal exit path (teardown, reservations, lock, receipt)."""
+
+
+# Set once the exit path starts: a signal then no longer interrupts the cleanup.
+SIGNALS = {'unwinding': False}
 
 
 def utc(ts=None):
@@ -184,6 +194,7 @@ class Lane:
                 'rvoip-expires-at': expires}
         ids = {}
         moved = {}
+        targets = self.reserve(tf, expires)
         if self.args.az and self.args.az != tf.get('availability_zone'):
             # Launch templates name one subnet; --az moves both templates to the same-named public subnet of
             # another AZ (no Terraform change). The whole lane shares the AZ, and so does every later leg.
@@ -194,11 +205,12 @@ class Lane:
             ids['dut'] = self.aws.run_from_template(
                 tf['dut_launch_template'], 1, dict(base, Name='rvoip-bench-dut', **{'rvoip-role': 'dut'}),
                 instance_type=self.args.ea_host_type if self.ea_uas else self.args.dut_type,
-                **moved.get('dut_launch_template', {}))
+                capacity_reservation=targets.get('dut'), **moved.get('dut_launch_template', {}))
             ids['callers'] = self.aws.run_from_template(
                 tf['caller_launch_template'], self.args.callers,
                 dict(base, Name='rvoip-bench-caller', **{'rvoip-role': 'caller'}),
-                instance_type=self.args.caller_type, **moved.get('caller_launch_template', {}))
+                instance_type=self.args.caller_type, capacity_reservation=targets.get('callers'),
+                **moved.get('caller_launch_template', {}))
         except AwsError as error:
             self.aws.terminate(ids.get('dut', []) + ids.get('callers', []))
             if 'InsufficientInstanceCapacity' in str(error) or 'VcpuLimitExceeded' in str(error):
@@ -297,6 +309,88 @@ class Lane:
             'set -euo pipefail', 'export PATH=$PATH:/snap/bin', 'mkdir -p /opt/rvoip-bench',
             'aws s3 cp --only-show-errors %sagent/bench-agent.sh /opt/rvoip-bench/bench-agent.sh' % s3_run,
             'METRICS_PORT=%d bash /opt/rvoip-bench/bench-agent.sh %s' % (METRICS_PORT, quoted)])
+
+    # ---- On-Demand Capacity Reservations
+    # minor/full hold one targeted reservation per instance type for the lane (1 DUT + N callers) in the
+    # lane's AZ and cluster placement group, so a long run cannot lose its hosts to a capacity miss. A leg
+    # creates them before it launches (a capacity miss here is the same INFRA as a launch miss: nothing is
+    # recorded yet), launches only into them (never unreserved), and cancels them on every exit path.
+    # Each also ends by itself at the lane's rvoip-expires-at, so a crashed orchestrator stops billing
+    # then at the latest; the next lane on the env-id cancels it sooner (sweep_reservations).
+
+    @property
+    def env_tag(self):
+        return self.args.env_tag or 'unpinned'
+
+    def reserve(self, tf, expires):
+        """Role -> reservation id for this leg's launch ({} when --no-reserve-capacity)."""
+        if not self.args.reserve_capacity:
+            return {}
+        dut_template = self.aws.template_data(tf['dut_launch_template'])
+        placement = dut_template.get('Placement') or {}
+        az = self.args.az or tf.get('availability_zone') or placement.get('AvailabilityZone')
+        group = placement.get('GroupName')
+        group_arn = self.aws.placement_group_arn(group) if group else None
+        need = {'dut': (self.args.ea_host_type if self.ea_uas else self.args.dut_type) or tf['dut_instance_type'],
+                'callers': self.args.caller_type or tf['caller_instance_type']}
+        counts = {}
+        for role, itype in need.items():
+            counts[itype] = counts.get(itype, 0) + (1 if role == 'dut' else self.args.callers)
+        reservations = self.state.setdefault('reservations', [])
+        live = [r for r in reservations if not r.get('cancelled_at') and r['az'] == az]
+        if live:
+            found = {r['CapacityReservationId']: r for r in self.aws.describe_capacity_reservations([r['id'] for r in live])}
+            usable = {r['instance_type']: r for r in live if (found.get(r['id']) or {}).get('State') == 'active'
+                      and found[r['id']].get('AvailableInstanceCount', 0) >= counts.get(r['instance_type'], 0)}
+        else:
+            usable = {}
+        by_type = {}
+        for itype, count in counts.items():
+            if itype in usable:
+                by_type[itype] = usable[itype]['id']
+                continue
+            tags = {'rvoip-bench': 'true', 'Name': 'rvoip-bench-lane', 'rvoip-run-id': self.args.run_id,
+                    'rvoip-env-id': self.env_tag, 'rvoip-expires-at': expires}
+            token = '%s-%d' % (self.args.run_id[:56], len(reservations))
+            try:
+                cid = self.aws.create_capacity_reservation(itype, az, count, expires, tags, token, group_arn)
+            except AwsError as error:
+                if 'InsufficientInstanceCapacity' in str(error) or 'ReservationCapacityExceeded' in str(error):
+                    raise Infra('reserve %d x %s in %s: %s' % (count, itype, az, error))
+                raise
+            reservations.append({'id': cid, 'instance_type': itype, 'count': count, 'az': az,
+                                 'placement_group': group, 'created_at': utc(), 'ends_at': expires})
+            self.save()
+            self.log('reserved %d x %s in %s: %s (ends %s)' % (count, itype, az, cid, expires))
+            by_type[itype] = cid
+        self.aws.wait_capacity_reservations(sorted(set(by_type.values())))
+        return {role: by_type[itype] for role, itype in need.items()}
+
+    def release_reservations(self):
+        """Cancel every reservation this run still holds (each exit path)."""
+        held = [r for r in self.state.get('reservations', []) if not r.get('cancelled_at')]
+        for r in held:
+            try:
+                self.aws.cancel_capacity_reservation(r['id'])
+                r['cancelled_at'] = utc()
+                self.log('cancelled capacity reservation', r['id'])
+            except AwsError as error:
+                self.log('WARNING cancel %s failed; it ends by itself at %s:' % (r['id'], r.get('ends_at')), error)
+        if held:
+            self.save()
+
+    def sweep_reservations(self):
+        """Cancel bench reservations tagged for this env-id that no live run holds (a crashed leg's)."""
+        mine = {r['id'] for r in self.state.get('reservations', []) if not r.get('cancelled_at')}
+        found = self.aws.describe_capacity_reservations(filters=(
+            ('tag:rvoip-bench', 'true'), ('tag:rvoip-env-id', self.env_tag), ('state', 'active,pending')))
+        for r in found:
+            if r['CapacityReservationId'] in mine:
+                continue
+            tags = {t['Key']: t['Value'] for t in r.get('Tags', [])}
+            self.log('cancelling orphaned capacity reservation %s (run %s, %s x %s)' % (
+                r['CapacityReservationId'], tags.get('rvoip-run-id'), r.get('TotalInstanceCount'), r.get('InstanceType')))
+            self.aws.cancel_capacity_reservation(r['CapacityReservationId'])
 
     def teardown(self):
         ids = self.state.get('lane', {}).get('instances', [])
@@ -778,7 +872,10 @@ def receipt_for(ctx, rows, started, status, reasons, env_id, rates_path, report)
             'caller_count': len(lane.get('callers', [])),
             'sources_per_caller': min((len(c['ips']) for c in lane.get('callers', [])), default=None),
             'connections_per_source': CALLER_CONNECTIONS, 'ami_id': lane.get('ami_id'),
-            'kernel': facts.get('kernel')}, **bins),
+            'kernel': facts.get('kernel'),
+            'capacity_reservations': [{k: r.get(k) for k in ('id', 'instance_type', 'count', 'az', 'created_at',
+                                                              'cancelled_at')}
+                                      for r in state.get('reservations', [])]}, **bins),
         'baseline': {'path': str(rates_path.relative_to(REPO)) if rates_path else None,
                      'sha256': sha256_file(rates_path) if rates_path and rates_path.exists() else None},
         'rows': rows,
@@ -848,6 +945,9 @@ def parse_args(argv):
     p.add_argument('--dut-type', help='override the DUT instance type (functional smoke on small hosts; never a gate run)')
     p.add_argument('--caller-type', help='override the caller instance type (smoke only)')
     p.add_argument('--keep-lane', action='store_true', help='do not terminate the lane (debug; costs money)')
+    p.add_argument('--reserve-capacity', action=argparse.BooleanOptionalAction, default=None,
+                   help='hold an On-Demand Capacity Reservation for the lane while each leg runs '
+                        '(default: on for minor and full, off otherwise)')
     p.add_argument('--keep-local', action='store_true')
     p.add_argument('--break-lock', action='store_true')
     args = p.parse_args(argv)
@@ -868,6 +968,9 @@ def parse_args(argv):
         path = getattr(args, name)
         if path and not Path(path).is_file():
             raise Usage('--%s: no such file %r' % (name.replace('_', '-'), path))
+    if args.reserve_capacity is None:
+        args.reserve_capacity = bool(profiles.PROFILES[args.profile].get('reserve_capacity'))
+    args.env_tag = None    # the env-id the lane's reservations are tagged with (set once resolved)
     args.r0 = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.r0)}
     args.cap = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.cap)}
     args.run_id = args.run_id or 'bench-%s-%s-%s' % (args.profile, args.candidate[:12], stamp())
@@ -949,6 +1052,28 @@ def outcome_code(status):
 
 
 def main(argv=None):
+    """run_lane with SIGINT/SIGTERM turned into Interrupted, so a stopped run still tears its lane down,
+    cancels its reservations, releases the lock and writes an INFRA receipt."""
+    SIGNALS['unwinding'] = False
+
+    def on_signal(signum, frame):
+        if SIGNALS['unwinding']:
+            return    # already on the exit path: let the cleanup finish
+        SIGNALS['unwinding'] = True
+        raise Interrupted('interrupted by %s' % signal.Signals(signum).name)
+
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, on_signal)
+    try:
+        return run(argv)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def run(argv=None):
     try:
         args = parse_args(argv if argv is not None else sys.argv[1:])
     except Usage as error:
@@ -986,6 +1111,7 @@ def main(argv=None):
                 return outcome_code(final['status'])
         env_id, pinned = resolve_environment(args, aws)
         args.az = resolve_az(args.az, (pinned or {}).get('az'), (ctx.state.get('lane') or {}).get('az'))
+        args.env_tag = env_id
         args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
         if not aws.s3_create_exclusive(lock, {'run_id': args.run_id, 'at': utc(), 'profile': args.profile}):
             held = aws.s3_get_json(lock)
@@ -997,6 +1123,7 @@ def main(argv=None):
             else:
                 raise Infra('lane lock held by %s' % held)
         have_lock = True
+        ctx.lane.sweep_reservations()
         if not (args.resume and ctx.lane.alive()):
             ctx.lane.launch(profile['budget_hours'])
             ctx.lane.install(ctx.s3_run)
@@ -1071,11 +1198,17 @@ def main(argv=None):
         log('error:', ''.join(traceback.format_exception(error))[-3000:])
         status, reasons, code = 'INFRA', ['harness error: %s' % error], EXIT_INFRA
     finally:
+        SIGNALS['unwinding'] = True
         if not args.dry_run and (have_lock or ctx.state.get('lane')):
             try:
                 ctx.lane.teardown()
             except Exception as error:  # noqa: BLE001
                 log('WARNING teardown failed; the janitor reaps by rvoip-expires-at:', error)
+        if not args.dry_run:
+            try:
+                ctx.lane.release_reservations()
+            except Exception as error:  # noqa: BLE001
+                log('WARNING reservation release failed; each ends by itself at the lane expiry:', error)
             if have_lock:
                 try:
                     aws.s3_rm(lock)

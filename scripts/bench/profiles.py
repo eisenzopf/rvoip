@@ -35,11 +35,11 @@ PROFILES = {
     # Every minor release: bisect searches, overload, the IETF report.
     'minor': {'rows': ['R1', 'R2', 'R5', 'R6'], 'method': 'search', 'algorithm': 'bisect',
               'confirmations': 3, 'resolution': 0.02, 'overload': True, 'latency_at': 0.90,
-              'report': True, 'budget_hours': 13, 'max_trials': 16},
+              'report': True, 'budget_hours': 13, 'max_trials': 16, 'reserve_capacity': True},
     # Quarterly: the exact RFC 7502 §4.10 search.
     'full': {'rows': ['R1', 'R2', 'R5', 'R6'], 'method': 'search', 'algorithm': 'rfc7502',
              'confirmations': 10, 'overload': True, 'latency_at': 0.90, 'report': True,
-             'budget_hours': 60, 'max_trials': 40},
+             'budget_hours': 60, 'max_trials': 40, 'reserve_capacity': True},
     # Functional check of a lane: one short trial per row (never a gate; --r0 ROW=sps overrides).
     'smoke': {'rows': ['R1', 'R5', 'R2', 'R6'], 'method': 'smoke', 'seconds': 30, 'warmup_seconds': 10,
               'rates': {'R1': 400, 'R5': 400, 'R2': 200, 'R6': 200}, 'budget_hours': 1.5},

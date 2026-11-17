@@ -49,12 +49,50 @@ class Aws:
         out = self.call('ec2', 'describe-instances', '--instance-ids', *ids)
         return [i for r in out.get('Reservations', []) for i in r['Instances']]
 
+    def template_data(self, template):
+        return self.call('ec2', 'describe-launch-template-versions', '--launch-template-name', template,
+                         '--versions', '$Default')['LaunchTemplateVersions'][0]['LaunchTemplateData']
+
+    def placement_group_arn(self, name):
+        return self.call('ec2', 'describe-placement-groups', '--group-names', name)['PlacementGroups'][0]['GroupArn']
+
+    # ---- On-Demand Capacity Reservations (targeted: only launches that name them use them)
+    def create_capacity_reservation(self, instance_type, az, count, end, tags, token, placement_group_arn=None):
+        spec = [{'ResourceType': 'capacity-reservation', 'Tags': [{'Key': k, 'Value': v} for k, v in tags.items()]}]
+        args = ['ec2', 'create-capacity-reservation', '--instance-type', instance_type,
+                '--instance-platform', 'Linux/UNIX', '--availability-zone', az, '--instance-count', str(count),
+                '--instance-match-criteria', 'targeted', '--end-date-type', 'limited', '--end-date', end,
+                '--client-token', token, '--tag-specifications', json.dumps(spec)]
+        if placement_group_arn:
+            args += ['--placement-group-arn', placement_group_arn]
+        return self.call(*args, retries=2)['CapacityReservation']['CapacityReservationId']
+
+    def describe_capacity_reservations(self, ids=(), filters=()):
+        args = ['ec2', 'describe-capacity-reservations']
+        if ids:
+            args += ['--capacity-reservation-ids', *ids]
+        if filters:
+            args += ['--filters', *('Name=%s,Values=%s' % (k, v) for k, v in filters)]
+        return self.call(*args).get('CapacityReservations', [])
+
+    def cancel_capacity_reservation(self, cid):
+        self.call('ec2', 'cancel-capacity-reservation', '--capacity-reservation-id', cid)
+
+    def wait_capacity_reservations(self, ids, timeout=300):
+        deadline = time.time() + timeout
+        while True:
+            states = {r['CapacityReservationId']: r['State'] for r in self.describe_capacity_reservations(ids)}
+            if all(states.get(i) == 'active' for i in ids):
+                return
+            if any(states.get(i) not in ('active', 'pending') for i in ids) or time.time() > deadline:
+                raise AwsError('capacity reservations not active: %s' % states)
+            time.sleep(5)
+
     def template_in_az(self, template, az):
         """run-instances overrides that move a launch template to `az`: its network interfaces with the
         subnet swapped for the same-named subnet of that AZ in the same VPC, and its placement (the
         cluster placement group takes the AZ of its first instance while empty)."""
-        data = self.call('ec2', 'describe-launch-template-versions', '--launch-template-name', template,
-                         '--versions', '$Default')['LaunchTemplateVersions'][0]['LaunchTemplateData']
+        data = self.template_data(template)
         enis = [dict(e) for e in data.get('NetworkInterfaces', [])]
         if not enis or not enis[0].get('SubnetId'):
             raise AwsError('launch template %s names no subnet to move to %s' % (template, az))
@@ -73,7 +111,7 @@ class Aws:
         return {'network_interfaces': enis, 'placement': placement}
 
     def run_from_template(self, template, count, tags, ami=None, instance_type=None, user_data=None,
-                          network_interfaces=None, placement=None):
+                          network_interfaces=None, placement=None, capacity_reservation=None):
         spec = [{'ResourceType': rt, 'Tags': [{'Key': k, 'Value': v} for k, v in tags.items()]}
                 for rt in ('instance', 'volume')]
         args = ['ec2', 'run-instances', '--launch-template', 'LaunchTemplateName=%s,Version=$Default' % template,
@@ -86,6 +124,9 @@ class Aws:
             args += ['--network-interfaces', json.dumps(network_interfaces)]
         if placement:
             args += ['--placement', json.dumps(placement)]
+        if capacity_reservation:
+            args += ['--capacity-reservation-specification',
+                     json.dumps({'CapacityReservationTarget': {'CapacityReservationId': capacity_reservation}})]
         if user_data:
             args += ['--user-data', base64.b64encode(user_data.encode()).decode()]
         out = self.call(*args, retries=2)
