@@ -2,12 +2,13 @@
 // Via = ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
 // via-parm = sent-protocol LWS sent-by *( SEMI via-params )
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
     combinator::{map_res, opt},
     error::{Error as NomError, ErrorKind},
-    sequence::{pair, preceded, tuple},
+    sequence::{pair, preceded},
 };
 // Import fmt
 use std::str;
@@ -37,11 +38,11 @@ use crate::types::via::{SentProtocol, ViaHeader}; // Use the main Param enum
 // RFC 3261 Section 20.42
 fn sent_protocol(input: &[u8]) -> ParseResult<'_, SentProtocol> {
     map_res(
-        tuple((
-            alt((tag_no_case(b"SIP"), token)), // name
-            preceded(slash, opt(token)),       // version (make it optional)
-            preceded(slash, token),            // transport
-        )),
+        (
+            alt((tag_no_case(&b"SIP"[..]), token)), // name
+            preceded(slash, opt(token)),            // version (make it optional)
+            preceded(slash, token),                 // transport
+        ),
         |(name_b, ver_b_opt, tran_b)| {
             let name = str::from_utf8(name_b)
                 .map_err(|_| nom::Err::Failure(NomError::new(input, ErrorKind::Char)))?
@@ -68,7 +69,8 @@ fn sent_protocol(input: &[u8]) -> ParseResult<'_, SentProtocol> {
                 transport,
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // sent-by = host [ COLON port ]
@@ -81,11 +83,11 @@ fn sent_by(input: &[u8]) -> ParseResult<'_, (Host, Option<u16>)> {
 // RFC 3261 Section 20.42
 fn via_param_parser(input: &[u8]) -> ParseResult<'_, ViaHeader> {
     map_res(
-        tuple((
+        (
             sent_protocol,
             preceded(lws, sent_by),
             semicolon_separated_params0(via_param_item), // Use list helper with imported parser
-        )),
+        ),
         |(protocol, (host, port), params)| {
             // According to RFC 3261, a branch parameter is mandatory for all Via headers after RFC 3261
             // However, we don't enforce this here as we may need to parse headers from pre-RFC 3261 implementations
@@ -97,7 +99,8 @@ fn via_param_parser(input: &[u8]) -> ParseResult<'_, ViaHeader> {
                 params,
             })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Via = ( "Via" / "v" ) HCOLON via-parm *(COMMA via-parm)
@@ -105,9 +108,13 @@ fn via_param_parser(input: &[u8]) -> ParseResult<'_, ViaHeader> {
 pub fn parse_via(input: &[u8]) -> ParseResult<'_, Vec<ViaHeader>> {
     // This is the strict RFC-compliant parser that requires the header name
     preceded(
-        pair(alt((tag_no_case(b"Via"), tag_no_case(b"v"))), hcolon),
+        pair(
+            alt((tag_no_case(&b"Via"[..]), tag_no_case(&b"v"[..]))),
+            hcolon,
+        ),
         comma_separated_list1(via_param_parser), // Use the parser for a full via-parm
-    )(input)
+    )
+    .parse(input)
 }
 
 // Test-only function that directly parses via-parm content without requiring the header name

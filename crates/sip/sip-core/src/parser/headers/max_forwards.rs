@@ -1,6 +1,7 @@
 // Parser for Max-Forwards header (RFC 3261 Section 20.22)
 // Max-Forwards = "Max-Forwards" HCOLON 1*DIGIT
 
+use nom::Parser;
 use nom::{
     character::complete::digit1,
     combinator::map_res,
@@ -20,11 +21,13 @@ use crate::parser::ParseResult;
 /// will be rejected with an error as per SIP RFC 3261 implementation guidelines.
 pub fn parse_max_forwards(input: &[u8]) -> ParseResult<'_, u8> {
     map_res(digit1, |bytes| {
-        let s = str::from_utf8(bytes)
-            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))?;
+        let s = str::from_utf8(bytes).map_err(|_| {
+            nom::Err::<_>::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit))
+        })?;
         s.parse::<u8>()
             .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))
-    })(input)
+    })
+    .parse(input)
 }
 
 #[cfg(test)]

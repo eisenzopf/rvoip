@@ -3,6 +3,7 @@
 // info = LAQUOT absoluteURI RAQUOT *( SEMI info-param)
 // info-param = ( "purpose" EQUAL ( "icon" / "info" / "card" / token ) ) / generic-param
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while1},
@@ -35,7 +36,7 @@ fn info_param(input: &[u8]) -> ParseResult<'_, InfoParam> {
     alt((
         map(
             preceded(
-                pair(tag_no_case(b"purpose"), equal),
+                pair(tag_no_case(&b"purpose"[..]), equal),
                 alt((
                     map_res(tag_no_case("icon"), |_| {
                         Ok::<InfoPurpose, nom::error::Error<&[u8]>>(InfoPurpose::Icon)
@@ -58,7 +59,8 @@ fn info_param(input: &[u8]) -> ParseResult<'_, InfoParam> {
             InfoParam::Purpose,
         ),
         map(generic_param, InfoParam::Generic),
-    ))(input)
+    ))
+    .parse(input)
 }
 
 // Convert InfoParam to Param
@@ -147,7 +149,8 @@ fn info(input: &[u8]) -> ParseResult<'_, CallInfoValue> {
 
             CallInfoValue { uri, params }
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Helper function to trim leading and trailing whitespace
@@ -160,21 +163,25 @@ pub fn parse_call_info(input: &[u8]) -> ParseResult<'_, Vec<CallInfoValue>> {
         // Skip any leading whitespace including newlines
         let (input, _) = crate::parser::whitespace::sws(input)?;
         // Match a comma
-        let (input, _) = tag(b",")(input)?;
+        let (input, _) = tag(&b","[..])(input)?;
         // Skip any trailing whitespace including newlines
         let (input, _) = crate::parser::whitespace::sws(input)?;
         Ok((input, &b""[..]))
     }
 
-    separated_list1(comma_separator, info)(input)
+    separated_list1(comma_separator, info).parse(input)
 }
 
 /// Parses a complete Call-Info header, including the header name
 pub fn parse_call_info_header(input: &[u8]) -> ParseResult<'_, CallInfo> {
     map(
-        preceded(pair(tag_no_case(b"Call-Info"), hcolon), parse_call_info),
+        preceded(
+            pair(tag_no_case(&b"Call-Info"[..]), hcolon),
+            parse_call_info,
+        ),
         CallInfo::new,
-    )(input)
+    )
+    .parse(input)
 }
 
 #[cfg(test)]

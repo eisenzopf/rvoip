@@ -6,6 +6,7 @@ use super::common::{auth_param, auth_scheme, digest_param};
 use crate::parser::common::comma_separated_list1;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
+use nom::Parser;
 // Import the necessary types from types::auth
 use crate::types::auth::{AuthScheme, Challenge};
 use nom::{bytes::complete::take_while, combinator::opt};
@@ -29,7 +30,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<'_, Challenge> {
             let (rem, params) = comma_separated_list1(digest_param)(rem)?;
 
             // Consume any trailing whitespace
-            let (rem, _) = opt(take_while(|c| c == b' ' || c == b'\t'))(rem)?;
+            let (rem, _) = opt(take_while(|c| c == b' ' || c == b'\t')).parse(rem)?;
 
             Ok((rem, Challenge::Digest { params }))
         }
@@ -39,7 +40,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<'_, Challenge> {
             let (rem, params) = comma_separated_list1(auth_param)(rem)?;
 
             // Consume any trailing whitespace
-            let (rem, _) = opt(take_while(|c| c == b' ' || c == b'\t'))(rem)?;
+            let (rem, _) = opt(take_while(|c| c == b' ' || c == b'\t')).parse(rem)?;
 
             Ok((rem, Challenge::Basic { params }))
         }
@@ -48,7 +49,7 @@ pub fn challenge(input: &[u8]) -> ParseResult<'_, Challenge> {
             let (rem, params) = comma_separated_list1(auth_param)(rem)?;
 
             // Consume any trailing whitespace
-            let (rem, _) = opt(take_while(|c| c == b' ' || c == b'\t'))(rem)?;
+            let (rem, _) = opt(take_while(|c| c == b' ' || c == b'\t')).parse(rem)?;
 
             Ok((rem, Challenge::Other { scheme, params }))
         }

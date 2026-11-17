@@ -5,6 +5,7 @@ use crate::parser::separators::comma;
 use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 use crate::types::auth::AuthenticationInfoParam;
+use nom::Parser;
 use nom::{
     combinator::opt,
     error::{Error as NomError, ErrorKind},
@@ -51,10 +52,11 @@ pub fn parse_authentication_info(input: &[u8]) -> ParseResult<'_, Vec<Authentica
         delimited(sws, comma, sws), // This allows for LWS around the comma
         |input| {
             // Use lws to handle line folding before each parameter
-            let (input, _) = opt(lws)(input)?;
+            let (input, _) = opt(lws).parse(input)?;
             ainfo(input).map_err(|_| auth_info_error(input, AuthInfoError::InvalidParameter))
         },
-    )(input)?;
+    )
+    .parse(input)?;
 
     // Make sure there's nothing left after parsing
     let (remaining, _) = sws(remaining)?;
