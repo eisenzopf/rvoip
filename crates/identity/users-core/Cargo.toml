@@ -22,7 +22,7 @@ name = "users_core"
 [features]
 default = []
 auth-core = ["dep:rvoip-auth-core", "dep:rvoip-core-traits"]
-client = ["reqwest"]
+client = ["reqwest", "dep:rustls"]
 postgres = ["dep:sqlx-postgres"]
 
 [dependencies]
@@ -77,7 +77,8 @@ md5 = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 
 # HTTP client (for examples)
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"], optional = true }
+rustls = { workspace = true, optional = true }
 
 # Validation
 validator = { version = "0.20", features = ["derive"] }
@@ -89,7 +90,7 @@ rvoip-core-traits = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.14"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"] }
 serde_json = "1.0"
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }

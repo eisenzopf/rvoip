@@ -44,7 +44,8 @@ webpki = { package = "rustls-webpki", version = "0.103.13", features = ["ring"] 
 rustls-pki-types = "1.12"
 
 # HTTP fetch of the info= cert URL
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { workspace = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
