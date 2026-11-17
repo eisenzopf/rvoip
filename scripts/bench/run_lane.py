@@ -532,8 +532,9 @@ def run_smoke(ctx, row_id):
     callers = [c['id'] for c in ctx.lane.info['callers']]
     for variant in ctx.args.diag_variants:
         # Diagnostic variants (--diag-variant): a caller host tweak before the trial; 'none' is the testbed as pinned.
-        tweak = ctx.aws.run(callers, ctx.lane.agent(ctx.s3_run, 'host-tweak', variant), 'rvoip bench host-tweak', 120)
-        ctx.log('host-tweak', variant, {i: r['StandardOutputContent'].strip()[-200:] for i, r in tweak.items()})
+        if ctx.args.diag_variants != ['none']:
+            tweak = ctx.aws.run(callers, ctx.lane.agent(ctx.s3_run, 'host-tweak', variant), 'rvoip bench host-tweak', 120)
+            ctx.log('host-tweak', variant, {i: r['StandardOutputContent'].strip()[-200:] for i, r in tweak.items()})
         rel = '%s/t00-r%d' % (row_id, rate) if ctx.args.diag_variants == ['none'] else '%s/diag-%s-r%d' % (row_id, variant, rate)
         summary, rel, local, note = ctx.trials.run(row_id, row, rate, 0, profile, rel=rel)
         verdict = ctx.trials.verdict(summary, rel, local, note)
