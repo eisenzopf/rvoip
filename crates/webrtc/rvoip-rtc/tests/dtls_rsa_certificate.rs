@@ -23,8 +23,8 @@ use crate::dtls_common::TestPeer;
 
 mod dtls_common;
 
-const RSA_OFFERER_KEY: &str = include_str!("testdata/rsa_2048_offerer_key.pem");
-const RSA_ANSWERER_KEY: &str = include_str!("testdata/rsa_2048_answerer_key.pem");
+const RSA_OFFERER_KEY: &str = include_str!("testdata/rsa_2048_offerer_key.txt");
+const RSA_ANSWERER_KEY: &str = include_str!("testdata/rsa_2048_answerer_key.txt");
 
 /// The key type a peer authenticates with.
 #[derive(Copy, Clone, Debug)]
