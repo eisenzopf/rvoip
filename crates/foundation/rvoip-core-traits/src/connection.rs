@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum Transport {
     Quic,
     WebTransport,

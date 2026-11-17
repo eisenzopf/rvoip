@@ -1,6 +1,7 @@
 #[cfg(test)]
 use crate::types::StatusCode;
 use crate::types::{Message, Request, Response};
+use nom::Parser;
 
 // Update imports to use available modules
 // use crate::parser::headers::{parse_header as parse_header_value, parse_headers, header_parser as single_nom_header_parser, headers_parser as nom_headers_parser};
@@ -20,7 +21,6 @@ use nom::branch::alt;
 use nom::bytes::complete::{take, take_till};
 use nom::combinator::{map, map_res, recognize};
 use nom::error::{Error as NomError, ErrorKind};
-use nom::sequence::tuple;
 use nom::IResult;
 use std::str;
 use std::str::FromStr;
@@ -181,7 +181,8 @@ fn full_message_parser_with_content_length(
                 .or(Some(String::new()));
             (false, None, None, Some(v), Some(s), reason_opt)
         }),
-    ))(input)?;
+    ))
+    .parse(input)?;
 
     let (is_request, method, mut uri, version, status_code, reason_phrase_opt) = start_line_data;
 
@@ -362,7 +363,7 @@ fn header_name(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // header-value = *(TEXT-UTF8char / UTF8-CONT / LWS)
 // Simplified: Takes bytes until CRLF. Actual unfolding/validation happens later.
 pub fn header_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(take_till(|c| c == b'\r' || c == b'\n'))(input)
+    recognize(take_till(|c| c == b'\r' || c == b'\n')).parse(input)
 }
 
 // message-header = header-name HCOLON header-value CRLF
@@ -370,15 +371,15 @@ pub fn header_value(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // Returns a raw Header struct with the value already unfolded
 fn message_header(input: &[u8]) -> ParseResult<'_, Header> {
     map_res(
-        tuple((
+        (
             header_name,
             hcolon,              // Separator with whitespace handling
             header_value_better, // Handles line folding
             crlf,                // Final CRLF
-        )),
+        ),
         |(name_bytes, _, raw_value_bytes, _)| {
             str::from_utf8(name_bytes)
-                .map_err(|_| nom::Err::Failure(NomError::new(name_bytes, ErrorKind::Char)))
+                .map_err(|_| nom::Err::<_>::Failure(NomError::new(name_bytes, ErrorKind::Char)))
                 .and_then(|name_str| {
                     HeaderName::from_str(name_str)
                         .map_err(|_| {
@@ -392,7 +393,8 @@ fn message_header(input: &[u8]) -> ParseResult<'_, Header> {
                         })
                 })
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 /// How a header field whose value did not parse is handled.

@@ -31,7 +31,8 @@ tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 tracing.workspace = true
 url.workspace = true
 zeroize.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }

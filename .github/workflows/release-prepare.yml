@@ -2,15 +2,19 @@ name: Prepare release PR
 
 # Opens the version-bump pull request from a qualified main commit.
 #
-# The branch and pull request are created with the rvoip release GitHub App's
-# installation token, not GITHUB_TOKEN. Events caused by GITHUB_TOKEN do not
-# start workflows, so a bot-authored PR used to need a dispatched PR Gate copy
-# that did not count and a manual run approval (held 6 h 13 min for 0.4.0).
-# With the App token the bump PR's own PR Gate starts by itself.
-#
-# Repository configuration (docs/RELEASING.md, "Release App"):
+# Default: the branch and pull request are created with the rvoip release
+# GitHub App's installation token, and the bump PR's own PR Gate starts by
+# itself. Repository configuration (docs/RELEASING.md, "Release App"):
 #   vars.RVOIP_RELEASE_APP_CLIENT_ID      the App's client ID
 #   secrets.RVOIP_RELEASE_APP_PRIVATE_KEY the App's private key
+#
+# Fallback, when either is unset: GITHUB_TOKEN pushes the branch and opens
+# the PR. GitHub then holds the PR's own `pull_request` PR Gate run for a
+# maintainer's approval (the author is a bot), and that held run blocks the
+# merge even when a dispatched copy passes (0.4.0 waited 6 h 13 min on it).
+# The workflow dispatches the PR Gate as an early signal and prints a link to
+# the held run; a maintainer approves it ("Approve and run"). The workflow
+# never approves runs itself.
 
 on:
   workflow_dispatch:
@@ -20,7 +24,7 @@ on:
         required: true
         type: string
       candidate:
-        description: Main commit to release (a green nightly qualification candidate); defaults to the head of main
+        description: Main commit to release (one with a green remote-release qualification); defaults to the head of main
         required: true
         default: main
         type: string
@@ -45,8 +49,26 @@ jobs:
     name: Prepare v${{ inputs.version }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # GITHUB_TOKEN writes only in fallback mode (no release App configured).
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    env:
+      APP_CONFIGURED: ${{ vars.RVOIP_RELEASE_APP_CLIENT_ID != '' && secrets.RVOIP_RELEASE_APP_PRIVATE_KEY != '' }}
     steps:
+      - name: Warn when the release App is not configured
+        if: env.APP_CONFIGURED != 'true'
+        run: |
+          echo "::warning title=Prepare release PR fallback::The release App is not configured (vars.RVOIP_RELEASE_APP_CLIENT_ID / secrets.RVOIP_RELEASE_APP_PRIVATE_KEY). GITHUB_TOKEN opens the PR, and a maintainer must approve its held PR Gate run before it can merge."
+          {
+            echo "## Fallback mode: no release App"
+            echo
+            echo "GITHUB_TOKEN opens the bump PR. Its own PR Gate run will wait for a maintainer's **Approve and run**; the link follows below once the PR exists."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Mint the release App token
+        if: env.APP_CONFIGURED == 'true'
         id: app-token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
@@ -60,7 +82,7 @@ jobs:
         with:
           ref: ${{ inputs.candidate }}
           fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Require a candidate on main
         run: |
@@ -75,7 +97,7 @@ jobs:
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
-          toolchain: 1.91.0
+          toolchain: 1.95.0
 
       - name: Install release validation dependencies
         run: >-
@@ -83,16 +105,21 @@ jobs:
           libasound2-dev libopus-dev libssl-dev libvpx-dev
           protobuf-compiler pkg-config cmake
 
-      - name: Commit as the release App
+      - name: Commit as the release App, or as github-actions in fallback mode
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          if [[ "$APP_CONFIGURED" == true ]]; then
+            user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+          else
+            git config user.name github-actions[bot]
+            git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          fi
           git switch -c "release/v$VERSION"
 
       - name: Download the candidate's qualification evidence
@@ -171,7 +198,7 @@ jobs:
 
       - name: Open the release pull request
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           VERSION: ${{ inputs.version }}
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
           REPOSITORY: ${{ github.repository }}
@@ -182,9 +209,47 @@ jobs:
           if [[ -n "$QUALIFICATION_RUN_ID" ]]; then
             qualification="https://github.com/${REPOSITORY}/actions/runs/${QUALIFICATION_RUN_ID}"
           fi
-          body="Version bump of every workspace crate to v$VERSION on top of qualified candidate \`$CANDIDATE\`, with the changelog and release notes assembled from \`changes/\`."$'\n\n'"- Candidate qualification: $qualification"$'\n'"- The PR Gate runs on this PR by itself (release App), including the release-notes finality check."$'\n'"- After merge, requalify this PR's head commit with \`release-patch\` or \`release-minor\`, \`first_candidate=false\` and the candidate's runs as \`prior_run_id\`; only the bookkeeping gates run. Then publish that commit."
+          gate="- The PR Gate runs on this PR by itself (release App), including the release-notes finality check."
+          if [[ "$APP_CONFIGURED" != true ]]; then
+            gate="- **Fallback mode (no release App):** this PR's own PR Gate run waits for a maintainer's **Approve and run**; the link is in a comment below. It includes the release-notes finality check, and the PR cannot merge until it passes."
+          fi
+          body="Version bump of every workspace crate to v$VERSION on top of qualified candidate \`$CANDIDATE\`, with the changelog and release notes assembled from \`changes/\`."$'\n\n'"- Candidate qualification: $qualification"$'\n'"$gate"$'\n'"- After merge, requalify this PR's head commit with \`release-patch\` or \`release-minor\`, \`first_candidate=false\` and the candidate's runs as \`prior_run_id\`; only the bookkeeping gates run. Then publish that commit."
           gh pr create \
             --base main \
             --head "$branch" \
             --title "Prepare v$VERSION" \
             --body "$body"
+
+      - name: "Fallback: dispatch the PR Gate and link the held run to approve"
+        if: env.APP_CONFIGURED != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          branch="release/v$VERSION"
+          head="$(git rev-parse HEAD)"
+          # An early signal on the same head; it does not unblock the merge.
+          gh workflow run pr-gate.yml --repo "$REPOSITORY" --ref "$branch"
+          held=""
+          for _ in $(seq 1 24); do
+            held="$(gh api "repos/${REPOSITORY}/actions/runs?head_sha=${head}&event=pull_request" \
+              --jq '[.workflow_runs[] | select(.name == "PR Gate")] | first | .id // empty')"
+            [[ -n "$held" ]] && break
+            sleep 5
+          done
+          if [[ -n "$held" ]]; then
+            link="https://github.com/${REPOSITORY}/actions/runs/${held}"
+          else
+            link="https://github.com/${REPOSITORY}/actions/workflows/pr-gate.yml?query=event%3Apull_request+branch%3Arelease%2Fv${VERSION}"
+          fi
+          message="Maintainer step: open ${link} and click **Approve and run**. This PR's own PR Gate run is held because a bot opened the PR (no release App configured); the PR cannot merge until that run passes. The workflow never approves runs itself."
+          echo "::warning title=Approve the held PR Gate run::${link}"
+          {
+            echo
+            echo "### Approve the held PR Gate run"
+            echo
+            echo "$message"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$branch" --repo "$REPOSITORY" --body "$message"

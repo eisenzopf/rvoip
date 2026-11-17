@@ -2,13 +2,14 @@
 // Timestamp = "Timestamp" HCOLON 1*(DIGIT) [ "." *(DIGIT) ] [ LWS delay ]
 // delay = *(DIGIT) [ "." *(DIGIT) ]
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while},
     character::complete::{digit1, space0},
     combinator::{map_res, opt, recognize},
     error::{Error as NomError, ErrorKind, ParseError},
-    sequence::{pair, preceded, tuple},
+    sequence::{pair, preceded},
 };
 use ordered_float::NotNan;
 use std::str; // For parsing float strings
@@ -21,8 +22,9 @@ use crate::parser::ParseResult;
 fn float_digits(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(pair(
         digit1, // Must have at least one digit before decimal
-        opt(pair(tag(b"."), take_while(|c: u8| c.is_ascii_digit()))),
-    ))(input)
+        opt(pair(tag(&b"."[..]), take_while(|c: u8| c.is_ascii_digit()))),
+    ))
+    .parse(input)
 }
 
 // Parses a delay value according to ABNF: *(DIGIT) [ "." *(DIGIT) ]
@@ -30,14 +32,15 @@ fn float_digits(input: &[u8]) -> ParseResult<'_, &[u8]> {
 fn delay_digits(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(alt((
         // Case 1: With decimal point - can have optional digits before
-        recognize(tuple((
+        recognize((
             take_while(|c: u8| c.is_ascii_digit()), // 0 or more digits
-            tag(b"."),
+            tag(&b"."[..]),
             take_while(|c: u8| c.is_ascii_digit()), // 0 or more digits
-        ))),
+        )),
         // Case 2: Just digits, no decimal
         digit1,
-    )))(input)
+    )))
+    .parse(input)
 }
 
 // Define structure for Timestamp value
@@ -72,7 +75,8 @@ pub fn parse_timestamp_value(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
             NotNan::new(f).map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Verify))
             // Map NotNan error to NomError
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Parses delay value: *(DIGIT) [ "." *(DIGIT) ] into NotNan<f32>
@@ -106,7 +110,8 @@ pub fn parse_delay_value(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
 
             NotNan::new(f).map_err(|_| NomError::from_error_kind(bytes, ErrorKind::Verify))
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Timestamp = "Timestamp" HCOLON 1*(DIGIT) [ "." *(DIGIT) ] [ LWS delay ]
@@ -138,7 +143,8 @@ pub fn parse_timestamp(input: &[u8]) -> ParseResult<'_, (NotNan<f32>, Option<Not
     let (remaining, delay) = opt(preceded(
         space0,            // LWS (Linear White Space)
         parse_delay_value, // delay value has different rules from timestamp
-    ))(remaining)?;
+    ))
+    .parse(remaining)?;
 
     Ok((remaining, (timestamp, delay)))
 }

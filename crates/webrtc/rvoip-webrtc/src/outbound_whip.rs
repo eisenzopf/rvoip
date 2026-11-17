@@ -242,7 +242,7 @@ pub(crate) async fn build_checked_client(
         ));
     }
     let addresses: Vec<SocketAddr> = addresses.into_iter().collect();
-    let builder = Client::builder()
+    let builder = crate::ring_http_client_builder()
         .use_rustls_tls()
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(policy.connect_timeout())
@@ -602,7 +602,7 @@ mod tests {
             .unwrap(),
         );
         let mut resource = WhipResourceClient {
-            client: Client::builder()
+            client: crate::ring_http_client_builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap(),

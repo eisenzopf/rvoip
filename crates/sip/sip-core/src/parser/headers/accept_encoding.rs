@@ -5,6 +5,7 @@
 // content-coding = token
 // accept-param = ("q" EQUAL qvalue) / generic-param
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -98,7 +99,8 @@ impl std::cmp::PartialOrd for EncodingInfo {
 fn codings(input: &[u8]) -> ParseResult<'_, String> {
     map(alt((token, tag("*"))), |bytes| {
         String::from_utf8_lossy(bytes).to_string()
-    })(input)
+    })
+    .parse(input)
 }
 
 // accept-param = ("q" EQUAL qvalue) / generic-param
@@ -113,7 +115,8 @@ fn encoding(input: &[u8]) -> ParseResult<'_, EncodingInfo> {
             coding: coding_str,
             params: params_vec,
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Define structure for Accept-Encoding header value
@@ -133,7 +136,7 @@ pub struct AcceptEncodingValue {
 // It should return ParseResult<'_, Vec<EncodingInfo>> , empty Vec if header value is empty
 pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<'_, Vec<EncodingInfo>> {
     // Use separated_list0 to allow an empty list if the input is empty or just whitespace
-    separated_list0(comma, encoding)(input)
+    separated_list0(comma, encoding).parse(input)
 }
 
 #[cfg(test)]

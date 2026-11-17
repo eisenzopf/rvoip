@@ -773,15 +773,13 @@ impl Server {
             } else {
                 server_name.clone()
             };
-            let request = url::Url::parse(&format!("moqt://{accepted_host}"))?;
-            let session = web_transport_quinn::Session::raw(
-                conn,
-                request,
-                web_transport_quinn::proto::ConnectResponse::default(),
-            );
+            // Raw QUIC sessions carry no URL (web-transport 0.13), so the
+            // accepted TLS server name travels in the negotiated transport.
+            let accepted_url = url::Url::parse(&format!("moqt://{accepted_host}"))?;
+            let session = web_transport_quinn::Session::raw(conn);
             (
                 session,
-                NegotiatedTransport::new(Transport::RawQuic, selected),
+                NegotiatedTransport::raw_quic(selected, accepted_url),
             )
         } else {
             anyhow::bail!("unsupported ALPN: {}", alpn)
@@ -933,7 +931,11 @@ impl Client {
             let session = web_transport_quinn::Session::connect(connection, request)
                 .await
                 .context("failed to establish WebTransport session")?;
-            let protocol = selected_webtransport_protocol(session.response().protocol.as_deref())?;
+            let protocol = selected_webtransport_protocol(
+                session
+                    .response()
+                    .and_then(|response| response.protocol.as_deref()),
+            )?;
             (
                 session,
                 NegotiatedTransport::new(Transport::WebTransport, protocol),
@@ -943,12 +945,8 @@ impl Client {
                 anyhow::bail!("peer selected raw QUIC contrary to the requested substrate policy");
             }
             (
-                web_transport_quinn::Session::raw(
-                    connection,
-                    target.network_url(),
-                    web_transport_quinn::proto::ConnectResponse::default(),
-                ),
-                NegotiatedTransport::new(Transport::RawQuic, protocol),
+                web_transport_quinn::Session::raw(connection),
+                NegotiatedTransport::raw_quic(protocol, target.network_url()),
             )
         } else {
             anyhow::bail!(

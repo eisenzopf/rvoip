@@ -22,7 +22,7 @@ name = "users_core"
 [features]
 default = []
 auth-core = ["dep:rvoip-auth-core", "dep:rvoip-core-traits"]
-client = ["reqwest"]
+client = ["reqwest", "dep:rustls"]
 postgres = ["dep:sqlx-postgres"]
 
 [dependencies]
@@ -30,16 +30,16 @@ postgres = ["dep:sqlx-postgres"]
 tokio = { workspace = true, features = ["full"] }
 
 # Database
-sqlx-core = { version = "0.8", default-features = false, features = ["_rt-tokio", "json"] }
-sqlx-sqlite = { version = "0.8", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
-sqlx-postgres = { version = "0.8", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
+sqlx-core = { version = "0.9", default-features = false, features = ["_rt-tokio", "json"] }
+sqlx-sqlite = { version = "0.9", default-features = false, features = ["bundled", "chrono", "json", "uuid"] }
+sqlx-postgres = { version = "0.9", default-features = false, features = ["chrono", "json", "uuid"], optional = true }
 
 # Password hashing
 argon2 = "0.5"
 password-hash = "0.5"
 
 # JWT
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 
@@ -57,8 +57,8 @@ thiserror = { workspace = true }
 async-trait = "0.1"
 
 # Web framework (for REST API)
-axum = { version = "0.7", features = ["http2", "json", "tokio", "macros"] }
-axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+axum = { version = "0.8", features = ["http2", "json", "tokio", "macros"] }
+axum-server = { version = "0.9", default-features = false, features = ["tls-rustls-no-provider"] }
 tower-http = { version = "0.7", features = ["cors", "trace"] }
 
 # Logging
@@ -77,7 +77,8 @@ md5 = "0.8"
 rsa = { version = "0.9", features = ["pem"] }
 
 # HTTP client (for examples)
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"], optional = true }
+rustls = { workspace = true, optional = true }
 
 # Validation
 validator = { version = "0.20", features = ["derive"] }
@@ -89,7 +90,7 @@ rvoip-core-traits = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3.14"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "http2", "charset"] }
 serde_json = "1.0"
 futures = "0.3"
 tower = { version = "0.5", features = ["util"] }

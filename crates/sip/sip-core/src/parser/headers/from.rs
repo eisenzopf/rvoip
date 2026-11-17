@@ -4,6 +4,7 @@
 // from-param = tag-param / generic-param
 // tag-param = "tag" EQUAL token
 
+use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -44,14 +45,18 @@ fn tag_param(input: &[u8]) -> ParseResult<'_, Param> {
         preceded(tag_no_case(b"tag".as_slice()), preceded(equal, token)),
         |tag_bytes| match str::from_utf8(tag_bytes) {
             Ok(tag_str) => Ok(Param::Tag(tag_str.to_string())),
-            Err(_) => Err(nom::Err::Failure(NomError::new(tag_bytes, ErrorKind::Tag))),
+            Err(_) => Err(nom::Err::<_>::Failure(NomError::new(
+                tag_bytes,
+                ErrorKind::Tag,
+            ))),
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // Special case for the "lr" flag parameter
 fn lr_param(input: &[u8]) -> ParseResult<'_, Param> {
-    value(Param::Lr, tag_no_case(b"lr"))(input)
+    value(Param::Lr, tag_no_case(&b"lr"[..])).parse(input)
 }
 
 // transport-param = "transport=" token
@@ -59,12 +64,13 @@ fn transport_param(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(tag_no_case(b"transport".as_slice()), preceded(equal, token)),
         |transport_bytes| str::from_utf8(transport_bytes).map(|s| Param::Transport(s.to_string())),
-    )(input)
+    )
+    .parse(input)
 }
 
 // from-param = tag-param / generic-param
 fn from_param_item(input: &[u8]) -> ParseResult<'_, Param> {
-    alt((tag_param, lr_param, transport_param, generic_param))(input)
+    alt((tag_param, lr_param, transport_param, generic_param)).parse(input)
 }
 
 // from-spec = ( name-addr / addr-spec ) *( SEMI from-param )
@@ -81,14 +87,15 @@ fn from_spec(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params.extend(params_vec);
             addr // Return the modified Address
         },
-    )(input)
+    )
+    .parse(input)
 }
 
 // From = "From" HCOLON from-spec
 // Note: HCOLON handled elsewhere
 // Make this function public
 pub fn parse_from(input: &[u8]) -> ParseResult<'_, FromHeader> {
-    map(from_spec, FromHeader)(input)
+    map(from_spec, FromHeader).parse(input)
 }
 
 #[cfg(test)]
