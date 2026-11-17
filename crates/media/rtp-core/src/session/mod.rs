@@ -14,7 +14,7 @@ pub use stream::{RtpStream, RtpStreamStats};
 
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use rand::Rng;
+use rand::RngExt;
 use send_accounting::{SendAccounting, SendTotals};
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
@@ -200,7 +200,7 @@ fn wallclock_rtp_timestamp(clock_rate: u32) -> RtpTimestamp {
 /// user or host name, and stays fixed for the session's lifetime.
 fn random_cname() -> String {
     use base64::Engine;
-    let bytes: [u8; 12] = rand::thread_rng().gen();
+    let bytes: [u8; 12] = rand::rng().random();
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
@@ -1624,8 +1624,8 @@ impl RtpSession {
 
         // Generate SSRC if not provided
         let ssrc = config.ssrc.unwrap_or_else(|| {
-            let mut rng = rand::thread_rng();
-            rng.gen::<u32>()
+            let mut rng = rand::rng();
+            rng.random::<u32>()
         });
 
         // Create transport config - respect provided ports!
@@ -1657,8 +1657,8 @@ impl RtpSession {
         // Create scheduler if needed
         let scheduler = Some(RtpScheduler::new(
             config.clock_rate,
-            rand::thread_rng().gen::<u16>(), // Random starting sequence
-            rand::thread_rng().gen::<u32>(), // Random starting timestamp
+            rand::rng().random::<u16>(), // Random starting sequence
+            rand::rng().random::<u32>(), // Random starting timestamp
         ));
         let stats = Arc::new(parking_lot::Mutex::new(RtpSessionStats::default()));
         let send_accounting = Arc::new(SendAccounting::default());
@@ -4899,8 +4899,8 @@ mod tests {
             .unwrap();
         // A fresh random master key per run: both directions share it, and
         // nothing here depends on particular key bytes.
-        let key: [u8; 16] = rand::thread_rng().gen();
-        let salt: [u8; 14] = rand::thread_rng().gen();
+        let key: [u8; 16] = rand::rng().random();
+        let salt: [u8; 14] = rand::rng().random();
         let context = || {
             crate::srtp::SrtpContext::new(
                 crate::srtp::SRTP_AES128_CM_SHA1_80,
@@ -5007,9 +5007,9 @@ mod sync_tx_tests {
     /// run time rather than hard-coded, and shared by every context a test
     /// builds so both ends of a call agree.
     fn test_srtp_key() -> &'static ([u8; 16], [u8; 14]) {
-        use rand::Rng;
+        use rand::RngExt;
         static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
-        KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()))
+        KEY.get_or_init(|| (rand::rng().random(), rand::rng().random()))
     }
 
     fn srtp_context() -> crate::srtp::SrtpContext {

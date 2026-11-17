@@ -30,9 +30,9 @@ const FRAMES_PER_FIRE: usize = 4;
 /// time rather than hard-coded, shared by every context a test builds so
 /// both ends of a call agree.
 fn test_srtp_key() -> &'static ([u8; 16], [u8; 14]) {
-    use rand::Rng;
+    use rand::RngExt;
     static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
-    KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()))
+    KEY.get_or_init(|| (rand::rng().random(), rand::rng().random()))
 }
 
 fn srtp_context() -> SrtpContext {

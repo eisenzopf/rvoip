@@ -296,22 +296,22 @@ impl crate::ApiKeyStore for PostgresUserStore {
         &self,
         request: crate::api_keys::CreateApiKeyRequest,
     ) -> Result<(crate::ApiKey, String)> {
-        use rand::Rng;
+        use rand::RngExt;
         use sha2::{Digest, Sha256};
 
         request.validate()?;
 
         let raw_key = format!(
             "rvoip_ak_live_{}",
-            rand::thread_rng()
-                .sample_iter(&rand::distributions::Alphanumeric)
+            rand::rng()
+                .sample_iter(&rand::distr::Alphanumeric)
                 .take(32)
                 .map(char::from)
                 .collect::<String>()
         );
         let mut hasher = Sha256::new();
         hasher.update(raw_key.as_bytes());
-        let key_hash = format!("{:x}", hasher.finalize());
+        let key_hash = hex::encode(hasher.finalize());
 
         let api_key = crate::ApiKey {
             id: crate::User::new_id(),
@@ -350,7 +350,7 @@ impl crate::ApiKeyStore for PostgresUserStore {
 
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
-        let key_hash = format!("{:x}", hasher.finalize());
+        let key_hash = hex::encode(hasher.finalize());
 
         let row = query(
             "SELECT id, user_id, name, key_hash, permissions, active, expires_at, last_used, created_at
