@@ -113,7 +113,7 @@ pub struct OidcProvider {
 impl OidcProvider {
     /// Discover OIDC provider metadata from `/.well-known/openid-configuration`.
     pub async fn discover(config: OidcConfig) -> Result<Self, OidcError> {
-        let client = reqwest::Client::new();
+        let client = crate::ring_http_client();
         let metadata = client
             .get(config.discovery_url()?)
             .send()
@@ -322,7 +322,7 @@ mod tests {
             .with_client_credentials("sip-client", "secret")
             .with_jwks_cache_ttl(Duration::from_secs(60));
         let provider =
-            OidcProvider::from_metadata(config, metadata(), reqwest::Client::new()).unwrap();
+            OidcProvider::from_metadata(config, metadata(), crate::ring_http_client()).unwrap();
 
         let _jwks = provider.bearer_validator().unwrap();
         let _introspection = provider.introspection_validator().unwrap();
@@ -334,7 +334,7 @@ mod tests {
         let mut metadata = metadata();
         metadata.introspection_endpoint = None;
         let provider =
-            OidcProvider::from_metadata(config, metadata, reqwest::Client::new()).unwrap();
+            OidcProvider::from_metadata(config, metadata, crate::ring_http_client()).unwrap();
 
         let error = provider
             .introspection_validator()
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn issuer_mismatch_rejects_metadata() {
         let config = OidcConfig::new(Url::parse("https://idp.example.test/other").unwrap());
-        let error = OidcProvider::from_metadata(config, metadata(), reqwest::Client::new())
+        let error = OidcProvider::from_metadata(config, metadata(), crate::ring_http_client())
             .expect_err("issuer mismatch should fail");
         assert!(error.to_string().contains("does not match"));
     }
@@ -362,4 +362,16 @@ mod tests {
         assert_eq!(principal.issuer.as_deref(), Some("https://issuer.example"));
         assert_eq!(principal.method, rvoip_auth_core::AuthenticationMethod::Jwt);
     }
+}
+
+/// Build a reqwest client on the workspace's ring rustls provider.
+///
+/// reqwest is built with `rustls-no-provider` and so uses the process-default
+/// rustls provider. Install the workspace's ring provider as that default
+/// first (a no-op when the application has already installed one).
+pub(crate) fn ring_http_client() -> reqwest::Client {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
+        .build()
+        .expect("reqwest client builds with the ring rustls provider")
 }

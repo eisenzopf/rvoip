@@ -15,7 +15,8 @@ description = "Audit sink implementations for RVoIP auth events"
 [dependencies]
 async-trait = { workspace = true }
 rvoip-auth-core.workspace = true
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

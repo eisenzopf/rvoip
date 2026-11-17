@@ -28,7 +28,7 @@ async fn keycloak_password_grant_token_validates_via_jwks() {
         return;
     };
     let base_url = base_url.trim_end_matches('/');
-    let client = reqwest::Client::new();
+    let client = ring_reqwest_builder().build().unwrap();
     let token_url = format!("{base_url}/realms/rvoip/protocol/openid-connect/token");
     let token = fetch_token_with_retry(&client, &token_url).await;
 
@@ -85,4 +85,11 @@ async fn fetch_token_with_retry(client: &reqwest::Client, token_url: &str) -> St
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     panic!("Keycloak token endpoint did not become ready: {last_error}");
+}
+
+/// reqwest is built with `rustls-no-provider`: install the workspace's ring
+/// provider as the process default before building a client.
+fn ring_reqwest_builder() -> reqwest::ClientBuilder {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    reqwest::Client::builder()
 }
