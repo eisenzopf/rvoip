@@ -23,9 +23,10 @@ variable "release_name_prefix" {
 }
 
 variable "bench_ami_id" {
-  description = "Baked bench AMI (scripts/bench/ami/bake.py). Null uses stock Ubuntu 24.04, which is only fit for baking."
+  description = "Baked bench AMI (scripts/bench/ami/bake.py). Null uses stock Ubuntu 24.04, which is only fit for baking. A new AMI is a new bench environment (env-id): re-pin and re-baseline."
   type        = string
-  default     = null
+  # rvoip-bench-20261117T010818Z-1b56903e410c (Ubuntu 24.04, scripts/bench/ami digest 1b56903e410c)
+  default = "ami-0d3897eb748e4b60e"
 }
 
 variable "dut_instance_type" {
