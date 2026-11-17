@@ -11,6 +11,7 @@ import rfc_report_ietf
 
 LATENCY_KEYS = ('p50', 'p95', 'p99', 'p99_9')
 DID = '+15550100000'
+MEDIA_PORT_START, MEDIA_PORT_END = 25000, 64999
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +25,12 @@ def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, o
     calls = sum(round(s['cps'] * s['seconds']) for s in stages)
     peak = max(s['cps'] for s in stages)
     # Concurrency: calls in flight for the hold, setup and teardown, with margin.
-    concurrent = min(35000 * len(sources), int(peak * (hold / 1000 + 12)) + 2000)
+    # The caller's whole reserved media range (bench_tune.py reserves 25000-64999 on callers); every
+    # endpoint owns an equal, even-aligned block of it, and the caller refuses max_concurrent above
+    # the pool even for signaling-only calls.
+    ports = (MEDIA_PORT_END - MEDIA_PORT_START + 1)
+    slots = len(sources) * connections * ((ports // connections) & ~1)
+    concurrent = min(35000 * len(sources), slots, int(peak * (hold / 1000 + 4)) + 1000)
     return {
         'run_id': run_id,
         'scenario': row.get('id', 'bench'),
@@ -42,8 +48,8 @@ def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, o
         'did': DID,
         'codec': 'pcmu',
         'rtcp_mux_required': True,
-        'media_port_start': 30000,
-        'media_port_end': 59999,
+        'media_port_start': MEDIA_PORT_START,
+        'media_port_end': MEDIA_PORT_END,
         'calls': calls,
         'cps': peak,
         'stages': stages,

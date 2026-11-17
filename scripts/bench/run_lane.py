@@ -367,7 +367,10 @@ class Trials:
         local = self.args.local / rel
         cached = local / 'merged' / 'summary.json'
         if cached.exists():
-            return json.loads(cached.read_text()), rel, local, None   # reused on --resume
+            reused = json.loads(cached.read_text())
+            if rfc7502.evaluate_trial(reused, 'rfc')[0]:
+                return reused, rel, local, None   # reused on --resume
+            # A void trial (no scored attempt) is never reused: a retry at the same rate reruns it.
         if local.exists():
             shutil.rmtree(local)
         local.mkdir(parents=True)
