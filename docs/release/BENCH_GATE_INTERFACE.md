@@ -89,84 +89,25 @@ Only one lane runs per account at a time (an S3 lock in run_lane).
 
 ## Receipt schema (`rvoip-bench-lane-receipt-v1`)
 
-The benchmark work owns the schema. The collector (`gates.py collect`)
-rejects the gate unless the receipt has the schema, the gate's profile
-(`release` or `minor`), `candidate_sha` equal to the gate receipt's
-candidate, and `status` `PASS` or `WARN`. WARN, a likely improvement with a
-proposed new R in `recommendation`, passes the gate; the receipt's `reasons`
-say why. The rest of the receipt is for the reports, for example:
+The benchmark work owns the lane's CLI, exit codes, receipt schema and verdict
+rules: see `docs/BENCH_GATE_INTERFACE.md` (it lands with the harness PR).
+This file is only the release side of that contract.
 
-```json
-{
-  "schema": "rvoip-bench-lane-receipt-v1",
-  "profile": "release",
-  "candidate_sha": "<40-hex commit measured>",
-  "status": "PASS | WARN | FAIL",
-  "reasons": ["R1: 1.05 x R trial passed; record a new R after review"],
-  "started_at": "<ISO 8601 UTC>",
-  "ended_at": "<ISO 8601 UTC>",
-  "environment": {
-    "env_id": "<instance types + AMI + caller build, the baseline key>",
-    "dut_instance_type": "c8i.4xlarge",
-    "caller_instance_type": "c8in.24xlarge",
-    "caller_count": 2,
-    "ami_id": "ami-...",
-    "caller_build_sha256": "<64-hex>",
-    "dut_build_sha256": "<64-hex>"
-  },
-  "baseline": {
-    "path": "crates/sip/rvoip-sip/perf-baselines/rfc7502/<env-id>/<file>.json",
-    "sha256": "<64-hex>"
-  },
-  "rows": [
-    {
-      "id": "R1",
-      "transport": "tls",
-      "media": "none",
-      "hold_seconds": 0,
-      "recorded_rate_cps": 5384,
-      "result": "PASS | WARN | FAIL",
-      "trials": [
-        {
-          "rate_factor": 0.95,
-          "rate_cps": 5114,
-          "duration_seconds": 180,
-          "valid": true,
-          "attempts": 920520,
-          "failures": 0,
-          "result": "PASS",
-          "evidence_uri": "s3://<bucket>/release/<run>/bench/R1/t1.tar.gz",
-          "evidence_sha256": "<64-hex>"
-        }
-      ],
-      "latency": {
-        "rate_factor": 0.9,
-        "srd_ms": {"p50": 0.0, "p99": 0.0, "p99_9": 0.0},
-        "sdd_ms": {"p50": 0.0, "p99": 0.0, "p99_9": 0.0},
-        "tolerance_pct": 25,
-        "floor_ms": 10,
-        "result": "PASS"
-      }
-    }
-  ],
-  "deviations": [
-    "10 s establishment threshold",
-    "warm-up at r/2, unscored",
-    "fresh DUT process per trial",
-    "rate quantum 4",
-    "503 with Retry-After counted as DUT failure"
-  ],
-  "report": {"path": "rfc7502-report.md", "sha256": "<64-hex>"}
-}
-```
+The collector (`gates.py collect`) rejects the gate unless the receipt has
+the schema, the gate's profile (`release` or `minor`), `candidate_sha` equal
+to the gate receipt's candidate, and `status` `PASS` or `WARN`. WARN, a likely
+improvement with a proposed new R, passes the gate; the receipt's `reasons`
+say why.
 
-`report` is required for the `minor` profile and is attached to the GitHub
-release.
+The tester builds (`rvoip-loadgen`, `ea-uas`) and the lane AMI are pinned per
+env-id in `crates/sip/rvoip-sip/perf-baselines/rfc7502/<env-id>/env.json`;
+`perf-baselines/rfc7502/ENVIRONMENT` names the current env-id. run_lane
+fetches and verifies those builds and exits 2 if the lane's AMI differs.
 
 ## Reuse
 
 The bench gates hash `Cargo.toml`, `Cargo.lock`, `crates/foundation/**`,
-`crates/media/**`, `crates/sip/**`, `crates/tools/**`, `scripts/bench/**`
+`crates/media/**`, `crates/sip/**` (which includes the recorded rates and pinned environment under `crates/sip/rvoip-sip/perf-baselines/rfc7502/**`), `crates/tools/**`, `scripts/bench/**`
 `infra/aws/bench/**` and `scripts/release/bench_gate.py`, plus what every gate hashes: `rust-toolchain.toml`,
 `scripts/release/gates.py`, `.config/**`, `.github/workflows/**` and
 `deny.toml`. Hashing is version-normalized, so the bump commit's

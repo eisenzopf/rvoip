@@ -1766,6 +1766,15 @@ version = "{version}"
                 )
                 self.assertIn("scripts/bench/**", gate["affected_paths"])
                 self.assertIn(3, gate["retry_on_exit_codes"])
+                # The recorded R values and the pinned tester environment
+                # decide the verdict, so a change to them reruns the lane.
+                for path in (
+                    "crates/sip/rvoip-sip/perf-baselines/rfc7502/ENVIRONMENT",
+                    "crates/sip/rvoip-sip/perf-baselines/rfc7502/env-a/env.json",
+                    "crates/tools/rvoip-bench-uas/src/main.rs",
+                    "scripts/bench/run_lane.py",
+                ):
+                    self.assertTrue(gates.matches(path, gate["affected_paths"]), path)
         matrix = gates.matrix_for(
             [{"id": "perf.rfc7502-release", "decision": "RUN"}], by_id
         )
