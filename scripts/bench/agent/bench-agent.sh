@@ -208,6 +208,22 @@ summarize)
   aws s3 cp --only-show-errors "$T/evidence-manifest.json" "${trial}evidence-manifest.json"
   rm -rf "$T"
   ;;
+host-tweak)
+  # host-tweak none|notrack : diagnostic-only caller tweak (never in a gate run). notrack exempts every
+  # UDP packet from conntrack, to measure conntrack's share of the receive-path cost.
+  mode=$1
+  if command -v iptables >/dev/null; then
+    iptables -t raw -D PREROUTING -p udp -j NOTRACK 2>/dev/null || true
+    iptables -t raw -D OUTPUT -p udp -j NOTRACK 2>/dev/null || true
+    if [ "$mode" = notrack ]; then
+      iptables -t raw -I PREROUTING -p udp -j NOTRACK
+      iptables -t raw -I OUTPUT -p udp -j NOTRACK
+    fi
+  elif [ "$mode" = notrack ]; then
+    log "no iptables on this host"; exit 74
+  fi
+  python3 -c "import json,os;p='/proc/sys/net/netfilter/nf_conntrack_count';print(json.dumps({'host_tweak':'$mode','conntrack_count':int(open(p).read()) if os.path.exists(p) else None}))"
+  ;;
 cleanup)
   stop_all
   ;;

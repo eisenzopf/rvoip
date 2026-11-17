@@ -524,12 +524,24 @@ def run_smoke(ctx, row_id):
     p = profiles.PROFILES['smoke']
     row = profiles.ROWS[row_id]
     rate = profiles.quantize(ctx.args.r0.get(row_id) or p['rates'][row_id], profiles.TRIAL['quantum'] * 2)
-    profile = rfc7502.trial_profile(rate, rate * p['seconds'], p['warmup_seconds'], p['seconds'],
+    seconds = ctx.args.smoke_seconds or p['seconds']
+    profile = rfc7502.trial_profile(rate, rate * seconds, p['warmup_seconds'], seconds,
                                     hosts=len(ctx.lane.info['callers']))
-    summary, rel, local, note = ctx.trials.run(row_id, row, rate, 0, profile)
-    verdict = ctx.trials.verdict(summary, rel, local, note)
     result = {'id': row_id, 'transport': row['transport'], 'media': row['media'], 'hold_ms': row['hold_ms'],
-              'trials': [compact(verdict, summary, rate=rate, kind='smoke')]}
+              'trials': []}
+    callers = [c['id'] for c in ctx.lane.info['callers']]
+    for variant in ctx.args.diag_variants:
+        # Diagnostic variants (--diag-variant): a caller host tweak before the trial; 'none' is the testbed as pinned.
+        tweak = ctx.aws.run(callers, ctx.lane.agent(ctx.s3_run, 'host-tweak', variant), 'rvoip bench host-tweak', 120)
+        ctx.log('host-tweak', variant, {i: r['StandardOutputContent'].strip()[-200:] for i, r in tweak.items()})
+        rel = '%s/t00-r%d' % (row_id, rate) if ctx.args.diag_variants == ['none'] else '%s/diag-%s-r%d' % (row_id, variant, rate)
+        summary, rel, local, note = ctx.trials.run(row_id, row, rate, 0, profile, rel=rel)
+        verdict = ctx.trials.verdict(summary, rel, local, note)
+        result['trials'].append(compact(verdict, summary, rate=rate, kind='smoke', variant=variant,
+                                        softirq={k: (v or {}).get('softirq_peak_share')
+                                                 for k, v in ((summary or {}).get('resource') or {}).items()},
+                                        net_flagged={k: ((v or {}).get('net') or {}).get('flagged')
+                                                     for k, v in ((summary or {}).get('resource') or {}).items()}))
     checks = (summary or {}).get('checks') or {}
     bad = sorted(k for k, v in checks.items() if v is False)
     if verdict['outcome'] == 'pass' and not verdict['halt'] and not bad:
@@ -817,6 +829,9 @@ def parse_args(argv):
     p.add_argument('--rows', help='comma list overriding the profile rows (debug)')
     p.add_argument('--r0', action='append', default=[], help='ROW=sps initial rate for a search row')
     p.add_argument('--cap', action='append', default=[], help='ROW=sps tester cap override')
+    p.add_argument('--smoke-seconds', type=int, help='smoke: scored stage length (default: the profile\'s)')
+    p.add_argument('--diag-variant', dest='diag_variants', action='append',
+                   help='smoke only: run each row once per caller host tweak (none, notrack); diagnostic, never recordable')
     p.add_argument('--dut-type', help='override the DUT instance type (functional smoke on small hosts; never a gate run)')
     p.add_argument('--caller-type', help='override the caller instance type (smoke only)')
     p.add_argument('--keep-lane', action='store_true', help='do not terminate the lane (debug; costs money)')
@@ -824,6 +839,9 @@ def parse_args(argv):
     p.add_argument('--break-lock', action='store_true')
     args = p.parse_args(argv)
     args.started = time.time()
+    args.diag_variants = args.diag_variants or ['none']
+    if args.diag_variants != ['none'] and (args.profile != 'smoke' or args.record):
+        raise Usage('--diag-variant is a smoke-only diagnostic and is never recorded')
     if not re.fullmatch(r'[0-9a-f]{40}', args.candidate):
         raise Usage('--candidate must be a 40-hex sha')
     if not args.bucket:
