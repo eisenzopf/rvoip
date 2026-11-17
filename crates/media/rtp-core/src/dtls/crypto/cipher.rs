@@ -8,7 +8,7 @@ use crate::dtls::Result;
 use bytes::{BufMut, Bytes, BytesMut};
 
 // Add crypto imports
-use aes::cipher::{BlockDecrypt, BlockEncrypt, Key, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, Key, KeyInit};
 use aes::{Aes128, Aes256};
 use aes_gcm::{
     aead::{Aead, Nonce, Payload},
@@ -357,7 +357,8 @@ impl AeadImpl {
 impl Encryptor for AeadImpl {
     fn encrypt(&self, plaintext: &[u8], additional_data: &[u8]) -> Result<Bytes> {
         // Create a nonce from the IV
-        let nonce = Nonce::<Aes128Gcm>::from_slice(&self.iv);
+        let nonce =
+            <&Nonce<Aes128Gcm>>::try_from(&self.iv[..]).expect("iv length matches the cipher");
 
         // Encrypt the data based on cipher type
         match self.cipher_type {
@@ -398,7 +399,11 @@ impl Encryptor for AeadImpl {
 
                 // Encrypt
                 let ciphertext = cipher
-                    .encrypt(Nonce::<Aes256Gcm>::from_slice(&self.iv), payload)
+                    .encrypt(
+                        <&Nonce<Aes256Gcm>>::try_from(&self.iv[..])
+                            .expect("iv length matches the cipher"),
+                        payload,
+                    )
                     .map_err(|e| {
                         crate::error::Error::CryptoError(format!("AEAD encryption failed: {}", e))
                     })?;
@@ -433,7 +438,11 @@ impl Decryptor for AeadImpl {
 
                 // Decrypt
                 let plaintext = cipher
-                    .decrypt(Nonce::<Aes128Gcm>::from_slice(&self.iv), payload)
+                    .decrypt(
+                        <&Nonce<Aes128Gcm>>::try_from(&self.iv[..])
+                            .expect("iv length matches the cipher"),
+                        payload,
+                    )
                     .map_err(|e| {
                         crate::error::Error::CryptoError(format!("AEAD decryption failed: {}", e))
                     })?;
@@ -456,7 +465,11 @@ impl Decryptor for AeadImpl {
 
                 // Decrypt
                 let plaintext = cipher
-                    .decrypt(Nonce::<Aes256Gcm>::from_slice(&self.iv), payload)
+                    .decrypt(
+                        <&Nonce<Aes256Gcm>>::try_from(&self.iv[..])
+                            .expect("iv length matches the cipher"),
+                        payload,
+                    )
                     .map_err(|e| {
                         crate::error::Error::CryptoError(format!("AEAD decryption failed: {}", e))
                     })?;
@@ -512,7 +525,7 @@ impl BlockCipherImpl {
         match self.mac_algorithm {
             MacAlgorithm::HmacSha1 => {
                 let mut mac =
-                    <HmacSha1 as hmac::Mac>::new_from_slice(&self.mac_key).map_err(|e| {
+                    <HmacSha1 as hmac::KeyInit>::new_from_slice(&self.mac_key).map_err(|e| {
                         crate::error::Error::CryptoError(format!(
                             "Failed to initialize HMAC-SHA1: {}",
                             e
@@ -523,8 +536,8 @@ impl BlockCipherImpl {
                 Ok(Bytes::copy_from_slice(&result))
             }
             MacAlgorithm::HmacSha256 => {
-                let mut mac =
-                    <HmacSha256 as hmac::Mac>::new_from_slice(&self.mac_key).map_err(|e| {
+                let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(&self.mac_key)
+                    .map_err(|e| {
                         crate::error::Error::CryptoError(format!(
                             "Failed to initialize HMAC-SHA256: {}",
                             e
@@ -535,8 +548,8 @@ impl BlockCipherImpl {
                 Ok(Bytes::copy_from_slice(&result))
             }
             MacAlgorithm::HmacSha384 => {
-                let mut mac =
-                    <HmacSha384 as hmac::Mac>::new_from_slice(&self.mac_key).map_err(|e| {
+                let mut mac = <HmacSha384 as hmac::KeyInit>::new_from_slice(&self.mac_key)
+                    .map_err(|e| {
                         crate::error::Error::CryptoError(format!(
                             "Failed to initialize HMAC-SHA384: {}",
                             e
@@ -591,7 +604,8 @@ impl Encryptor for BlockCipherImpl {
         // Encrypt the data
         let encrypted = match self.cipher_type {
             CipherType::Aes128Cbc => {
-                let key = Key::<Aes128>::from_slice(&self.key);
+                let key =
+                    <&Key<Aes128>>::try_from(&self.key[..]).expect("key length matches the cipher");
                 let cipher = Aes128::new(key);
 
                 // Implement CBC mode encryption
@@ -620,7 +634,8 @@ impl Encryptor for BlockCipherImpl {
                 ciphertext.freeze()
             }
             CipherType::Aes256Cbc => {
-                let key = Key::<Aes256>::from_slice(&self.key);
+                let key =
+                    <&Key<Aes256>>::try_from(&self.key[..]).expect("key length matches the cipher");
                 let cipher = Aes256::new(key);
 
                 // Implement CBC mode encryption (same as above)
@@ -672,7 +687,8 @@ impl Decryptor for BlockCipherImpl {
         // Decrypt the data
         let decrypted = match self.cipher_type {
             CipherType::Aes128Cbc => {
-                let key = Key::<Aes128>::from_slice(&self.key);
+                let key =
+                    <&Key<Aes128>>::try_from(&self.key[..]).expect("key length matches the cipher");
                 let cipher = Aes128::new(key);
 
                 // Implement CBC mode decryption
@@ -704,7 +720,8 @@ impl Decryptor for BlockCipherImpl {
                 plaintext.freeze()
             }
             CipherType::Aes256Cbc => {
-                let key = Key::<Aes256>::from_slice(&self.key);
+                let key =
+                    <&Key<Aes256>>::try_from(&self.key[..]).expect("key length matches the cipher");
                 let cipher = Aes256::new(key);
 
                 // Implement CBC mode decryption (same as above)

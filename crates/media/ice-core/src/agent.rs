@@ -37,9 +37,9 @@ impl Credentials {
     /// Generate spec-sized random credentials.
     #[must_use]
     pub fn generate() -> Self {
-        use rand::distributions::Alphanumeric;
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+        use rand::distr::Alphanumeric;
+        use rand::RngExt;
+        let mut rng = rand::rng();
         let take = |n: usize, rng: &mut rand::rngs::ThreadRng| -> String {
             (0..n)
                 .map(|_| char::from(rng.sample(Alphanumeric)))
@@ -152,7 +152,7 @@ impl AgentConfig {
             role,
             lite: false,
             credentials,
-            tie_breaker: rand::Rng::gen(&mut rand::thread_rng()),
+            tie_breaker: rand::RngExt::random(&mut rand::rng()),
             ta: Duration::from_millis(50),
             rto_initial: Duration::from_millis(500),
             rto_max: Duration::from_secs(3),

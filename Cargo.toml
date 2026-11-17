@@ -74,6 +74,9 @@ members = [
     "crates/extensions/rvoip-saml",
     "crates/extensions/rvoip-webauthn",
     "crates/extensions/rvoip-ims-aka",
+
+    # tools/ — benchmark tools, never published.
+    "crates/tools/rvoip-bench-uas",
 ]
 
 exclude = [
@@ -290,7 +293,7 @@ futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
 parking_lot = "0.13"
-rand = { version = "0.8", features = ["small_rng"] }
+rand = "0.10"
 clap = { version = "4.0", features = ["derive"] }
 
 # Additional dependencies used by various crates
@@ -316,13 +319,13 @@ axum-server = { version = "0.9", features = ["tls-rustls-ring"] }
 # to avoid pulling chromiumoxide_cdp's heavy proc-macro chain when the
 # feature isn't selected.
 chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"] }
-sha2 = "0.10"
-sha1 = "0.10"
+sha2 = "0.11"
+sha1 = "0.11"
 zeroize = "1.9"
 subtle = "2.6"
-hmac = "0.12"
-aes = "0.8"
-md-5 = "0.10"
+hmac = "0.13"
+aes = "0.9"
+md-5 = "0.11"
 ring = "0.17"
 rcgen = "0.14"
 x509-parser = "0.18"

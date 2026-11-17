@@ -144,14 +144,14 @@ use shared::error::Result;
 /// # }
 /// ```
 ///
-/// # Specifications
+/// # Specification
 ///
 /// - [W3C RTCSessionDescription]
 /// - [MDN RTCSessionDescription]
 /// - [RFC 8866] - SDP: Session Description Protocol
 /// - [RFC 3264] - Offer/Answer Model with SDP
 ///
-/// [W3C RTCSessionDescription]: https://w3c.github.io/webrtc-pc/#rtcsessiondescription-class
+/// [W3C RTCSessionDescription]: https://www.w3.org/TR/webrtc/#rtcsessiondescription-class
 /// [MDN RTCSessionDescription]: https://developer.mozilla.org/en-US/docs/Web/API/RTCSessionDescription
 /// [RFC 8866]: https://datatracker.ietf.org/doc/html/rfc8866
 /// [RFC 3264]: https://datatracker.ietf.org/doc/html/rfc3264
@@ -227,6 +227,10 @@ impl RTCSessionDescription {
     /// # Ok(())
     /// # }
     /// ```
+    /// # Errors
+    ///
+    /// Returns an error if `sdp` is not valid SDP; the text is parsed eagerly so that an
+    /// unparseable description fails here rather than at `set_local_description` time.
     pub fn answer(sdp: String) -> Result<RTCSessionDescription> {
         let mut desc = RTCSessionDescription {
             sdp,
@@ -278,6 +282,10 @@ impl RTCSessionDescription {
     /// # Ok(())
     /// # }
     /// ```
+    /// # Errors
+    ///
+    /// Returns an error if `sdp` is not valid SDP; the text is parsed eagerly so that an
+    /// unparseable description fails here rather than at `set_local_description` time.
     pub fn offer(sdp: String) -> Result<RTCSessionDescription> {
         let mut desc = RTCSessionDescription {
             sdp,
@@ -335,6 +343,10 @@ impl RTCSessionDescription {
     /// Provisional answers are less commonly used in modern WebRTC. Consider
     /// whether sending a final answer immediately is more appropriate for your
     /// use case.
+    /// # Errors
+    ///
+    /// Returns an error if `sdp` is not valid SDP; the text is parsed eagerly so that an
+    /// unparseable description fails here rather than at `set_local_description` time.
     pub fn pranswer(sdp: String) -> Result<RTCSessionDescription> {
         let mut desc = RTCSessionDescription {
             sdp,
@@ -354,7 +366,7 @@ impl RTCSessionDescription {
     /// [`RTCSdpType::Rollback`]. Rollback is used to revert a pending
     /// local or remote description and return the signaling state to Stable.
     ///
-    /// Per WebRTC specification (RFC 8829 §5.7), rollback descriptions
+    /// Per WebRTC specification (RFC 9429 §5.7), rollback descriptions
     /// typically have empty SDP content. This is used to abort an in-progress
     /// negotiation, such as when implementing Perfect Negotiation collision
     /// resolution.
@@ -387,11 +399,12 @@ impl RTCSessionDescription {
     /// # Examples
     ///
     /// ```no_run
+    /// # use std::time::Instant;
     /// use rtc::peer_connection::sdp::{RTCSessionDescription, RTCSdpType};
     /// use rtc::peer_connection::RTCPeerConnectionBuilder;
     ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let mut pc = RTCPeerConnectionBuilder::new().build()?;
+    /// # let mut pc = RTCPeerConnectionBuilder::new().build(Instant::now())?;
     /// // Create a rollback description (typically with empty SDP)
     /// let rollback = RTCSessionDescription::rollback(None)?;
     /// assert_eq!(rollback.sdp_type, RTCSdpType::Rollback);
@@ -399,16 +412,21 @@ impl RTCSessionDescription {
     ///
     /// // Use case: Polite peer rolling back local offer on collision
     /// // (assumes peer is currently in HaveLocalOffer state)
-    /// pc.set_local_description(rollback)?;
+    /// pc.set_local_description(Instant::now(), rollback)?;
     /// // Now back in Stable state, ready to accept remote offer
     /// # Ok(())
     /// # }
     /// ```
     ///
+    /// # Errors
+    ///
+    /// Returns an error only if a non-empty `sdp` is supplied and does not parse. The usual
+    /// call, `rollback(None)`, cannot fail.
+    ///
     /// # Specification
     ///
     /// Implements rollback as specified in:
-    /// - RFC 8829 (JSEP) §5.7: Rollback
+    /// - RFC 9429 (JSEP) §5.7: Rollback
     /// - W3C WebRTC 1.0 §4.4.1.6: Set the RTCSessionDescription
     pub fn rollback(sdp: Option<String>) -> Result<RTCSessionDescription> {
         let mut desc = RTCSessionDescription {
@@ -469,6 +487,9 @@ impl RTCSessionDescription {
     ///
     /// This method parses the SDP each time it's called. For repeated access,
     /// consider caching the result.
+    /// # Errors
+    ///
+    /// Returns an error if the stored SDP text is not valid SDP.
     pub fn unmarshal(&self) -> Result<SessionDescription> {
         let mut reader = Cursor::new(self.sdp.as_bytes());
         let parsed = SessionDescription::unmarshal(&mut reader)?;

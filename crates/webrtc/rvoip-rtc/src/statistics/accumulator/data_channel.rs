@@ -3,6 +3,8 @@
 use crate::data_channel::RTCDataChannelState;
 use crate::statistics::stats::data_channel::RTCDataChannelStats;
 use crate::statistics::stats::{RTCStats, RTCStatsType};
+use sctp::StreamId;
+use shared::time::SystemInstant;
 use std::time::Instant;
 
 /// Accumulated data channel statistics.
@@ -10,8 +12,8 @@ use std::time::Instant;
 /// This struct tracks message/byte counters and state for a data channel.
 #[derive(Debug, Default)]
 pub struct DataChannelStatsAccumulator {
-    /// The data channel identifier.
-    pub data_channel_identifier: u16,
+    /// The SCTP stream identifier, or 0 while the channel has not been assigned one.
+    pub data_channel_identifier: StreamId,
     /// The label assigned to the data channel.
     pub label: String,
     /// The sub-protocol name.
@@ -52,7 +54,7 @@ impl DataChannelStatsAccumulator {
     pub fn snapshot(&self, now: Instant, id: String) -> RTCDataChannelStats {
         RTCDataChannelStats {
             stats: RTCStats {
-                timestamp: now,
+                timestamp: SystemInstant::now(now),
                 typ: RTCStatsType::DataChannel,
                 id,
             },
@@ -71,6 +73,7 @@ impl DataChannelStatsAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::statistics::accumulator::assert_stamped_at;
 
     #[test]
     fn test_default() {
@@ -163,7 +166,7 @@ mod tests {
 
         assert_eq!(stats.stats.id, "RTCDataChannel_42");
         assert_eq!(stats.stats.typ, RTCStatsType::DataChannel);
-        assert_eq!(stats.stats.timestamp, now);
+        assert_stamped_at(stats.stats.timestamp, now);
         assert_eq!(stats.data_channel_identifier, 42);
         assert_eq!(stats.label, "test-channel");
         assert_eq!(stats.protocol, "json");

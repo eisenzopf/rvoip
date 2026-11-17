@@ -15,7 +15,7 @@
 use crate::error::{AuthError, Result};
 use crate::providers::DigestSecret;
 use hex;
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest as Sha2Digest, Sha256, Sha512_256};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -593,8 +593,8 @@ impl DigestAuthenticator {
     }
 
     fn generate_nonce() -> String {
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 16] = rng.gen();
+        let mut rng = rand::rng();
+        let random_bytes: [u8; 16] = rng.random();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -604,8 +604,8 @@ impl DigestAuthenticator {
     }
 
     fn generate_opaque() -> String {
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 16] = rng.gen();
+        let mut rng = rand::rng();
+        let random_bytes: [u8; 16] = rng.random();
         hex::encode(random_bytes)
     }
 }
@@ -798,8 +798,8 @@ impl DigestClient {
     }
 
     fn generate_cnonce() -> String {
-        let mut rng = rand::thread_rng();
-        let random_bytes: [u8; 8] = rng.gen();
+        let mut rng = rand::rng();
+        let random_bytes: [u8; 8] = rng.random();
         hex::encode(random_bytes)
     }
 }

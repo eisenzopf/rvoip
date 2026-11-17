@@ -357,6 +357,7 @@ impl RxCore {
                         Ok(bounds) => Ok(bounds),
                         Err(_) => {
                             *srtp_unprotect_failures += 1;
+                            crate::transport::record_srtp_unprotect_failure();
                             if *srtp_diagnostics
                                 && (*srtp_unprotect_failures <= 5
                                     || *srtp_unprotect_failures % 50 == 0)
@@ -476,6 +477,7 @@ impl RxCore {
                 Ok(packet) => Ok(packet),
                 Err(_) => {
                     *srtp_unprotect_failures += 1;
+                    crate::transport::record_srtp_unprotect_failure();
                     if *srtp_diagnostics
                         && (*srtp_unprotect_failures <= 5 || *srtp_unprotect_failures % 50 == 0)
                     {

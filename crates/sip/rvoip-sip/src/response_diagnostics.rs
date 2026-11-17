@@ -33,7 +33,7 @@ fn reason_text(input: &str) -> (String, bool) {
 }
 
 fn fingerprint(value: &str) -> String {
-    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+    format!("sha256:{}", hex::encode(Sha256::digest(value.as_bytes())))
 }
 
 fn header_value(name: &str, displayed: &str) -> String {

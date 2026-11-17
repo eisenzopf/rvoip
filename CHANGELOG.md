@@ -461,6 +461,15 @@ bumps (they break the test fixtures and examples built on the older APIs).
   transaction exists. `rvoip_sip::Config::server_call_admission_early_reject`
   (default `false`) installs it against `server_call_admission_limit`, and
   `UnifiedCoordinator::sip_slot_cleanup_stats` exposes the counters.
+- `NewCallRateLimit::with_retry_after_secs` (field `retry_after_secs`,
+  default `None`): the 503s a rate limit causes carry `Retry-After`, so a
+  caller backs off instead of retrying at once. They never carried it
+  before; `NewCallRateLimit::new` keeps that behaviour.
+- New `rvoip_sip_dialog::live_dialog_count()`: the dialogs every live
+  `DialogManager` in the process holds right now (early, confirmed, or
+  terminated but not yet removed), read from the dialog stores themselves at
+  no per-dialog cost. A drained server reads zero; anything else is leaked
+  dialog state.
 
 #### Inbound call lifecycle and hangup (#348, #355, #364)
 
@@ -993,6 +1002,11 @@ production v2 profile, measured on Xeon 6 SMT.
 
 ### RTP/RTCP and media quality
 
+- New `rvoip_rtp_core::transport::srtp_unprotect_failures_total()`: inbound
+  SRTP packets the process's RTP transports dropped because they failed
+  authentication or the replay check (RFC 3711 §3.3). Counted only on that
+  drop path.
+
 #### Receive and send robustness (#337)
 
 - A concealment frame can no longer ask for gigabytes of memory. A gap
@@ -1379,6 +1393,15 @@ outcome unchanged, and add no configuration.
   components `public_key_jwk` publishes. HS256 is unchanged.
 
 ### Release process, CI and dependencies
+
+- New `crates/tools/rvoip-bench-uas` (`publish = false`): the Device Under
+  Test of the RFC 7501/7502 benchmark release gate
+  (`RFC7502_BENCHMARK.md` §3). A terminating UAS on `CallbackPeer` with fast
+  auto-accept over UDP or TLS, SDP for signaling-only, RTP or SDES-SRTP calls,
+  RTP echo through executor v2's inline media path, `max-cps` admission on
+  the stateless new-call gate, `ready.json` / `stats.jsonl` /
+  `summary.json` run files with a finish-file drain to true zero, and
+  Prometheus `/metrics`.
 
 - Dependency security bumps (#341): `quinn-proto` 0.11.19, `rustls` 0.23.46,
   `rustls-webpki` 0.103.16, `tokio` 1.54.1, and `webpki-roots` /

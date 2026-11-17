@@ -4,7 +4,7 @@
 //! can be handled within a single RTP session.
 
 use bytes::Bytes;
-use rand::Rng;
+use rand::RngExt;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -91,9 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Sender SSRC: {:08x}", sender_ssrc);
 
     // Create additional SSRCs for simulating multiple streams
-    let mut rng = rand::thread_rng();
-    let alt_ssrc1: RtpSsrc = rng.gen();
-    let alt_ssrc2: RtpSsrc = rng.gen();
+    let mut rng = rand::rng();
+    let alt_ssrc1: RtpSsrc = rng.random();
+    let alt_ssrc2: RtpSsrc = rng.random();
     info!("Additional SSRCs: {:08x}, {:08x}", alt_ssrc1, alt_ssrc2);
 
     // Pre-create streams for the SSRCs in the receiver to ensure they're tracked

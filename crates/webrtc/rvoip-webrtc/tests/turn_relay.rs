@@ -31,7 +31,20 @@ async fn relay_policy_config_is_accepted_and_peer_still_builds() {
     // belongs in an external-TURN integration suite (coturn + iptables).
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let mut config = WebRtcConfig::loopback();
+    // A relay-only policy with nothing to relay through is rejected when the
+    // peer connection is built, which also shows the knob reached the core.
+    let mut without_turn = WebRtcConfig::loopback();
+    without_turn.ice_transport_policy = IceTransportPolicy::Relay;
+    assert!(
+        RvoipPeerConnection::new(&without_turn, PeerRole::Offerer)
+            .await
+            .is_err(),
+        "Relay policy without a TURN server must be rejected"
+    );
+
+    // With a TURN server configured (unreachable here; only the policy is
+    // under test) the peer builds and offers.
+    let mut config = WebRtcConfig::loopback().with_turn("turn:127.0.0.1:3478", "rvoip", "rvoip");
     config.ice_transport_policy = IceTransportPolicy::Relay;
 
     let peer = std::sync::Arc::new(

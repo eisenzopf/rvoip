@@ -1766,7 +1766,7 @@ fn runtime_switch_snapshot() -> Value {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn update_atomic_max(target: &AtomicU64, value: u64) {

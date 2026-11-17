@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::media_stream::track_local::TrackLocal;
-use crate::peer_connection::{Interceptor, NoopInterceptor, PeerConnectionRef};
+use crate::peer_connection::PeerConnectionRef;
 use crate::rtp_transceiver::RtpSender;
 use rtc::media_stream::MediaStreamId;
 use rtc::rtp_transceiver::RTCRtpSenderId;
@@ -15,27 +15,21 @@ use std::time::Instant;
 /// Concrete async rtp sender implementation (generic over interceptor type).
 ///
 /// This wraps a rtp sender and provides async send/receive APIs.
-pub(crate) struct RtpSenderImpl<I = NoopInterceptor>
-where
-    I: Interceptor,
-{
+pub(crate) struct RtpSenderImpl {
     /// Unique identifier for this rtp sender
     id: RTCRtpSenderId,
 
     /// Inner PeerConnection Reference
-    inner: Arc<PeerConnectionRef<I>>,
+    inner: Arc<PeerConnectionRef>,
 
     track: Arc<dyn TrackLocal>,
 }
 
-impl<I> RtpSenderImpl<I>
-where
-    I: Interceptor,
-{
+impl RtpSenderImpl {
     /// Create a new rtp sender wrapper
     pub(crate) fn new(
         id: RTCRtpSenderId,
-        inner: Arc<PeerConnectionRef<I>>,
+        inner: Arc<PeerConnectionRef>,
         track: Arc<dyn TrackLocal>,
     ) -> Self {
         Self { id, inner, track }
@@ -43,10 +37,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl<I> RtpSender for RtpSenderImpl<I>
-where
-    I: Interceptor + 'static,
-{
+impl RtpSender for RtpSenderImpl {
     fn id(&self) -> RTCRtpSenderId {
         self.id
     }

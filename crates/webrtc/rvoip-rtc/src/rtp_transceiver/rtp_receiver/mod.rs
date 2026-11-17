@@ -16,6 +16,7 @@
 //! ## Accessing the received track
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::media_stream::MediaStreamTrackId;
 //! # use rtc::rtp_transceiver::RTCRtpReceiverId;
@@ -23,7 +24,7 @@
 //! #     receiver_id: RTCRtpReceiverId,
 //! #     track_id: MediaStreamTrackId
 //! # ) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // Get the receiver and access its track
 //! if let Some(receiver) = peer_connection.rtp_receiver(receiver_id) {
@@ -39,10 +40,11 @@
 //! ## Getting receive parameters
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut receiver) = peer_connection.rtp_receiver(receiver_id) {
 //!     // Get current receive parameters
@@ -59,11 +61,12 @@
 //! ## Checking receiver capabilities
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 //! # use rtc::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(receiver) = peer_connection.rtp_receiver(receiver_id) {
 //!     // Check video capabilities
@@ -86,10 +89,11 @@
 //! ## Getting contributing sources
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut receiver) = peer_connection.rtp_receiver(receiver_id) {
 //!     // Get CSRC information for mixed audio
@@ -106,10 +110,11 @@
 //! ## Getting synchronization sources
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # use rtc::rtp_transceiver::RTCRtpReceiverId;
 //! # fn example(receiver_id: RTCRtpReceiverId) -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! if let Some(mut receiver) = peer_connection.rtp_receiver(receiver_id) {
 //!     // Get SSRC information
@@ -125,9 +130,10 @@
 //! ## Handling incoming receivers
 //!
 //! ```no_run
+//! # use std::time::Instant;
 //! # use rtc::peer_connection::RTCPeerConnectionBuilder;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut peer_connection = RTCPeerConnectionBuilder::new().build()?;
+//! let mut peer_connection = RTCPeerConnectionBuilder::new().build(Instant::now())?;
 //!
 //! // After remote description is set, collect receiver IDs first
 //! let receiver_ids: Vec<_> = peer_connection.get_receivers().collect();
@@ -143,7 +149,7 @@
 //! # }
 //! ```
 //!
-//! # Specifications
+//! # Specification
 //!
 //! * [W3C RTCRtpReceiver](https://www.w3.org/TR/webrtc/#rtcrtpreceiver-interface)
 //! * [MDN RTCRtpReceiver](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpReceiver)
@@ -156,14 +162,15 @@ pub(crate) mod rtp_contributing_source;
 
 use crate::media_stream::track::MediaStreamTrack;
 use crate::peer_connection::RTCPeerConnection;
-use crate::peer_connection::message::RTCMessage;
+use crate::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use crate::peer_connection::transport::RTCDtlsTransport;
 use crate::rtp_transceiver::RTCRtpReceiverId;
 use crate::rtp_transceiver::rtp_sender::rtp_capabilities::RTCRtpCapabilities;
 use crate::rtp_transceiver::rtp_sender::rtp_codec::RtpCodecKind;
 use crate::rtp_transceiver::rtp_sender::rtp_receiver_parameters::RTCRtpReceiveParameters;
-use interceptor::{Interceptor, NoopInterceptor};
 use sansio::Protocol;
 use shared::error::Result;
+use std::time::Instant;
 
 pub use rtp_contributing_source::{RTCRtpContributingSource, RTCRtpSynchronizationSource};
 
@@ -176,22 +183,50 @@ pub use rtp_contributing_source::{RTCRtpContributingSource, RTCRtpSynchronizatio
 ///
 /// This struct borrows the [`RTCPeerConnection`] mutably, ensuring exclusive access
 /// during RTP receiver operations.
-pub struct RTCRtpReceiver<'a, I = NoopInterceptor>
-where
-    I: Interceptor,
-{
+pub struct RTCRtpReceiver<'a> {
     pub(crate) id: RTCRtpReceiverId,
-    pub(crate) peer_connection: &'a mut RTCPeerConnection<I>,
+    pub(crate) peer_connection: &'a mut RTCPeerConnection,
 }
 
-impl<I> RTCRtpReceiver<'_, I>
-where
-    I: Interceptor,
-{
+impl RTCRtpReceiver<'_> {
+    /// The DTLS transport over which this receiver's RTP packets are received.
+    ///
+    /// ## Nullability
+    ///
+    /// `None` until this receiver's transceiver has been associated by negotiation. The spec
+    /// sources this from the `[[ReceiverTransport]]` slot, which is per-receiver and is filled while
+    /// applying a local or remote description — so the predicate is that transceiver's mid, not
+    /// a connection-wide flag.
+    ///
+    /// Deliberately *not* keyed on whether the DTLS endpoint has been built: an offerer
+    /// associates its transceivers at `setLocalDescription`, before the answer starts DTLS, and a
+    /// browser reports a transport there too. The handle simply reports
+    /// [`RTCDtlsTransportState::New`](crate::peer_connection::transport::RTCDtlsTransportState)
+    /// until the handshake begins.
+    ///
+    /// Under bundling every sender and receiver shares one transport, so all of these compare
+    /// equal by [`id()`](crate::peer_connection::transport::RTCDtlsTransport::id).
+    ///
+    /// ## Specifications
+    ///
+    /// * [W3C](https://www.w3.org/TR/webrtc/#dom-rtcrtpreceiver-transport)
+    pub fn transport(&self) -> Option<RTCDtlsTransport<'_>> {
+        // `[[ReceiverTransport]]` is assigned when this receiver's transceiver is associated by
+        // negotiation — the point at which the transceiver acquires a mid. Before that the slot
+        // is null, which is what the spec means by "prior to construction of the
+        // `RTCDtlsTransport` object".
+        self.peer_connection.rtp_transceivers[self.id.0]
+            .mid()
+            .as_ref()?;
+
+        Some(RTCDtlsTransport {
+            peer_connection: self.peer_connection,
+        })
+    }
     /// Returns the track associated with this receiver.
     ///
     /// The [`track`](RTCRtpReceiver::track) method returns the [`MediaStreamTrack`] that is
-    /// associated with this receiver as specified in the [W3C WebRTC specification](https://www.w3.org/TR/webrtc/#dom-rtcrtpreceiver-track).
+    /// associated with this receiver as specified in the [W3C WebRTC specification](https://www.w3.org/TR/webrtc/#dom-rtpreceiver-track).
     ///
     /// # Returns
     ///
@@ -315,30 +350,43 @@ where
     ///
     /// Returns an error if internal handle_write returns error
     ///
-    /// # Example
+    /// # Examples
     ///
-    /// ```ignore
-    /// // Send a Picture Loss Indication to request a keyframe
-    /// use rtcp::picture_loss_indication::PictureLossIndication;
-    ///
-    /// let pli = PictureLossIndication {
-    ///     sender_ssrc: 0,
-    ///     media_ssrc: remote_ssrc,
-    /// };
-    /// receiver.write_rtcp(vec![Box::new(pli)])?;
     /// ```
-    pub fn write_rtcp(&mut self, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()> {
+    /// // Send a Picture Loss Indication to request a keyframe
+    /// use rtc::peer_connection::RTCPeerConnection;
+    /// use rtc::rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication;
+    /// use rtc::rtp_transceiver::RTCRtpReceiverId;
+    /// use std::time::Instant;
+    ///
+    /// # fn example(
+    /// #     peer_connection: &mut RTCPeerConnection,
+    /// #     receiver_id: RTCRtpReceiverId,
+    /// #     remote_ssrc: u32,
+    /// # ) -> Result<(), Box<dyn std::error::Error>> {
+    /// if let Some(mut receiver) = peer_connection.rtp_receiver(receiver_id) {
+    ///     let pli = PictureLossIndication {
+    ///         sender_ssrc: 0,
+    ///         media_ssrc: remote_ssrc,
+    ///     };
+    ///     receiver.write_rtcp(Instant::now(), vec![Box::new(pli)])?;
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn write_rtcp(&mut self, now: Instant, packets: Vec<Box<dyn rtcp::Packet>>) -> Result<()> {
         // peer_connection is mutable borrow, its rtp_transceivers won't be resized and
         // the direction won't be changed too, so, unwrap() here is safe.
 
-        //TODO: handle rtcp media ssrc, header extension, etc.
         let receiver = self.peer_connection.rtp_transceivers[self.id.0]
             .receiver_mut()
             .as_mut()
             .unwrap();
 
         let track_id = receiver.track().track_id().to_string();
-        self.peer_connection
-            .handle_write(RTCMessage::RtcpPacket(track_id, packets))
+        self.peer_connection.handle_write(TaggedRTCMessage {
+            now,
+            message: RTCMessage::RtcpPacket(track_id, packets),
+        })
     }
 }

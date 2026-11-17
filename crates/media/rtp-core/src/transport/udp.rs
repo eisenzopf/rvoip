@@ -1158,8 +1158,8 @@ impl UdpRtpTransport {
         {
             // Generate a session ID if not provided
             let session_id = config.session_id.clone().unwrap_or_else(|| {
-                use rand::Rng;
-                let random_suffix: u32 = rand::thread_rng().gen();
+                use rand::RngExt;
+                let random_suffix: u32 = rand::rng().random();
                 format!("rtp-session-{}", random_suffix)
             });
             // Persist generated ownership so `close()` releases the exact
@@ -5002,6 +5002,7 @@ mod tests {
             .unwrap();
 
         let mut events = transport_b.subscribe();
+        let failures_before = crate::transport::srtp_unprotect_failures_total();
 
         let header = RtpHeader::new(0, 1, 12345, 0xdead_beef);
         let payload = Bytes::from_static(b"this should be dropped");
@@ -5018,6 +5019,12 @@ mod tests {
             waited.is_err(),
             "auth-failed packet must be silently dropped (got event {:?})",
             waited
+        );
+        // The drop is counted process-wide (other tests may add their own
+        // failures concurrently, never remove any).
+        assert!(
+            crate::transport::srtp_unprotect_failures_total() > failures_before,
+            "the dropped packet is counted"
         );
     }
 

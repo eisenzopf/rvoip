@@ -20,7 +20,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{rngs::StdRng, RngExt, SeedableRng};
 use rvoip_webrtc::peer::connect_loopback;
 use rvoip_webrtc::WebRtcConfig;
 use tokio::net::UdpSocket;
@@ -56,7 +56,7 @@ pub async fn spawn_lossy_udp_proxy(
                 }
             }
             // Drop with `loss_rate`.
-            if rng.gen::<f64>() < loss_rate {
+            if rng.random::<f64>() < loss_rate {
                 continue;
             }
             // Forward to the *other* endpoint.
