@@ -319,14 +319,108 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+  # bench-minor takes about 11 hours, longer than one hosted job or one
+  # provisioner session. These legs advance the same lane (one run id,
+  # `--resume`, a 330-minute budget each) before gate-bench finishes it and
+  # records the receipt; a lane that completes early makes later legs no-ops.
+  bench-leg-1:
+    name: bench / minor lane, leg 1
+    if: contains(needs.plan.outputs.bench_matrix, 'perf.rfc7502-minor')
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+      - name: Restore bench DUT build cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-bench-dut
+      - name: Install DUT build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Advance the bench-minor lane
+        env:
+          RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
+          RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+        run: >-
+          python3 scripts/release/bench_gate.py --advance
+          --profile minor --candidate "$CANDIDATE" --max-wall 330
+          --receipt target/bench-leg/bench-receipt.json
+
+  bench-leg-2:
+    name: bench / minor lane, leg 2
+    if: contains(needs.plan.outputs.bench_matrix, 'perf.rfc7502-minor')
+    needs: [plan, bench-leg-1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Check out exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.candidate_sha }}
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+      - name: Restore bench DUT build cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-bench-dut
+      - name: Install DUT build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+      - name: Assume the provisioner role without a stored key
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.RVOIP_AWS_PROVISIONER_ROLE_ARN }}
+          aws-region: ${{ vars.RVOIP_AWS_REGION }}
+          role-duration-seconds: 21600
+      - name: Advance the bench-minor lane
+        env:
+          RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
+          RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+        run: >-
+          python3 scripts/release/bench_gate.py --advance
+          --profile minor --candidate "$CANDIDATE" --max-wall 330
+          --receipt target/bench-leg/bench-receipt.json
+
+
   gate-bench:
     # Release-only RFC 7501/7502 benchmark lanes (docs/release/BENCH_GATE_INTERFACE.md).
     # `scripts/bench/run_lane.py` provisions its own DUT and callers and
     # writes the receipt this job's gate shard records; this job is only the
     # controller that holds the AWS session and uploads the evidence.
     name: bench / ${{ matrix.id }}
-    if: needs.plan.outputs.bench_shard_count != '0'
-    needs: plan
+    if: >-
+      always() && needs.plan.result == 'success'
+      && needs.plan.outputs.bench_shard_count != '0'
+      && needs.bench-leg-1.result != 'failure' && needs.bench-leg-2.result != 'failure'
+    needs: [plan, bench-leg-1, bench-leg-2]
     runs-on: ubuntu-latest
     timeout-minutes: 360
     permissions:
@@ -341,6 +435,21 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.candidate_sha }}
 
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Restore bench DUT build cache
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        with:
+          shared-key: release-bench-dut
+
+      - name: Install DUT build dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake
+
       - name: Assume the provisioner role without a stored key
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -350,6 +459,8 @@ jobs:
 
       - name: Run benchmark lane gate
         env:
+          RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
+          RVOIP_BENCH_MAX_WALL: "330"
           RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
           RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
           RVOIP_AWS_SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}

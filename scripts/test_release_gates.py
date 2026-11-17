@@ -1635,7 +1635,7 @@ version = "{version}"
                 "profile": "release",
                 "candidate_sha": "c" * 40,
                 "status": "PASS",
-                "failures": [],
+                "reasons": [],
             }
             (gate_dir / "bench-receipt.json").write_text(json.dumps(bench))
             receipt = {
@@ -1676,6 +1676,27 @@ version = "{version}"
                 with self.subTest(key=key):
                     (gate_dir / "bench-receipt.json").write_text(json.dumps({**bench, key: value}))
                     self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 1)
+
+    def test_bench_gate_wrapper_resumes_one_lane_across_legs(self) -> None:
+        bench = load_module("release_bench_gate", ROOT / "scripts/release/bench_gate.py")
+        candidate = "c" * 40
+        self.assertEqual(
+            bench.lane_run_id("minor", candidate, "4242"), "bench-minor-cccccccccccc-4242"
+        )
+        args = bench.argparse.Namespace(
+            profile="minor", candidate=candidate, receipt=Path("r.json"), max_wall=330
+        )
+        command = bench.lane_command(args, Path("/t/release/rvoip-bench-uas"), "4242")
+        self.assertIn("--resume", command)
+        self.assertEqual(command[command.index("--max-wall") + 1], "330")
+        self.assertEqual(command[command.index("--run-id") + 1], "bench-minor-cccccccccccc-4242")
+        self.assertNotIn("--caller-bin", command)
+        # Without the lane orchestrator installed the gate fails as a usage error.
+        if not bench.RUN_LANE.exists():
+            self.assertEqual(
+                bench.main(["--profile", "release", "--candidate", candidate, "--receipt", "x.json"]),
+                bench.EXIT_USAGE,
+            )
 
     def test_lab_teardowns_are_reused_with_their_chain_not_always_fresh(self) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
@@ -1734,7 +1755,7 @@ version = "{version}"
                     gate["command"],
                     [
                         "python3",
-                        "{workspace}/scripts/bench/run_lane.py",
+                        "{workspace}/scripts/release/bench_gate.py",
                         "--profile",
                         profile,
                         "--candidate",
@@ -1744,6 +1765,7 @@ version = "{version}"
                     ],
                 )
                 self.assertIn("scripts/bench/**", gate["affected_paths"])
+                self.assertIn(3, gate["retry_on_exit_codes"])
         matrix = gates.matrix_for(
             [{"id": "perf.rfc7502-release", "decision": "RUN"}], by_id
         )

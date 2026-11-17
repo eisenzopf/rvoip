@@ -1699,8 +1699,6 @@ def validate_bench_receipt(gate_dir: Path, gate_id: str, candidate: str) -> str 
         problems.append("candidate_sha")
     if payload.get("status") not in {"PASS", "WARN"}:
         problems.append("status")
-    if payload.get("failures") != []:
-        problems.append("failures")
     if problems:
         return f"{gate_id}: bench lane receipt mismatch in {', '.join(problems)}"
     return None

@@ -1267,7 +1267,7 @@ def bench_lane_gates() -> list[dict[str, Any]]:
             executor="argv",
             command=[
                 "python3",
-                "{workspace}/scripts/bench/run_lane.py",
+                "{workspace}/scripts/release/bench_gate.py",
                 "--profile",
                 profile,
                 "--candidate",
@@ -1277,10 +1277,15 @@ def bench_lane_gates() -> list[dict[str, Any]]:
             ],
             resource="bench-lane",
             dependencies=["source.remote-clean"],
-            paths=BENCH_LANE_PATHS,
-            timeout_minutes=seconds // 60 + 60,
+            paths=[*BENCH_LANE_PATHS, "scripts/release/bench_gate.py"],
+            # One hosted job; bench-minor's earlier legs run before it
+            # (release-qualify.yml, bench-leg-*).
+            timeout_minutes=350,
             estimated_seconds=seconds,
         )
+        # run_lane exit 3: quota, capacity, lane lock, or a tester that
+        # stayed invalid; retried once like any infrastructure failure.
+        gate["retry_on_exit_codes"] = [3, 75]
         gate["kind"] = "benchmark"
         gate["category"] = "Performance and resiliency"
         gate["expected_outputs"].append("bench-receipt.json")

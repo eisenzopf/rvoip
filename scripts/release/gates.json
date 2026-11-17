@@ -11149,13 +11149,14 @@
         "crates/sip/**",
         "crates/tools/**",
         "scripts/bench/**",
-        "infra/aws/bench/**"
+        "infra/aws/bench/**",
+        "scripts/release/bench_gate.py"
       ],
       "always_fresh": false,
       "category": "Performance and resiliency",
       "command": [
         "python3",
-        "{workspace}/scripts/bench/run_lane.py",
+        "{workspace}/scripts/release/bench_gate.py",
         "--profile",
         "release",
         "--candidate",
@@ -11166,7 +11167,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "python3 {workspace}/scripts/bench/run_lane.py --profile release --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
+      "display_command": "python3 {workspace}/scripts/release/bench_gate.py --profile release --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
       "estimated_seconds": 14400,
       "executor": "argv",
       "expected_outputs": [
@@ -11181,9 +11182,10 @@
       "name": "patch-release RFC 7502 confirmation trials",
       "resource_class": "bench-lane",
       "retry_on_exit_codes": [
+        3,
         75
       ],
-      "timeout_minutes": 300,
+      "timeout_minutes": 350,
       "working_directory": "."
     },
     {
@@ -11196,13 +11198,14 @@
         "crates/sip/**",
         "crates/tools/**",
         "scripts/bench/**",
-        "infra/aws/bench/**"
+        "infra/aws/bench/**",
+        "scripts/release/bench_gate.py"
       ],
       "always_fresh": false,
       "category": "Performance and resiliency",
       "command": [
         "python3",
-        "{workspace}/scripts/bench/run_lane.py",
+        "{workspace}/scripts/release/bench_gate.py",
         "--profile",
         "minor",
         "--candidate",
@@ -11213,7 +11216,7 @@
       "dependencies": [
         "source.remote-clean"
       ],
-      "display_command": "python3 {workspace}/scripts/bench/run_lane.py --profile minor --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
+      "display_command": "python3 {workspace}/scripts/release/bench_gate.py --profile minor --candidate {candidate} --receipt {artifact_dir}/bench-receipt.json",
       "estimated_seconds": 43200,
       "executor": "argv",
       "expected_outputs": [
@@ -11228,9 +11231,10 @@
       "name": "minor-release RFC 7502 search and overload report",
       "resource_class": "bench-lane",
       "retry_on_exit_codes": [
+        3,
         75
       ],
-      "timeout_minutes": 780,
+      "timeout_minutes": 350,
       "working_directory": "."
     }
   ],
