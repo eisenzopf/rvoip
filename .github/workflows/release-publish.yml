@@ -1,5 +1,12 @@
 name: Publish protected release
 
+# One dispatch, one approval. The `package` job runs without the protected
+# environment: it verifies the qualified commit, packages and build-verifies
+# every crate once, and uploads the archives with their SHA-256. With
+# execute=true the `publish` job then waits for the `release-publish`
+# approval and uploads exactly those archives, level by level, without
+# verifying or compiling again.
+
 on:
   workflow_dispatch:
     inputs:
@@ -8,20 +15,19 @@ on:
         required: true
         type: string
       qualification_run_id:
-        description: Successful remote-release qualification run ID
+        description: Successful release-profile qualification run ID
         required: true
         type: string
       execute:
-        description: Publish crates, tag, and create the GitHub release
+        description: After packaging, publish crates, tag, and create the GitHub release (needs release-publish approval)
         required: true
         default: false
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
   actions: read
-  id-token: write
-  attestations: write
+  attestations: read
 
 env:
   RUSTUP_MAX_RETRIES: "10"
@@ -31,13 +37,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish v${{ inputs.version }}
-    environment: release-publish
+  package:
+    name: Verify and package v${{ inputs.version }}
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    timeout-minutes: 120
+    outputs:
+      candidate: ${{ steps.summary.outputs.candidate }}
     steps:
       - name: Check out publication workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -76,39 +81,10 @@ jobs:
           --dir target/downloaded-qualification
 
       - name: Resolve, verify, and check out qualified candidate
-        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          aggregate="$(find target/downloaded-qualification -name aggregate.json -type f -print -quit)"
-          test -n "$aggregate" || {
-            echo "qualification aggregate is missing" >&2
-            exit 1
-          }
-          gh attestation verify "$aggregate" --repo "$REPOSITORY"
-          test "$(jq -r .schema "$aggregate")" = rvoip-release-qualification-v1
-          test "$(jq -r .status "$aggregate")" = PASS
-          test "$(jq -r .profile "$aggregate")" = remote-release
-          candidate="$(jq -r .candidate_sha "$aggregate")"
-          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]] || {
-            echo "qualification candidate is not a full commit SHA" >&2
-            exit 1
-          }
-          git cat-file -e "$candidate^{commit}"
-          git merge-base --is-ancestor "$candidate" origin/main || {
-            echo "qualified candidate is not an ancestor of origin/main" >&2
-            exit 1
-          }
-          qualification="$(realpath "$aggregate")"
-          cp scripts/release.py target/release-tool.py
-          release_tool="$(realpath target/release-tool.py)"
-          git checkout -B main "$candidate"
-          test "$(git rev-parse HEAD)" = "$candidate"
-          echo "QUALIFIED_CANDIDATE=$candidate" >> "$GITHUB_ENV"
-          echo "RELEASE_TOOL=$release_tool" >> "$GITHUB_ENV"
-          echo "REMOTE_QUALIFICATION=$qualification" >> "$GITHUB_ENV"
+        run: bash scripts/release/resolve_qualified_candidate.sh
 
       - name: Fresh package and source verification
         env:
@@ -119,30 +95,127 @@ jobs:
           --qualified-head "$QUALIFIED_CANDIDATE"
           --remote-qualification "$REMOTE_QUALIFICATION"
 
-      - name: Dry-run or execute resumable topological publication
-        shell: bash
+      - name: Release notes and changelog are final
         env:
-          EXECUTE: ${{ inputs.execute }}
           VERSION: ${{ inputs.version }}
+        run: python3 "$RELEASE_TOOL" notes-final --version "$VERSION"
+
+      - name: Package and build-verify every crate once
+        env:
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python3 "$RELEASE_TOOL" package
+          --version "$VERSION"
+          --qualified-head "$QUALIFIED_CANDIDATE"
+          --output target/release-packages
+
+      - name: Publication plan
+        env:
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python3 "$RELEASE_TOOL" publish
+          --version "$VERSION"
+          --qualified-head "$QUALIFIED_CANDIDATE"
+          --packages target/release-packages
+
+      - name: Summarize packaged release
+        id: summary
         run: |
-          args=(
-            publish
-            --version "$VERSION"
-            --qualified-head "$QUALIFIED_CANDIDATE"
-          )
-          if test "$EXECUTE" = true; then
-            args+=(--execute)
-          fi
-          python3 "$RELEASE_TOOL" "${args[@]}"
+          set -euo pipefail
+          echo "candidate=$QUALIFIED_CANDIDATE" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Packaged v${{ inputs.version }}"
+            echo
+            echo "- Candidate: \`$QUALIFIED_CANDIDATE\`"
+            echo "- Crates: $(jq '.ordered_packages | length' target/release-packages/release-packages.json)"
+            echo "- Topological levels: $(jq '.levels | length' target/release-packages/release-packages.json)"
+            echo
+            echo '```'
+            cat target/release-packages/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload packaged archives
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-packages
+          path: target/release-packages/
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish v${{ inputs.version }}
+    if: inputs.execute
+    needs: package
+    environment: release-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+      actions: read
+      id-token: write
+      attestations: write
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - name: Check out publication workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.91.0
+
+      - name: Establish exact local main
+        run: git checkout -B main origin/main
+
+      - name: Download signed qualification evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          gh run download "$QUALIFICATION_RUN_ID"
+          --repo "$REPOSITORY"
+          --name release-gate-evidence
+          --dir target/downloaded-qualification
+
+      - name: Resolve, verify, and check out qualified candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: bash scripts/release/resolve_qualified_candidate.sh
+
+      - name: Require the packaged candidate
+        env:
+          PACKAGED_CANDIDATE: ${{ needs.package.outputs.candidate }}
+        run: test "$PACKAGED_CANDIDATE" = "$QUALIFIED_CANDIDATE"
+
+      - name: Download packaged archives
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-packages
+          path: target/release-packages
+
+      - name: Publish the packaged archives by topological level
+        env:
+          VERSION: ${{ inputs.version }}
+        run: >-
+          python3 "$RELEASE_TOOL" publish
+          --version "$VERSION"
+          --qualified-head "$QUALIFIED_CANDIDATE"
+          --packages target/release-packages
+          --execute
 
       - name: Attest published package archives
-        if: inputs.execute
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: target/package/*.crate
+          subject-path: target/release-packages/*.crate
 
       - name: Create immutable tag and generated GitHub release
-        if: inputs.execute
         env:
           GH_TOKEN: ${{ github.token }}
           QUALIFICATION_RUN_ID: ${{ inputs.qualification_run_id }}
@@ -165,6 +238,7 @@ jobs:
             "$performance/current-performance-evaluation.json"
             "$performance/current-performance-evaluation.md"
             "$performance/current-performance-artifact-index.json"
+            target/release-packages/SHA256SUMS
           )
           for asset in "${assets[@]}"; do
             test -s "$asset" || {
@@ -173,7 +247,7 @@ jobs:
             }
           done
           printf -v release_notes \
-            'Detailed release notes: https://github.com/%s/blob/%s/crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md\n\nProtected qualification run and full evidence: https://github.com/%s/actions/runs/%s\n' \
+            'Detailed release notes: https://github.com/%s/blob/%s/docs/release/RELEASE_NOTES_NEXT.md\n\nProtected qualification run and full evidence: https://github.com/%s/actions/runs/%s\n' \
             "$REPOSITORY" "$tag" "$REPOSITORY" "$QUALIFICATION_RUN_ID"
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com

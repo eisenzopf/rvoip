@@ -21,7 +21,7 @@ proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
 [immutable qualification history](docs/releases/qualification/README.md)
 retains prior releases and the detailed 0.4.0 performance evaluation.
 
-What changed in this release: the [release notes](docs/RELEASE_NOTES_NEXT.md)
+What changed in this release: the [release notes](../../../docs/release/RELEASE_NOTES_NEXT.md)
 and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
 [0.4 migration guide](../../../docs/MIGRATING_0.4.md) covers the breaking
 changes, including `#[non_exhaustive]` `Config`, the new `Event` variant and
@@ -483,7 +483,7 @@ Operational references:
   tuning guidance.
 - [`docs/INTEROP_CI_PLAN.md`](docs/INTEROP_CI_PLAN.md) for PBX, SIPp, and
   strict-UA runner expectations.
-- [`docs/RELEASE_NOTES_NEXT.md`](docs/RELEASE_NOTES_NEXT.md) and the
+- [`docs/release/RELEASE_NOTES_NEXT.md`](../../../docs/release/RELEASE_NOTES_NEXT.md) and the
   [0.4 migration guide](../../../docs/MIGRATING_0.4.md) for what changed in
   this release and how to upgrade.
 

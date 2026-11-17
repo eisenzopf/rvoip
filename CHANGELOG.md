@@ -116,48 +116,8 @@ Each item has a one-line migration.
 - The unreleased `rvoip-webex-byob` prototype crate is renamed
   `rvoip-webex-byova` (Cisco's term) before its first release. Migration for
   path or Git users: rename the dependency and `rvoip_webex_byob` paths.
-- **`rvoip_core_traits::Transport` is `#[non_exhaustive]`**, so later
-  transports are no longer breaking changes. Migration: add a wildcard arm
-  to `match`es on `Transport` outside `rvoip-core-traits`.
-- **ordered-float 4 → 5 in `rvoip-sip-core`.** `Contact::q`,
-  `Address::q`, `AcceptLanguage`'s `q`, and `Timestamp::new` / `value` /
-  `delay` / `set_value` / `set_delay` use ordered-float 5's `NotNan`.
-  Migration: depend on ordered-float 5 where you name `NotNan`.
-- **quick-xml 0.41 → 0.42 in `rvoip-sip-registrar`.** `RegistrarError`
-  implements `From<quick_xml::Error>` for quick-xml 0.42. Migration: move
-  your own quick-xml dependency to 0.42 if you rely on that conversion.
-- **redis 0.27 → 1.x in `rvoip-redis`.** `RedisAuthError::Redis` wraps a
-  redis 1.x `RedisError`. Migration: depend on redis 1 when you match on
-  the wrapped error's kind (`ErrorKind::IoError` is now `ErrorKind::Io`).
-- **cpal 0.15 → 0.18.** `rvoip-webrtc`'s `CpalAudioSource::new_with_device`
-  and `CpalSpeakerSink::new_with_device` (feature `client-cpal`) take a
-  cpal 0.18 `Device`. Migration: depend on cpal 0.18; `Device::name()` is
-  now `Device::description()?.name()` and `SampleRate` is a plain `u32`.
 
 ### Dependencies
-
-**ordered-float** 4 → 5, **quick-xml** 0.41 → 0.42, **redis** 0.27 → 1.x,
-**cpal** 0.15 → 0.18, **metrics** 0.23 → 0.24 with
-**metrics-exporter-prometheus** 0.16 → 0.18 (moq-relay already installed a
-0.24 recorder, so rvoip's 0.23 metrics never reached it), and the
-**opentelemetry** / **opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33
-group with **tracing-opentelemetry** 0.33 → 0.34 (`rvoip-infra-common`'s
-optional `otel` exporter). Notes:
-
-- quick-xml 0.42 events are `str`, not bytes: the registrar's PIDF parser
-  matches names as `str` and reads text with `xml10_content()`.
-- redis 1.x: the single-node connection manager takes its retry floor as
-  `set_min_delay` (it was the exponential-backoff `factor` in milliseconds)
-  and its timeouts as `Option`s; rvoip still sets every timeout explicitly.
-  `cluster_routing::get_slot` is no longer public, so the live-cluster test
-  computes key slots itself and checks them against Redis reference values.
-- cpal 0.18 removes `Device::name()`; `rvoip-audio-device` and the
-  `sip_client` example name devices by `description()` and pass the
-  (`Copy`) `StreamConfig` by value.
-- web-transport 0.13 is not in this group: its raw-QUIC sessions no longer
-  carry a URL, which moq-transport uses as the session target, so it lands
-  with its own change.
-
 
 The low-risk part of the grouped dependabot update (#298). No public API
 changes: none of the crates below has a type in a published rvoip API.
@@ -186,14 +146,15 @@ changes: none of the crates below has a type in a published rvoip API.
   quinn 0.11.12, tokio-rustls 0.26.6, http 1.5.0, hickory-server 0.26.3,
   serde_with 3.24.0, moka 0.12.16 and others in #298.
 
-Coordinated with downstream applications: **metrics** 0.23 → 0.24 with
-**metrics-exporter-prometheus** 0.16 → 0.18, and **opentelemetry** /
-**opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33 with
-**tracing-opentelemetry** 0.33 → 0.34. rvoip emits into whatever metrics
+Not in this release, coordinated with downstream applications: **metrics**
+0.23 → 0.24 with **metrics-exporter-prometheus** 0.16 → 0.18, and
+**opentelemetry** / **opentelemetry_sdk** / **opentelemetry-otlp** 0.32 → 0.33
+with **tracing-opentelemetry** 0.33 → 0.34. rvoip emits into whatever metrics
 recorder and OpenTelemetry global provider the application installs, and those
-are keyed to the crate's semver line: an application must move its recorder
-and OpenTelemetry provider to the same lines as rvoip 0.5, or rvoip's metrics
-and spans silently disappear.
+are keyed to the crate's semver line. Moving rvoip alone would make its metrics
+silently disappear for applications whose recorder is still on metrics 0.23, and
+the OpenTelemetry globals have the same coupling. Both move in a later release
+together with the applications that consume them.
 
 Held back for their own changes: nom 8, the aes / ctr / aes-gcm SRTP stack
 and axum 0.8 / tower 0.5, as planned. Also held back:
