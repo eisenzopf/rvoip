@@ -1,0 +1,40 @@
+[package]
+name = "rvoip-bench-uas"
+description = "Device Under Test for rvoip's RFC 7501/7502 SIP benchmark: a terminating SIP UAS and RTP echo endpoint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "rvoip-bench-uas"
+path = "src/main.rs"
+
+[dependencies]
+rvoip-sip.workspace = true
+rvoip-sip-dialog.workspace = true
+rvoip-rtp-core.workspace = true
+rvoip-core-traits.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The loopback tests' UAC trusts the DUT's self-signed test certificate.
+rvoip-sip = { workspace = true, features = ["dev-insecure-tls"] }
+rvoip-media-core.workspace = true
+rcgen.workspace = true
+# The throughput check's TLS caller.
+tokio-rustls.workspace = true
+
+[lints]
+workspace = true

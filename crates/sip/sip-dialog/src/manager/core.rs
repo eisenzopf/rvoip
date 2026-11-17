@@ -1099,6 +1099,7 @@ impl DialogManager {
         let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
+        crate::manager::occupancy::register(&dialogs);
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
         // Create dialog event channel for subscription manager
@@ -1847,6 +1848,7 @@ impl DialogManager {
         let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
+        crate::manager::occupancy::register(&dialogs);
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
         let transaction_dialog_route_hash = Arc::new(DashMap::with_capacity(index_capacity));
         let weak_transaction_dialog_route_hash = Arc::downgrade(&transaction_dialog_route_hash);

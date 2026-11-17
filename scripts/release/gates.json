@@ -416,6 +416,7 @@
         "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
+        "rvoip-bench-uas",
         "rvoip-client",
         "rvoip-codec-core",
         "rvoip-core",
@@ -506,6 +507,7 @@
         "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
+        "rvoip-bench-uas",
         "rvoip-client",
         "rvoip-codec-core",
         "rvoip-core",
@@ -598,6 +600,7 @@
         "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
+        "rvoip-bench-uas",
         "rvoip-client",
         "rvoip-codec-core",
         "rvoip-core",
@@ -1971,6 +1974,7 @@
         "rvoip-audio-send-queue",
         "rvoip-audit",
         "rvoip-auth-core",
+        "rvoip-bench-uas",
         "rvoip-client",
         "rvoip-codec-core",
         "rvoip-core",
@@ -8390,6 +8394,50 @@
     },
     {
       "affected_crates": [
+        "rvoip-bench-uas"
+      ],
+      "affected_paths": [
+        "crates/tools/rvoip-bench-uas/**",
+        "scripts/ci/run_checks.py"
+      ],
+      "always_fresh": false,
+      "category": "Parallel workspace core",
+      "command": [
+        "python3",
+        "scripts/ci/run_checks.py",
+        "shard",
+        "--name",
+        "release-rvoip-bench-uas",
+        "--packages",
+        "rvoip-bench-uas",
+        "--output",
+        "{artifact_dir}/nested-ci-receipt.json"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "test and lint rvoip-bench-uas",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log",
+        "nested-ci-receipt.json"
+      ],
+      "id": "core.rvoip-bench-uas",
+      "kind": "cargo",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "rvoip-bench-uas unit, integration, example, and Clippy checks",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [
         "rvoip-client"
       ],
       "affected_paths": [
@@ -10689,6 +10737,7 @@
         "core.rvoip-audio-send-queue",
         "core.rvoip-audit",
         "core.rvoip-auth-core",
+        "core.rvoip-bench-uas",
         "core.rvoip-client",
         "core.rvoip-codec-core",
         "core.rvoip-core",
@@ -11004,6 +11053,7 @@
       "core.rvoip-audio-send-queue",
       "core.rvoip-audit",
       "core.rvoip-auth-core",
+      "core.rvoip-bench-uas",
       "core.rvoip-client",
       "core.rvoip-codec-core",
       "core.rvoip-core",
@@ -11135,6 +11185,7 @@
       "core.rvoip-audio-send-queue",
       "core.rvoip-audit",
       "core.rvoip-auth-core",
+      "core.rvoip-bench-uas",
       "core.rvoip-client",
       "core.rvoip-codec-core",
       "core.rvoip-core",
@@ -11332,5 +11383,5 @@
     "unautomated_legacy_ids": []
   },
   "schema": "rvoip-release-gate-catalog-v1",
-  "workspace_package_count": 48
+  "workspace_package_count": 49
 }
