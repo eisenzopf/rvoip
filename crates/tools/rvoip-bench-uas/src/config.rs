@@ -414,7 +414,10 @@ mod tests {
                 retry_after_secs: 2
             }
         );
-        assert_eq!(config.bind, "10.90.200.10:5061".parse().unwrap());
+        assert_eq!(
+            config.bind,
+            "10.90.200.10:5061".parse::<SocketAddr>().unwrap()
+        );
         assert_eq!(config.worker_threads, None);
         assert_eq!(config.tuning, Tuning::default());
         std::fs::remove_dir_all(dir).unwrap();

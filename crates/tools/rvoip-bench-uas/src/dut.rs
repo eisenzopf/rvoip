@@ -470,7 +470,7 @@ mod tests {
         assert_eq!(config.tls_bind_addr, Some("10.1.2.3:5061".parse().unwrap()));
         assert_eq!(
             config.bind_addr,
-            "10.1.2.3:0".parse().unwrap(),
+            "10.1.2.3:0".parse::<SocketAddr>().unwrap(),
             "UDP/TCP off the TLS port"
         );
         assert_eq!(
