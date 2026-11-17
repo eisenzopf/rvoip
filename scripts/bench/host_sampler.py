@@ -6,7 +6,7 @@ the per-thread CPU sampling of its resource observer). Run on each bench host
 beside the process under test (rvoip-bench-uas on the DUT, rvoip-loadgen on a
 caller):
 
-    host_sampler.py --pid <pid> --out resources.jsonl [--interval 2]
+    host_sampler.py --pid <pid> --out resources.jsonl [--interval 2] [--iface <nic>]
 
 One JSON line per interval until <pid> exits (or is replaced by a new process
 with the same pid):
@@ -19,7 +19,15 @@ with the same pid):
   host_cpu_pct_ticks  host busy %% from /proc/stat ticks
   host                raw counters: run_ns (per-CPU /proc/schedstat run time),
                       idle_us (per-CPU cpuidle residency), ksoftirqd_ns,
-                      net_rx / net_tx (/proc/softirqs), stat (per-CPU ticks)
+                      net_rx / net_tx (/proc/softirqs), stat (per-CPU ticks:
+                      user nice system idle iowait irq softirq steal, USER_HZ;
+                      caller_policy.softirq_saturation reads softirq and idle
+                      per CPU from these)
+  irq_iface, irq_cpus the primary NIC (--iface, else the default route's) and
+                      the CPUs its queue IRQs are affined to (/proc/interrupts
+                      names <iface>-*, /proc/irq/<n>/effective_affinity_list);
+                      read once at start. Older files lack them: the reader
+                      falls back to the host's tuning.json, then every CPU.
   cpu_cores_pct       process CPU over the interval (100 = one core); absent
                       on the first line
   rss_bytes, threads
@@ -78,6 +86,61 @@ def ksoftirqd_schedstats():
         except OSError:
             pass
     return paths
+
+
+def primary_iface():
+    """The interface of the IPv4 default route (/proc/net/route), or None."""
+    try:
+        with open('/proc/net/route') as stream:
+            next(stream, None)
+            for line in stream:
+                parts = line.split()
+                if len(parts) > 2 and parts[1] == '00000000':
+                    return parts[0]
+    except OSError:
+        pass
+    return None
+
+
+def parse_cpu_list(text):
+    """'48-51,60' -> [48, 49, 50, 51, 60]."""
+    cpus = set()
+    for part in (text or '').strip().split(','):
+        part = part.strip()
+        if not part:
+            continue
+        low, _, high = part.partition('-')
+        try:
+            cpus.update(range(int(low), int(high or low) + 1))
+        except ValueError:
+            continue
+    return sorted(cpus)
+
+
+def nic_irq_cpus(iface, interrupts='/proc/interrupts', irq_root='/proc/irq'):
+    """CPUs that the queue IRQs of `iface` (interrupt names starting with '<iface>-') are affined to, or None."""
+    if not iface:
+        return None
+    irqs = []
+    try:
+        with open(interrupts) as stream:
+            for line in stream:
+                number, _, rest = line.partition(':')
+                if number.strip().isdigit() and any(name.startswith(iface + '-') for name in rest.split()):
+                    irqs.append(number.strip())
+    except OSError:
+        return None
+    cpus = set()
+    for irq in irqs:
+        for name in ('effective_affinity_list', 'smp_affinity_list'):
+            try:
+                found = parse_cpu_list(Path(irq_root, irq, name).read_text())
+            except OSError:
+                continue
+            if found:
+                cpus.update(found)
+                break
+    return sorted(cpus) or None
 
 
 def host_counters(idle, ksoft):
@@ -165,8 +228,10 @@ def process_sample(pid):
     return {'process': process, 'thread_cpu_times': times, 'thread_names': names}
 
 
-def run(pid, out, interval=2.0, max_samples=None, clock=time):
+def run(pid, out, interval=2.0, max_samples=None, clock=time, iface=None):
     """Sample until `pid` exits; returns the number of lines written."""
+    iface = iface or primary_iface()
+    irq_cpus = nic_irq_cpus(iface)
     idle = idle_paths()
     ksoft = ksoftirqd_schedstats()
     cpus = os.cpu_count()
@@ -187,7 +252,8 @@ def run(pid, out, interval=2.0, max_samples=None, clock=time):
             process = sample['process']
             row = {'at': at, 'pid': pid, 'logical_cpus': cpus, 'physical_cores': cores,
                    'rss_bytes': process['rss_pages'] * PAGE, 'threads': process['threads'],
-                   'thread_cpu_times': sample['thread_cpu_times'], 'thread_names': sample['thread_names'], 'host': host}
+                   'thread_cpu_times': sample['thread_cpu_times'], 'thread_names': sample['thread_names'], 'host': host,
+                   'irq_iface': iface, 'irq_cpus': irq_cpus}
             cpu_seconds = (process['utime'] + process['stime']) / HZ
             if previous is not None:
                 elapsed = at - previous['at']
@@ -212,10 +278,11 @@ def main(argv=None):
     parser.add_argument('--out', required=True)
     parser.add_argument('--interval', type=float, default=2.0)
     parser.add_argument('--max-samples', type=int, default=None)
+    parser.add_argument('--iface', default=None, help='primary NIC (default: the default route\'s interface)')
     args = parser.parse_args(argv)
     if args.pid <= 1:
         parser.error('--pid must name the process under test')
-    written = run(args.pid, args.out, args.interval, args.max_samples)
+    written = run(args.pid, args.out, args.interval, args.max_samples, iface=args.iface)
     print(json.dumps({'pid': args.pid, 'out': args.out, 'samples': written}))
     return 0 if written else 1
 

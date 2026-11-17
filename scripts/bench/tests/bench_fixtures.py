@@ -39,8 +39,9 @@ def default_outcome(stage, index_in_stage, rate, limit, reject_status=503):
 def write_caller(directory, profile, host_index, hosts, run_start_epoch, rate, *, limit=None, media=False,
                  hold_ms=0, process_offset_ms=400, lateness_ms=0.4, audio_fail_every=None, thread_cores=0.3,
                  process_cores=3.0, transport='tls_srtp', skip_events=False, bye_status=200, drop_bins=(),
-                 reject_status=503, setup_offset_ms=0.0):
-    """One caller host's share of `profile`. Returns the number of calls scheduled."""
+                 reject_status=503, setup_offset_ms=0.0, saturate=None, irq_cpus=None, net=None):
+    """One caller host's share of `profile`. Returns the number of calls scheduled. `saturate` = (cpu, first, last)
+    sampler intervals (sample i is taken at run start - 2 + i) at 98 % softirq; `net` = (before, after) texts."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     run_id = 'trial'
@@ -130,11 +131,32 @@ def write_caller(directory, profile, host_index, hosts, run_start_epoch, rate, *
     (directory / 'analysis.json').write_text(json.dumps({'attempted': calls}))
     write_resources(directory / 'resources.jsonl', run_start_epoch - 2, total + hold_ms / 1000.0 + 4,
                     process_cores, thread_cores, ['loadgen-signaling', 'loadgen-call-0', 'loadgen-call-1', 'rvoip-media'],
-                    logical=96, physical=48)
+                    logical=96, physical=48, saturate=saturate, irq_cpus=irq_cpus)
+    if net:
+        (directory / 'net-before.txt').write_text(net[0])
+        (directory / 'net-after.txt').write_text(net[1])
     return calls
 
 
-def write_resources(path, start, seconds, process_cores, thread_cores, names, logical, physical, hot_at=None):
+SAMPLED_CPUS = 4   # per-CPU /proc/stat lines in synthetic samples (USER_HZ 100, 1 s apart)
+
+
+def cpu_stat(i, saturate=None):
+    """host.stat of synthetic sample `i`: cumulative per-CPU ticks [user nice system idle iowait irq softirq steal],
+    2 % softirq per interval; `saturate` = (cpu, first_i, last_i) puts that CPU at 98 % softirq in those intervals."""
+    stat = {}
+    for cpu in range(SAMPLED_CPUS):
+        hot = 0
+        if saturate and cpu == saturate[0]:
+            hot = max(0, min(i, saturate[2]) - saturate[1] + 1)   # intervals ending at first_i..last_i so far
+        normal = i - hot
+        stat['cpu%d' % cpu] = [10 * normal + 1 * hot, 0, 0, 88 * normal + 1 * hot, 0, 0, 2 * normal + 98 * hot, 0]
+    stat['cpu'] = [sum(v[k] for v in stat.values()) for k in range(8)]
+    return stat
+
+
+def write_resources(path, start, seconds, process_cores, thread_cores, names, logical, physical, hot_at=None,
+                    saturate=None, irq_cpus=None):
     rows = []
     for i in range(int(seconds) + 1):
         at = start + i
@@ -144,7 +166,10 @@ def write_resources(path, start, seconds, process_cores, thread_cores, names, lo
             threads[0]['user_time'] += (i - hot_at + 1) * 1.0
         row = {'at': at, 'pid': 4242, 'logical_cpus': logical, 'physical_cores': physical, 'rss_bytes': 300 * 2 ** 20,
                'threads': len(names), 'thread_cpu_times': threads,
-               'thread_names': {str(100 + j): name for j, name in enumerate(names)}}
+               'thread_names': {str(100 + j): name for j, name in enumerate(names)},
+               'host': {'stat': cpu_stat(i, saturate)}}
+        if irq_cpus is not None:
+            row['irq_iface'], row['irq_cpus'] = 'ens5', irq_cpus
         if i:
             row['cpu_cores_pct'] = 100.0 * process_cores
             row['host_cpu_pct'] = 12.5
@@ -153,7 +178,7 @@ def write_resources(path, start, seconds, process_cores, thread_cores, names, lo
 
 
 def write_dut(directory, run_start_epoch, profile, *, limit=None, true_zero=True, clean=True, skip=(), media=None,
-              srtp_failures=0):
+              srtp_failures=0, saturate=None):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     total = sum(s['seconds'] for s in profile['stages'])
@@ -193,7 +218,8 @@ def write_dut(directory, run_start_epoch, profile, *, limit=None, true_zero=True
             'rvoip_bench_uas_responses_sent_total{code="503"} %d\n' % (invites, ok, rejected))
     if 'resources.jsonl' not in skip:
         write_resources(directory / 'resources.jsonl', run_start_epoch - 2, total + 4, 4.0, 0.5,
-                        ['rvoip-bench-uas', 'tokio-rt-worker-0', 'tokio-rt-worker-1'], logical=16, physical=8)
+                        ['rvoip-bench-uas', 'tokio-rt-worker-0', 'tokio-rt-worker-1'], logical=16, physical=8,
+                        saturate=saturate)
 
 
 def make_trial(trial_dir, rate, *, hosts=2, n=None, warmup_seconds=4, minimum_seconds=6, limit=None, media=False,

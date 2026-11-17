@@ -6,6 +6,9 @@
 #   dut-start   <trial prefix> <bin>      fresh DUT (or ea-uas) process, wait for ready.json
 #   dut-finish  <trial prefix> <bin>      drain (finish file or SIGTERM), pack and upload dut.tar.gz
 #   caller-run  <trial prefix> <index>    disk guard, start barrier, run the caller, upload caller-<i>.tar.gz
+#
+# Around each DUT and caller run the agent snapshots the network counters (net-before.txt, net-after.txt:
+# ethtool -S, sysfs statistics, softnet_stat, /proc/net/snmp + netstat, conntrack count) into the run dir.
 #   cleanup                               stop every bench process
 set -euo pipefail
 export PATH=$PATH:/snap/bin
@@ -36,6 +39,25 @@ stop_all() {
   sleep 2
   for name in rvoip-bench-uas ea-uas rvoip-loadgen; do pkill -KILL -x "$name" 2>/dev/null || true; done
   pkill -f host_sampler.py 2>/dev/null || true
+}
+net_snapshot() {  # net_snapshot <file>: NIC, softnet, SNMP and conntrack counters; summarize_trial.py parses the deltas
+  local f=$1 iface s
+  iface=$(awk '$2 == "00000000" {print $1; exit}' /proc/net/route 2>/dev/null || true)
+  {
+    echo "### at $(date +%s.%N)"
+    echo "### iface ${iface}"
+    if [ -n "$iface" ]; then
+      echo "### ethtool -S $iface"; ethtool -S "$iface" 2>&1 || true
+      echo "### sysfs /sys/class/net/$iface/statistics"
+      for s in /sys/class/net/"$iface"/statistics/*; do echo "$(basename "$s"): $(cat "$s" 2>/dev/null)"; done
+    fi
+    echo "### softnet /proc/net/softnet_stat"; cat /proc/net/softnet_stat 2>&1 || true
+    echo "### snmp /proc/net/snmp"; cat /proc/net/snmp 2>&1 || true
+    echo "### snmp /proc/net/netstat"; cat /proc/net/netstat 2>&1 || true
+    echo "### conntrack"
+    if command -v conntrack >/dev/null 2>&1; then conntrack -C 2>/dev/null || true
+    elif [ -r /proc/sys/net/netfilter/nf_conntrack_count ]; then cat /proc/sys/net/netfilter/nf_conntrack_count; fi
+  } > "$f" 2>&1 || true
 }
 facts() {
   python3 - <<'PY'
@@ -78,6 +100,7 @@ dut-start)
   rm -rf "$WORK/run"; mkdir -p "$WORK/run"
   aws s3 cp --only-show-errors "${trial}dut.json" "$WORK/run/config.json"
   cd "$WORK/run"
+  net_snapshot "$WORK/run/net-before.txt"
   ulimit -n 4194304
   if [ "$bin" = ea-uas ]; then
     setsid nohup "$BIN/ea-uas" "$WORK/run/config.json" > "$WORK/run/dut.log" 2>&1 < /dev/null &
@@ -119,6 +142,7 @@ dut-finish)
   # the agent records whether it had to be killed.
   echo "{\"killed\": $([ -n "$rc" ] && echo true || echo false)}" > exit.json
   sleep 2; pkill -f host_sampler.py 2>/dev/null || true
+  net_snapshot "$WORK/run/net-after.txt"
   cp /var/lib/rvoip-bench/tuning.json tuning.json 2>/dev/null || true
   facts > host-facts.json || true
   tar -C "$WORK/run" -czf "$WORK/dut.tar.gz" .
@@ -133,6 +157,7 @@ caller-run)
   rm -rf "$out"; mkdir -p "$out"
   aws s3 cp --only-show-errors "${trial}caller-$index.json" "$out/caller.json"
   aws s3 cp --only-show-errors "${trial}caller-env.sh" "$out/caller-env.sh"
+  net_snapshot "$out/net-before.txt"   # before the barrier, so it never delays the start
   echo "{\"index\": $index, \"at\": $(date +%s.%N)}" > "$out/barrier-ready.json"
   aws s3 cp --only-show-errors "$out/barrier-ready.json" "${trial}barrier/ready-$index.json"
   go=
@@ -153,6 +178,7 @@ caller-run)
   wait "$pid"; rc=$?
   set -e
   echo "{\"code\": $rc, \"ended\": $(date +%s.%N)}" > "$out/exit.json"
+  net_snapshot "$out/net-after.txt"
   sleep 3
   cp /var/lib/rvoip-bench/tuning.json "$out/tuning.json" 2>/dev/null || true
   facts > "$out/host-facts.json" || true

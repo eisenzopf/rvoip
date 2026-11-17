@@ -16,14 +16,18 @@ import merge_callers  # noqa: E402
 REPORT_OK = {'shutdown_outcome': 'ok', 'interrupted': False, 'caller_watchdogs': 0, 'generator_skipped': 0, 'hold_ms': 0}
 
 
-def samples(start, seconds, process_cores=2.0, thread_cores=0.2, hot_from=None, tail_report_second=None):
+def samples(start, seconds, process_cores=2.0, thread_cores=0.2, hot_from=None, tail_report_second=None,
+            saturate=None, irq_cpus=None):
     rows = []
     for i in range(seconds + 1):
         hot = 0.0 if hot_from is None or i < hot_from else (i - hot_from + 1) * 0.9
         rows.append({'at': start + i, 'cpu_cores_pct': 100 * process_cores if i else None,
                      'thread_cpu_times': [{'id': 1, 'user_time': thread_cores * i + hot, 'system_time': 0.0},
                                           {'id': 2, 'user_time': thread_cores * i, 'system_time': 0.0}],
-                     'thread_names': {'1': 'loadgen-call-0', '2': 'loadgen-signaling'}})
+                     'thread_names': {'1': 'loadgen-call-0', '2': 'loadgen-signaling'},
+                     'host': {'stat': fx.cpu_stat(i, saturate)}})
+        if irq_cpus is not None:
+            rows[-1]['irq_cpus'] = irq_cpus
     if tail_report_second is not None:
         rows.append({'at': start + tail_report_second, 'cpu_cores_pct': 100 * 40.0,
                      'thread_cpu_times': [{'id': 1, 'user_time': 1000.0, 'system_time': 0.0}],
@@ -130,6 +134,76 @@ class PredicateTests(unittest.TestCase):
         self.assertAlmostEqual(combined['thread_peak_cores'], 0.5)
         self.assertEqual(combined['hottest_thread']['caller'], 'caller-2')
         self.assertFalse(combined['caller_valid'])
+
+
+class SoftirqTests(unittest.TestCase):
+    """no_irq_cpu_softirq_saturated: a NIC IRQ CPU >= 95 % softirq for 2 consecutive samples (sample i at 1000 + i;
+    interval i covers [999 + i, 1000 + i])."""
+
+    def test_one_cpu_saturated_the_others_not(self):
+        rows = samples(1000, 12, saturate=(1, 4, 6))
+        found = caller_policy.softirq_saturation(rows, run_start_epoch=1000)
+        self.assertEqual(found['saturated_cpus'], [1], 'CPUs 0, 2 and 3 stay at 2 %')
+        self.assertAlmostEqual(found['peak_share'], 0.98)
+        self.assertEqual(found['peak_cpu'], 1)
+        self.assertEqual(found['first_saturated_second'], 3, 'interval 4 began at 1003')
+        self.assertEqual(found['cpus_judged'], 'all_cpus')
+        self.assertTrue(found['saturated_before_cutoff'])
+        self.assertAlmostEqual(found['idle_share_at_peak'], 0.01)
+
+    def test_one_saturated_sample_is_not_enough(self):
+        found = caller_policy.softirq_saturation(samples(1000, 12, saturate=(1, 4, 4)))
+        self.assertFalse(found['saturated'])
+        self.assertAlmostEqual(found['peak_share'], 0.98)
+
+    def test_only_nic_irq_cpus_are_judged(self):
+        rows = samples(1000, 12, saturate=(1, 4, 8))
+        other = caller_policy.softirq_saturation(rows, irq_cpus=[2, 3], irq_cpus_source='tuning.json')
+        self.assertFalse(other['saturated'], 'CPU 1 is not a NIC IRQ CPU')
+        self.assertEqual(other['irq_cpus'], [2, 3])
+        self.assertAlmostEqual(other['peak_share'], 0.02)
+        own = caller_policy.softirq_saturation(samples(1000, 12, saturate=(1, 4, 8), irq_cpus=[1]), irq_cpus=[2, 3])
+        self.assertEqual(own['saturated_cpus'], [1], "the sample's own irq_cpus win over tuning.json")
+        self.assertTrue(own['irq_cpus_source'].startswith('resources.jsonl'))
+
+    def test_old_samples_without_per_cpu_stat_are_missing_input(self):
+        rows = [dict(row, host={}) for row in samples(1000, 12)]
+        v = caller_policy.predicate(bins(10, 100), [0.5], rows, REPORT_OK, physical_cores=48, run_start_epoch=1000)
+        self.assertFalse(v['checks'][caller_policy.SOFTIRQ_CHECK])
+        self.assertIn('per-CPU /proc/stat in resources.jsonl', v['missing_inputs'])
+
+    def test_predicate_fails_a_saturated_caller(self):
+        v = caller_policy.predicate(bins(10, 100), [0.5], samples(1000, 12, saturate=(2, 5, 8)), REPORT_OK,
+                                    physical_cores=48, run_start_epoch=1000, scored_from_second=2)
+        self.assertFalse(v['checks'][caller_policy.SOFTIRQ_CHECK])
+        self.assertFalse(v['caller_valid_before_backpressure'])
+        self.assertEqual(v['softirq']['saturated_cpus'], [2])
+        ok = caller_policy.predicate(bins(10, 100), [0.5], samples(1000, 12), REPORT_OK, physical_cores=48,
+                                     run_start_epoch=1000, scored_from_second=2)
+        self.assertTrue(ok['checks'][caller_policy.SOFTIRQ_CHECK])
+        self.assertAlmostEqual(ok['softirq']['peak_share'], 0.02)
+        combined = caller_policy.combine({'caller-1': v, 'caller-2': ok})
+        self.assertFalse(combined['checks'][caller_policy.SOFTIRQ_CHECK])
+        self.assertEqual(combined['softirq_by_caller']['caller-1']['saturated_cpus'], [2])
+        self.assertEqual(combined['softirq_by_caller']['caller-2']['saturated_cpus'], [])
+
+    def test_onset_must_precede_the_backpressure_second(self):
+        # began at 1004 (interval 5), backpressure second 5: tester evidence even though it runs on past the marker
+        before = caller_policy.predicate(bins(10, 100), [0.5], samples(1000, 12, saturate=(2, 5, 9)), REPORT_OK,
+                                         backpressure_second=5, physical_cores=48, run_start_epoch=1000)
+        self.assertFalse(before['checks'][caller_policy.SOFTIRQ_CHECK])
+        # began at 1006, after the DUT's first backpressure: recorded, not a caller failure
+        after = caller_policy.predicate(bins(10, 100), [0.5], samples(1000, 12, saturate=(2, 7, 9)), REPORT_OK,
+                                        backpressure_second=5, physical_cores=48, run_start_epoch=1000)
+        self.assertTrue(after['checks'][caller_policy.SOFTIRQ_CHECK])
+        self.assertEqual(after['softirq']['saturated_cpus'], [2])
+        self.assertFalse(after['softirq']['saturated_before_cutoff'])
+
+    def test_warmup_saturation_is_outside_the_scored_stage(self):
+        v = caller_policy.predicate(bins(10, 100), [0.5], samples(1000, 12, saturate=(0, 1, 3)), REPORT_OK,
+                                    physical_cores=48, run_start_epoch=1000, scored_from_second=4)
+        self.assertTrue(v['checks'][caller_policy.SOFTIRQ_CHECK])
+        self.assertEqual(v['softirq']['saturated_cpus'], [])
 
 
 class MergeTests(unittest.TestCase):

@@ -58,10 +58,34 @@ class HostSamplerTests(unittest.TestCase):
         peak, hottest = caller_policy.thread_peaks(rows)
         self.assertGreater(peak, 0.3)
         self.assertEqual(hottest['tid'], str(child.pid), 'the main thread is the busy one')
+        self.assertIn('irq_cpus', rows[0], 'every sample carries the NIC IRQ CPU list (None when unknown)')
+        softirq = caller_policy.softirq_saturation(rows)
+        self.assertIsNotNone(softirq['peak_share'], 'per-CPU softirq comes from the per-CPU /proc/stat lines')
+        self.assertEqual(softirq['missing'], [])
 
     def test_exits_at_once_for_a_missing_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(host_sampler.run(2 ** 22 + 12345, Path(tmp) / 'r.jsonl', interval=0.01), 0)
+
+
+class NicIrqTests(unittest.TestCase):
+    def test_nic_irq_cpus_follow_the_queue_irq_affinity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            (tmp / 'interrupts').write_text(
+                '            CPU0       CPU1\n'
+                ' 110:          1          0  PCI-MSIX-0000:27:00.0    0-edge      ena-mgmnt@pci:0000:27:00.0\n'
+                ' 111:        900          0  PCI-MSIX-0000:27:00.0    1-edge      ens5-Tx-Rx-0\n'
+                ' 112:          0        800  PCI-MSIX-0000:27:00.0    2-edge      ens5-Tx-Rx-1\n'
+                ' 113:          0        800  PCI-MSIX-0000:28:00.0    1-edge      ens6-Tx-Rx-0\n'
+                'NMI:          0          0   Non-maskable interrupts\n')
+            for irq, cpus in (('111', '48'), ('112', '49-50'), ('113', '7')):
+                (tmp / 'irq' / irq).mkdir(parents=True)
+                (tmp / 'irq' / irq / 'effective_affinity_list').write_text(cpus + '\n')
+            self.assertEqual(host_sampler.nic_irq_cpus('ens5', tmp / 'interrupts', tmp / 'irq'), [48, 49, 50])
+            self.assertIsNone(host_sampler.nic_irq_cpus('eth9', tmp / 'interrupts', tmp / 'irq'))
+            self.assertIsNone(host_sampler.nic_irq_cpus(None))
+        self.assertEqual(host_sampler.parse_cpu_list('0-2,7, 9-9'), [0, 1, 2, 7, 9])
 
 
 class DiskGuardTests(unittest.TestCase):

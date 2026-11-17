@@ -92,6 +92,32 @@ class ReportTests(unittest.TestCase):
             self.assertIn('| %s |' % area, md)
         self.assertIn('100.0000%', md, 'SER of the final passing trial')
 
+    def test_failing_trials_name_the_saturated_side(self):
+        spec = json.loads(json.dumps(self.spec))
+        spec['baseline']['R1'] = {'search': 'R1/search.json'}   # the R1 search stands in for a §6.1 baseline search
+        md = rfc_report.build(spec)[0].markdown()
+        self.assertIn('| Saturated side | Network counters |', md)
+        self.assertIn('no host receive path saturated (peak softirq caller-1 2 %, caller-2 2 %, DUT host 2 %)', md)
+        baseline = md.split('## 2. Testbed baseline')[1].split('## 3.')[0]
+        self.assertIn('| Row | Rate (sps) | Outcome | Saturated side | Network counters | Trial |', baseline)
+        self.assertIn('| R1 |', baseline)
+        # a summary whose caller-1 receive path saturated
+        summary = {'plan': {'dut_kind': 'ea-uas'},
+                   'resource': {'caller-1': {'softirq': {'peak_share': 1.0, 'saturated_cpus': list(range(48, 64)),
+                                                         'first_saturated_second': 39, 'saturated_before_cutoff': True,
+                                                         'cutoff_epoch': 41.0},
+                                             'net': {'flagged': {'softnet_time_squeeze': 812}}},
+                                'caller-2': {'softirq': {'peak_share': 0.14, 'saturated_cpus': []}},
+                                'dut': {'softirq': {'peak_share': 0.17, 'saturated_cpus': []}}}}
+        side, net = rfc_report.saturation_cells(summary, outcome='fail')
+        self.assertEqual(side, 'caller-1 receive path (softirq 100 % on CPUs 48-63, from second 39)')
+        self.assertEqual(net, 'caller-1 softnet_time_squeeze +812')
+        self.assertEqual(rfc_report.saturation_cells(summary, outcome='pass'), (rfc_report.EMPTY, rfc_report.EMPTY))
+        summary['resource']['caller-1']['softirq']['saturated_cpus'] = []
+        summary['resource']['dut']['softirq'].update(peak_share=0.99, saturated_cpus=[24, 25])
+        self.assertEqual(rfc_report.saturation_cells(summary, outcome='invalid')[0],
+                         'ea-uas host receive path (softirq 99 % on CPUs 24-25)')
+
     def test_tester_limited_reading(self):
         spec = json.loads(json.dumps(self.spec))
         spec['baseline']['R1'] = {'result_sps': 60, 'source': 'low baseline'}

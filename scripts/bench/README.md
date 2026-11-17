@@ -158,8 +158,10 @@ baseline. A media baseline counts only when its final trial's
 ### Host tools
 
 ```text
-host_sampler.py --pid <pid> --out resources.jsonl [--interval 2] [--max-samples N]
-host_sampler.run(pid, out, interval=2.0, max_samples=None) -> int
+host_sampler.py --pid <pid> --out resources.jsonl [--interval 2] [--max-samples N] [--iface <nic>]
+host_sampler.run(pid, out, interval=2.0, max_samples=None, iface=None) -> int   # rows carry irq_iface, irq_cpus
+caller_policy.softirq_saturation(samples, irq_cpus=None, irq_cpus_source=None, start_epoch, end_epoch,
+                                 cutoff_epoch, run_start_epoch) -> {peak_share, saturated_cpus, first_saturated_second, ...}
 disk_guard.require_free(path, minimum_gib=20) -> float      # raises DiskGuardError
 disk_guard.prune_unpacked(directories, min_bytes=2 MiB, keep=()) -> int
 disk_guard.py <path> [--min-gib 20]                          # exit 1 below the minimum
@@ -238,6 +240,9 @@ DUT (`rvoip-bench-uas`, RFC7502_BENCHMARK.md §3):
   backpressure marker.
 
 `resources.jsonl` on every host: `host_sampler.py --pid <process under test>`.
+`net-before.txt` / `net-after.txt` on every host (bench-agent.sh, around the DUT and
+caller runs): `ethtool -S`, sysfs NIC statistics, `/proc/net/softnet_stat`,
+`/proc/net/snmp` + `/proc/net/netstat`, conntrack count.
 
 ## summary.json (`rvoip-bench-trial-summary/1`)
 
@@ -255,10 +260,10 @@ DUT (`rvoip-bench-uas`, RFC7502_BENCHMARK.md §3):
 | `stage_assignment` | `call_index`, `own_clock` (calls placed by schedule index, or by their own clock when the id gives no index), `basis` |
 | `bins_1s[]` | merged 1 s bins on caller-1's wall clock (the cross-host time series; per-host validity uses each host's own clock): `t, stage, requested_cps, offered, dispatched, admitted, rejected_503, full, guard_skips, setup_p99_ms` |
 | `backpressure` | `first_second, first_503_second, first_timeout_second, dut_first_503_second` (s from the run start) |
-| `caller_validity` | combined predicate: `caller_valid, caller_valid_before_backpressure, checks{dispatch_within_1pct_per_bin_before_backpressure, schedule_to_write_p99_at_most_5ms, process_cpu_at_most_limit, no_thread_above_0_8_core, zero_guard_skips, clean_shutdown, source_pools_balanced}, dispatch_misses[{t, requested, dispatched, caller}], scheduler_lateness_p99_ms, process_peak_cores, process_core_limit, thread_peak_cores, hottest_thread, source_pools, missing_inputs, backpressure_second` |
+| `caller_validity` | combined predicate: `caller_valid, caller_valid_before_backpressure, checks{dispatch_within_1pct_per_bin_before_backpressure, schedule_to_write_p99_at_most_5ms, process_cpu_at_most_limit, no_thread_above_0_8_core, no_irq_cpu_softirq_saturated, zero_guard_skips, clean_shutdown, source_pools_balanced}, dispatch_misses[{t, requested, dispatched, caller}], scheduler_lateness_p99_ms, process_peak_cores, process_core_limit, thread_peak_cores, hottest_thread, softirq_by_caller{role: {peak_share, saturated_cpus, first_saturated_second, …}}, source_pools, missing_inputs, backpressure_second`. `no_irq_cpu_softirq_saturated`: no NIC IRQ CPU (all CPUs when the IRQ list is unknown) >= 95 % in softirq for 2 consecutive samples, with the saturation beginning on the scored stage before the DUT's first backpressure second; tester evidence, never a DUT shortfall |
 | `caller_validity_by_caller` | the same per host (own clock) |
 | `callers.<role>` | `start_offset_seconds, missing, report{verdict, planned, attempted, …, rfc6076_trace}` |
-| `resource.<role>` (`dut`, `caller-<i>`) | `samples, scored_samples, logical_cpus, physical_cores, sampled_peak_cores, scored_mean_cores, scored_peak_cores, host_peak_cpu_pct, scored_host_mean_cpu_pct, peak_rss_bytes, peak_threads, scored_thread_groups{family: {mean_cores, peak_cores}}` |
+| `resource.<role>` (`dut`, `caller-<i>`) | `samples, scored_samples, logical_cpus, physical_cores, sampled_peak_cores, scored_mean_cores, scored_peak_cores, host_peak_cpu_pct, scored_host_mean_cpu_pct, peak_rss_bytes, peak_threads, scored_thread_groups{family: {mean_cores, peak_cores}}, softirq_peak_share, softirq_saturated_cpus, softirq{peak_share, peak_cpu, saturated_cpus, first_saturated_second, saturated_before_cutoff, irq_cpus, irq_cpus_source, …}, net{deltas, flagged, …}` (scored stage; on the DUT the softirq readout is recorded only) |
 | `generator` | `hosts, sources, connections_per_source, endpoints, transport, call_model, hold_ms` |
 | `rfc6076` | `all_calls` and `scored` (trial-* stages) metric blocks, `caller_report_trace, call_model, hold_ms, transport` |
 | `setup_ms`, `final_status_counts`, `disconnect_failures{all_calls, scored}` | scored-stage readouts |

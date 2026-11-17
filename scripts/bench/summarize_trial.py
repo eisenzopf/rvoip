@@ -16,8 +16,19 @@ extracted:
                                  media, transport, hosts, criterion, dut_kind
     <trial-dir>/dut/             ready.json stats.jsonl summary.json
                                  metrics-*.prom dut.log resources.jsonl
+                                 [tuning.json net-before.txt net-after.txt]
     <trial-dir>/caller-<i>/      caller.json events.jsonl report.json
                                  analysis.json caller.log resources.jsonl
+                                 [tuning.json net-before.txt net-after.txt]
+
+Per host, `resource.<role>.softirq` is the kernel receive-path readout
+(caller_policy.softirq_saturation: peak per-CPU softirq share, saturated NIC
+IRQ CPUs, first saturated second); on a caller it backs the
+`no_irq_cpu_softirq_saturated` validity check, on the DUT it is recorded only
+(`resource.dut.softirq_peak_share`, `softirq_saturated_cpus`). When
+bench-agent.sh left net-before.txt / net-after.txt, `resource.<role>.net`
+holds the counter deltas (NIC drops and ENA allowance counters, softnet
+drops and time squeeze, UDP buffer errors, TCP timeouts, conntrack).
 
 Output: one dict (schema `rvoip-bench-trial-summary/1`, see README.md) with
 exactly what rfc7502.evaluate_trial, caller_policy, search.py and the report
@@ -34,6 +45,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import caller_policy  # noqa: E402
+import host_sampler  # noqa: E402
 import merge_callers  # noqa: E402
 import rfc6076  # noqa: E402
 import rfc7502  # noqa: E402
@@ -296,6 +308,121 @@ def resource_summary(samples, window=None):
                                      for family, row in sorted(groups.items()) if row['wall_seconds'] > 0}}
 
 
+# ---------------------------------------------------------------- kernel receive path and network counters
+
+def irq_cpus_from_tuning(host_dir):
+    """(NIC IRQ CPUs, source) from the host's tuning.json (bench_tune.py: read-back affinity, else the plan)."""
+    tuning = _json(Path(host_dir) / 'tuning.json') or {}
+    iface = tuning.get('interface') or 'primary NIC'
+    affinity = (tuning.get('readback') or {}).get('irq_affinity') or {}
+    cpus = set()
+    for value in affinity.values():
+        cpus.update(host_sampler.parse_cpu_list(str(value)))
+    if cpus:
+        return sorted(cpus), 'tuning.json readback.irq_affinity (%s)' % iface
+    planned = (tuning.get('plan') or {}).get('irq_cpus')
+    if planned:
+        return sorted(int(cpu) for cpu in planned), 'tuning.json plan.irq_cpus (%s)' % iface
+    return None, None
+
+
+def host_softirq(samples, host_dir, start_epoch=None, end_epoch=None, cutoff_epoch=None, run_start_epoch=None):
+    irq_cpus, source = irq_cpus_from_tuning(host_dir)
+    return caller_policy.softirq_saturation(samples, irq_cpus, source, start_epoch, end_epoch, cutoff_epoch, run_start_epoch)
+
+
+# Counters read from bench-agent.sh net-*.txt; every one of them is a problem when it grows during a run.
+NET_ETHTOOL_KEYS = ('rx_drops', 'tx_drops', 'pps_allowance_exceeded', 'bw_in_allowance_exceeded',
+                    'bw_out_allowance_exceeded', 'conntrack_allowance_exceeded', 'linklocal_allowance_exceeded')
+NET_SYSFS_KEYS = ('rx_dropped', 'rx_missed_errors', 'rx_fifo_errors', 'rx_over_errors', 'tx_dropped')
+NET_SNMP_KEYS = ('UdpInErrors', 'UdpRcvbufErrors', 'UdpSndbufErrors', 'TcpExtTCPTimeouts', 'TcpExtListenDrops')
+NET_SOFTNET_KEYS = ('softnet_dropped', 'softnet_time_squeeze')
+
+
+def parse_net_snapshot(text):
+    """bench-agent.sh net-*.txt -> {'at', 'iface', 'counters': {name: int}}. Sections start with '### <name>'."""
+    out = {'at': None, 'iface': None, 'counters': {}}
+    counters = out['counters']
+    section, snmp_header = None, {}
+    for raw in (text or '').splitlines():
+        line = raw.rstrip()
+        if line.startswith('### '):
+            head = line[4:].strip()
+            if head.startswith('at '):
+                try:
+                    out['at'] = float(head[3:])
+                except ValueError:
+                    pass
+                section = None
+            elif head.startswith('iface '):
+                out['iface'] = head[6:].strip() or None
+                section = None
+            else:
+                section = head.split()[0]
+            continue
+        if not line.strip() or section is None:
+            continue
+        if section in ('ethtool', 'sysfs'):
+            key, sep, value = line.strip().partition(':')
+            if sep:
+                try:
+                    counters[('' if section == 'ethtool' else 'sysfs_') + key.strip()] = int(value.strip())
+                except ValueError:
+                    pass
+        elif section == 'softnet':
+            fields = line.split()
+            try:
+                counters['softnet_processed'] = counters.get('softnet_processed', 0) + int(fields[0], 16)
+                counters['softnet_dropped'] = counters.get('softnet_dropped', 0) + int(fields[1], 16)
+                counters['softnet_time_squeeze'] = counters.get('softnet_time_squeeze', 0) + int(fields[2], 16)
+            except (IndexError, ValueError):
+                pass
+        elif section == 'snmp':
+            # /proc/net/snmp and /proc/net/netstat: a header line then a value line per protocol.
+            proto, _, rest = line.partition(':')
+            fields = rest.split()
+            if proto not in snmp_header:
+                snmp_header[proto] = fields
+            else:
+                for name, value in zip(snmp_header.pop(proto), fields):
+                    try:
+                        counters[proto + name] = int(value)
+                    except ValueError:
+                        pass
+        elif section == 'conntrack':
+            key, sep, value = line.partition(':')
+            try:
+                counters['conntrack_count'] = int((value if sep else key).strip())
+            except ValueError:
+                pass
+    return out
+
+
+def net_section(host_dir):
+    """Counter deltas between net-before.txt and net-after.txt of one host dir, or None when either is absent."""
+    host_dir = Path(host_dir)
+    try:
+        before = parse_net_snapshot((host_dir / 'net-before.txt').read_text(errors='replace'))
+        after = parse_net_snapshot((host_dir / 'net-after.txt').read_text(errors='replace'))
+    except OSError:
+        return None
+    a, b = before['counters'], after['counters']
+    deltas = {}
+    for key in NET_ETHTOOL_KEYS + tuple('sysfs_' + k for k in NET_SYSFS_KEYS) + NET_SNMP_KEYS + NET_SOFTNET_KEYS:
+        if key in a and key in b:
+            deltas[key] = b[key] - a[key]
+    flagged = {key: value for key, value in deltas.items() if value > 0}
+    return {'iface': after['iface'] or before['iface'], 'seconds': (after['at'] - before['at'])
+            if after['at'] is not None and before['at'] is not None else None,
+            'deltas': deltas, 'flagged': flagged,
+            'softnet_processed': (b.get('softnet_processed', 0) - a.get('softnet_processed', 0))
+            if 'softnet_processed' in a and 'softnet_processed' in b else None,
+            'conntrack_count_before': a.get('conntrack_count'), 'conntrack_count_after': b.get('conntrack_count'),
+            'conntrack_allowance_available': b.get('conntrack_allowance_available'),
+            'missing': sorted(key for key in NET_ETHTOOL_KEYS[2:] + NET_SNMP_KEYS[:4] + NET_SOFTNET_KEYS
+                              if key not in deltas)}
+
+
 # ---------------------------------------------------------------- DUT
 
 def dut_section(dut_dir, run_start_epoch, timeline_end_epoch, window):
@@ -500,10 +627,16 @@ def summarize(trial_dir, criterion=None):
         hosts = (plan or {}).get('caller_hosts')
         host = (hosts.get(role) if isinstance(hosts, dict) else None) or {}
         physical = (resources[role] or {}).get('physical_cores') or host.get('physical_cores')
+        irq_cpus, irq_source = irq_cpus_from_tuning(caller['dir'])
         by_caller[role] = caller_policy.predicate(
             own_bins, lateness, samples, caller['report'], own_bp,
             physical_cores=physical if isinstance(physical, int) else None,
-            run_start_epoch=events['run_start_epoch'])
+            run_start_epoch=events['run_start_epoch'], irq_cpus=irq_cpus, irq_cpus_source=irq_source,
+            scored_from_second=scored_window[0] if scored_window else None)
+        softirq = by_caller[role].get('softirq')
+        if resources[role] is not None and softirq:
+            resources[role].update(softirq_peak_share=softirq['peak_share'],
+                                   softirq_saturated_cpus=softirq['saturated_cpus'], softirq=softirq)
     usable_roles = {c['role'] for c in usable}
     for caller in callers:
         if caller['role'] not in usable_roles:
@@ -520,7 +653,18 @@ def summarize(trial_dir, criterion=None):
                                       'caller_cleanup_failures', 'journal_sample', 'call_model', 'transport', 'hold_ms',
                                       'connections_per_source', 'endpoints', 'rfc6076_trace')} if c.get('report') else None}
                       for c in callers}
+    if dut_resources is not None:
+        # Recorded only, never a validity check: says whether the DUT's (or ea-uas's) receive path saturated.
+        softirq = host_softirq(_jsonl(dut_dir / 'resources.jsonl'), dut_dir,
+                               epoch_window[0] if epoch_window else None, epoch_window[1] if epoch_window else None,
+                               run_start_epoch=run_start_epoch)
+        dut_resources.update(softirq_peak_share=softirq['peak_share'], softirq_saturated_cpus=softirq['saturated_cpus'],
+                             softirq=softirq)
     resources['dut'] = dut_resources
+    for role, host_dir in [(c['role'], c['dir']) for c in callers] + [('dut', dut_dir)]:
+        net = net_section(host_dir)
+        if net is not None:
+            resources[role] = dict(resources.get(role) or {}, net=net)
     out['resource'] = resources
     out['generator'] = {'hosts': len(callers), 'sources': (validity.get('source_pools') or {}).get('sources'),
                         'connections_per_source': (report or {}).get('connections_per_source'),

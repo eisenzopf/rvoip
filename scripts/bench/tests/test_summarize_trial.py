@@ -203,5 +203,137 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(written['schema'], summarize_trial.SCHEMA)
 
 
+CALLER_THREADS = ['loadgen-signaling', 'loadgen-call-0', 'loadgen-call-1', 'rvoip-media']
+NET_BEFORE = """### at 1000.0
+### iface ens5
+### ethtool -S ens5
+NIC statistics:
+     rx_drops: 5
+     pps_allowance_exceeded: 10
+     bw_in_allowance_exceeded: 0
+     bw_out_allowance_exceeded: 0
+     conntrack_allowance_exceeded: 0
+     linklocal_allowance_exceeded: 0
+     conntrack_allowance_available: 900000
+     queue_0_rx_cnt: 100
+### sysfs /sys/class/net/ens5/statistics
+rx_dropped: 7
+tx_dropped: 0
+### softnet /proc/net/softnet_stat
+0000a000 00000000 00000001 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000
+0000b000 00000000 00000002 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001
+### snmp /proc/net/snmp
+Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors InCsumErrors IgnoredMulti MemErrors
+Udp: 1000 0 3 900 2 0 0 0 0
+### snmp /proc/net/netstat
+TcpExt: SyncookiesSent ListenDrops TCPTimeouts
+TcpExt: 0 0 4
+### conntrack
+12
+"""
+NET_AFTER = (NET_BEFORE.replace('### at 1000.0', '### at 1250.0').replace('pps_allowance_exceeded: 10', 'pps_allowance_exceeded: 75')
+             .replace('0000b000 00000000 00000002', '0000c000 00000004 00000012')
+             .replace('Udp: 1000 0 3 900 2', 'Udp: 9000 0 53 900 52').replace('\n12\n', '\n40\n'))
+
+
+class SoftirqSaturationTests(unittest.TestCase):
+    """A caller host whose NIC IRQ CPU sits in softirq is tester evidence; the DUT side is recorded only."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def trial(self, saturate=None, **kw):
+        d = self.tmp / ('t-%d' % len(list(self.tmp.iterdir())))
+        profile = fx.make_trial(d, 40, **kw)
+        total = sum(st['seconds'] for st in profile['stages'])
+        if saturate:
+            # caller-1 only, sampled 0.5 s off the second: interval i covers [T0 - 3.5 + i, T0 - 2.5 + i]
+            fx.write_resources(d / 'caller-1' / 'resources.jsonl', fx.T0 - 2.5, total + 4, 3.0, 0.3, CALLER_THREADS,
+                               logical=96, physical=48, saturate=saturate)
+            (d / 'caller-1' / 'tuning.json').write_text(json.dumps({'interface': 'ens5', 'plan': {'irq_cpus': [1, 2]}}))
+        return d, profile
+
+    def test_saturated_caller_makes_the_trial_invalid(self):
+        d, profile = self.trial(saturate=(1, 8, 12))
+        s = summarize_trial.summarize(d, 'rfc')
+        by = s['caller_validity_by_caller']
+        self.assertIs(by['caller-1']['checks']['no_irq_cpu_softirq_saturated'], False)
+        self.assertIs(by['caller-2']['checks']['no_irq_cpu_softirq_saturated'], True)
+        one = s['resource']['caller-1']
+        self.assertEqual(one['softirq_saturated_cpus'], [1])
+        self.assertAlmostEqual(one['softirq_peak_share'], 0.98)
+        self.assertEqual(one['softirq']['irq_cpus'], [1, 2])
+        self.assertTrue(one['softirq']['irq_cpus_source'].startswith('tuning.json plan.irq_cpus'))
+        self.assertEqual(one['softirq']['first_saturated_second'], 4)
+        self.assertAlmostEqual(s['resource']['caller-2']['softirq_peak_share'], 0.02)
+        self.assertEqual(s['resource']['caller-2']['softirq']['cpus_judged'], 'all_cpus', 'no tuning.json')
+        self.assertAlmostEqual(s['resource']['dut']['softirq_peak_share'], 0.02)
+        self.assertEqual(s['resource']['dut']['softirq_saturated_cpus'], [])
+        self.assertEqual(s['evaluation']['outcome'], 'invalid')
+        reason = [r for r in s['evaluation']['reasons'] if 'no_irq_cpu_softirq_saturated' in r]
+        self.assertEqual(reason, ['caller check no_irq_cpu_softirq_saturated failed '
+                                  '(caller-1 receive path (softirq 98 % on CPUs 1, from second 4))'])
+        side = s['evaluation']['detail']['host_saturation']
+        self.assertEqual(side['side'], 'caller')
+
+    def test_tester_saturation_is_never_a_dut_shortfall(self):
+        # Timeouts in the trial stage are the DUT backpressure marker (second 4). Without saturation they fail the
+        # trial; with caller-1 saturated from 3.5 s (before the marker) the same failures are tester evidence.
+        clean, _ = self.trial(limit=30, caller_kwargs={'reject_status': None})
+        s = summarize_trial.summarize(clean, 'rfc')
+        self.assertEqual(s['backpressure']['first_timeout_second'], 4)
+        self.assertEqual(s['evaluation']['outcome'], 'fail')
+        self.assertEqual(s['evaluation']['detail']['host_saturation']['side'], None)
+        d, _ = self.trial(saturate=(1, 7, 11), limit=30, caller_kwargs={'reject_status': None})
+        s = summarize_trial.summarize(d, 'rfc')
+        self.assertIs(s['caller_validity']['checks']['no_irq_cpu_softirq_saturated'], False)
+        self.assertEqual(s['evaluation']['outcome'], 'invalid')
+        # a dispatch shortfall beside it does not turn the trial into a DUT fail (the E74 exception)
+        s['stage_summaries'][1]['whole_stage']['dispatched'] -= 3
+        attempted, succeeded, valid, detail = rfc7502.evaluate_trial(s)
+        self.assertFalse(valid)
+        self.assertIsNone(detail['dut_shortfall_reasons'])
+        self.assertIn('3 scheduled calls not dispatched', detail['invalid_reasons'])
+        self.assertTrue(any('no_irq_cpu_softirq_saturated' in r for r in detail['invalid_reasons']))
+
+    def test_saturation_after_the_backpressure_marker_is_recorded_not_failed(self):
+        d, _ = self.trial(saturate=(1, 9, 12), limit=30, caller_kwargs={'reject_status': None})
+        s = summarize_trial.summarize(d, 'rfc')
+        self.assertIs(s['caller_validity']['checks']['no_irq_cpu_softirq_saturated'], True)
+        self.assertEqual(s['resource']['caller-1']['softirq_saturated_cpus'], [1])
+        self.assertEqual(s['evaluation']['outcome'], 'fail')
+        self.assertIn('after the DUT backpressure marker', s['evaluation']['detail']['host_saturation']['text'])
+
+    def test_saturated_dut_is_recorded_only(self):
+        d, _ = self.trial(dut_kwargs={'saturate': (3, 8, 11)})
+        s = summarize_trial.summarize(d, 'rfc')
+        self.assertEqual(s['resource']['dut']['softirq_saturated_cpus'], [3])
+        self.assertNotIn('no_irq_cpu_softirq_saturated', s['checks'])
+        self.assertEqual(s['evaluation']['outcome'], 'pass')
+        side = rfc7502.host_saturation(s)
+        self.assertEqual(side['side'], 'dut')
+        self.assertTrue(side['text'].startswith('DUT host receive path (softirq 98 % on CPUs 3'), side['text'])
+
+    def test_net_counter_deltas(self):
+        d, _ = self.trial(caller_kwargs={'net': (NET_BEFORE, NET_AFTER)})
+        s = summarize_trial.summarize(d, 'rfc')
+        net = s['resource']['caller-1']['net']
+        self.assertEqual(net['iface'], 'ens5')
+        self.assertEqual(net['seconds'], 250.0)
+        self.assertEqual(net['flagged'], {'pps_allowance_exceeded': 65, 'softnet_dropped': 4, 'softnet_time_squeeze': 16,
+                                          'UdpInErrors': 50, 'UdpRcvbufErrors': 50})
+        self.assertEqual(net['deltas']['TcpExtTCPTimeouts'], 0)
+        self.assertEqual(net['deltas']['sysfs_rx_dropped'], 0)
+        self.assertEqual((net['conntrack_count_before'], net['conntrack_count_after']), (12, 40))
+        self.assertEqual(net['softnet_processed'], 0x1000)
+        self.assertNotIn('net', s['resource']['dut'] or {}, 'no snapshots on the DUT')
+        flags = rfc7502.host_saturation(s)['net_flags']
+        self.assertIn('caller-1 pps_allowance_exceeded +65', flags)
+        self.assertIn('caller-2 UdpRcvbufErrors +50', flags)
+
+
 if __name__ == '__main__':
     unittest.main()

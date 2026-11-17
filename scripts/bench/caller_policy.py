@@ -14,7 +14,19 @@ Thresholds (unchanged from E74, RFC7502_BENCHMARK.md §2):
 * caller process CPU <= 0.75 x the host's physical cores, during generation
   only (the scheduled seconds plus the hold; the caller's end-of-run report
   building is not load generation);
-* no caller thread above 0.8 core over any sampler interval.
+* no caller thread above 0.8 core over any sampler interval;
+* no NIC IRQ CPU in softirq (`no_irq_cpu_softirq_saturated`): the host's
+  kernel receive path is not saturated. A CPU is saturated when it spends
+  >= 95 % of a sampler interval in softirq (per-CPU /proc/stat softirq ticks
+  over all its ticks) for 2 consecutive samples; the CPUs judged are the
+  primary NIC's queue-IRQ CPUs (the sample's `irq_cpus`, else the host's
+  tuning.json), every CPU when that list is unknown. Judged on the scored
+  stage: saturation that began (its first saturated interval started) before
+  the DUT's first backpressure second fails the check. A saturated tester
+  drops responses in its own kernel, and those calls then look like DUT
+  timeouts, so the onset, not the whole run, must precede the marker. Unlike
+  a dispatch shortfall this never becomes a DUT result (rfc7502.evaluate_trial
+  keeps the trial invalid).
 
 Thread policy: `RVOIP_LOADGEN_SIGNALING_THREADS` + `RVOIP_LOADGEN_LANES` x
 `RVOIP_LOADGEN_WORKERS_PER_LANE` + `RVOIP_MEDIA_WORKER_THREADS` <= logical
@@ -54,7 +66,10 @@ DISPATCH_TOLERANCE = 0.01
 SCHEDULE_P99_LIMIT_MS = 5.0
 PROCESS_CORE_FRACTION = 0.75
 THREAD_CORE_LIMIT = 0.8
-VERSION = 'caller-validity-v1'
+SOFTIRQ_SATURATED_SHARE = 0.95
+SOFTIRQ_CONSECUTIVE_SAMPLES = 2
+SOFTIRQ_CHECK = 'no_irq_cpu_softirq_saturated'
+VERSION = 'caller-validity-v2'
 
 
 def policy_for(logical_cpus):
@@ -161,14 +176,101 @@ def generation_samples(samples, run_start_epoch, bins, hold_ms, backpressure_sec
     return [row for row in samples if run_start_epoch <= row['at'] <= end]
 
 
+def _per_cpu_ticks(row):
+    """{cpu: [user nice system idle iowait irq softirq steal]} of one sample's per-CPU /proc/stat lines."""
+    stat = (row.get('host') or {}).get('stat') or {}
+    out = {}
+    for name, ticks in stat.items():
+        if name.startswith('cpu') and name[3:].isdigit() and isinstance(ticks, list) and len(ticks) >= 7:
+            out[int(name[3:])] = ticks
+    return out
+
+
+def softirq_saturation(samples, irq_cpus=None, irq_cpus_source=None, start_epoch=None, end_epoch=None,
+                       cutoff_epoch=None, run_start_epoch=None, threshold=SOFTIRQ_SATURATED_SHARE,
+                       consecutive=SOFTIRQ_CONSECUTIVE_SAMPLES):
+    """Kernel receive-path saturation of one host from host_sampler rows.
+
+    Per sampler interval and CPU: softirq share = softirq ticks / all ticks (per-CPU /proc/stat, USER_HZ). The
+    judged CPUs are the sample's own `irq_cpus` (new samplers), else `irq_cpus` (the host's tuning.json),
+    else every CPU. Intervals that overlap [start_epoch, end_epoch) are judged. A CPU is saturated over a run of
+    `consecutive` intervals at >= `threshold`; `saturated_before_cutoff` is True when such a run began (its first
+    interval started) before `cutoff_epoch` (the DUT's first backpressure second; None = no cutoff).
+    `peak_share` is the highest judged share in the window, `idle_share_at_peak` that CPU's idle share then."""
+    rows = sorted((row for row in samples or [] if row.get('at') is not None), key=lambda row: row['at'])
+    own = next((row.get('irq_cpus') for row in rows if row.get('irq_cpus')), None)
+    if own:
+        irq_cpus, irq_cpus_source = sorted(own), 'resources.jsonl irq_cpus (%s)' % (
+            next((row.get('irq_iface') for row in rows if row.get('irq_iface')), None) or 'primary NIC')
+    cpus_basis = 'nic_irq_cpus' if irq_cpus else 'all_cpus'
+    judged_cpus = set(irq_cpus) if irq_cpus else None
+    out = {'basis': 'per-CPU /proc/stat softirq ticks / all ticks per sampler interval',
+           'threshold_share': threshold, 'consecutive_samples': consecutive, 'cpus_judged': cpus_basis,
+           'irq_cpus': sorted(irq_cpus) if irq_cpus else None, 'irq_cpus_source': irq_cpus_source if irq_cpus else None,
+           'intervals': 0, 'peak_share': None, 'peak_cpu': None, 'peak_at': None, 'idle_share_at_peak': None,
+           'saturated_cpus': [], 'saturated': False, 'first_saturated_epoch': None, 'first_saturated_second': None,
+           'saturated_before_cutoff': False, 'cutoff_epoch': cutoff_epoch, 'missing': []}
+    streak, saturated, first, first_before_cutoff = {}, set(), None, False
+    previous = None
+    for row in rows:
+        ticks = _per_cpu_ticks(row)
+        if previous is not None and ticks:
+            begin, at = previous[0], row['at']
+            inside = (start_epoch is None or at > start_epoch) and (end_epoch is None or begin < end_epoch)
+            if inside and at > begin:
+                out['intervals'] += 1
+                for cpu, now in ticks.items():
+                    before = previous[1].get(cpu)
+                    if before is None or (judged_cpus is not None and cpu not in judged_cpus):
+                        continue
+                    delta = [b - a for a, b in zip(before, now)]
+                    total = sum(delta[:8])
+                    if total <= 0:
+                        continue
+                    share = delta[6] / total
+                    if out['peak_share'] is None or share > out['peak_share']:
+                        out.update(peak_share=share, peak_cpu=cpu, peak_at=at, idle_share_at_peak=(delta[3] + delta[4]) / total)
+                    if share >= threshold:
+                        run = streak.get(cpu)
+                        run = (run[0], run[1] + 1) if run else (begin, 1)
+                        streak[cpu] = run
+                        if run[1] >= consecutive:
+                            saturated.add(cpu)
+                            if first is None or run[0] < first:
+                                first = run[0]
+                            if cutoff_epoch is None or run[0] < cutoff_epoch:
+                                first_before_cutoff = True
+                    else:
+                        streak.pop(cpu, None)
+            elif not inside:
+                streak = {}
+        if ticks:
+            previous = (row['at'], ticks)
+    if not any(_per_cpu_ticks(row) for row in rows):
+        out['missing'].append('per-CPU /proc/stat in resources.jsonl')
+    elif not out['intervals']:
+        out['missing'].append('no sampler interval in the judged window')
+    out['saturated_cpus'] = sorted(saturated)
+    out['saturated'] = bool(saturated)
+    out['saturated_before_cutoff'] = first_before_cutoff
+    out['first_saturated_epoch'] = first
+    if first is not None and run_start_epoch is not None:
+        out['first_saturated_second'] = int(math.floor(first - run_start_epoch))
+    return out
+
+
 def predicate(bins, scheduler_lateness_ms, samples, report, backpressure_second=None,
-              physical_cores=None, process_core_limit=None, run_start_epoch=None, judged_from_second=0):
+              physical_cores=None, process_core_limit=None, run_start_epoch=None, judged_from_second=0,
+              irq_cpus=None, irq_cpus_source=None, scored_from_second=None):
     """Caller validity: dispatch, schedule lag, CPU, per-thread CPU, skips, shutdown.
 
     `bins` are this caller's 1 s bins ({t, requested_cps, dispatched, guard_skips}); time-bounded checks are
     judged from `judged_from_second` and before the DUT's first backpressure second. `scheduler_lateness_ms`
-    must already be restricted to calls scheduled before that marker. A check whose input is missing is
-    False (and named under `missing_inputs`), never assumed.
+    must already be restricted to calls scheduled before that marker. The softirq check is judged on the scored
+    stage (from `scored_from_second`, default `judged_from_second`, to the end of generation) and fails when a
+    saturation run began before the backpressure second (see softirq_saturation); `irq_cpus` is the host's NIC
+    IRQ CPU list when the samples do not carry one. A check whose input is missing is False (and named under
+    `missing_inputs`), never assumed.
     """
     missing = []
     if process_core_limit is None:
@@ -190,6 +292,17 @@ def predicate(bins, scheduler_lateness_ms, samples, report, backpressure_second=
     thread_peak, hottest = thread_peaks(window)
     if not samples:
         missing.append('resources.jsonl')
+    if run_start_epoch is not None:
+        scored_from = judged_from_second if scored_from_second is None else scored_from_second
+        generation_end = run_start_epoch + max(row['t'] for row in bins) + 1 + (report.get('hold_ms') or 0) / 1000.0 \
+            if bins else None
+        softirq = softirq_saturation(
+            samples, irq_cpus, irq_cpus_source, start_epoch=run_start_epoch + scored_from, end_epoch=generation_end,
+            cutoff_epoch=None if backpressure_second is None else run_start_epoch + backpressure_second,
+            run_start_epoch=run_start_epoch)
+    else:
+        softirq = softirq_saturation(samples, irq_cpus, irq_cpus_source)
+    missing += softirq['missing']
     if all('guard_skips' in row for row in bins) and bins:
         guard_skips = sum(row['guard_skips'] for row in judged)
     else:
@@ -200,6 +313,7 @@ def predicate(bins, scheduler_lateness_ms, samples, report, backpressure_second=
         'process_cpu_at_most_limit': process_peak is not None and process_core_limit is not None
                                      and process_peak <= process_core_limit,
         'no_thread_above_0_8_core': len(window) >= 2 and thread_peak <= THREAD_CORE_LIMIT,
+        SOFTIRQ_CHECK: not softirq['missing'] and not softirq['saturated_before_cutoff'],
         'zero_guard_skips': guard_skips == 0,
         'clean_shutdown': report.get('shutdown_outcome') == 'ok' and not report.get('interrupted')
                           and not report.get('caller_watchdogs'),
@@ -220,10 +334,13 @@ def predicate(bins, scheduler_lateness_ms, samples, report, backpressure_second=
               'process_peak_cores': process_peak, 'process_core_limit': process_core_limit,
               'physical_cores': physical_cores, 'generation_samples': len(window),
               'thread_peak_cores': thread_peak if len(window) >= 2 else None, 'hottest_thread': hottest,
+              'softirq': softirq,
               'scope': 'Schedule-to-write uses scheduler_lateness_ms (timer due to scheduling), which excludes '
                        'peer-blocked TLS writes. CPU is judged on samples taken during generation (run start to the '
                        'last scheduled second plus the hold). A shortfall or unclean shutdown after the DUT '
-                       'backpressure marker is a DUT result.'}
+                       'backpressure marker is a DUT result. Softirq saturation of a NIC IRQ CPU (>= 95 %% of an '
+                       'interval, 2 consecutive samples) on the scored stage that began before that marker is tester '
+                       'evidence: the caller host\'s kernel receive path, never the DUT.'}
     if sources is not None:
         result['source_pools'] = sources
     return result
@@ -280,6 +397,9 @@ def combine(by_caller, backpressure_second=None):
            'process_core_limit': min((v['process_core_limit'] for _, v in rows if v.get('process_core_limit') is not None), default=None),
            'thread_peak_cores': worst('thread_peak_cores'),
            'hottest_thread': dict(hottest, caller=hottest_role) if hottest else None,
+           'softirq_by_caller': {role: {key: (v.get('softirq') or {}).get(key) for key in (
+               'peak_share', 'peak_cpu', 'saturated_cpus', 'first_saturated_second', 'saturated_before_cutoff',
+               'cpus_judged')} for role, v in rows if v.get('softirq')},
            'scope': 'Every caller host valid on its own predicate (caller_validity_by_caller); dispatch misses '
                     'are tagged with their host.'}
     if pools:

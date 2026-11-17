@@ -429,6 +429,13 @@ def caller_invalid_in_trial(summary):
         vacuous.add('schedule_to_write_p99_at_most_5ms')
     reasons = ['caller check %s failed' % name for name, ok in sorted(checks.items())
                if ok is False and name != 'dispatch_within_1pct_per_bin_before_backpressure' and name not in vacuous]
+    softirq_check = 'no_irq_cpu_softirq_saturated'
+    if checks.get(softirq_check) is False:
+        saturated = host_saturation(summary)
+        named = [text for role, text in saturated['parts'] if role != 'dut']
+        if named:
+            reasons = [reason + ' (%s)' % '; '.join(named) if reason == 'caller check %s failed' % softirq_check else reason
+                       for reason in reasons]
     if checks.get('dispatch_within_1pct_per_bin_before_backpressure') is False:
         windows = trial_windows(summary)
         misses = validity.get('dispatch_misses') or []
@@ -442,6 +449,65 @@ def caller_invalid_in_trial(summary):
             reasons.append('caller dispatch outside 1%% in %d trial bins' % len(real) if real else
                            'caller dispatch check failed without per-bin detail')
     return reasons
+
+
+def _pct_text(share):
+    return '%.0f %%' % (100.0 * share) if share is not None else 'n/a'
+
+
+def _cpu_ranges(cpus):
+    cpus = sorted(set(cpus or ()))
+    parts, start = [], None
+    for i, cpu in enumerate(cpus):
+        start = cpu if start is None else start
+        if i + 1 == len(cpus) or cpus[i + 1] != cpu + 1:
+            parts.append(str(start) if start == cpu else '%d-%d' % (start, cpu))
+            start = None
+    return ','.join(parts)
+
+
+def host_saturation(summary):
+    """Which host's kernel receive path saturated in one trial (summarize_trial resource.<role>.softirq).
+
+    {'side': 'caller' | 'dut' | 'both' | None (none saturated) | 'unknown' (no softirq record),
+     'parts': [(role, text)], 'text': one line for a report, 'net_flags': ['caller-1 pps_allowance_exceeded +12']}.
+    A caller host counts when its check failed (saturation that began before the DUT's first backpressure) or
+    it saturated at any point of the scored stage; the DUT side is recorded only."""
+    summary = summary or {}
+    resource = summary.get('resource') or {}
+    by_caller = summary.get('caller_validity_by_caller') or {}
+    far_end = 'ea-uas host' if ((summary.get('plan') or {}).get('dut_kind') == 'ea-uas') else 'DUT host'
+    parts, peaks, sides, known = [], [], set(), False
+    roles = sorted(role for role in set(resource) | set(by_caller) if str(role).startswith('caller')) + ['dut']
+    for role in roles:
+        softirq = (resource.get(role) or {}).get('softirq') or (by_caller.get(role) or {}).get('softirq')
+        if not softirq or softirq.get('peak_share') is None:
+            continue
+        known = True
+        label = far_end if role == 'dut' else role
+        peaks.append('%s %s' % (label, _pct_text(softirq['peak_share'])))
+        cpus = softirq.get('saturated_cpus') or []
+        if cpus:
+            sides.add('dut' if role == 'dut' else 'caller')
+            when = softirq.get('first_saturated_second')
+            parts.append((role, '%s receive path (softirq %s on CPUs %s%s%s)' % (
+                label, _pct_text(softirq['peak_share']), _cpu_ranges(cpus),
+                ', from second %d' % when if when is not None else '',
+                ', after the DUT backpressure marker' if role != 'dut' and softirq.get('saturated_before_cutoff') is False
+                and softirq.get('cutoff_epoch') is not None else '')))
+    flags = []
+    for role in sorted(resource):
+        net = (resource.get(role) or {}).get('net') or {}
+        for key, value in sorted((net.get('flagged') or {}).items()):
+            flags.append('%s %s +%d' % (far_end if role == 'dut' else role, key, value))
+    if not known:
+        side, text = 'unknown', 'softirq not recorded'
+    elif not sides:
+        side, text = None, 'no host receive path saturated (peak softirq %s)' % ', '.join(peaks)
+    else:
+        side = 'both' if len(sides) == 2 else sides.pop()
+        text = '; '.join(t for _, t in parts)
+    return {'side': side, 'parts': parts, 'text': text, 'net_flags': flags}
 
 
 def caller_load(summary):
@@ -495,6 +561,8 @@ def evaluate_trial(summary, criterion='rfc'):
     # concurrency bound fills and it skips scheduled calls. When the sent attempts include Session Attempt
     # Failures, the caller's own CPU checks are clean and every other reason is about dispatch/shutdown/pool
     # balance, the shortfall is the DUT's (RFC 7501 §3.1.8 failures among the attempts sent): fail, not invalid.
+    # A saturated caller receive path (no_irq_cpu_softirq_saturated) is never in this list: the tester's own
+    # kernel dropped the responses, so those failures are tester evidence and the trial stays invalid.
     dispatch_kinds = ('scheduled calls not dispatched', 'caller dispatch outside', 'caller dispatch check failed',
                       'caller check clean_shutdown failed', 'caller check source_pools_balanced failed',
                       'caller check zero_guard_skips failed')
@@ -531,7 +599,9 @@ def evaluate_trial(summary, criterion='rfc'):
               'dut': {key: (summary.get('dut') or {}).get(key) for key in
                       ('true_zero', 'clean_shutdown', 'peak_cpu_cores', 'peak_rss_bytes', 'responses_503')},
               # the tester's own load, so a result can show the generator was not the limit
-              'caller': caller_load(summary)}
+              'caller': caller_load(summary),
+              # which host's kernel receive path saturated (tester evidence on a caller, recorded on the DUT)
+              'host_saturation': host_saturation(summary)}
     return offered, succeeded, not reasons, detail
 
 

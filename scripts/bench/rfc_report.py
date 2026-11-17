@@ -85,7 +85,8 @@ DEFAULT_DEVIATIONS = [
     ('Tester cap', 'The search cannot exceed r_max = 0.67 x the §6.1 testbed baseline of the same row; a result at the '
      'cap, or above 0.67 x the baseline, is reported as R >= value (tester-limited), never as R.'),
     ('Invalid trials', 'A trial with tester-side defects (calls without terminal evidence, undispatched or '
-     'generator-skipped calls, a caller outside its validity bounds before the DUT\'s first backpressure) is repeated '
+     'generator-skipped calls, a caller outside its validity bounds before the DUT\'s first backpressure, '
+     'including a caller host whose kernel receive path saturated: a NIC IRQ CPU >= 95 % in softirq) is repeated '
      'at the same rate and never scored as a DUT failure; three invalid trials in a row stop the search.'),
     ('Establishment threshold', '10 s instead of the RFC 7501 §3.3.2 recommendation of 32 s (Timer B).'),
     ('503 with Retry-After', 'A 503 is a DUT Session Attempt Failure, never a tester fault. With admission on the DUT '
@@ -351,6 +352,28 @@ def load_of(summary):
             'dut_rss': dut.get('peak_rss_bytes'), 'dut_active': dut.get('peak_active_calls')}
 
 
+def saturation_of(summary, detail=None):
+    """rfc7502.host_saturation of one trial: from its merged summary, else the search record's detail."""
+    found = rfc7502.host_saturation(summary) if summary else None
+    if (found is None or found['side'] == 'unknown') and (detail or {}).get('host_saturation'):
+        found = detail['host_saturation']
+    return found
+
+
+def saturation_cells(summary, detail=None, outcome=None):
+    """(saturated side, network counter flags) cells of a failing or invalid trial; '-' for a passing one."""
+    if outcome == 'pass':
+        return EMPTY, EMPTY
+    found = saturation_of(summary, detail)
+    if not found:
+        return PENDING, PENDING
+    net = '; '.join(found.get('net_flags') or [])
+    if not net:
+        resource = (summary or {}).get('resource') or {}
+        net = 'no counter grew' if any((row or {}).get('net') for row in resource.values()) else 'not recorded'
+    return found['text'], net
+
+
 def failure_breakdown(ctx, found):
     """Final-status breakdown of the lowest failing trial above R (else the highest failing trial)."""
     trials = [t for t in (found or {}).get('trials') or [] if t.get('outcome') == 'fail']
@@ -432,6 +455,22 @@ def section_baseline(doc, ctx, title):
                          fmt(load['host_cpu'])) if load else 'recorded value')])
     doc.table(['Row', 'Transport', 'Hold', 'Baseline R', 'r_max (0.67 x)', 'Source', 'Generator load (final trial)'],
               rows or [[PENDING] * 7])
+    failing = []
+    for r in ctx['rows']:
+        item = (ctx['spec'].get('baseline') or {}).get(r['row']) or {}
+        found = ctx['ev'].search(item.get('search')) if item.get('search') else None
+        for t in (found or {}).get('trials') or []:
+            if t.get('outcome') not in ('fail', 'invalid'):
+                continue
+            detail = t.get('detail') or {}
+            side, net = saturation_cells(ctx['ev'].summary(detail.get('run')), detail, t.get('outcome'))
+            failing.append([r['row'], fmt(t.get('rate')), t.get('outcome'), side, net, detail.get('run') or PENDING])
+    if failing:
+        doc.table(['Row', 'Rate (sps)', 'Outcome', 'Saturated side', 'Network counters', 'Trial'], failing,
+                  caption='Failing and invalid baseline trials: which host\'s kernel receive path saturated (a NIC IRQ '
+                          'CPU >= 95 % in softirq for 2 consecutive samples). A saturated caller is tester evidence and '
+                          'makes the trial invalid; the far-end (ea-uas) side is recorded only. Network counters are '
+                          'the run\'s growth in NIC drops, ENA allowance, softnet, UDP buffer and TCP timeout counters.')
 
 
 def section_setup(doc, ctx, title):
@@ -590,21 +629,25 @@ def section_traces(doc, ctx, title):
         row = r['row']
         found = ctx['found'][row]
         doc.h(3, row_label(row))
+        header = ['Trial', 'Rate (sps)', 'Attempted n', 'Succeeded s', 'Outcome', 'Notes', 'Saturated side',
+                  'Network counters', 'Caller cores', 'Hottest caller thread', 'DUT peak cores', 'Trial']
         if not found:
-            doc.table(['Trial', 'Rate (sps)', 'Attempted n', 'Succeeded s', 'Outcome', 'Notes', 'Caller cores',
-                       'Hottest caller thread', 'DUT peak cores', 'Trial'], [[PENDING] * 10])
+            doc.table(header, [[PENDING] * len(header)])
             continue
         rows = []
         for t in found['trials']:
             detail = t.get('detail') or {}
-            load = load_of(ctx['ev'].summary(detail.get('run')))
+            summary = ctx['ev'].summary(detail.get('run'))
+            load = load_of(summary)
             notes = '; '.join(detail.get('invalid_reasons') or []) or '; '.join(detail.get('halt_reasons') or []) or EMPTY
+            side, net = saturation_cells(summary, detail, t.get('outcome'))
             rows.append([t.get('index'), fmt(t.get('rate')), fmt(t.get('attempted')), fmt(t.get('succeeded')), t.get('outcome'),
-                         notes, fmt(load['process_cores'], 2), fmt(load['hot_thread'], 2), fmt(load['dut_cores'], 2),
-                         detail.get('run') or PENDING])
-        doc.table(['Trial', 'Rate (sps)', 'Attempted n', 'Succeeded s', 'Outcome', 'Notes', 'Caller cores',
-                   'Hottest caller thread', 'DUT peak cores', 'Trial'], rows or [[PENDING] * 10],
-                  caption='Stop: %s' % (found['result'].get('stop_reason') or 'search not finished'))
+                         notes, side, net, fmt(load['process_cores'], 2), fmt(load['hot_thread'], 2),
+                         fmt(load['dut_cores'], 2), detail.get('run') or PENDING])
+        doc.table(header, rows or [[PENDING] * len(header)],
+                  caption='Stop: %s. Saturated side (failing and invalid trials): the host whose kernel receive path '
+                          'saturated, a NIC IRQ CPU >= 95 %% in softirq for 2 consecutive samples; a saturated caller '
+                          'makes the trial invalid.' % (found['result'].get('stop_reason') or 'search not finished'))
 
 
 def section_methodology(doc, ctx, title):
