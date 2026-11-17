@@ -301,7 +301,7 @@ base64 = "0.23"
 nom = "8"
 nom-language = "0.1"
 log = "0.4"
-ordered-float = { version = "4.2.0", features = ["serde"] }
+ordered-float = { version = "5", features = ["serde"] }
 socket2 = { version = "0.6", features = ["all"] }
 mio = { version = "0.8", features = ["os-poll", "net"] }
 # default-features=false drops rustls's default `aws_lc_rs` provider AND
@@ -343,7 +343,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
 web-transport = "0.10.6"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
-metrics = "0.23"
+metrics = "0.24"
 # Qualified, attributed MOQT draft-19 forks. Package aliases retain the
 # upstream Rust crate names while the registry identities remain rvoip-owned.
 moq-transport = { package = "rvoip-moq-transport", path = "crates/moq/rvoip-moq-transport", version = "0.4.0" }
