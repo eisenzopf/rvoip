@@ -602,17 +602,21 @@ def run_search_row(ctx, row_id, recorded, caps):
             ctx.aws.s3_cp(folder / name, ctx.s3_run + row_id + '/' + name)
     if outcome.get('paused'):
         raise WallClock('search %s paused: %s' % (row_id, outcome.get('halted')))
+    trials = []
+    if (folder / 'search.json').exists():
+        trials = json.loads((folder / 'search.json').read_text()).get('trials', [])
     result = {'id': row_id, 'transport': row['transport'], 'media': row['media'], 'hold_ms': row['hold_ms'],
               'recorded_r': (recorded or {}).get('r'), 'tester_cap': cap,
-              'search': {k: outcome.get(k) for k in ('algorithm', 'result', 'stop_reason', 'tester_limited',
-                                                      'old_r', 'halted', 'trials')},
-              'trials': outcome.get('trials', [])}
-    r = outcome.get('result')
+              'search': {k: outcome.get(k) for k in ('algorithm', 'result_sps', 'stop_reason', 'tester_limited',
+                                                      'highest_passing_sps', 'lowest_failing_sps', 'halted',
+                                                      'trials', 'valid_trials', 'parameters')},
+              'trials': trials}
+    r = outcome.get('result_sps')
     stop = outcome.get('stop_reason') or ''
-    if r is None and ctx.lane.ea_uas and 'invalid' in stop and outcome.get('old_r'):
+    if r is None and ctx.lane.ea_uas and 'invalid' in stop and outcome.get('highest_passing_sps'):
         # §6.1 testbed baseline: the tester itself ran out (caller validity) above every passing rate.
         # The baseline is then >= the highest passing rate (E74: "stopped: 3 consecutive invalid trials").
-        r = outcome['old_r']
+        r = outcome['highest_passing_sps']
         outcome['tester_limited'] = True
     if r is None:
         reason = outcome.get('halted') or stop or 'no result'
