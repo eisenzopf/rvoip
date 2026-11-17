@@ -367,7 +367,7 @@ class Trials:
         local = self.args.local / rel
         cached = local / 'merged' / 'summary.json'
         if cached.exists():
-            return json.loads(cached.read_text()), rel, local, 'cached'
+            return json.loads(cached.read_text()), rel, local, None   # reused on --resume
         if local.exists():
             shutil.rmtree(local)
         local.mkdir(parents=True)
