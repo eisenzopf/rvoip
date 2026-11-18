@@ -697,8 +697,11 @@ pub struct DialogManager {
     >,
     pub(crate) active_invite_failover_by_dialog: Arc<DashMap<DialogId, u64>>,
     /// Exact reverse index for active and retained logical INVITE plans.
-    /// Unlike `active_invite_failover_by_dialog`, entries remain until the
-    /// corresponding late-response tombstones are removed.
+    /// Unlike `active_invite_failover_by_dialog`, entries outlive the active
+    /// operation while the dialog is still attached. Detaching the dialog
+    /// drops its terminal plans from this index (they stay reachable by exact
+    /// transaction key in `invite_failover_attempts`); only wire-unknown plans
+    /// keep their entries until exact teardown completes.
     pub(crate) invite_failover_plans_by_dialog: Arc<DashMap<DialogId, Vec<u64>>>,
     pub(crate) invite_failover_attempts: Arc<
         DashMap<Arc<TransactionKey>, super::transaction_integration::InviteFailoverAttemptIndex>,
@@ -706,6 +709,8 @@ pub struct DialogManager {
     /// Exact reverse index for active and retained INVITE attempts. This is
     /// independent of `dialog_invite_transactions`, whose hot transaction
     /// routes are intentionally removed before the late-response tombstone.
+    /// Like `invite_failover_plans_by_dialog`, detaching the dialog drops the
+    /// entries of its terminal plans and keeps those of wire-unknown plans.
     pub(crate) invite_failover_attempts_by_dialog: Arc<DashMap<DialogId, Vec<Arc<TransactionKey>>>>,
     /// Exact ordered expiry index for active and retained INVITE plans. It is
     /// bounded to one current entry per retained plan and excludes the
