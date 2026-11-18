@@ -218,7 +218,11 @@ the whole lane in another AZ with no Terraform change: it reuses the
 templates' interfaces with the same-named public subnet of that AZ
 (`rvoip-release-public-<az>`) and overrides their placement. The cluster
 placement group is empty between lanes, so it takes the AZ of each lane's first
-instance. `pin_env.py --az` records the AZ in `env.json`. From then on every
+instance. The group stays bound to an AZ while any member is still
+shutting down. So teardown waits until EC2 reports the lane's instances
+terminated, which takes up to 5 minutes (a signal skips the wait). A launch also
+waits up to 5 minutes for members in another AZ to finish. If they don't, it
+stops with an INFRA that names them. `pin_env.py --az` records the AZ in `env.json`. From then on every
 run on that env-id launches there, and a different `--az` is a usage error, as
 is a resumed leg in an AZ other than its first leg's. The caller count works the
 same way: `pin_env.py --callers` records it as `caller_count`, `run_lane.py`
