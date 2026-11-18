@@ -1004,7 +1004,7 @@ def parse_args(argv):
     p.add_argument('--region', default=os.environ.get('RVOIP_AWS_REGION', 'us-west-2'))
     p.add_argument('--bucket', default=os.environ.get('RVOIP_AWS_EVIDENCE_BUCKET'))
     p.add_argument('--lane-config', help='JSON of the infra/aws/bench outputs (default: terraform output)')
-    p.add_argument('--callers', type=int, default=2)
+    p.add_argument('--callers', type=int, help='caller hosts (default: the env-id\'s pinned caller_count, else 2)')
     p.add_argument('--az', help='launch the lane in this AZ instead of the templates\' (same-named public subnet, '
                                 'same VPC); default: the env-id\'s pinned AZ, else the templates\'')
     p.add_argument('--ea-host-type', default='c8i.12xlarge', help='baseline: ea-uas host type (E74 used c8i.12xlarge)')
@@ -1129,6 +1129,21 @@ def resolve_az(wanted, pinned, leg):
     return wanted
 
 
+# Profiles whose results gate a release or are recorded: they run on exactly the pinned testbed.
+PINNED_PROFILES = ('release', 'minor', 'full', 'baseline')
+
+
+def resolve_callers(wanted, pinned, leg, profile):
+    """The lane's caller count: --callers, else env.json's caller_count, else an earlier leg's, else 2. The
+    env-id names the count, so a run that gates or records cannot use another; smoke/diag may (never recorded).
+    The legs of one run always share it."""
+    if leg and wanted and wanted != leg:
+        raise Usage("--callers %d, but this run's earlier leg ran %d" % (wanted, leg))
+    if pinned and wanted and wanted != pinned and profile in PINNED_PROFILES:
+        raise Usage('--callers %d, but the env-id pins %d callers' % (wanted, pinned))
+    return wanted or leg or pinned or 2
+
+
 def outcome_code(status):
     return {'PASS': EXIT_PASS, 'WARN': EXIT_PASS, 'FAIL': EXIT_FAIL}.get(status, EXIT_INFRA)
 
@@ -1194,6 +1209,8 @@ def run(argv=None):
                 return outcome_code(final['status'])
         env_id, pinned = resolve_environment(args, aws)
         args.az = resolve_az(args.az, (pinned or {}).get('az'), (ctx.state.get('lane') or {}).get('az'))
+        args.callers = resolve_callers(args.callers, (pinned or {}).get('caller_count'),
+                                       len((ctx.state.get('lane') or {}).get('callers') or []) or None, args.profile)
         args.env_tag = env_id
         args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
         if not aws.s3_create_exclusive(lock, {'run_id': args.run_id, 'at': utc(), 'profile': args.profile}):
