@@ -563,7 +563,7 @@ class LaneCase(unittest.TestCase):
                     'sources_per_caller', 'connections_per_source', 'ami_id', 'kernel', 'dut_sha256', 'caller_sha256',
                     'ea_uas_sha256'):
             self.assertIn(key, env)
-        self.assertEqual(env['caller_count'], 2)
+        self.assertGreaterEqual(env['caller_count'], 2)
         self.assertEqual(env['sources_per_caller'], 2)
         self.assertEqual(env['ami_id'], AMI)
         self.assertEqual(env['caller_sha256'], sha256(self.bed.bins['rvoip-loadgen']))
@@ -1015,6 +1015,39 @@ class ChainTests(LaneCase):
             {'schema': 'rvoip-rfc7502-env-v1', 'env_id': env_id, 'az': az}))
         self.addCleanup((self.bed.baselines / env_id / 'env.json').unlink, missing_ok=True)
         return env_id
+
+    def pin_callers(self, count):
+        env_id = self.bed.env_id()
+        (self.bed.baselines / env_id).mkdir(parents=True, exist_ok=True)
+        (self.bed.baselines / env_id / 'env.json').write_text(json.dumps(
+            {'schema': 'rvoip-rfc7502-env-v1', 'env_id': env_id, 'caller_count': count}))
+        self.addCleanup((self.bed.baselines / env_id / 'env.json').unlink, missing_ok=True)
+        return env_id
+
+    def test_pinned_caller_count_is_the_default(self):
+        env_id = self.pin_callers(3)
+        launched = len(self.bed.cloud.launched)
+        code, receipt, log = self.bed.run('smoke', 'smoke-3c', '--rows', 'R1', '--env-id', env_id, world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(len(self.bed.cloud.launched) - launched, 4, '1 DUT + the 3 pinned callers')
+        self.assertEqual(receipt['environment']['caller_count'], 3)
+
+    def test_gated_run_with_another_caller_count_is_refused(self):
+        env_id = self.pin_callers(3)
+        launched = len(self.bed.cloud.launched)
+        code, receipt, log = self.bed.run('baseline', 'base-2c', '--rows', 'R1', '--env-id', env_id, '--callers', '2',
+                                          world=world_for(tester_capacity=TESTER))
+        self.assertEqual(code, 2, log)
+        self.assertIn('the env-id pins 3 callers', ' '.join(receipt['reasons']))
+        self.assertEqual(len(self.bed.cloud.launched), launched)
+
+    def test_smoke_may_override_the_pinned_caller_count(self):
+        env_id = self.pin_callers(3)
+        launched = len(self.bed.cloud.launched)
+        code, receipt, log = self.bed.run('smoke', 'smoke-2c', '--rows', 'R1', '--env-id', env_id, '--callers', '2',
+                                          world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(len(self.bed.cloud.launched) - launched, 3)
 
     def test_pinned_az_is_where_the_lane_runs(self):
         env_id = self.pin_az('us-west-2c')

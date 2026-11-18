@@ -220,12 +220,17 @@ templates' interfaces with the same-named public subnet of that AZ
 placement group is empty between lanes, so it takes the AZ of each lane's first
 instance. `pin_env.py --az` records the AZ in `env.json`. From then on every
 run on that env-id launches there, and a different `--az` is a usage error, as
-is a resumed leg in an AZ other than its first leg's. A baseline and the runs
+is a resumed leg in an AZ other than its first leg's. The caller count works the
+same way: `pin_env.py --callers` records it as `caller_count`, `run_lane.py`
+launches that many when `--callers` is omitted, and a `release`, `minor`,
+`full` or `baseline` run with a different count is a usage error. Smoke and
+diag may override it, since they are never recorded. A baseline and the runs
 gated on it therefore never span AZs. When an AZ runs short of capacity,
 re-pin a new env-id in another AZ and re-baseline; never fall back between
-AZs mid-environment. The CI orchestrator policy allows `RunInstances` only in
-the template subnet, so `--az` works from an admin session until that policy
-lists the other subnets (a Terraform change).
+AZs mid-environment. The `rvoip-bench-orchestrator` policy, which is attached
+to the Release qualification workflow's role (`rvoip-release-gh-provisioner`),
+allows launches in every release public subnet, so `--az` works in CI as well as
+from an admin session.
 
 `minor` and `full` also hold an On-Demand Capacity Reservation while each leg
 runs (`--reserve-capacity`; on by default for those two, off for the others,
@@ -253,9 +258,8 @@ reservations under `environment.capacity_reservations`. A reservation's EC2
 `EndDate` is authoritative: holds and adoption move it, while the
 `rvoip-expires-at` tag keeps the end set when it was created.
 `scripts/bench/odcr_probe.py` exercises the whole cycle on real EC2 for about
-$0.05 (one `c8i.large`). The orchestrator
-policy has no Capacity Reservation actions yet (the same Terraform item as the
-subnets).
+$0.05 (one `c8i.large`). The same orchestrator policy grants the reservation
+actions, scoped to the `rvoip-bench=true` tag.
 
 The AMI (`scripts/bench/ami/bake.py`) is Ubuntu 24.04 plus the E74 host
 tuning, applied at every boot by `rvoip-bench-tune.service`: XPS, NIC IRQs on
