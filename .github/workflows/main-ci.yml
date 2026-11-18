@@ -20,7 +20,7 @@ env:
 
 jobs:
   plan:
-    name: Plan all 48 crates
+    name: Plan every workspace crate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -79,11 +79,14 @@ jobs:
           done < <(find examples -mindepth 2 -maxdepth 2 -name Cargo.toml -print | sort)
           python3 scripts/ci/pr_plan.py "${args[@]}"
 
-      - name: Require exactly 48 workspace crates
+      # Main plans every workspace crate. Compare against the live member
+      # count instead of a constant, which went stale when a crate was added.
+      - name: Require every workspace crate in the plan
         run: |
+          expected="$(cargo metadata --locked --no-deps --format-version 1 | jq '.workspace_members | length')"
           count="$(jq '.selected_crates | length' target/ci-plan/plan.json)"
-          test "$count" = 48 || {
-            echo "expected 48 workspace crates, planned $count" >&2
+          test "$count" = "$expected" || {
+            echo "expected $expected workspace crates, planned $count" >&2
             exit 1
           }
 
