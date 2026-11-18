@@ -231,6 +231,31 @@ class PrebuiltPerformanceTests(unittest.TestCase):
         )
         self.assertIsNone(prebuilt.gate_definition(gate))
 
+    def test_ignored_qualification_reaches_the_prebuilt_binary(self) -> None:
+        # The prebuilt runner invokes the test binary directly, so the exact
+        # name filter and --ignored must survive into its argv or the gate
+        # passes having run nothing.
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        gate = next(
+            item
+            for item in catalog["gates"]
+            if item["id"] == "perf.invite-planner-retention"
+        )
+        definition = prebuilt.gate_definition(gate)
+        self.assertIsNotNone(definition)
+        self.assertEqual(definition["kind"], "cargo")
+        self.assertEqual(definition["features"], ("perf-tests",))
+        self.assertEqual(definition["targets"], ["invite_planner_retention_qualification"])
+        self.assertEqual(
+            definition["runner_args"],
+            [
+                "real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_zero",
+                "--exact",
+                "--ignored",
+                "--nocapture",
+            ],
+        )
+
     def test_every_runtime_performance_command_has_prebuild_support(self) -> None:
         catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
         unsupported = []

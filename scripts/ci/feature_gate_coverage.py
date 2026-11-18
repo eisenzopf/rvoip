@@ -58,12 +58,7 @@ RELEASE_REFERENCE_ROOTS = ("scripts/release", "crates/sip/rvoip-sip/scripts")
 # reason. Only cfg-gated files may be listed: a target with
 # `required-features` must always have a gate. The policy test fails when an
 # entry here gains coverage, so the list cannot go stale.
-KNOWN_CFG_GAPS = {
-    ("rvoip-sip", "invite_planner_retention_qualification"): (
-        "needs `perf-tests` and is `#[ignore]`d as a >90 s release "
-        "qualification, but no release gate runs it yet"
-    ),
-}
+KNOWN_CFG_GAPS: dict[tuple[str, str], str] = {}
 
 TARGET_FLAGS = {
     "--lib",

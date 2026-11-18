@@ -74,6 +74,14 @@ class FeatureGateCoverageTests(unittest.TestCase):
                     row["required_features"] + coverage.cfg_features(row["cfg"] or ""),
                 )
 
+    def test_invite_planner_retention_runs_in_its_release_gate(self) -> None:
+        # Was the last KNOWN_CFG_GAPS entry: `perf-tests`-gated and ignored,
+        # so the PR SIP lane ran it as an empty binary and nothing ran it.
+        row = self.by_target[("rvoip-sip", "invite_planner_retention_qualification")]
+        self.assertEqual(row["gating"], "cfg")
+        self.assertEqual(row["status"], "release-only")
+        self.assertEqual(row["release_run"], ["release perf.invite-planner-retention"])
+
     def test_known_cfg_gaps_are_cfg_only_and_still_gaps(self) -> None:
         # An entry that gains a gate must leave the list; a target with
         # `required-features` may never be on it.
