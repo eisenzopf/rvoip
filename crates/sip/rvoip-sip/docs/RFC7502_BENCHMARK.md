@@ -224,7 +224,12 @@ is a resumed leg in an AZ other than its first leg's. The caller count works the
 same way: `pin_env.py --callers` records it as `caller_count`, `run_lane.py`
 launches that many when `--callers` is omitted, and a `release`, `minor`,
 `full` or `baseline` run with a different count is a usage error. Smoke and
-diag may override it, since they are never recorded. A baseline and the runs
+diag may override it, since they are never recorded. The callers' media executor is
+pinned too. `pin_env.py` records `caller_media` (default 24 worker threads in 4
+lanes), and every trial on that env-id passes it to each caller as
+`media_worker_threads`/`media_lanes`. rvoip's own default is half the CPUs,
+clamped to 2-8 workers. That caps a 96-vCPU caller at about 1,100 SRTP calls/s,
+because its 8 media threads cross the 0.8-core per-thread validity limit. A baseline and the runs
 gated on it therefore never span AZs. When an AZ runs short of capacity,
 re-pin a new env-id in another AZ and re-baseline; never fall back between
 AZs mid-environment. The `rvoip-bench-orchestrator` policy, which is attached

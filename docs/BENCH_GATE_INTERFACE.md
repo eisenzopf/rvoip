@@ -93,6 +93,7 @@ JSON style as `gates.py` (sorted keys, no whitespace).
     "dut_instance_type": "c8i.4xlarge", "caller_instance_type": "c8in.24xlarge",
     "caller_count": 2, "sources_per_caller": 2, "connections_per_source": 8,
     "ami_id": "ami-...", "kernel": "6.8.0-...",
+    "caller_media": {"worker_threads": 24, "lanes": 4},
     "capacity_reservations": [
       {"id": "cr-...", "instance_type": "c8in.24xlarge", "count": 2, "az": "us-west-2b",
        "created_at": "...Z", "cancelled_at": "...Z", "held_for_resume": true, "ends_at": "...Z"}
