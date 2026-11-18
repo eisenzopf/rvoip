@@ -1705,18 +1705,18 @@ run_dependency_audit() {
 # Accepted Dependency Advisories
 
 - advisory: `RUSTSEC-2023-0071`
-- package: `rsa`
-- status: accepted beta risk
-- reason: RustSec reports no fixed upgrade is available.
-- affected paths:
-  - `users-core` RS256/JWK support from configured signing keys.
-  - `webauthn-rs` transitive crypto via `crypto-glue`.
-- beta stance: keep this advisory visible in release evidence and revisit before stable release or when upstream publishes a fixed upgrade path.
+- package: `rsa` 0.9.10
+- status: accepted, unreachable
+- path: `rvoip-webauthn` -> `webauthn-rs` 0.6.1-dev -> `crypto-glue` 0.1.15 -> `rsa` 0.9.10. Every other `rsa` user, `users-core` included, is on the fixed 0.10.0.
+- reason: the attack needs RSA private-key operations; a WebAuthn relying party only verifies RS256 signatures with authenticators' public keys.
+- remove when: `crypto-glue` targets `rsa` 0.10.0 final, so `webauthn-rs` >= 0.6.2 resolves next to `rsa` 0.10.0.
 
-- advisories: `RUSTSEC-2026-0185` (`quinn-proto`), `RUSTSEC-2026-0104` / `RUSTSEC-2026-0098` / `RUSTSEC-2026-0099` (`rustls-webpki`)
-- status: accepted beta risk
-- reason: transitive via the `quinn` (QUIC) and `rustls` stacks; no fixed upgrade adopted in the currently pinned versions.
-- beta stance: revisit when the pinned stacks bump `quinn-proto` >= 0.11.15 and `rustls-webpki` to the fixed line.
+- advisory: `RUSTSEC-2026-0387`
+- package: `crypto-bigint` 0.5.5
+- status: accepted, unreachable
+- paths: the same `webauthn-rs` -> `crypto-glue` 0.1.15 -> `elliptic-curve` 0.13 stack; dev-only via the `webrtc` 0.14 dev-dependency -> `dtls` 0.13. rtp-core's DTLS-SRTP (`dtls` 0.17.3) uses the fixed `crypto-bigint` 0.7.
+- reason: the relying party only verifies ECDSA signatures over public data; the dev path never ships.
+- remove when: the same `crypto-glue` release, and the `webrtc` 0.14 dev-dependency moves off `dtls` 0.13.
 EOF
   run_gate_continue "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
     set -euo pipefail
@@ -1726,9 +1726,9 @@ EOF
       exit 127
     fi
     set +e
-    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
+    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
     audit_status=$?
-    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
+    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
     json_status=$?
     set -e
     {
@@ -2344,8 +2344,7 @@ if [ -f "$ARTIFACT_DIR/security/accepted-advisories.md" ]; then
 
 ## Accepted Dependency Advisories
 
-- `RUSTSEC-2023-0071` (`rsa`): accepted beta risk because RustSec reports no fixed upgrade.
-- `RUSTSEC-2026-0185` (`quinn-proto`), `RUSTSEC-2026-0104`/`-0098`/`-0099` (`rustls-webpki`): accepted; transitive via the `quinn`/`rustls` stacks.
+- `RUSTSEC-2023-0071` (`rsa` 0.9.10) and `RUSTSEC-2026-0387` (`crypto-bigint` 0.5.5): accepted, unreachable; only via `rvoip-webauthn`'s `crypto-glue` 0.1.15 (signature verification only) and a dev-only `dtls` 0.13. See `deny.toml` for paths and removal conditions.
 - Affected paths: `users-core` RS256/JWK support and `webauthn-rs` transitive crypto.
 - Evidence: `security/accepted-advisories.md`.
 EOF
