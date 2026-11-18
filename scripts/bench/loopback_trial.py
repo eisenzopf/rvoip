@@ -76,6 +76,7 @@ class FakeLane:
 class FakeArgs:
     def __init__(self, run_id):
         self.run_id = run_id
+        self.caller_media = None    # a loopback host keeps rvoip's default media executor
 
 
 def raise_nofile():

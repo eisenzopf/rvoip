@@ -565,7 +565,7 @@ class Trials:
                 row=row, run_id='%s-h%d' % (run_id, i + 1), sources=caller['ips'], connections=CALLER_CONNECTIONS,
                 dut_ip=lane['dut']['ip'], dut_port=DUT_SIP_PORT[row['transport']],
                 stages=[{'cps': s['cps'], 'seconds': s['seconds']} for s in stages],
-                output='/var/lib/rvoip-bench/caller-%d' % (i + 1)))
+                output='/var/lib/rvoip-bench/caller-%d' % (i + 1), media=self.args.caller_media))
         return configs
 
     def plan(self, row_id, row, rate, index, profile, rel, admission=None):
@@ -989,6 +989,7 @@ def receipt_for(ctx, rows, started, status, reasons, env_id, rates_path, report)
             'caller_count': len(lane.get('callers', [])),
             'sources_per_caller': min((len(c['ips']) for c in lane.get('callers', [])), default=None),
             'connections_per_source': CALLER_CONNECTIONS, 'ami_id': lane.get('ami_id'),
+            'caller_media': getattr(args, 'caller_media', None),
             'kernel': facts.get('kernel'),
             'capacity_reservations': [{k: r.get(k) for k in ('id', 'instance_type', 'count', 'az', 'created_at',
                                                               'cancelled_at', 'held_for_resume', 'ends_at')}
@@ -1088,6 +1089,7 @@ def parse_args(argv):
     if args.reserve_capacity is None:
         args.reserve_capacity = bool(profiles.PROFILES[args.profile].get('reserve_capacity'))
     args.env_tag = None    # the env-id the lane's reservations are tagged with (set once resolved)
+    args.caller_media = None    # env.json caller_media (set once resolved)
     args.r0 = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.r0)}
     args.cap = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.cap)}
     args.run_id = args.run_id or 'bench-%s-%s-%s' % (args.profile, args.candidate[:12], stamp())
@@ -1248,6 +1250,8 @@ def run(argv=None):
         args.callers = resolve_callers(args.callers, (pinned or {}).get('caller_count'),
                                        len((ctx.state.get('lane') or {}).get('callers') or []) or None, args.profile)
         args.env_tag = env_id
+        # The callers' media executor is part of the testbed: the env-id's pinned layout, or rvoip's default.
+        args.caller_media = (pinned or {}).get('caller_media')
         args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
         if not aws.s3_create_exclusive(lock, {'run_id': args.run_id, 'at': utc(), 'profile': args.profile}):
             held = aws.s3_get_json(lock)

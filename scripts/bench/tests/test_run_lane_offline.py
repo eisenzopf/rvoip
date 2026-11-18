@@ -1040,6 +1040,30 @@ class ChainTests(LaneCase):
         self.addCleanup((self.bed.baselines / env_id / 'env.json').unlink, missing_ok=True)
         return env_id
 
+    def test_pinned_caller_media_is_what_every_trial_runs(self):
+        env_id = self.bed.env_id()
+        (self.bed.baselines / env_id).mkdir(parents=True, exist_ok=True)
+        (self.bed.baselines / env_id / 'env.json').write_text(json.dumps(
+            {'schema': 'rvoip-rfc7502-env-v1', 'env_id': env_id, 'caller_media': {'worker_threads': 24, 'lanes': 4}}))
+        self.addCleanup((self.bed.baselines / env_id / 'env.json').unlink, missing_ok=True)
+        code, receipt, log = self.bed.run('smoke', 'smoke-media', '--rows', 'R2', '--env-id', env_id, world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(receipt['environment']['caller_media'], {'worker_threads': 24, 'lanes': 4})
+        plans = [k for k in self.bed.cloud.keys(BUCKET, 'bench/smoke-media/') if k.endswith('/plan.json')]
+        self.assertTrue(plans)
+        for key in plans:
+            plan = self.bed.cloud.get_json('s3://%s/%s' % (BUCKET, key))
+            for config in plan['caller_configs']:
+                self.assertEqual((config['media_worker_threads'], config['media_lanes']), (24, 4), key)
+
+    def test_unpinned_environment_sends_no_media_layout(self):
+        code, receipt, log = self.bed.run('smoke', 'smoke-nomedia', '--rows', 'R2', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertIsNone(receipt['environment']['caller_media'])
+        for key in [k for k in self.bed.cloud.keys(BUCKET, 'bench/smoke-nomedia/') if k.endswith('/plan.json')]:
+            for config in self.bed.cloud.get_json('s3://%s/%s' % (BUCKET, key))['caller_configs']:
+                self.assertNotIn('media_worker_threads', config)
+
     def test_pinned_caller_count_is_the_default(self):
         env_id = self.pin_callers(3)
         launched = len(self.bed.cloud.launched)
