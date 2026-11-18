@@ -120,6 +120,8 @@ __pycache__/
 
 ## OS
 .DS_Store
+# macOS AppleDouble resource forks, written next to files copied off APFS
+._*
 desktop.ini
 Thumbs.db
 

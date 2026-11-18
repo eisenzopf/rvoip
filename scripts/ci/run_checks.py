@@ -14,7 +14,7 @@ import subprocess
 import sys
 import time
 import tomllib
-from typing import Any
+from typing import Any, NamedTuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fetch_webex_byova_protos as webex_byova_protos  # noqa: E402
@@ -56,6 +56,101 @@ CODEC_FEATURE_SIP_TEST_PARTITIONS = 3
 # Every gate that runs optional-codec tests, including the rvoip-sip shards.
 ALL_CODEC_FEATURE_GATES = tuple(sorted({*CODEC_FEATURE_GATES, *CODEC_FEATURE_SIP_SHARDS}))
 
+# Feature-gated targets no other gate builds, one gate per crate family. Keep
+# in step with the matching `specialty_rules` entries in `policy.json` and the
+# `--specialty-gate` flags in `.github/workflows/main-ci.yml`, exactly like the
+# codec gates above; `test_feature_gate_coverage.py` fails when a target with
+# `required-features`, or a test file behind `#![cfg(feature = ...)]`, is
+# reached by no gate at all.
+#
+# The shards build default features, so `cargo test --tests` skips a target
+# whose `required-features` are off without a word, and a `#![cfg(feature)]`
+# test compiles to an empty binary that passes. `rvoip-webrtc`'s
+# `sip_webrtc_acceptance` sat in that hole from September and rotted. Each
+# entry below is one `cargo test` for one package. By default it runs the
+# package's library, binary, example and integration tests with the union of
+# the features its feature-gated targets need, so the library's own
+# feature-gated unit tests run too. An entry names `tests` only when the
+# features would break the rest of the package (a build with no crypto
+# provider, say). Packages that share most of a dependency tree share a gate,
+# and so one job and one cache.
+class FeatureRun(NamedTuple):
+    package: str
+    features: str
+    no_default_features: bool = False
+    tests: tuple[str, ...] = ()
+
+
+FEATURE_TARGET_GATES: dict[str, tuple[FeatureRun, ...]] = {
+    "feature-targets-amazon-connect": (FeatureRun("rvoip-amazon-connect", "server"),),
+    "feature-targets-moq": (
+        FeatureRun("rvoip-moq", "relay-runtime"),
+        FeatureRun("rvoip-redis", "moq"),
+    ),
+    # rvoip-rtc's crypto-provider contract: both built-in providers side by
+    # side, and a build with neither that must fail with an actionable error.
+    # Only those targets: the rest of the crate needs exactly one provider.
+    "feature-targets-rtc": (
+        FeatureRun(
+            "rvoip-rtc",
+            "crypto-aws-lc-rs",
+            tests=("crypto_provider_peer_connections",),
+        ),
+        FeatureRun(
+            "rvoip-rtc",
+            "",
+            no_default_features=True,
+            tests=("no_builtin_crypto_provider",),
+        ),
+    ),
+    "feature-targets-rtp-core": (FeatureRun("rvoip-rtp-core", "dtls-webrtc"),),
+    "feature-targets-sip-stack": (
+        FeatureRun("rvoip-sip-core", "generated-validation,lenient_parsing"),
+        FeatureRun("rvoip-sip-dialog", "generated-validation"),
+        FeatureRun("rvoip-sip-transport", "dns"),
+    ),
+    "feature-targets-users-core": (
+        FeatureRun("rvoip-users-core", "auth-core,client,postgres"),
+    ),
+    # Every rvoip-webrtc feature but `interop-browser` (nightly-interop.yml
+    # runs it against a real Chromium) and the three no target needs:
+    # `client-cpal` (an audio device), `test-hooks` and `turn-fork-candidate`.
+    # `soak-1h` is a 60-second smoke unless SOAK_SECS says otherwise.
+    "feature-targets-webrtc": (
+        FeatureRun(
+            "rvoip-webrtc",
+            "bridge-quic,client-video-h264,client-video-vp8,comprehensive,"
+            "signaling-whip,signaling-ws,soak-1h,tls-rustls",
+        ),
+    ),
+    "feature-targets-websocket": (FeatureRun("rvoip-websocket", "media-webrtc,wss"),),
+}
+# `client-video-vp8` generates libvpx bindings against the installed headers
+# with env-libvpx-sys's bindgen 0.68, which needs libclang 18 or older
+# (rust-bindgen#2824): these gates install libvpx-dev and run on ubuntu-24.04,
+# like rustdoc's `--all-features` build.
+LIBVPX_GATES = ("rustdoc", "feature-targets-webrtc", "workspace-all-features")
+
+
+def feature_run_argv(run: FeatureRun) -> list[str]:
+    argv = ["cargo", "test", "--locked", "-p", run.package]
+    if run.no_default_features:
+        argv.append("--no-default-features")
+    if run.features:
+        argv.extend(("--features", run.features))
+    if run.tests:
+        argv.extend(arg for name in run.tests for arg in ("--test", name))
+    else:
+        argv.extend(("--lib", "--tests", "--bins", "--examples"))
+    return argv
+
+
+def feature_target_commands(
+    gate: str,
+) -> list[tuple[list[str], Path | None, dict[str, str] | None]]:
+    return [(feature_run_argv(run), None, None) for run in FEATURE_TARGET_GATES[gate]]
+
+
 # Every `rvoip-sip` feature except the release-only `perf-*` harness. Written
 # out rather than computed so the command is inspectable from here; the
 # accompanying test derives the same set from the manifest and fails if a new
@@ -89,6 +184,29 @@ RUSTDOC_COMMAND = (
     "--all-features",
     "--no-deps",
 )
+# Cargo unifies features across every package a command selects, so a
+# workspace-wide `--all-features` build compiles code that no per-package
+# build ever sees: one crate's optional dependency adds trait impls another
+# crate's tests then trip over. #424 broke this build on main -- rkyv,
+# reached through dtls 0.17, adds `PartialEq<ArchivedSocketAddr> for
+# SocketAddr`, which made a `"...".parse().unwrap()` comparison in
+# rvoip-bench-uas's tests ambiguous -- and no gate noticed, because every
+# other gate selects packages. This gate must stay workspace-wide: splitting
+# it by package would lose exactly the unification it exists to build.
+# rustdoc's `--all-features` build is the other workspace-wide one, but it
+# never compiles test, example or bench targets.
+WORKSPACE_ALL_FEATURES_COMMAND = (
+    "cargo",
+    "clippy",
+    "--locked",
+    "--workspace",
+    "--all-features",
+    "--all-targets",
+    "--",
+    "-D",
+    "warnings",
+)
+WORKSPACE_ALL_FEATURES_GATE = "workspace-all-features"
 SIP_SHARD_FEATURES = ["--features", "rvoip-sip/test-hooks"]
 
 
@@ -555,6 +673,8 @@ def specialty_commands(
                 )
             )
         return commands
+    if gate in FEATURE_TARGET_GATES:
+        return feature_target_commands(gate)
     if gate in CODEC_FEATURE_SIP_SHARDS:
         return codec_sip_shard_commands(gate, root)
     if gate in CODEC_FEATURE_GATES:
@@ -713,6 +833,8 @@ def specialty_commands(
         ]
     if gate == "rustdoc":
         return [(list(RUSTDOC_COMMAND), None, None)]
+    if gate == WORKSPACE_ALL_FEATURES_GATE:
+        return [(list(WORKSPACE_ALL_FEATURES_COMMAND), None, None)]
     if gate == "amazon-connect-aws-control":
         return [
             (

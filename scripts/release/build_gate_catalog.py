@@ -1154,6 +1154,64 @@ def burst_scenario_gates() -> list[dict[str, Any]]:
     return result
 
 
+INVITE_PLANNER_RETENTION_GATE_ID = "perf.invite-planner-retention"
+INVITE_PLANNER_RETENTION_TEST = (
+    "real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_zero"
+)
+
+
+def invite_planner_retention_gate() -> dict[str, Any]:
+    """Retained initial-INVITE planning across the 90-second horizon.
+
+    `tests/invite_planner_retention_qualification.rs` is `perf-tests`-gated
+    and `#[ignore]`d: it drives a real localhost stack at 100 active plans and
+    10 attempts per second for 92 seconds, past the production retention
+    horizon, and requires the retained state to drain to zero. It post-dates
+    the canonical 108-gate run, so it is synthesized here. It shares the
+    perf batch's quiet `ec2-performance` workers and runs from the prebuilt
+    exact-candidate bundle like the other direct Cargo performance gates.
+    """
+
+    gate = synthetic_gate(
+        INVITE_PLANNER_RETENTION_GATE_ID,
+        "retained initial-INVITE planning at capacity 100 and 10 CPS past the retention horizon",
+        executor="argv",
+        command=[
+            "cargo",
+            "test",
+            "--locked",
+            "-p",
+            "rvoip-sip",
+            "--release",
+            "--features",
+            "perf-tests",
+            "--test",
+            "invite_planner_retention_qualification",
+            INVITE_PLANNER_RETENTION_TEST,
+            "--",
+            "--exact",
+            "--ignored",
+            "--nocapture",
+        ],
+        resource="ec2-performance",
+        dependencies=["source.remote-clean"],
+        # Every INVITE crosses the coordinator, dialog, transaction, UDP
+        # transport and parser, which live across the SIP crates.
+        paths=[
+            "Cargo.lock",
+            "crates/foundation/**",
+            "crates/media/**",
+            "crates/sip/**",
+        ],
+        # Matches the perf batch's cold-build floor; the run itself is ~95 s.
+        timeout_minutes=20,
+        estimated_seconds=120,
+    )
+    gate["kind"] = "performance"
+    gate["category"] = "Performance and resiliency"
+    return gate
+
+
 def facade_feature_bundle_gate() -> dict[str, Any]:
     """Compile every public facade bundle as part of exact-candidate qualification."""
     gate = synthetic_gate(
@@ -1422,6 +1480,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         ),
     ]
     synthetic.extend(burst_scenario_gates())
+    synthetic.append(invite_planner_retention_gate())
     bench = bench_lane_gates()
     preflight = infrastructure_preflight_gates()
     core = [core_gate(package, root, weights) for package in package_rows]
@@ -1500,6 +1559,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
                 "build.facade-feature-bundles",
                 "security.codeql-exact",
                 "package.archives",
+                INVITE_PLANNER_RETENTION_GATE_ID,
                 "report.remote-aggregate",
                 "source.remote-final",
             ]

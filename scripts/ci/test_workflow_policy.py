@@ -119,9 +119,22 @@ class WorkflowPolicyTests(unittest.TestCase):
                 # path would go unnoticed until main, so main runs the gates
                 # unconditionally.
                 self.assertIn(f"--specialty-gate {gate}", main)
-        # Identical patterns across the four, so splitting the job did not
-        # narrow what any one change verifies.
-        self.assertEqual(len({frozenset(rules[gate]) for gate in gates}), 1)
+        # Identical shared patterns across every codec gate, so splitting the
+        # job did not narrow what any one change verifies.
+        sip_shards = set(run_checks.CODEC_FEATURE_SIP_SHARDS)
+        sip_only = {"crates/sip/rvoip-sip/tests/**"}
+        self.assertEqual(
+            len({frozenset(rules[gate] - sip_only) for gate in gates}), 1
+        )
+        # The rvoip-sip shards also run every rvoip-sip test target with the
+        # codec features on, so a PR touching only a SIP test selects them;
+        # the other packages' gates never build those targets.
+        for gate in gates:
+            with self.subTest(gate=gate):
+                if gate in sip_shards:
+                    self.assertLessEqual(sip_only, rules[gate])
+                else:
+                    self.assertFalse(sip_only & rules[gate])
 
     def test_facade_feature_bundles_are_owned_by_a_gate_and_forced_on_main(self) -> None:
         policy = json.loads((ROOT / "scripts/ci/policy.json").read_text())
@@ -146,20 +159,25 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("rustdoc", gates)
         main = (ROOT / ".github/workflows/main-ci.yml").read_text()
         self.assertIn("--specialty-gate rustdoc", main)
-        # `--all-features` builds rvoip-webrtc's libvpx bindings, so both
-        # specialty jobs must install the headers for this gate.
+        # `--all-features` builds rvoip-webrtc's libvpx bindings, as does
+        # feature-targets-webrtc's `client-video-vp8`, so both specialty jobs
+        # must install the headers for every gate in LIBVPX_GATES.
+        self.assertIn("rustdoc", run_checks.LIBVPX_GATES)
+        condition = " || ".join(
+            f"matrix.gate == '{gate}'" for gate in run_checks.LIBVPX_GATES
+        )
         for workflow in ("pr-gate.yml", "main-ci.yml"):
             text = (ROOT / ".github/workflows" / workflow).read_text()
             specialty = text.split("\n  specialty:\n", maxsplit=1)[1]
-            step = specialty.split("Install libvpx for all-features rustdoc", 1)
+            step = specialty.split("Install libvpx for VP8 bindings", 1)
             with self.subTest(workflow=workflow):
                 self.assertEqual(len(step), 2)
-                self.assertIn("if: matrix.gate == 'rustdoc'", step[1][:200])
+                self.assertIn(f"if: {condition}", step[1][:200])
                 self.assertIn("libvpx-dev", step[1][:200])
                 # env-libvpx-sys's bindgen 0.68 breaks under libclang 19+
-                # (rust-bindgen#2824), so the gate stays on 24.04's clang 18.
+                # (rust-bindgen#2824), so these gates stay on 24.04's clang 18.
                 self.assertIn(
-                    "runs-on: ${{ matrix.gate == 'rustdoc' && 'ubuntu-24.04' "
+                    f"runs-on: ${{{{ ({condition}) && 'ubuntu-24.04' "
                     "|| 'ubuntu-latest' }}",
                     re.split(r"\n  (?=\S)", specialty, maxsplit=1)[0],
                 )

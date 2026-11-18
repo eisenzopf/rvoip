@@ -184,11 +184,13 @@ jobs:
     name: Specialty ${{ matrix.gate }}
     needs: plan
     if: needs.plan.outputs.specialty_count != '0'
-    # The rustdoc gate builds rvoip-webrtc's `client-video-vp8` bindings
-    # through env-libvpx-sys, whose bindgen 0.68 emits field-less opaque
-    # structs under libclang 19+ (rust-bindgen#2824). ubuntu-latest moved to
-    # 26.04 and its newer clang; 24.04's default clang 18 still works.
-    runs-on: ${{ matrix.gate == 'rustdoc' && 'ubuntu-24.04' || 'ubuntu-latest' }}
+    # The rustdoc, feature-targets-webrtc and workspace-all-features gates
+    # build rvoip-webrtc's `client-video-vp8` bindings through env-libvpx-sys,
+    # whose bindgen 0.68 emits field-less opaque structs under libclang 19+
+    # (rust-bindgen#2824). ubuntu-latest moved to 26.04 and its newer clang;
+    # 24.04's default clang 18 still works. Keep in step with
+    # run_checks.LIBVPX_GATES.
+    runs-on: ${{ (matrix.gate == 'rustdoc' || matrix.gate == 'feature-targets-webrtc' || matrix.gate == 'workspace-all-features') && 'ubuntu-24.04' || 'ubuntu-latest' }}
     # As main-ci's specialty job. codec-features-sip builds, tests and lints
     # rvoip-sip with every codec feature and takes 32-45 min cold; a job
     # cancelled at the limit never saves its cache, so the next run is cold too.
@@ -216,10 +218,13 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
 
+      # workspace-all-features restores main-ci's cache for the same gate, so
+      # a PR's first run of the unified build starts warm (~15-20 min instead
+      # of ~35-45 min cold). Every other gate keeps its PR-only key.
       - name: Restore content-addressed Rust cache
         uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
         with:
-          shared-key: pr-specialty-${{ matrix.gate }}
+          shared-key: ${{ matrix.gate == 'workspace-all-features' && 'main' || 'pr' }}-specialty-${{ matrix.gate }}
 
       - name: Set up Node.js for browser gate
         if: matrix.gate == 'browser-smoke'
@@ -234,11 +239,13 @@ jobs:
           sudo apt-get update && sudo apt-get install -y
           libasound2-dev libopus-dev libssl-dev protobuf-compiler pkg-config cmake lsof
 
-      # `--all-features` documents rvoip-webrtc's `client-video-vp8`, whose
-      # libvpx bindings are generated against the installed headers.
-      - name: Install libvpx for all-features rustdoc
-        if: matrix.gate == 'rustdoc'
-        run: sudo apt-get install -y libvpx-dev
+      # rustdoc's and workspace-all-features' `--all-features` builds and
+      # feature-targets-webrtc all build rvoip-webrtc's `client-video-vp8`,
+      # whose libvpx bindings bindgen generates against the installed headers
+      # with libclang.
+      - name: Install libvpx for VP8 bindings
+        if: matrix.gate == 'rustdoc' || matrix.gate == 'feature-targets-webrtc' || matrix.gate == 'workspace-all-features'
+        run: sudo apt-get install -y libvpx-dev clang libclang-dev
 
       - name: Run selected specialty gate
         run: >-

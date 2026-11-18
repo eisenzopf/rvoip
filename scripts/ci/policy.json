@@ -204,6 +204,7 @@
         "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
         "crates/sip/rvoip-sip/src/media_stream.rs",
         "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/sip/rvoip-sip/tests/**",
         "crates/foundation/rvoip-core/src/media_graph.rs",
         "crates/foundation/rvoip-core/src/bridge/mod.rs",
         "crates/foundation/rvoip-core/Cargo.toml"
@@ -223,6 +224,7 @@
         "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
         "crates/sip/rvoip-sip/src/media_stream.rs",
         "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/sip/rvoip-sip/tests/**",
         "crates/foundation/rvoip-core/src/media_graph.rs",
         "crates/foundation/rvoip-core/src/bridge/mod.rs",
         "crates/foundation/rvoip-core/Cargo.toml"
@@ -242,6 +244,7 @@
         "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
         "crates/sip/rvoip-sip/src/media_stream.rs",
         "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/sip/rvoip-sip/tests/**",
         "crates/foundation/rvoip-core/src/media_graph.rs",
         "crates/foundation/rvoip-core/src/bridge/mod.rs",
         "crates/foundation/rvoip-core/Cargo.toml"
@@ -261,6 +264,7 @@
         "crates/sip/rvoip-sip/src/adapters/media_adapter.rs",
         "crates/sip/rvoip-sip/src/media_stream.rs",
         "crates/sip/rvoip-sip/Cargo.toml",
+        "crates/sip/rvoip-sip/tests/**",
         "crates/foundation/rvoip-core/src/media_graph.rs",
         "crates/foundation/rvoip-core/src/bridge/mod.rs",
         "crates/foundation/rvoip-core/Cargo.toml"
@@ -290,6 +294,65 @@
         "crates/foundation/rvoip-core/src/media_graph.rs",
         "docs/FEATURE_BUNDLES.md",
         "scripts/ci/check_facade_feature_bundles.py"
+      ]
+    },
+    {
+      "gate": "feature-targets-amazon-connect",
+      "patterns": [
+        "Cargo.lock",
+        "crates/webrtc/rvoip-amazon-connect/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-moq",
+      "patterns": [
+        "Cargo.lock",
+        "crates/moq/rvoip-moq/**",
+        "crates/extensions/rvoip-redis/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-rtc",
+      "patterns": [
+        "Cargo.lock",
+        "crates/webrtc/rvoip-rtc/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-rtp-core",
+      "patterns": [
+        "Cargo.lock",
+        "crates/media/rtp-core/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-sip-stack",
+      "patterns": [
+        "Cargo.lock",
+        "crates/sip/sip-core/**",
+        "crates/sip/sip-dialog/**",
+        "crates/sip/sip-transport/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-users-core",
+      "patterns": [
+        "Cargo.lock",
+        "crates/identity/users-core/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-webrtc",
+      "patterns": [
+        "Cargo.lock",
+        "crates/webrtc/rvoip-webrtc/**"
+      ]
+    },
+    {
+      "gate": "feature-targets-websocket",
+      "patterns": [
+        "Cargo.lock",
+        "crates/uctp/rvoip-websocket/**"
       ]
     },
     {
@@ -371,6 +434,12 @@
         "crates/extensions/rvoip-vcon-postgres/**",
         "crates/foundation/rvoip-core/src/vcon.rs",
         "crates/foundation/rvoip-core/src/store/vcon_store.rs"
+      ]
+    },
+    {
+      "gate": "workspace-all-features",
+      "patterns": [
+        "*"
       ]
     },
     {
