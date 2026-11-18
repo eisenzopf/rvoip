@@ -72,6 +72,11 @@ class Interrupted(Infra):
 SIGNALS = {'unwinding': False}
 
 
+# How long a lane waits for a cluster placement group to let go of another AZ (a previous lane's
+# instances still shutting down), and how long teardown waits for its own instances to terminate.
+PLACEMENT_WAIT_SECONDS = 300
+
+
 def parse_utc(text):
     return datetime.datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
 
@@ -194,9 +199,35 @@ class Lane:
         if used + need > quota:
             raise Infra('vCPU quota: %d in use + %d for the lane > %d' % (used, need, quota))
 
+    def lane_placement(self, tf):
+        """(placement group, AZ) the lane launches into: --az (or the pinned AZ), else the templates'."""
+        placement = self.aws.template_data(tf['dut_launch_template']).get('Placement') or {}
+        return placement.get('GroupName'), (self.args.az or tf.get('availability_zone')
+                                            or placement.get('AvailabilityZone'))
+
+    def wait_for_placement_group(self, tf):
+        """A cluster placement group is bound to the AZ of its members until the last one is terminated, so
+        a launch into another AZ right after a lane (or a fallback to another AZ) is refused by EC2. Wait for
+        members elsewhere to finish terminating; fail INFRA, naming them, when they do not."""
+        group, az = self.lane_placement(tf)
+        if not group or not az:
+            return
+        deadline = time.time() + PLACEMENT_WAIT_SECONDS
+        while True:
+            elsewhere = [m for m in self.aws.placement_group_members(group) if m[1] != az]
+            if not elsewhere:
+                return
+            if time.time() >= deadline:
+                raise Infra('placement group %s is bound to %s by %s; launch in %s when they have terminated' % (
+                    group, elsewhere[0][1], ', '.join('%s (%s)' % (m[0], m[2]) for m in elsewhere), az))
+            self.log('waiting for placement group %s: %s still in %s' % (
+                group, ', '.join('%s %s' % (m[0], m[2]) for m in elsewhere), elsewhere[0][1]))
+            time.sleep(15)
+
     def launch(self, budget_hours):
         tf = self.tf_outputs()
         self.preflight(tf)
+        self.wait_for_placement_group(tf)
         expires = utc(time.time() + (budget_hours + 1) * 3600)
         base = {'rvoip-bench': 'true', 'managed-by': 'github-actions', 'rvoip-run-id': self.args.run_id,
                 'rvoip-expires-at': expires}
@@ -474,13 +505,17 @@ class Lane:
                     mine['cancelled_at'] = utc()
         self.save()
 
-    def teardown(self):
+    def teardown(self, wait=True):
+        """Terminate the lane; with `wait`, until EC2 reports every instance terminated, so the placement
+        group is free for the next lane in any AZ (a signal skips the wait: the process is being stopped)."""
         ids = self.state.get('lane', {}).get('instances', [])
         if ids and not self.args.keep_lane:
             self.log('terminating', ids)
             self.aws.terminate(ids)
             self.state['lane']['terminated_at'] = utc()
             self.save()
+            if wait and not self.aws.wait_terminated(ids, timeout=PLACEMENT_WAIT_SECONDS):
+                self.log('WARNING lane instances not terminated after %d s: %s' % (PLACEMENT_WAIT_SECONDS, ids))
 
     def save(self):
         self.args.save_state(self.state)
@@ -1188,6 +1223,7 @@ def run(argv=None):
     env_id, rates_path = args.env_id, None
     code = EXIT_INFRA
     stopped_for_wall = False
+    interrupted = False
     try:
         if args.dry_run:
             log('dry run: quota', aws.vcpu_quota(), 'in use', aws.running_standard_vcpus(),
@@ -1295,6 +1331,7 @@ def run(argv=None):
     except (Infra, AwsError) as error:
         log('infra:', error)
         status, reasons, code = 'INFRA', [str(error)[-800:]], EXIT_INFRA
+        interrupted = isinstance(error, Interrupted)
     except Exception as error:  # noqa: BLE001  -- a harness bug is infra, never a DUT verdict
         log('error:', ''.join(traceback.format_exception(error))[-3000:])
         status, reasons, code = 'INFRA', ['harness error: %s' % error], EXIT_INFRA
@@ -1302,7 +1339,7 @@ def run(argv=None):
         SIGNALS['unwinding'] = True
         if not args.dry_run and (have_lock or ctx.state.get('lane')):
             try:
-                ctx.lane.teardown()
+                ctx.lane.teardown(wait=not interrupted)
             except Exception as error:  # noqa: BLE001
                 log('WARNING teardown failed; the janitor reaps by rvoip-expires-at:', error)
         if not args.dry_run:

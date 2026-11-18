@@ -144,6 +144,25 @@ class Aws:
         if ids:
             self.call('ec2', 'terminate-instances', '--instance-ids', *ids)
 
+    def wait_terminated(self, ids, timeout=300):
+        """True once every instance is `terminated` (a cluster placement group stays bound to the AZ of
+        any member still shutting down), False at the timeout."""
+        deadline = time.time() + timeout
+        while True:
+            states = {i['InstanceId']: i['State']['Name'] for i in self.describe_instances(ids)}
+            if all(s == 'terminated' for s in states.values()):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(10)
+
+    def placement_group_members(self, group):
+        """(instance id, AZ, state) of every instance in `group` that is not yet terminated."""
+        out = self.call('ec2', 'describe-instances', '--filters', 'Name=placement-group-name,Values=%s' % group,
+                        'Name=instance-state-name,Values=pending,running,shutting-down,stopping,stopped')
+        return [(i['InstanceId'], i['Placement']['AvailabilityZone'], i['State']['Name'])
+                for r in out.get('Reservations', []) for i in r['Instances']]
+
     def wait_running(self, ids, timeout=900):
         deadline = time.time() + timeout
         while time.time() < deadline:

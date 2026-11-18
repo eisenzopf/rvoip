@@ -81,6 +81,7 @@ class World:
         self.dut_clean_shutdown = True
         self.reserve_short = ()        # instance types create-capacity-reservation has no capacity for
         self.signal_on = None          # (agent command, signum): the orchestrator gets that signal there
+        self.terminate_polls = 0       # describe-instances calls an instance stays shutting-down after terminate
         self.__dict__.update(kw)
 
 
@@ -243,13 +244,28 @@ class Cloud:
 
     def ec2_describe_instances(self, args):
         ids = multi(args, '--instance-ids')
+        filters = dict(f[len('Name='):].split(',Values=') for f in multi(args, '--filters'))
+        for inst in self.instances.values():
+            if inst['State']['Name'] == 'shutting-down':
+                inst['polls_left'] -= 1
+                if inst['polls_left'] < 0:
+                    inst['State'] = {'Name': 'terminated'}
+        if 'placement-group-name' in filters:
+            states = filters.get('instance-state-name', '').split(',')
+            return {'Reservations': [{'Instances': [i for i in self.instances.values()
+                                                    if i['Placement']['GroupName'] == filters['placement-group-name']
+                                                    and i['State']['Name'] in states]}]}
         if not ids:
             return {'Reservations': []}    # the quota preflight: nothing else running
         return {'Reservations': [{'Instances': [self.instances[i] for i in ids]}]}
 
     def ec2_terminate_instances(self, args):
         for iid in multi(args, '--instance-ids'):
-            self.instances[iid]['State'] = {'Name': 'terminated'}
+            if self.world.terminate_polls:
+                self.instances[iid]['State'] = {'Name': 'shutting-down'}
+                self.instances[iid]['polls_left'] = self.world.terminate_polls
+            else:
+                self.instances[iid]['State'] = {'Name': 'terminated'}
             reserved = self.reservations.get(self.instances[iid].get('CapacityReservationId'))
             if reserved and reserved['State'] == 'active':
                 reserved['AvailableInstanceCount'] += 1
@@ -1311,6 +1327,60 @@ class ReservationTests(LaneCase):
         self.assertIn('cancelling orphaned capacity reservation %s (run crashed' % orphan, log)
         self.assertEqual(self.bed.cloud.reservations[orphan]['State'], 'cancelled')
         self.assertEqual(self.bed.cloud.held_reservations(), sorted([other_env, not_bench]))
+
+
+
+class PlacementGroupTests(LaneCase):
+    """A cluster placement group is bound to the AZ of any member still shutting down."""
+
+    def setUp(self):
+        self.bed = Bed()
+        sleep = mock.patch('time.sleep', self.bed.clock.advance)    # waits advance the fake clock only
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def tearDown(self):
+        self.bed.close()
+
+    def stranger(self, az, state='shutting-down', polls=3):
+        iid = 'i-%017x' % (0xfff0 + len(self.bed.cloud.instances))
+        self.bed.cloud.instances[iid] = {
+            'InstanceId': iid, 'InstanceType': 'c8in.24xlarge', 'ImageId': AMI, 'State': {'Name': state},
+            'Placement': {'AvailabilityZone': az, 'GroupName': 'rvoip-bench'}, 'polls_left': polls,
+            'NetworkInterfaces': [], 'Tags': [], 'role': 'caller'}
+        return iid
+
+    def test_teardown_waits_until_its_instances_are_terminated(self):
+        world = World(terminate_polls=3)
+        code, receipt, log = self.bed.run('smoke', 'smoke-pg-wait', '--rows', 'R1', world=world)
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual({i['State']['Name'] for i in self.bed.cloud.instances.values()}, {'terminated'})
+        self.assertNotIn('not terminated after', log)
+
+    def test_launch_waits_for_a_group_still_bound_elsewhere(self):
+        self.stranger('us-west-2c', polls=4)
+        code, receipt, log = self.bed.run('smoke', 'smoke-pg-other', '--rows', 'R1', '--az', 'us-west-2a',
+                                          world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertIn('waiting for placement group rvoip-bench', log)
+        self.assertEqual(receipt['environment']['availability_zone'], 'us-west-2a')
+
+    def test_a_group_that_stays_bound_is_a_clear_infra(self):
+        iid = self.stranger('us-west-2c', state='running')
+        code, receipt, log = self.bed.run('smoke', 'smoke-pg-bound', '--rows', 'R1', '--az', 'us-west-2a',
+                                          world=World())
+        self.assertEqual(code, 3, log)
+        self.assertIn('placement group rvoip-bench is bound to us-west-2c by %s (running)' % iid,
+                      ' '.join(receipt['reasons']))
+        self.assertEqual(self.bed.cloud.launched, [], 'nothing launched')
+
+    def test_members_in_the_same_az_do_not_block(self):
+        iid = self.stranger('us-west-2a', state='running')
+        code, receipt, log = self.bed.run('smoke', 'smoke-pg-same', '--rows', 'R1', '--az', 'us-west-2a',
+                                          world=World())
+        self.assertEqual((code, receipt['status']), (0, 'PASS'), log)
+        self.assertNotIn('waiting for placement group', log)
+        self.assertEqual(self.bed.alive(), [iid], 'only the stranger is left running')
 
 
 if __name__ == '__main__':
