@@ -56,9 +56,11 @@ changes matter even to code that never names those crates:
   builds names ring, so an application that links both rustls providers no
   longer panics at its first TLS connection.
 
-CI runs more of the test suite: `cargo test --workspace --all-features`
-passes again, and a policy test checks that the sharded SIP codec gate runs
-every eligible test target.
+CI now runs every feature-gated test. Every `required-features` target and
+cfg-gated test file is run or built by a CI gate (51 such targets had none),
+a policy test fails on any new gap, and a workspace-wide `--all-features`
+clippy gate runs on every PR and on main. `cargo test --workspace
+--all-features` passes.
 
 ### Breaking changes
 
@@ -1526,17 +1528,36 @@ outcome unchanged, and add no configuration.
   four minutes to the Asterisk gate and two to the FreeSWITCH gate. The
   compatibility and RFC matrices list them as release-gated with protected
   evidence pending the first qualification run.
-- CI test coverage (#418, #436–#440). The `codec-features-sip` PR gate runs
-  as four concurrent shards, and a policy test checks that together they run
-  every eligible test target exactly once and one clippy over every target.
-  `cargo test --workspace --all-features` passes again. The facade bundle
-  contracts now check each bundle's declared feature closure, read from the
-  manifest, instead of `cfg!`, so they hold when every feature is on. The
-  rvoip-sip perf scenarios report as ignored in debug builds instead of
-  panicking; release builds still run them. Fixtures that failed only under
-  all features or on busy runners are fixed in the tests, not the library: a
-  reused RTP sequence space, a stale retained-capacity snapshot, and fixed
-  ports inside the ephemeral range.
+- CI test coverage (#418, #436–#440, #443, #445, #447).
+  - Cargo silently skips a target whose `required-features` are off, and a
+    test file under a crate-level `#![cfg(feature = ...)]` compiles to an
+    empty binary that passes. 51 such targets and 18 cfg-gated test files ran
+    in no gate (#443). Eight `feature-targets-*` specialty gates now run them
+    on the PRs that touch their crates and on every main push. A policy test
+    (`scripts/ci/feature_gate_coverage.py`) models every CI and release cargo
+    command and fails on any target that no gate runs or builds. rvoip-sip's
+    `perf-tests` harness is covered by the release catalog only, by contract.
+  - A `workspace-all-features` gate runs `cargo clippy --locked --workspace
+    --all-features --all-targets -- -D warnings` on every PR and every main
+    push. Per-package gates never unify features across crates, so a
+    workspace-wide `--all-features` build could break unnoticed (#443).
+  - The INVITE planner retention qualification, which no gate ran, is now the
+    release gate `perf.invite-planner-retention` (#447).
+  - Main Gate checks that it plans every workspace crate against the
+    `cargo metadata` member count instead of a hard-coded number (#445).
+  - The `codec-features-sip` PR gate runs as four concurrent shards. A policy
+    test checks that together they run every eligible test target exactly
+    once, plus one clippy over every target (#418).
+  - `cargo test --workspace --all-features` passes:
+    - The facade bundle contracts check each bundle's declared feature
+      closure, read from the manifest, instead of `cfg!`, so they hold when
+      every feature is on.
+    - The rvoip-sip perf scenarios report as ignored in debug builds instead
+      of panicking; release builds still run them.
+    - Fixtures that failed only under all features or on busy runners are
+      fixed in the tests, not the library: a reused RTP sequence space, a
+      stale retained-capacity snapshot, and fixed ports inside the ephemeral
+      range (#436–#440).
 
 ### Documentation
 
