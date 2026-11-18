@@ -34,3 +34,20 @@ class CallerConfigTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CallerMediaTests(unittest.TestCase):
+    """The callers' media executor is pinned per environment (env.json caller_media)."""
+
+    def config(self, media):
+        return score.caller_config(profiles.ROWS['R2'], 'run', ['10.0.0.1', '10.0.0.2'], 8, '10.0.0.9', 5061,
+                                   [{'cps': 1000, 'seconds': 10}], '/tmp/out', media=media)
+
+    def test_pinned_media_layout_reaches_the_caller(self):
+        config = self.config({'worker_threads': 24, 'lanes': 4})
+        self.assertEqual((config['media_worker_threads'], config['media_lanes']), (24, 4))
+
+    def test_no_pin_keeps_the_rvoip_default(self):
+        config = self.config(None)
+        self.assertNotIn('media_worker_threads', config)
+        self.assertNotIn('media_lanes', config)

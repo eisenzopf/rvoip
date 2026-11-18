@@ -18,8 +18,12 @@ MEDIA_PORT_START, MEDIA_PORT_END = 25000, 64999
 # Configs (crates/sip/rvoip-sip/docs/RFC7502_BENCHMARK.md §3-§4)
 # ---------------------------------------------------------------------------
 
-def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, output):
-    """rvoip-loadgen config for one caller host (this host's share of every stage)."""
+def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, output, media=None):
+    """rvoip-loadgen config for one caller host (this host's share of every stage).
+
+    `media` is the environment's pinned caller media executor ({'worker_threads': n, 'lanes': m}, env.json
+    `caller_media`): every run on an env-id lays out the caller's media threads exactly as its baseline did.
+    None leaves rvoip's default (half the CPUs, 2-8 workers: about 1,100 SRTP calls/s per caller host)."""
     hold = row['hold_ms']
     signaling_only = row['media'] == 'none'
     calls = sum(round(s['cps'] * s['seconds']) for s in stages)
@@ -31,7 +35,7 @@ def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, o
     ports = (MEDIA_PORT_END - MEDIA_PORT_START + 1)
     slots = len(sources) * connections * ((ports // connections) & ~1)
     concurrent = min(35000 * len(sources), slots, int(peak * (hold / 1000 + 4)) + 1000)
-    return {
+    config = {
         'run_id': run_id,
         'scenario': row.get('id', 'bench'),
         'bind_ip': sources[0],
@@ -61,6 +65,10 @@ def caller_config(row, run_id, sources, connections, dut_ip, dut_port, stages, o
         'linger_seconds': 30,
         'metrics_listen': '0.0.0.0:9465',
     }
+    if media:
+        config['media_worker_threads'] = int(media['worker_threads'])
+        config['media_lanes'] = int(media.get('lanes', 1))
+    return config
 
 
 def ea_uas_config(row, ip, port):
