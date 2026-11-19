@@ -1770,6 +1770,10 @@ version = "{version}"
         command = bench.lane_command(args, Path("/t/release/rvoip-bench-uas"), "4242")
         self.assertIn("--resume", command)
         self.assertEqual(command[command.index("--max-wall") + 1], "330")
+        self.assertEqual(command[command.index("--capacity-wait") + 1], "90")
+        args.capacity_wait = 30
+        command = bench.lane_command(args, Path("/t/release/rvoip-bench-uas"), "4242")
+        self.assertEqual(command[command.index("--capacity-wait") + 1], "30")
         self.assertEqual(command[command.index("--run-id") + 1], "bench-minor-cccccccccccc-4242")
         self.assertNotIn("--caller-bin", command)
         # The minor lane records R into the gate's evidence, never the checkout.

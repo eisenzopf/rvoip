@@ -129,6 +129,7 @@ JSON style as `gates.py` (sorted keys, no whitespace).
     "report": {"md": "s3://.../report/rfc7502-report.md", "html": "..."}
   },
   "cost": {"instance_hours": {"c8i.4xlarge": 3.6, "c8in.24xlarge": 7.2}, "estimated_usd": 49.7},
+  "capacity_misses": [{"at": "...Z", "attempt": 1, "error": "reserve 3 x c8in.24xlarge in us-west-2a: ..."}],
   "tool": {"run_lane_sha256": "...", "repo_sha": "<sha the orchestrator ran from>"}
 }
 ```

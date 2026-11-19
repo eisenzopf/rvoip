@@ -64,6 +64,11 @@ class WallClock(RuntimeError):
     """Exit 4: --max-wall reached; resume later."""
 
 
+class CapacityMiss(Infra):
+    """EC2 has no capacity for the lane (InsufficientInstanceCapacity creating a reservation or launching):
+    exit 3 like any INFRA, but retried while --capacity-wait lasts."""
+
+
 class Interrupted(Infra):
     """SIGINT/SIGTERM: unwind through the normal exit path (teardown, reservations, lock, receipt)."""
 
@@ -80,6 +85,9 @@ PLACEMENT_WAIT_SECONDS = 300
 def parse_utc(text):
     return datetime.datetime.strptime(text, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=datetime.timezone.utc).timestamp()
 
+
+# --capacity-wait retries a capacity miss this often (nothing runs or is reserved while it waits).
+CAPACITY_RETRY_SECONDS = 300
 
 # A reservation held across a --max-wall stop ends by itself this long after the stop at the latest.
 HOLD_SECONDS = 2 * 3600
@@ -224,6 +232,33 @@ class Lane:
                 group, ', '.join('%s %s' % (m[0], m[2]) for m in elsewhere), elsewhere[0][1]))
             time.sleep(15)
 
+    def launch_waiting_for_capacity(self, budget_hours):
+        """launch(), retrying a capacity miss every CAPACITY_RETRY_SECONDS while --capacity-wait lasts. Every
+        miss is logged and kept in the run state (the receipt's capacity_misses). Any other error fails at once.
+        The wait counts against --max-wall: a retry that would leave too little time for a trial stops the run
+        with exit 4 (resume later); the end of the wait is the capacity miss itself (INFRA)."""
+        wait = max(0, int(self.args.capacity_wait or 0)) * 60
+        started = time.time()
+        attempt = 1
+        while True:
+            try:
+                return self.launch(budget_hours)
+            except CapacityMiss as error:
+                now = time.time()
+                misses = self.state.setdefault('capacity_misses', [])
+                misses.append({'at': utc(now), 'attempt': attempt, 'error': str(error)[:300]})
+                self.save()
+                if not wait:
+                    raise
+                if now + CAPACITY_RETRY_SECONDS > started + wait:
+                    raise CapacityMiss('%s (gave up after %d attempts over %.0f min of --capacity-wait %d)' % (
+                        str(error)[:400], attempt, (now - started) / 60, wait // 60))
+                self.args.check_wall(CAPACITY_RETRY_SECONDS + LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)
+                self.log('capacity: attempt %d at %s missed; retrying at %s (--capacity-wait ends %s): %s' % (
+                    attempt, utc(now), utc(now + CAPACITY_RETRY_SECONDS), utc(started + wait), str(error)[:200]))
+                time.sleep(CAPACITY_RETRY_SECONDS)
+                attempt += 1
+
     def launch(self, budget_hours):
         tf = self.tf_outputs()
         self.preflight(tf)
@@ -252,7 +287,9 @@ class Lane:
                 **moved.get('caller_launch_template', {}))
         except AwsError as error:
             self.aws.terminate(ids.get('dut', []) + ids.get('callers', []))
-            if 'InsufficientInstanceCapacity' in str(error) or 'VcpuLimitExceeded' in str(error):
+            if 'InsufficientInstanceCapacity' in str(error):
+                raise CapacityMiss('launch: %s' % error)
+            if 'VcpuLimitExceeded' in str(error):
                 raise Infra('launch: %s' % error)
             raise
         every = ids['dut'] + ids['callers']
@@ -392,7 +429,7 @@ class Lane:
                 cid = self.aws.create_capacity_reservation(itype, az, count, expires, tags, token, group_arn)
             except AwsError as error:
                 if 'InsufficientInstanceCapacity' in str(error) or 'ReservationCapacityExceeded' in str(error):
-                    raise Infra('reserve %d x %s in %s: %s' % (count, itype, az, error))
+                    raise CapacityMiss('reserve %d x %s in %s: %s' % (count, itype, az, error))
                 raise
             reservations.append({'id': cid, 'instance_type': itype, 'count': count, 'az': az,
                                  'placement_group': group, 'created_at': utc(), 'ends_at': expires})
@@ -1018,6 +1055,7 @@ def receipt_for(ctx, rows, started, status, reasons, env_id, rates_path, report)
                            for r in rows if r.get('proposed_r')},
         'evidence': {'s3_prefix': ctx.s3_run, 'manifest_sha256': None, 'report': report},
         'cost': cost(state, ended),
+        'capacity_misses': list(state.get('capacity_misses', [])),
         'tool': {'run_lane_sha256': sha256_file(Path(__file__)), 'repo_sha': git_sha()},
     }
     return receipt
@@ -1080,6 +1118,9 @@ def parse_args(argv):
     p.add_argument('--dut-type', help='override the DUT instance type (functional smoke on small hosts; never a gate run)')
     p.add_argument('--caller-type', help='override the caller instance type (smoke only)')
     p.add_argument('--keep-lane', action='store_true', help='do not terminate the lane (debug; costs money)')
+    p.add_argument('--capacity-wait', type=int, default=0, metavar='MINUTES',
+                   help='retry an EC2 capacity miss (reserving or launching the lane) every %d s for up to this '
+                        'many minutes, within --max-wall (default 0: fail at once)' % CAPACITY_RETRY_SECONDS)
     p.add_argument('--reserve-capacity', action=argparse.BooleanOptionalAction, default=None,
                    help='hold an On-Demand Capacity Reservation for the lane while each leg runs '
                         '(default: on for minor and full, off otherwise)')
@@ -1283,7 +1324,7 @@ def run(argv=None):
         have_lock = True
         ctx.lane.sweep_reservations()
         if not (args.resume and ctx.lane.alive()):
-            ctx.lane.launch(profile['budget_hours'])
+            ctx.lane.launch_waiting_for_capacity(profile['budget_hours'])
             ctx.lane.install(ctx.s3_run)
         lane = ctx.lane.info
         if pinned and pinned.get('ami_id') and lane.get('ami_id') != pinned['ami_id'] and not args.dut_type:
