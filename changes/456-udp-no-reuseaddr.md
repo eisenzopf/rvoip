@@ -9,6 +9,12 @@ every datagram sent to it, so signalling or call audio could be silently
 taken. UDP has no TIME_WAIT, so a port can be bound again as soon as its
 socket closes, including when its process is killed: restarts are not slowed.
 
+On Windows, where a later `SO_REUSEADDR` socket could take a held port
+whatever the holder set, SIP and media UDP sockets now set
+`SO_EXCLUSIVEADDRUSE` before they bind. The Windows build is compile-checked
+(`x86_64-pc-windows-gnu`) but not tested, since rvoip has no Windows CI. The
+macOS/BSD behaviour follows the BSD socket rules and is not CI-tested either.
+
 Migration: a second socket can no longer bind a UDP port that an rvoip
 transport still holds. If you paired a wildcard bind with a specific address
 on the same port (for example `0.0.0.0:5060` and `10.0.0.1:5060`), bind each
