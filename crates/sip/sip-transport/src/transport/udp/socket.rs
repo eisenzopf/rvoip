@@ -47,7 +47,15 @@ pub(crate) fn bind_std_udp_socket(
     // closes. Without SO_REUSEADDR, a teardown-then-rebind on the same port
     // (e.g. re-login after a failed REGISTER) can race the OS socket release
     // and fail with EADDRINUSE.
-    socket.set_reuse_address(true)?;
+    //
+    // Only an explicit port needs that. A port-0 bind never rebinds a known
+    // port, and on Linux a reuse-flagged port-0 bind can be handed a port
+    // that another reuse-flagged UDP socket already holds: the newer socket
+    // then receives every datagram sent to that port, so one transport
+    // silently loses its SIP responses to the other.
+    if addr.port() != 0 {
+        socket.set_reuse_address(true)?;
+    }
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
@@ -81,5 +89,26 @@ mod tests {
         let rebind =
             bind_std_udp_socket(addr, UdpSocketOptions::default()).expect("rebind same port");
         assert_eq!(rebind.local_addr().unwrap().port(), addr.port());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ephemeral_bind_does_not_share_its_port() {
+        // A port-0 bind must own its port outright. If it set SO_REUSEADDR,
+        // Linux would let any other reuse-flagged UDP socket share the port
+        // (and hand it out again on another port-0 bind); the newer socket
+        // then receives every datagram sent to that port, silently taking
+        // this transport's SIP responses.
+        let ephemeral =
+            bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
+                .expect("ephemeral bind");
+        let addr = ephemeral.local_addr().unwrap();
+
+        let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        intruder.set_reuse_address(true).unwrap();
+        let err = intruder
+            .bind(&addr.into())
+            .expect_err("a second socket must not share an ephemeral SIP port");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 }
