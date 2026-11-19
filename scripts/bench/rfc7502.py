@@ -260,16 +260,22 @@ def trial_seconds(rate, n, minimum=0):
 
 
 def host_shares(cps, seconds, hosts):
-    """Each caller host's even share (cps, calls) of one stage; ValueError unless every share x seconds is whole."""
-    calls = int(cps) * int(seconds)
-    if calls % hosts:
-        raise ValueError('stage %s cps x %s s = %d calls does not split into %d whole host shares'
-                         % (cps, seconds, calls, hosts))
-    return [{'cps': cps / hosts, 'seconds': int(seconds), 'calls': calls // hosts} for _ in range(hosts)]
+    """Each caller host's share (cps, seconds, calls) of one stage: a whole cps per host, the first hosts taking
+    the remainder (6440 cps over 3 hosts is 2147 + 2147 + 2146), so the stage total is exact and every host's
+    cps x seconds is an exact whole number in floating point too. rvoip-loadgen refuses a stage whose
+    cps x seconds has a fractional part, and an even fractional share does not survive that: 6440 / 3 cps x
+    30 s is 64399.99999999999 (baseline-0.5 R1 at 12880 sps: two void trials). ValueError unless `cps` is a
+    whole number of at least `hosts`."""
+    whole, seconds = int(cps), int(seconds)
+    if whole != cps or whole < hosts or hosts < 1 or seconds < 1:
+        raise ValueError('stage %s cps x %s s does not split into %d whole-cps host shares' % (cps, seconds, hosts))
+    base, extra = divmod(whole, hosts)
+    shares = [base + (1 if i < extra else 0) for i in range(hosts)]
+    return [{'cps': share, 'seconds': seconds, 'calls': share * seconds} for share in shares]
 
 
 def validate_shares(profile, hosts):
-    """Every stage of `profile` splits into `hosts` whole shares (raises ValueError otherwise)."""
+    """Every stage of `profile` splits into `hosts` whole-cps shares (raises ValueError otherwise)."""
     for stage in profile['stages']:
         host_shares(stage['cps'], stage['seconds'], hosts)
     return True
