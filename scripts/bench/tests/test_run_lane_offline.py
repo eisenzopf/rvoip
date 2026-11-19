@@ -35,6 +35,7 @@ sys.path.insert(0, str(HERE))
 import aws as aws_mod  # noqa: E402
 import bench_fixtures as fx  # noqa: E402
 import profiles  # noqa: E402
+import record_baseline  # noqa: E402
 import rfc_report  # noqa: E402
 import run_lane  # noqa: E402
 import summarize_trial  # noqa: E402
@@ -1405,6 +1406,157 @@ class PlacementGroupTests(LaneCase):
         self.assertEqual((code, receipt['status']), (0, 'PASS'), log)
         self.assertNotIn('waiting for placement group', log)
         self.assertEqual(self.bed.alive(), [iid], 'only the stranger is left running')
+
+
+
+class LowerBoundTests(LaneCase):
+    """A §6.1 baseline row that only passed is a lower bound, flagged wherever rates are read; a DUT search that
+    stops the same way still fails."""
+
+    def setUp(self):
+        self.bed = Bed()
+
+    def tearDown(self):
+        self.bed.close()
+
+    def report_text(self, receipt):
+        return self.bed.cloud.path(receipt['evidence']['report']['rfc7502-report']['md']).read_text()
+
+    def test_baseline_row_that_only_passed_records_a_lower_bound(self):
+        code, receipt, log = self.bed.run('baseline', 'base-lb', '--rows', 'R6', '--r0', 'R6=2400', '--record',
+                                          world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        row = self.rows(receipt)['R6']
+        self.assertEqual(row['verdict'], 'pass')
+        self.assertTrue(row['lower_bound'])
+        self.assertFalse(row['tester_limited'])
+        self.assertEqual(row['r'], row['search']['highest_passing_sps'])
+        self.assertTrue(row['search']['stop_reason'].startswith('max_trials'), row['search'])
+        self.assertEqual(len(row['trials']), profiles.PROFILES['baseline']['max_trials'])
+        base = self.bed.rates()['baseline_sps']['R6']
+        self.assertEqual((base['r'], base['lower_bound']), (row['r'], True))
+        self.assertTrue(base['lower_bound_reason'].startswith('max_trials'))
+        self.assertEqual(self.bed.rates()['tester_caps']['R6'], int(row['r'] * 0.67) // 4 * 4)
+        text = self.report_text(receipt)
+        self.assertIn('LOWER BOUND, not a measured ceiling', text)
+        self.assertIn('R6: baseline >= %d sps, a lower bound' % row['r'], text)
+
+    def test_measured_baseline_is_not_flagged(self):
+        code, receipt, log = self.bed.run('baseline', 'base-ceiling', '--rows', 'R1', '--record',
+                                          world=World(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertNotIn('lower_bound', self.rows(receipt)['R1'])
+        self.assertFalse(self.bed.rates()['baseline_sps']['R1']['lower_bound'])
+
+    def test_minor_and_full_max_trials_stops_still_fail(self):
+        """The gate profiles are unchanged: a DUT search out of trials has not converged (release confirms a
+        recorded R and runs no search)."""
+        for profile, run_id in (('minor', 'minor-mt'), ('full', 'full-mt')):
+            code, receipt, log = self.bed.run(profile, run_id, '--rows', 'R1', '--r0', 'R1=3000',
+                                              world=world_for({'R1': 10 ** 7}))
+            self.check(code, receipt, log, 1, 'FAIL')
+            row = self.rows(receipt)['R1']
+            self.assertEqual(row['verdict'], 'fail', profile)
+            self.assertIn('max_trials', row['reason'])
+            self.assertNotIn('lower_bound', row)
+            self.assertIsNone(row.get('r'))
+
+    def test_gate_flags_a_cap_from_a_lower_bound_baseline(self):
+        env_id = self.bed.env_id()
+        (self.bed.baselines / env_id).mkdir(parents=True, exist_ok=True)
+        (self.bed.baselines / env_id / 'rates.json').write_text(json.dumps({
+            'schema': 'rvoip-rfc7502-rates-v1', 'env_id': env_id, 'rows': {},
+            'tester_caps': {'R1': 6000, 'R5': 6000},
+            'baseline_sps': {'R1': {'r': 9000, 'tester_limited': False, 'lower_bound': True, 'source_run': 's3://x/'},
+                             'R5': {'r': 9000, 'tester_limited': True, 'lower_bound': False, 'source_run': 's3://x/'}}}))
+        code, receipt, log = self.bed.run('minor', 'minor-lbcap', '--rows', 'R1,R5', '--record',
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        rows = self.rows(receipt)
+        self.assertTrue(rows['R1']['tester_cap_lower_bound'])
+        self.assertFalse(rows['R5']['tester_cap_lower_bound'])
+        recorded = self.bed.rates()['rows']
+        self.assertTrue(recorded['R1']['tester_cap_lower_bound'])
+        self.assertFalse(recorded['R5']['tester_cap_lower_bound'])
+        text = self.report_text(receipt)
+        self.assertIn('LOWER BOUND, not a measured ceiling', text)
+
+
+class RecordBaselineTests(unittest.TestCase):
+    """record_baseline.py: a finished baseline run's rows into rates.json, without re-running anything."""
+
+    S3_RUN = 's3://%s/bench/base-done/' % BUCKET
+
+    def setUp(self):
+        self.bed = Bed()
+        self.env_id = self.bed.env_id()
+        (self.bed.baselines / self.env_id).mkdir(parents=True)
+        (self.bed.baselines / self.env_id / 'env.json').write_text(json.dumps(
+            {'schema': 'rvoip-rfc7502-env-v1', 'env_id': self.env_id}))
+        (self.bed.baselines / 'ENVIRONMENT').write_text(self.env_id + '\n')
+        self.bed.cloud.put(self.S3_RUN + 'state.json', json.dumps({'final': {'status': 'FAIL'}}))
+
+    def tearDown(self):
+        self.bed.close()
+
+    def receipt(self, **over):
+        receipt = {
+            'profile': 'baseline', 'status': 'FAIL', 'run_id': 'base-done', 'candidate_sha': CANDIDATE,
+            'environment': {'env_id': self.env_id}, 'evidence': {'s3_prefix': self.S3_RUN},
+            'rows': [
+                {'id': 'R1', 'r': 14168, 'tester_limited': True, 'verdict': 'pass',
+                 'search': {'result_sps': None, 'highest_passing_sps': 14168,
+                            'stop_reason': 'halt: 3 consecutive invalid trials'}},
+                {'id': 'R2', 'r': None, 'verdict': 'infra',
+                 'search': {'result_sps': None, 'highest_passing_sps': None, 'stop_reason': 'invalid'}},
+                {'id': 'R6', 'r': None, 'verdict': 'fail',
+                 'search': {'result_sps': None, 'highest_passing_sps': 5128,
+                            'stop_reason': 'max_trials (9) without convergence; highest passing rate 5128'}}]}
+        receipt.update(over)
+        path = self.bed.tmp / ('receipt-%d.json' % len(list(self.bed.tmp.glob('receipt-*'))))
+        path.write_text(json.dumps(receipt))
+        return path
+
+    def record(self, receipt, *extra):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = record_baseline.main(['--receipt', str(receipt), '--bucket', BUCKET] + list(extra))
+        return code, out.getvalue()
+
+    def test_records_measured_and_lower_bound_rows(self):
+        code, out = self.record(self.receipt())
+        self.assertEqual(code, 0, out)
+        rates = self.bed.rates()
+        self.assertEqual(sorted(rates['baseline_sps']), ['R1', 'R6'], 'R2 has no result')
+        self.assertEqual((rates['baseline_sps']['R1']['r'], rates['baseline_sps']['R1']['lower_bound']), (14168, False))
+        self.assertTrue(rates['baseline_sps']['R1']['tester_limited'])
+        self.assertEqual((rates['baseline_sps']['R6']['r'], rates['baseline_sps']['R6']['lower_bound']), (5128, True))
+        self.assertEqual(rates['tester_caps'], {'R1': 9492, 'R6': 3432})
+        self.assertEqual(rates['baseline_sps']['R1']['source_run'], self.S3_RUN)
+        self.assertTrue(self.bed.cloud.path(self.S3_RUN + 'record/%s/rates.json' % self.env_id).is_file())
+
+    def test_selected_rows_only_and_merge(self):
+        self.assertEqual(self.record(self.receipt(), '--rows', 'R6')[0], 0)
+        self.assertEqual(sorted(self.bed.rates()['baseline_sps']), ['R6'])
+        self.assertEqual(self.record(self.receipt(), '--rows', 'R1')[0], 0)
+        self.assertEqual(sorted(self.bed.rates()['baseline_sps']), ['R1', 'R6'], 'merged, R6 kept')
+
+    def test_refusals(self):
+        cases = [
+            (self.receipt(profile='minor'), (), 'only a baseline run'),
+            (self.receipt(environment={'env_id': 'aws-other'}), (), 'ENVIRONMENT is'),
+            (self.receipt(status='INFRA'), (), 'never finished'),
+            (self.receipt(), ('--rows', 'R2'), 'no recordable result for R2'),
+        ]
+        for receipt, extra, why in cases:
+            code, out = self.record(receipt, *extra)
+            self.assertEqual(code, 2, out)
+            self.assertIn(why, out)
+        self.bed.cloud.put(self.S3_RUN + 'state.json', json.dumps({'rows': {}}))
+        code, out = self.record(self.receipt())
+        self.assertEqual(code, 2, out)
+        self.assertIn('no final verdict', out)
+        self.assertIsNone(self.bed.rates(), 'nothing recorded by a refusal')
 
 
 if __name__ == '__main__':

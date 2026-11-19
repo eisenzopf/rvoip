@@ -56,6 +56,18 @@ EA -> DUT, media terminates on the DUT). Registration benchmarks do not apply.
   stop the search.
 - **Tester cap** r_max = 0.67 x the §6.1 testbed baseline of the same row; a
   result at the cap reads "R >= cap (tester-limited)".
+- **Baseline values**: a baseline row normally ends on three caller-invalid
+  trials. Its baseline is then the highest passing rate (`tester_limited`), the
+  tester's measured ceiling. A row that only passed until the search ran out of
+  trials or hours never showed that ceiling. It is recorded as its highest
+  passing rate with `lower_bound: true`, and every consumer flags it: rates.json
+  `baseline_sps`, `tester_cap_lower_bound` on each gate row, the receipt row, and
+  "LOWER BOUND, not a measured ceiling" in the report. A DUT search (`minor`,
+  `full`) that runs out of trials still fails. A baseline records only when the
+  whole run passes. `scripts/bench/record_baseline.py --receipt <receipt>
+  [--rows ...]` records a finished baseline run's rows afterwards, without
+  re-running anything. It refuses another profile, an env-id other than
+  ENVIRONMENT, and a run without a final verdict.
 - **Failure classes**: a 503 is a DUT failure (never a tester fault); a non-2xx
   (for example 481) to the caller's BYE is a *disconnect failure*, counted and
   reported, not a Session Attempt Failure.
