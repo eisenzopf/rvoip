@@ -43,34 +43,36 @@ yanked = "warn"
 # rustls-pemfile. Tighten to "workspace" or "all" once those transitive
 # stacks are cleaned up.
 unmaintained = "none"
-# Mirrors the accepted-advisory set enforced by the beta release gate
-# (crates/sip/rvoip-sip/scripts/beta_gate.sh -> `cargo audit`). Each is
-# transitive with no fixed upgrade adopted in the currently pinned versions;
-# full rationale is in the gate's security/accepted-advisories.md. Revisit
-# before stable release / when the upstream stacks publish fixes.
+# The beta/release gate's `cargo audit` (crates/sip/rvoip-sip/scripts/
+# beta_gate.sh, `run_dependency_audit`) ignores exactly the same set; keep
+# the two in step. Each entry names its only path, why the vulnerable code is
+# unreachable as rvoip uses it, and the upstream condition for removing it.
 ignore = [
-    # `rsa` — RustSec reports no fixed upgrade. Used directly by users-core
-    # (RS256 key handling) and transitively by webauthn-rs crypto-glue.
-    # jsonwebtoken signs with aws-lc-rs, not `rsa`.
+    # `rsa` 0.9.10, RUSTSEC-2023-0071 (Marvin: timing leak in RSA
+    # private-key decryption/signing).
+    # Only path: rvoip-webauthn -> webauthn-rs 0.6.1-dev -> webauthn-rs-core /
+    # webauthn-attestation-ca -> crypto-glue 0.1.15 -> rsa 0.9.10. Every other
+    # rsa user, users-core included, is on the fixed rsa 0.10.0.
+    # Unreachable: a WebAuthn relying party only verifies RS256 signatures
+    # with authenticators' public keys; it never holds or uses an RSA private
+    # key, which the attack needs.
+    # Remove when: crypto-glue publishes a release that targets rsa 0.10.0
+    # final (0.2.2 still requires `rsa ^0.10.0-rc.18` with feature `sha2`,
+    # which 0.10.0 final dropped), so webauthn-rs >= 0.6.2 can resolve next
+    # to users-core's rsa 0.10.0.
     "RUSTSEC-2023-0071",
-    # `crypto-bigint` 0.5 — transitive via the RustCrypto elliptic-curve 0.13
-    # stack. rtp-core, jsonwebtoken (aws-lc-rs backend) and webauthn-rs 0.6.2
-    # no longer use it; it remains only through third-party stacks: `dtls`
-    # 0.17 (rtp-core `dtls-webrtc`) and the `rtc-*` 0.20 alphas (`aws-config`
-    # left it at 1.13). The fix ships only in 0.7.6, which needs
-    # elliptic-curve 0.14. Revisit when those move to it.
+    # `crypto-bigint` 0.5.5, RUSTSEC-2026-0387 (non-constant-time arithmetic).
+    # Normal path: the same webauthn stack, crypto-glue 0.1.15 ->
+    # elliptic-curve / ecdsa / p256 / p384 / p521 0.13 -> crypto-bigint 0.5.5.
+    # Dev-only path: the `webrtc` 0.14 dev-dependency -> dtls 0.13.
+    # rtp-core's DTLS-SRTP stack (dtls 0.17.3, p256/p384 0.14) uses the fixed
+    # crypto-bigint 0.7.
+    # Unreachable: the relying party only verifies ECDSA signatures over
+    # public data, with no secret scalars; the dev path never ships.
+    # Remove when: the crypto-glue release above lets webauthn-rs leave the
+    # elliptic-curve 0.13 stack, and the webrtc 0.14 dev-dependency moves off
+    # dtls 0.13 (or is dropped).
     "RUSTSEC-2026-0387",
-    # `libsqlite3-sys` 0.30 (bundled SQLite 3.46) — transitive via
-    # sqlx-sqlite in users-core. The fix is libsqlite3-sys 0.39 (SQLite
-    # 3.54), but every sqlx release caps it below 0.38 (sqlx-sqlite 0.9.0,
-    # which users-core uses: `>=0.30.1, <0.38.0`). Exposure needs a
-    # locally attacker-written database plus `-wal` pair; users-core opens
-    # only its own configured database. Revisit when sqlx allows 0.39.
-    "RUSTSEC-2026-0459",
-    # `rustls-webpki` — transitive via the rustls stack. Revisit on the fixed line.
-    "RUSTSEC-2026-0104",
-    "RUSTSEC-2026-0098",
-    "RUSTSEC-2026-0099",
 ]
 
 # License compliance — permissive default; revisit when shipping
