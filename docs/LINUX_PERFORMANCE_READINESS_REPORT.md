@@ -226,7 +226,7 @@ The meaningful operating-system-specific runtime behavior is primarily socket
 configuration. In `crates/media/rtp-core/src/transport/validation.rs`, macOS
 and Linux both use:
 
-- `SO_REUSEADDR=true`;
+- `SO_REUSEADDR=false` (it let other sockets share a media port);
 - `SO_REUSEPORT=false`;
 - separate IPv4/IPv6 behavior; and
 - 131,072-byte RTP send and receive buffer requests.

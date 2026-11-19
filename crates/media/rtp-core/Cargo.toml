@@ -80,12 +80,18 @@ rustls = { workspace = true, optional = true }
 # are used from this.
 webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
 
+# Windows media binds go through socket2 so SO_EXCLUSIVEADDRUSE can be set
+# before bind (see transport/validation.rs, `bind_media_udp_socket`).
+[target.'cfg(windows)'.dependencies]
+socket2 = { workspace = true }
+
 [features]
 default = []
 memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]
 dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util", "dep:rustls"]
 
 [dev-dependencies]
+socket2 = { workspace = true }
 criterion = { workspace = true }
 # Paused-clock tests for the RFC 3550 RTCP report interval.
 tokio = { version = "1.41", features = ["full", "test-util"] }

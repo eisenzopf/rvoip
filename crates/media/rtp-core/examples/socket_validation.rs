@@ -30,18 +30,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PlatformType::Windows => {
             info!("Windows socket notes:");
             info!("- Windows uses Winsock API rather than Berkeley sockets");
-            info!("- SO_REUSEADDR behaves differently than on Unix systems");
+            info!("- A later SO_REUSEADDR socket can take a held port; media sockets never set it");
             info!("- Windows has no direct equivalent to Unix's SO_REUSEPORT");
         }
         PlatformType::MacOS => {
             info!("macOS socket notes:");
-            info!("- Typically requires both SO_REUSEADDR AND SO_REUSEPORT");
+            info!("- A duplicate UDP bind needs SO_REUSEPORT on both sockets; media sockets set neither");
             info!("- Has more BSD-like socket behavior");
             info!("- IPV6_V6ONLY defaults to ON (IPv6 sockets don't handle IPv4)");
         }
         PlatformType::Linux => {
             info!("Linux socket notes:");
-            info!("- Usually SO_REUSEADDR alone is sufficient");
+            info!("- Two SO_REUSEADDR UDP sockets can share a port; media sockets never set it");
             info!("- SO_REUSEPORT has different semantics (load balancing)");
             info!("- Older kernels default IPV6_V6ONLY to OFF");
         }
@@ -150,7 +150,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Demonstrate socket rebinding
-    info!("\nDemonstrating socket rebinding (requiring SO_REUSEADDR)...");
+    info!(
+        "\nDemonstrating socket rebinding (UDP has no TIME_WAIT, so no SO_REUSEADDR is needed)..."
+    );
 
     // Close socket1 by dropping it
     drop(socket1);

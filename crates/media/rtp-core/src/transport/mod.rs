@@ -175,6 +175,7 @@ pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, SrtpContextRollback, UdpRtpTransport};
 pub(crate) use udp::{RemotePeerAddrs, TxDestCache, TxPayload, MAX_TX_BATCH};
+pub(crate) use validation::bind_media_udp_socket;
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
 
 /// Inbound SRTP packets dropped by this process's RTP transports because they

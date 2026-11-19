@@ -4206,6 +4206,7 @@ dependencies = [
  "rvoip-infra-common",
  "sha1 0.11.0",
  "sha2 0.11.1",
+ "socket2",
  "thiserror 2.0.19",
  "time",
  "tokio",
@@ -4364,6 +4365,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "webpki-roots 1.0.11",
+ "winapi",
 ]
 
 [[package]]

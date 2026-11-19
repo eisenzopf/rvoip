@@ -43,22 +43,58 @@ pub(crate) fn bind_std_udp_socket(
         socket.set_send_buffer_size(size)?;
     }
 
-    // Allow rebinding the same local address right after a prior socket on it
-    // closes. Without SO_REUSEADDR, a teardown-then-rebind on the same port
-    // (e.g. re-login after a failed REGISTER) can race the OS socket release
-    // and fail with EADDRINUSE.
+    // No SO_REUSEADDR, on any port. UDP has no TIME_WAIT: once the previous
+    // socket on a port is closed (dropped, or its process exits or is killed)
+    // the kernel frees the port and a plain bind of it succeeds at once.
     //
-    // Only an explicit port needs that. A port-0 bind never rebinds a known
-    // port, and on Linux a reuse-flagged port-0 bind can be handed a port
-    // that another reuse-flagged UDP socket already holds: the newer socket
-    // then receives every datagram sent to that port, so one transport
-    // silently loses its SIP responses to the other.
-    if addr.port() != 0 {
-        socket.set_reuse_address(true)?;
-    }
+    // The flag only matters while another socket still holds the port. On
+    // Linux two UDP sockets that both set it may bind the same address and
+    // port, from any process and any user, and the newer one then receives
+    // every datagram sent there: a transport that set it could have its SIP
+    // traffic silently taken by any other reuse-flagged socket, and a port-0
+    // bind could be handed a port a reuse-flagged socket already held.
+    //
+    // macOS and the BSDs need SO_REUSEPORT on both sockets for a duplicate
+    // unicast bind, so there the flag never let a second bind of a held port
+    // succeed.
+    //
+    // Windows differs again: a later socket that sets SO_REUSEADDR can bind
+    // a port this socket holds, and take its datagrams, whatever this socket
+    // set, unless this socket set SO_EXCLUSIVEADDRUSE before its bind. So
+    // Windows sets it here.
+    #[cfg(windows)]
+    set_exclusive_address_use(&socket)?;
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
+}
+
+/// Set `SO_EXCLUSIVEADDRUSE` on a socket that is not yet bound, so that no
+/// other socket can bind the same address and port while it is open, even one
+/// that sets `SO_REUSEADDR`. The two options are mutually exclusive on
+/// Windows: a socket that has one cannot also set the other, so these SIP
+/// sockets never set `SO_REUSEADDR`.
+#[cfg(windows)]
+fn set_exclusive_address_use(socket: &Socket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use winapi::um::winsock2 as ws2;
+
+    let enable: i32 = 1;
+    // SAFETY: `socket` is a live socket for the duration of the call, and
+    // `optval`/`optlen` describe a valid, readable `i32`.
+    let rc = unsafe {
+        ws2::setsockopt(
+            socket.as_raw_socket() as ws2::SOCKET,
+            ws2::SOL_SOCKET,
+            ws2::SO_EXCLUSIVEADDRUSE,
+            &enable as *const i32 as *const winapi::ctypes::c_char,
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if rc == ws2::SOCKET_ERROR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -79,7 +115,7 @@ mod tests {
     #[test]
     fn rebinds_same_port_after_drop() {
         // Discover a free port, release it, then immediately rebind the same
-        // port — the SO_REUSEADDR path must not fail with EADDRINUSE.
+        // port. UDP has no TIME_WAIT, so the rebind needs no SO_REUSEADDR.
         let probe =
             bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
                 .expect("probe bind");
@@ -91,24 +127,58 @@ mod tests {
         assert_eq!(rebind.local_addr().unwrap().port(), addr.port());
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn ephemeral_bind_does_not_share_its_port() {
-        // A port-0 bind must own its port outright. If it set SO_REUSEADDR,
-        // Linux would let any other reuse-flagged UDP socket share the port
-        // (and hand it out again on another port-0 bind); the newer socket
-        // then receives every datagram sent to that port, silently taking
-        // this transport's SIP responses.
-        let ephemeral =
-            bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
-                .expect("ephemeral bind");
-        let addr = ephemeral.local_addr().unwrap();
-
+    /// A second socket that sets `SO_REUSEADDR` must not be able to bind the
+    /// transport's port. On Linux it could if the transport also set the
+    /// flag, and on Windows unless the transport set `SO_EXCLUSIVEADDRUSE`;
+    /// the newer socket then receives every datagram sent to that port,
+    /// silently taking this transport's SIP traffic.
+    #[cfg(any(unix, windows))]
+    fn assert_port_not_shareable(addr: SocketAddr) {
         let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
         intruder.set_reuse_address(true).unwrap();
         let err = intruder
             .bind(&addr.into())
-            .expect_err("a second socket must not share an ephemeral SIP port");
-        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+            .expect_err("a second socket must not share a SIP UDP port");
+        assert_refused(&err);
+    }
+
+    /// Unix refuses the bind with `EADDRINUSE`. Windows documents a refused
+    /// bind against an `SO_EXCLUSIVEADDRUSE` holder as `WSAEADDRINUSE` or
+    /// `WSAEACCES` depending on the two sockets' options, so accept either.
+    #[cfg(any(unix, windows))]
+    fn assert_refused(err: &io::Error) {
+        #[cfg(unix)]
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "{err}");
+        #[cfg(windows)]
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+            ),
+            "{err}"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn ephemeral_bind_does_not_share_its_port() {
+        let ephemeral =
+            bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
+                .expect("ephemeral bind");
+        assert_port_not_shareable(ephemeral.local_addr().unwrap());
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn explicit_bind_does_not_share_its_port() {
+        let probe =
+            bind_std_udp_socket("127.0.0.1:0".parse().unwrap(), UdpSocketOptions::default())
+                .expect("probe bind");
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+
+        let explicit =
+            bind_std_udp_socket(addr, UdpSocketOptions::default()).expect("explicit-port bind");
+        assert_port_not_shareable(explicit.local_addr().unwrap());
     }
 }
