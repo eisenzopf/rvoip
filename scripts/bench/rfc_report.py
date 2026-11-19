@@ -305,7 +305,16 @@ def baseline_value(ctx, row):
         value, limited = result.get('result_sps'), bool(result.get('tester_limited'))
         if value is None and result.get('highest_passing_sps') and 'invalid' in str(result.get('stop_reason', '')):
             return result['highest_passing_sps'], True, 'stopped on consecutive caller-invalid trials: lower bound'
+        if (value is None and result.get('highest_passing_sps')
+                and str(result.get('stop_reason') or '').startswith(('max_trials', 'max_hours'))):
+            return (result['highest_passing_sps'], True,
+                    'LOWER BOUND, not a measured ceiling: every trial passed and the search stopped (%s)'
+                    % result['stop_reason'])
         return value, limited, item['search']
+    if item.get('lower_bound'):
+        return (item.get('result_sps'), True,
+                'LOWER BOUND, not a measured ceiling (the tester\'s ceiling was never observed): %s'
+                % (item.get('source') or PENDING))
     return item.get('result_sps'), bool(item.get('tester_limited')), item.get('source')
 
 

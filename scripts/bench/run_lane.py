@@ -781,7 +781,8 @@ def run_confirm(ctx, row_id, recorded):
     row = profiles.ROWS[row_id]
     r = recorded['r']
     result = {'id': row_id, 'transport': row['transport'], 'media': row['media'], 'hold_ms': row['hold_ms'],
-              'recorded_r': r, 'tester_cap': recorded.get('tester_cap'), 'trials': []}
+              'recorded_r': r, 'tester_cap': recorded.get('tester_cap'),
+              'tester_cap_lower_bound': bool(recorded.get('tester_cap_lower_bound')), 'trials': []}
     plan = [('confirm', f) for f in p['confirm']] + [('probe_up', p['probe_up']), ('latency', p['latency_at'])]
     index = len(result['trials'])
     for kind, factor in plan:
@@ -825,6 +826,17 @@ def run_confirm(ctx, row_id, recorded):
     return result
 
 
+def baseline_lower_bound(search_outcome):
+    """The §6.1 baseline value of a search that ran out of trials or time before it saw the tester's ceiling
+    (every trial at or below its highest passing rate passed), else None. Recorded as a lower bound, flagged
+    `lower_bound` wherever rates are read, never as a measured ceiling. ea-uas baselines only: a DUT search
+    that stops this way has not converged and fails."""
+    stop = (search_outcome or {}).get('stop_reason') or ''
+    if (search_outcome or {}).get('result_sps') is None and stop.startswith(('max_trials', 'max_hours')):
+        return (search_outcome or {}).get('highest_passing_sps') or None
+    return None
+
+
 def run_search_row(ctx, row_id, recorded, caps):
     """minor/full/baseline: bisect or exact §4.10 search of one row (scripts/bench/search.py)."""
     p = profiles.PROFILES[ctx.args.profile]
@@ -864,6 +876,7 @@ def run_search_row(ctx, row_id, recorded, caps):
         trials = [search_record(t, ctx.s3_run) for t in json.loads((folder / 'search.json').read_text()).get('trials', [])]
     result = {'id': row_id, 'transport': row['transport'], 'media': row['media'], 'hold_ms': row['hold_ms'],
               'recorded_r': (recorded or {}).get('r'), 'tester_cap': cap,
+              'tester_cap_lower_bound': row_id in ctx.args.cap_lower_bound,
               'search': {k: outcome.get(k) for k in ('algorithm', 'result_sps', 'stop_reason', 'tester_limited',
                                                       'highest_passing_sps', 'lowest_failing_sps', 'halted',
                                                       'trials', 'valid_trials', 'parameters')},
@@ -875,6 +888,10 @@ def run_search_row(ctx, row_id, recorded, caps):
         # The baseline is then >= the highest passing rate (E74: "stopped: 3 consecutive invalid trials").
         r = outcome['highest_passing_sps']
         outcome['tester_limited'] = True
+    if r is None and ctx.lane.ea_uas and baseline_lower_bound(outcome):
+        r = baseline_lower_bound(outcome)
+        result['lower_bound'] = True
+        result['lower_bound_reason'] = outcome.get('stop_reason')
     if r is None:
         reason = outcome.get('halted') or stop or 'no result'
         result['verdict'] = 'infra' if 'invalid' in reason else 'fail'
@@ -1090,6 +1107,7 @@ def parse_args(argv):
         args.reserve_capacity = bool(profiles.PROFILES[args.profile].get('reserve_capacity'))
     args.env_tag = None    # the env-id the lane's reservations are tagged with (set once resolved)
     args.caller_media = None    # env.json caller_media (set once resolved)
+    args.cap_lower_bound = set()    # rows whose tester cap comes from a lower-bound baseline
     args.r0 = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.r0)}
     args.cap = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.cap)}
     args.run_id = args.run_id or 'bench-%s-%s-%s' % (args.profile, args.candidate[:12], stamp())
@@ -1284,6 +1302,9 @@ def run(argv=None):
         log('env-id', env_id, 'rates', rates_path if rates else 'none recorded')
         # A baseline measures the testbed itself: never capped by, or seeded from, what it recorded before.
         caps = dict({} if profile.get('ea_uas') else (rates or {}).get('tester_caps', {}), **args.cap)
+        # Caps from a lower-bound baseline row (the tester's ceiling never observed) are flagged in every row.
+        args.cap_lower_bound = {row for row, b in ((rates or {}).get('baseline_sps') or {}).items()
+                                if b.get('lower_bound') and row not in args.cap}
         if args.profile == 'release' and not rates:
             raise Usage('no recorded rates for %s (%s): run baseline and minor --record first' % (env_id, rates_path))
         for row_id in rows_wanted:

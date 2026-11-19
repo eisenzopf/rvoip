@@ -104,7 +104,7 @@ JSON style as `gates.py` (sorted keys, no whitespace).
   "rows": [
     {
       "id": "R1", "transport": "tls", "media": "none", "hold_ms": 0,
-      "recorded_r": 5000, "tester_cap": 6300,
+      "recorded_r": 5000, "tester_cap": 6300, "tester_cap_lower_bound": false,
       "trials": [
         {"factor": 0.95, "rate": 4748, "attempted": 904000, "established": 904000,
          "attempt_failures": 0, "disconnect_failures": 0, "status_counts": {"200": 904000},
@@ -163,8 +163,15 @@ attaches to the GitHub release.
 ```json
 {"schema": "rvoip-rfc7502-rates-v1", "env_id": "...", "recorded_at": "...",
  "source_run": "s3://...", "candidate_sha": "...",
- "rows": {"R1": {"r": 5000, "tester_cap": 6300, "srd_ms": {...}, "sdd_ms": {...}}}}
+ "rows": {"R1": {"r": 5000, "tester_cap": 6300, "tester_cap_lower_bound": false,
+                 "srd_ms": {...}, "sdd_ms": {...}}},
+ "tester_caps": {"R1": 9492},
+ "baseline_sps": {"R1": {"r": 14168, "tester_limited": true, "lower_bound": false, "source_run": "s3://..."}}}
 ```
+
+`tester_cap_lower_bound` / `lower_bound` true: the cap comes from a §6.1
+baseline that only passed, so the tester's ceiling was never observed. The cap
+is still enforced, but read it as at least, not as a measured ceiling.
 
 `perf-baselines/rfc7502/ENVIRONMENT` names the current env-id. A new env-id
 (new AMI, caller build or instance type) needs a `baseline` run and a `minor`

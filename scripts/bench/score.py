@@ -183,6 +183,10 @@ def _finding(r):
         return 'R4 overload at the ceiling C = %s sps: %s%s.' % (r.get('ceiling'), r.get('verdict'), why)
     if r.get('r') is None:
         return '%s: no result: %s%s.' % (r['id'], r.get('verdict'), why)
+    if r.get('lower_bound'):
+        return ('%s: baseline >= %s sps, a lower bound: every trial passed and the search stopped (%s) before the '
+                'tester\'s ceiling was observed; verdict %s%s.' % (r['id'], r['r'], r.get('lower_bound_reason'),
+                                                                    r.get('verdict'), why))
     return '%s: R %s %s sps%s; verdict %s%s.' % (r['id'], '>=' if r.get('tester_limited') else '=', r['r'],
                                                  ' (tester-limited)' if r.get('tester_limited') else '',
                                                  r.get('verdict'), why)
@@ -221,6 +225,7 @@ def render_report(ctx, rows, env_id, baseline=None):
         spec['baseline'] = {r['id']: {'search': '%s/search.json' % r['id']} for r in rows if r.get('search')}
     elif baseline:
         spec['baseline'] = {row: {'result_sps': b.get('r'), 'tester_limited': b.get('tester_limited'),
+                                  'lower_bound': bool(b.get('lower_bound')),
                                   'source': 'rates.json baseline_sps (%s)' % b.get('source_run')}
                             for row, b in baseline.items()}
     spec['findings'] = [_finding(r) for r in rows]
@@ -255,13 +260,18 @@ def record_rates(rows, env_id, baselines, ctx, profile, out=None):
             continue
         if profile == 'baseline':
             current['baseline_sps'][r['id']] = {'r': r['r'], 'tester_limited': r.get('tester_limited'),
+                                                'lower_bound': bool(r.get('lower_bound')),
                                                 'source_run': ctx.s3_run, 'recorded_at': now}
+            if r.get('lower_bound'):
+                current['baseline_sps'][r['id']]['lower_bound_reason'] = r.get('lower_bound_reason')
             q = 4
             current['tester_caps'][r['id']] = max(q, int(r['r'] * 0.67) // q * q)
         else:
             lat = r.get('latency') or {}
             current['rows'][r['id']] = {'r': r['r'], 'tester_limited': r.get('tester_limited'),
                                         'tester_cap': current['tester_caps'].get(r['id']),
+                                        'tester_cap_lower_bound': bool(
+                                            (current['baseline_sps'].get(r['id']) or {}).get('lower_bound')),
                                         'srd_ms': lat.get('srd_ms'), 'sdd_ms': lat.get('sdd_ms'),
                                         'latency_rate': lat.get('rate'),
                                         'source_run': ctx.s3_run, 'candidate_sha': ctx.args.candidate,
