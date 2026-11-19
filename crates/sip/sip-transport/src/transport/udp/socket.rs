@@ -56,12 +56,45 @@ pub(crate) fn bind_std_udp_socket(
     //
     // macOS and the BSDs need SO_REUSEPORT on both sockets for a duplicate
     // unicast bind, so there the flag never let a second bind of a held port
-    // succeed. Windows differs again: a later socket that sets SO_REUSEADDR
-    // can bind a held port whatever the holder set, unless the holder sets
-    // SO_EXCLUSIVEADDRUSE.
+    // succeed.
+    //
+    // Windows differs again: a later socket that sets SO_REUSEADDR can bind
+    // a port this socket holds, and take its datagrams, whatever this socket
+    // set, unless this socket set SO_EXCLUSIVEADDRUSE before its bind. So
+    // Windows sets it here.
+    #[cfg(windows)]
+    set_exclusive_address_use(&socket)?;
     socket.bind(&addr.into())?;
     socket.set_nonblocking(true)?;
     Ok(socket.into())
+}
+
+/// Set `SO_EXCLUSIVEADDRUSE` on a socket that is not yet bound, so that no
+/// other socket can bind the same address and port while it is open, even one
+/// that sets `SO_REUSEADDR`. The two options are mutually exclusive on
+/// Windows: a socket that has one cannot also set the other, so these SIP
+/// sockets never set `SO_REUSEADDR`.
+#[cfg(windows)]
+fn set_exclusive_address_use(socket: &Socket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use winapi::um::winsock2 as ws2;
+
+    let enable: i32 = 1;
+    // SAFETY: `socket` is a live socket for the duration of the call, and
+    // `optval`/`optlen` describe a valid, readable `i32`.
+    let rc = unsafe {
+        ws2::setsockopt(
+            socket.as_raw_socket() as ws2::SOCKET,
+            ws2::SOL_SOCKET,
+            ws2::SO_EXCLUSIVEADDRUSE,
+            &enable as *const i32 as *const winapi::ctypes::c_char,
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if rc == ws2::SOCKET_ERROR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -96,19 +129,37 @@ mod tests {
 
     /// A second socket that sets `SO_REUSEADDR` must not be able to bind the
     /// transport's port. On Linux it could if the transport also set the
-    /// flag, and the newer socket then receives every datagram sent to that
-    /// port, silently taking this transport's SIP traffic.
-    #[cfg(unix)]
+    /// flag, and on Windows unless the transport set `SO_EXCLUSIVEADDRUSE`;
+    /// the newer socket then receives every datagram sent to that port,
+    /// silently taking this transport's SIP traffic.
+    #[cfg(any(unix, windows))]
     fn assert_port_not_shareable(addr: SocketAddr) {
         let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
         intruder.set_reuse_address(true).unwrap();
         let err = intruder
             .bind(&addr.into())
             .expect_err("a second socket must not share a SIP UDP port");
-        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert_refused(&err);
     }
 
-    #[cfg(unix)]
+    /// Unix refuses the bind with `EADDRINUSE`. Windows documents a refused
+    /// bind against an `SO_EXCLUSIVEADDRUSE` holder as `WSAEADDRINUSE` or
+    /// `WSAEACCES` depending on the two sockets' options, so accept either.
+    #[cfg(any(unix, windows))]
+    fn assert_refused(err: &io::Error) {
+        #[cfg(unix)]
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse, "{err}");
+        #[cfg(windows)]
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+            ),
+            "{err}"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
     #[test]
     fn ephemeral_bind_does_not_share_its_port() {
         let ephemeral =
@@ -117,7 +168,7 @@ mod tests {
         assert_port_not_shareable(ephemeral.local_addr().unwrap());
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn explicit_bind_does_not_share_its_port() {
         let probe =

@@ -11,6 +11,58 @@ use tracing::{debug, error, info, warn};
 use crate::error::Error;
 use crate::Result;
 
+/// Bind a media UDP socket that no other socket can share while it is open.
+///
+/// On every platform other than Windows this is a plain bind: as long as this
+/// socket sets neither `SO_REUSEADDR` nor `SO_REUSEPORT`, the kernel refuses
+/// any other socket that tries to bind the same address and port.
+///
+/// Windows lets a later socket that sets `SO_REUSEADDR` bind a port that is
+/// already held, and take its datagrams, whatever the holder set, unless the
+/// holder set `SO_EXCLUSIVEADDRUSE` before its own bind. Tokio and std bind as
+/// they create the socket, so on Windows the socket is created with socket2,
+/// given `SO_EXCLUSIVEADDRUSE`, then bound and handed to tokio. The option and
+/// `SO_REUSEADDR` are mutually exclusive on Windows.
+pub(crate) async fn bind_media_udp_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+    #[cfg(not(windows))]
+    {
+        UdpSocket::bind(addr).await
+    }
+    #[cfg(windows)]
+    {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let socket = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+        set_exclusive_address_use(&socket)?;
+        socket.bind(&addr.into())?;
+        socket.set_nonblocking(true)?;
+        UdpSocket::from_std(socket.into())
+    }
+}
+
+/// Set `SO_EXCLUSIVEADDRUSE` on a socket that is not yet bound.
+#[cfg(windows)]
+fn set_exclusive_address_use(socket: &socket2::Socket) -> io::Result<()> {
+    use std::os::windows::io::AsRawSocket;
+    use winapi::um::winsock2 as ws2;
+
+    let enable: i32 = 1;
+    // SAFETY: `socket` is a live socket for the duration of the call, and
+    // `optval`/`optlen` describe a valid, readable `i32`.
+    let rc = unsafe {
+        ws2::setsockopt(
+            socket.as_raw_socket() as ws2::SOCKET,
+            ws2::SOL_SOCKET,
+            ws2::SO_EXCLUSIVEADDRUSE,
+            &enable as *const i32 as *const winapi::ctypes::c_char,
+            std::mem::size_of::<i32>() as i32,
+        )
+    };
+    if rc == ws2::SOCKET_ERROR {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Platform type detection for platform-specific code paths
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformType {
@@ -70,6 +122,9 @@ pub struct PlatformSocketStrategy {
     /// then bind the same address and port and receive every datagram sent
     /// to it; on Windows a later `SO_REUSEADDR` socket can take the port
     /// whatever this one sets. Turn it on only when that sharing is wanted.
+    /// On Windows media sockets are bound with `SO_EXCLUSIVEADDRUSE` (see
+    /// `bind_media_udp_socket`), which excludes `SO_REUSEADDR`: turning this
+    /// on there makes [`Self::apply_to_socket`] fail.
     pub use_reuse_addr: bool,
 
     /// Whether to set `SO_REUSEPORT` on the socket (when available). Off in

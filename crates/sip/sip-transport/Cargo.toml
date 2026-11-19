@@ -59,6 +59,10 @@ fastrand = { workspace = true, optional = true }
 # Add futures-util dependency
 futures-util = "0.3"
 
+# SO_EXCLUSIVEADDRUSE for SIP UDP binds on Windows (see transport/udp/socket.rs).
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winsock2", "ws2def"] }
+
 [features]
 default = ["udp", "tcp", "tls", "ws", "wss"]
 udp = []

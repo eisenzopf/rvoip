@@ -334,7 +334,7 @@ use super::allocator::{GlobalPortAllocator, PairingStrategy, PortAllocator};
 use super::rx_hot::{RxHot, RxHotVerdict};
 use super::srtp_rx::{OwnerSrtpRx, PreviousRecv, SrtpRecvShared, SrtpRecvSlot};
 use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
-use super::validation::PlatformSocketStrategy;
+use super::validation::{bind_media_udp_socket, PlatformSocketStrategy};
 use super::{RtpTransport, RtpTransportConfig, SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 use crate::error::Error;
 use crate::executor::{
@@ -1213,7 +1213,7 @@ impl UdpRtpTransport {
         } else {
             // Traditional socket binding without the allocator
             // Create RTP socket
-            let socket_rtp = UdpSocket::bind(config.local_rtp_addr)
+            let socket_rtp = bind_media_udp_socket(config.local_rtp_addr)
                 .await
                 .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
 
@@ -1242,7 +1242,7 @@ impl UdpRtpTransport {
                 };
 
                 // Create RTCP socket
-                let socket_rtcp = UdpSocket::bind(local_rtcp_addr)
+                let socket_rtcp = bind_media_udp_socket(local_rtcp_addr)
                     .await
                     .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
 
@@ -4153,9 +4153,11 @@ mod tests {
     /// A second socket that sets `SO_REUSEADDR` must not be able to bind a
     /// live media port. On Linux it could when the media socket also had the
     /// flag (even set after bind), and the newer socket then receives every
-    /// datagram sent to the port. Unix only: see the sip-transport
-    /// `udp_port_hijack` test for the macOS and Windows semantics.
-    #[cfg(unix)]
+    /// datagram sent to the port; on Windows it could unless the media socket
+    /// set `SO_EXCLUSIVEADDRUSE`. See the sip-transport `udp_port_hijack` test
+    /// for the macOS semantics. rvoip's CI runs on Linux only, so the Windows
+    /// build of this test is compile-checked, not run.
+    #[cfg(any(unix, windows))]
     fn assert_media_port_not_shareable(addr: SocketAddr, what: &str) {
         use socket2::{Domain, Protocol, Socket, Type};
         let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
@@ -4177,15 +4179,16 @@ mod tests {
                     "hijack: a second SO_REUSEADDR socket bound the {what} port {addr} {outcome}"
                 );
             }
-            Err(err) => assert_eq!(
-                err.kind(),
-                std::io::ErrorKind::AddrInUse,
+            // Windows reports the refusal as WSAEADDRINUSE or WSAEACCES.
+            Err(err) => assert!(
+                err.kind() == std::io::ErrorKind::AddrInUse
+                    || (cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied),
                 "the intruder on the {what} port must be refused with EADDRINUSE, got {err}"
             ),
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[tokio::test]
     async fn reuse_flagged_socket_cannot_take_an_explicit_media_port() {
         let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-port-hijack").await;

@@ -80,6 +80,11 @@ rustls = { workspace = true, optional = true }
 # are used from this.
 webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
 
+# Windows media binds go through socket2 so SO_EXCLUSIVEADDRUSE can be set
+# before bind (see transport/validation.rs, `bind_media_udp_socket`).
+[target.'cfg(windows)'.dependencies]
+socket2 = { workspace = true }
+
 [features]
 default = []
 memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]

@@ -7,13 +7,15 @@
 //! bind the transport's port with it and silently receive the transport's SIP
 //! traffic. Without the flag on the transport the kernel refuses that bind.
 //!
-//! Unix only. On macOS and the BSDs a duplicate unicast bind needs
-//! `SO_REUSEPORT` on both sockets, so the intruder is refused there whether or
-//! not the transport sets `SO_REUSEADDR`: the test passes but shows nothing
-//! the Linux run does not. On Windows `SO_REUSEADDR` lets a second socket bind
-//! a port whatever the holder set (only `SO_EXCLUSIVEADDRUSE` on the holder
-//! stops it), so the assertion does not hold there.
-#![cfg(unix)]
+//! On macOS and the BSDs a duplicate unicast bind needs `SO_REUSEPORT` on both
+//! sockets, so the intruder is refused there whether or not the transport sets
+//! `SO_REUSEADDR`: the test passes but shows nothing the Linux run does not.
+//! On Windows `SO_REUSEADDR` lets a second socket bind a held port whatever
+//! the holder set, unless the holder set `SO_EXCLUSIVEADDRUSE` before its
+//! bind, which the transport does there. Windows reports the refused bind as
+//! `WSAEADDRINUSE` or `WSAEACCES`. rvoip's CI runs on Linux only, so the
+//! Windows build of this test is compile-checked, not run.
+#![cfg(any(unix, windows))]
 
 use std::io;
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
@@ -50,6 +52,16 @@ async fn transport_on_explicit_port() -> (UdpTransport, mpsc::Receiver<Transport
     panic!("could not bind a SIP UDP transport to an explicit loopback port");
 }
 
+/// Unix refuses the intruder with `EADDRINUSE`; Windows with `WSAEADDRINUSE`
+/// or `WSAEACCES`.
+fn refused(err: &io::Error) -> bool {
+    match err.kind() {
+        io::ErrorKind::AddrInUse => true,
+        io::ErrorKind::PermissionDenied => cfg!(windows),
+        _ => false,
+    }
+}
+
 #[tokio::test]
 async fn reuse_flagged_socket_cannot_take_an_explicit_sip_udp_port() {
     let (transport, mut events, addr) = transport_on_explicit_port().await;
@@ -76,9 +88,8 @@ async fn reuse_flagged_socket_cannot_take_an_explicit_sip_udp_port() {
                 "hijack: a second SO_REUSEADDR socket bound the transport's port {addr} {outcome}"
             );
         }
-        Err(err) => assert_eq!(
-            err.kind(),
-            io::ErrorKind::AddrInUse,
+        Err(err) => assert!(
+            refused(&err),
             "the intruder must be refused with EADDRINUSE, got {err}"
         ),
     }

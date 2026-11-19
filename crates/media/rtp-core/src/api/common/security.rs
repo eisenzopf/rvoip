@@ -12,6 +12,7 @@ use crate::api::server::security::srtp::SrtpServerSecurityContext;
 use crate::api::server::security::{
     DefaultServerSecurityContext, ServerSecurityContext, SocketHandle,
 };
+use crate::transport::bind_media_udp_socket;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -127,7 +128,7 @@ impl SecurityManager {
 
         // Bind a socket for DTLS
         let socket =
-            Arc::new(UdpSocket::bind(socket_addr).await.map_err(|e| {
+            Arc::new(bind_media_udp_socket(socket_addr).await.map_err(|e| {
                 SecurityError::Configuration(format!("Failed to bind socket: {}", e))
             })?);
 
@@ -298,7 +299,7 @@ impl SecurityManager {
         // Bind a socket for DTLS
         let local_addr = SocketAddr::new(remote_addr.ip(), 0); // Use ephemeral port
         let socket =
-            Arc::new(UdpSocket::bind(local_addr).await.map_err(|e| {
+            Arc::new(bind_media_udp_socket(local_addr).await.map_err(|e| {
                 SecurityError::Configuration(format!("Failed to bind socket: {}", e))
             })?);
 
