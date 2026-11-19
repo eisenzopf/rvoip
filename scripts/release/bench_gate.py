@@ -48,7 +48,7 @@ ROOT = Path(__file__).resolve().parents[2]
 RUN_LANE = ROOT / "scripts/bench/run_lane.py"
 BASELINES = Path("crates/sip/rvoip-sip/perf-baselines/rfc7502")
 DUT_PACKAGE = "rvoip-bench-uas"
-DEFAULT_MAX_WALL_MINUTES = 330
+DEFAULT_MAX_WALL_MINUTES = 310
 # A leg waits this long for EC2 capacity (a reservation or launch miss) before failing INFRA. The wait counts
 # against --max-wall, so it never lengthens a job; a lane that waited resumes in the next leg.
 CAPACITY_WAIT_MINUTES = 90

@@ -321,8 +321,12 @@ jobs:
 
   # bench-minor takes about 11 hours, longer than one hosted job or one
   # provisioner session. These legs advance the same lane (one run id,
-  # `--resume`, a 330-minute budget each) before gate-bench finishes it and
-  # records the receipt; a lane that completes early makes later legs no-ops.
+  # `--resume`, a 300-minute budget each) before gate-bench (310 minutes)
+  # finishes it and records the receipt; a lane that completes early makes
+  # later legs no-ops. Each job keeps at least 45 minutes beyond its budget
+  # for checkout, toolchain, packages, a cold DUT build and teardown, so
+  # GitHub's job timeout never lands mid-teardown (test_workflow_policy).
+  # Capacity waits count inside the budget.
   bench-leg-1:
     name: bench / minor lane, leg 1
     if: contains(needs.plan.outputs.bench_matrix, 'perf.rfc7502-minor')
@@ -363,7 +367,7 @@ jobs:
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
         run: >-
           python3 scripts/release/bench_gate.py --advance
-          --profile minor --candidate "$CANDIDATE" --max-wall 330
+          --profile minor --candidate "$CANDIDATE" --max-wall 300
           --receipt target/bench-leg/bench-receipt.json
 
   bench-leg-2:
@@ -406,7 +410,7 @@ jobs:
           CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
         run: >-
           python3 scripts/release/bench_gate.py --advance
-          --profile minor --candidate "$CANDIDATE" --max-wall 330
+          --profile minor --candidate "$CANDIDATE" --max-wall 300
           --receipt target/bench-leg/bench-receipt.json
 
 
@@ -460,7 +464,7 @@ jobs:
       - name: Run benchmark lane gate
         env:
           RVOIP_BENCH_RUN_ID: ${{ github.run_id }}
-          RVOIP_BENCH_MAX_WALL: "330"
+          RVOIP_BENCH_MAX_WALL: "310"
           RVOIP_AWS_REGION: ${{ vars.RVOIP_AWS_REGION }}
           RVOIP_AWS_EVIDENCE_BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
           RVOIP_AWS_SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}

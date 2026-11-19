@@ -60,11 +60,14 @@ not by the candidate, and run_lane fetches and hash-checks them itself
 (requested of the benchmark work).
 
 `release-qualify.yml` runs the gate in the `gate-bench` job (`ubuntu-latest`,
-350 minutes, the provisioner role through OIDC, a 330-minute `--max-wall`).
+360 minutes, the provisioner role through OIDC, a 310-minute `--max-wall`).
 `bench-release` (about 3.5 h) fits in that one job. `bench-minor` (about
 11 h) does not, so two earlier jobs, `bench-leg-1` and `bench-leg-2`, call
 the wrapper with `--advance` to continue the same lane: same run id,
-`--resume`, a fresh role session and a 330-minute budget each. The final
+`--resume`, a fresh role session, and a 300-minute budget inside a
+350-minute job each. Every bench job keeps at least 45 minutes beyond its
+`--max-wall` for checkout, toolchain, packages, a cold DUT build and
+teardown; capacity waits count inside the budget. The final
 `gate-bench` call finds the lane complete or nearly so and, through
 `gates.py run-shard`, records the gate receipt. A lane that finishes early
 makes the later calls cheap: run_lane, resuming a complete run id, only
