@@ -175,7 +175,24 @@ class ProfileTests(unittest.TestCase):
         shares = rfc7502.host_shares(trial['cps'], trial['seconds'], 3)
         self.assertEqual(sum(s['calls'] for s in shares), trial['cps'] * trial['seconds'])
         with self.assertRaises(ValueError):
-            rfc7502.host_shares(1001, 1, 2)
+            rfc7502.host_shares(1001.5, 1, 2)
+        with self.assertRaises(ValueError):
+            rfc7502.host_shares(2, 30, 3)
+
+    def test_host_shares_are_whole_cps_the_caller_accepts(self):
+        """rvoip-loadgen rejects a stage unless (cps * seconds).fract() < 1e-6; an even fractional share of
+        6440 cps over 3 hosts for 30 s is 64399.99999999999 (baseline-0.5 R1 at 12880: void trials)."""
+        self.assertEqual([s['cps'] for s in rfc7502.host_shares(6440, 30, 3)], [2147, 2147, 2146])
+        for rate in range(16, 40001, 4):    # a warm-up stage needs >= 1 cps per host
+            for hosts in (1, 2, 3, 4):
+                profile = rfc7502.trial_profile(rate, hosts=hosts)
+                for stage in profile['stages']:
+                    shares = rfc7502.host_shares(stage['cps'], stage['seconds'], hosts)
+                    self.assertEqual(sum(s['cps'] for s in shares), stage['cps'])
+                    self.assertLessEqual(max(s['cps'] for s in shares) - min(s['cps'] for s in shares), 1)
+                    for share in shares:
+                        product = float(share['cps']) * float(share['seconds'])
+                        self.assertLess(abs(product % 1.0), 1e-6, (rate, hosts, stage, share))
 
     def test_scored_window_starts_after_the_ramp(self):
         profile = rfc7502.trial_profile(3600, 648000, warmup_seconds=120, warmup_ramp=True)
