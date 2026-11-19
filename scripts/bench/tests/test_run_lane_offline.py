@@ -83,6 +83,9 @@ class World:
         self.reserve_short = ()        # instance types create-capacity-reservation has no capacity for
         self.signal_on = None          # (agent command, signum): the orchestrator gets that signal there
         self.terminate_polls = 0       # describe-instances calls an instance stays shutting-down after terminate
+        self.reserve_misses = 0        # create-capacity-reservation calls that fail on capacity first
+        self.launch_misses = 0         # run-instances calls that fail on capacity first
+        self.reserve_error = None      # a non-capacity create-capacity-reservation error
         self.__dict__.update(kw)
 
 
@@ -197,6 +200,10 @@ class Cloud:
     # ---- EC2
     def ec2_run_instances(self, args):
         template = re.match(r'LaunchTemplateName=([^,]+)', opt(args, '--launch-template')).group(1)
+        if self.world.launch_misses:
+            self.world.launch_misses -= 1
+            raise aws_mod.AwsError('aws ec2 run-instances: An error occurred (InsufficientInstanceCapacity) when '
+                                   'calling the RunInstances operation: no capacity in us-west-2b')
         itype = opt(args, '--instance-type') or TEMPLATES[template]
         tags = {t['Key']: t['Value'] for t in json.loads(opt(args, '--tag-specifications'))[0]['Tags']}
         out = []
@@ -286,6 +293,12 @@ class Cloud:
 
     def ec2_create_capacity_reservation(self, args):
         itype = opt(args, '--instance-type')
+        if self.world.reserve_error:
+            raise aws_mod.AwsError('aws ec2 create-capacity-reservation: An error occurred (%s)' % self.world.reserve_error)
+        if self.world.reserve_misses:
+            self.world.reserve_misses -= 1
+            raise aws_mod.AwsError('aws ec2 create-capacity-reservation: An error occurred (InsufficientInstanceCapacity) '
+                                   'when calling the CreateCapacityReservation operation: no %s capacity' % itype)
         if itype in self.world.reserve_short:
             raise aws_mod.AwsError('aws ec2 create-capacity-reservation: An error occurred (InsufficientInstanceCapacity) '
                                    'when calling the CreateCapacityReservation operation: no %s capacity' % itype)
@@ -1557,6 +1570,83 @@ class RecordBaselineTests(unittest.TestCase):
         self.assertEqual(code, 2, out)
         self.assertIn('no final verdict', out)
         self.assertIsNone(self.bed.rates(), 'nothing recorded by a refusal')
+
+
+
+class CapacityWaitTests(LaneCase):
+    """--capacity-wait: a capacity miss (reserving or launching) is retried every 5 min, within --max-wall."""
+
+    def setUp(self):
+        self.bed = Bed()
+        sleep = mock.patch('time.sleep', self.bed.clock.advance)    # the 5 min retries advance the fake clock
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def tearDown(self):
+        self.bed.close()
+
+    def creates(self):
+        return [c for c in self.bed.cloud.calls if c[:2] == ('ec2', 'create-capacity-reservation')]
+
+    def test_reservation_succeeds_after_misses(self):
+        start = self.bed.clock()
+        code, receipt, log = self.bed.run('minor', 'cw-reserve', '--rows', 'R1', '--r0', 'R1=3000',
+                                          '--capacity-wait', '30',
+                                          world=world_for(tester_capacity=TESTER, reserve_misses=2))
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual([m['attempt'] for m in receipt['capacity_misses']], [1, 2])
+        self.assertIn('InsufficientInstanceCapacity', receipt['capacity_misses'][0]['error'])
+        self.assertIn('capacity: attempt 1 at ', log)
+        self.assertIn('capacity: attempt 2 at ', log)
+        self.assertEqual(len(self.creates()), 2 + 2, 'two misses, then the DUT and caller reservations')
+        self.assertGreaterEqual(self.bed.clock() - start, 2 * 300)
+        self.assertEqual(self.bed.cloud.held_reservations(), [])
+
+    def test_launch_succeeds_after_misses_without_a_reservation(self):
+        code, receipt, log = self.bed.run('smoke', 'cw-launch', '--rows', 'R1', '--capacity-wait', '30',
+                                          world=World(launch_misses=3))
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(len(receipt['capacity_misses']), 3)
+        self.assertTrue(receipt['capacity_misses'][0]['error'].startswith('launch: '))
+
+    def test_gives_up_at_the_wait_limit(self):
+        code, receipt, log = self.bed.run('minor', 'cw-giveup', '--rows', 'R1', '--r0', 'R1=3000',
+                                          '--capacity-wait', '12',
+                                          world=world_for(tester_capacity=TESTER, reserve_misses=1000))
+        self.assertEqual(code, 3, log)
+        self.assertEqual(receipt['status'], 'INFRA')
+        self.assertIn('gave up after 3 attempts', ' '.join(receipt['reasons']))
+        self.assertEqual([m['attempt'] for m in receipt['capacity_misses']], [1, 2, 3], 'at 0, 5 and 10 min')
+        self.assertEqual(self.bed.cloud.launched, [])
+        self.assertEqual(self.bed.cloud.held_reservations(), [])
+
+    def test_without_a_wait_a_miss_fails_at_once(self):
+        code, receipt, log = self.bed.run('minor', 'cw-none', '--rows', 'R1', '--r0', 'R1=3000',
+                                          world=world_for(tester_capacity=TESTER, reserve_misses=1))
+        self.assertEqual(code, 3, log)
+        self.assertEqual(len(receipt['capacity_misses']), 1)
+        self.assertNotIn('capacity: attempt', log)
+
+    def test_other_errors_are_not_retried(self):
+        code, receipt, log = self.bed.run('minor', 'cw-other', '--rows', 'R1', '--r0', 'R1=3000',
+                                          '--capacity-wait', '60',
+                                          world=world_for(tester_capacity=TESTER, reserve_error='UnauthorizedOperation'))
+        self.assertEqual(code, 3, log)
+        self.assertIn('UnauthorizedOperation', ' '.join(receipt['reasons']))
+        self.assertEqual(len(self.creates()), 1, 'tried once')
+        self.assertEqual(receipt['capacity_misses'], [])
+
+    def test_max_wall_ends_the_wait_first(self):
+        start = self.bed.clock()
+        code, receipt, log = self.bed.run('minor', 'cw-wall', '--rows', 'R1', '--r0', 'R1=3000',
+                                          '--capacity-wait', '120', '--max-wall', '60',
+                                          world=world_for(tester_capacity=TESTER, reserve_misses=1000))
+        self.assertEqual(code, 4, log)
+        self.assertIn('--max-wall', log)
+        self.assertLess(self.bed.clock() - start, 60 * 60, 'stopped inside --max-wall')
+        self.assertEqual(self.bed.cloud.launched, [])
+        state = json.loads((self.bed.local('cw-wall') / 'state.json').read_text())
+        self.assertGreaterEqual(len(state['capacity_misses']), 1)
 
 
 if __name__ == '__main__':

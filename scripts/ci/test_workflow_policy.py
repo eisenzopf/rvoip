@@ -637,6 +637,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         # A bench job spends its time outside run_lane's --max-wall on checkout,
         # the toolchain, packages, a cold DUT build and up to 5 min of teardown.
         # If GitHub's job timeout lands first, it kills the lane mid-teardown.
+        # A capacity wait counts inside --max-wall, so it is not part of that
+        # headroom; it must instead leave at least half the budget for the lane.
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         jobs = dict(
             (block.split(":\n", 1)[0].strip(), block)
@@ -644,6 +646,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         )
         bench_gate = (ROOT / "scripts/release/bench_gate.py").read_text()
         default = int(re.search(r"^DEFAULT_MAX_WALL_MINUTES = (\d+)$", bench_gate, re.M).group(1))
+        default_wait = int(re.search(r"^CAPACITY_WAIT_MINUTES = (\d+)$", bench_gate, re.M).group(1))
+        self.assertIn("against --max-wall", bench_gate)
         for name in ("bench-leg-1", "bench-leg-2", "gate-bench"):
             with self.subTest(job=name):
                 block = jobs[name]
@@ -653,8 +657,13 @@ class WorkflowPolicyTests(unittest.TestCase):
                 if "bench_gate.py" in block and not walls:
                     walls = [default]
                 self.assertTrue(walls, f"{name} sets no bench wall budget")
+                waits = [int(value) for value in re.findall(r"--capacity-wait (\d+)", block)]
+                waits += [int(value) for value in re.findall(r'RVOIP_BENCH_CAPACITY_WAIT: "(\d+)"', block)]
+                waits = waits or [default_wait]
                 for wall in walls:
                     self.assertGreaterEqual(timeout - wall, 45, f"{name}: {timeout} - {wall}")
+                    for wait in waits:
+                        self.assertLessEqual(2 * wait, wall, f"{name}: wait {wait} in wall {wall}")
 
     def test_bench_reservations_are_released_after_the_last_bench_job(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()

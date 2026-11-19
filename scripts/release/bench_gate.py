@@ -49,6 +49,9 @@ RUN_LANE = ROOT / "scripts/bench/run_lane.py"
 BASELINES = Path("crates/sip/rvoip-sip/perf-baselines/rfc7502")
 DUT_PACKAGE = "rvoip-bench-uas"
 DEFAULT_MAX_WALL_MINUTES = 310
+# A leg waits this long for EC2 capacity (a reservation or launch miss) before failing INFRA. The wait counts
+# against --max-wall, so it never lengthens a job; a lane that waited resumes in the next leg.
+CAPACITY_WAIT_MINUTES = 90
 RECORDED_RATES = "rates.json"
 EXIT_USAGE = 2
 EXIT_BUDGET = 4
@@ -117,6 +120,8 @@ def lane_command(args: argparse.Namespace, dut: Path, run: str) -> list[str]:
         lane_run_id(args.profile, args.candidate, run),
         "--max-wall",
         str(args.max_wall),
+        "--capacity-wait",
+        str(getattr(args, "capacity_wait", CAPACITY_WAIT_MINUTES)),
         "--resume",
         *record,
     ]
@@ -132,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=int(os.environ.get("RVOIP_BENCH_MAX_WALL", DEFAULT_MAX_WALL_MINUTES)),
         help="minutes this call may run before run_lane stops cleanly",
+    )
+    parser.add_argument(
+        "--capacity-wait",
+        type=int,
+        default=int(os.environ.get("RVOIP_BENCH_CAPACITY_WAIT", CAPACITY_WAIT_MINUTES)),
+        help="minutes run_lane retries an EC2 capacity miss (within --max-wall)",
     )
     parser.add_argument(
         "--advance",

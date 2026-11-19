@@ -282,6 +282,17 @@ reservations under `environment.capacity_reservations`. A reservation's EC2
 $0.05 (one `c8i.large`). The same orchestrator policy grants the reservation
 actions, scoped to the `rvoip-bench=true` tag.
 
+`--capacity-wait MINUTES` (default 0) retries an EC2 capacity miss every
+5 minutes. A miss is InsufficientInstanceCapacity when the lane's reservation
+is created or, for a profile without one, when the lane launches. Nothing runs
+or stays reserved while the run waits, beyond a partial reservation that the
+next attempt adopts. Every other error fails at once. The wait counts against
+`--max-wall`. A retry that would leave too little time for a launch and a trial
+stops the run with exit 4, to resume later. When the wait itself runs out, the
+run fails INFRA. Each miss is logged with its time and listed in the receipt's
+`capacity_misses`. `scripts/release/bench_gate.py` passes `--capacity-wait 90`
+to every bench leg (`RVOIP_BENCH_CAPACITY_WAIT` overrides it).
+
 The AMI (`scripts/bench/ami/bake.py`) is Ubuntu 24.04 plus the E74 host
 tuning, applied at every boot by `rvoip-bench-tune.service`: XPS, NIC IRQs on
 the SMT sibling of the busy core, 500 us RX/TX coalescing, RX ring 8,192,
