@@ -4114,6 +4114,114 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Bind a transport to explicit (non-zero) RTP and RTCP loopback ports.
+    async fn transport_on_explicit_media_ports(
+        session: &str,
+    ) -> (UdpRtpTransport, SocketAddr, SocketAddr) {
+        for _ in 0..20 {
+            let probe_rtp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let probe_rtcp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let rtp = probe_rtp.local_addr().unwrap();
+            let rtcp = probe_rtcp.local_addr().unwrap();
+            drop((probe_rtp, probe_rtcp));
+            // Another process can take a probed port in between; try again.
+            if let Ok(transport) =
+                UdpRtpTransport::new(explicit_media_config(session, rtp, rtcp)).await
+            {
+                return (transport, rtp, rtcp);
+            }
+        }
+        panic!("could not bind a media transport to explicit loopback ports");
+    }
+
+    fn explicit_media_config(
+        session: &str,
+        rtp: SocketAddr,
+        rtcp: SocketAddr,
+    ) -> RtpTransportConfig {
+        RtpTransportConfig {
+            local_rtp_addr: rtp,
+            local_rtcp_addr: Some(rtcp),
+            symmetric_rtp: true,
+            rtcp_mux: false,
+            session_id: Some(session.to_string()),
+            use_port_allocator: false,
+            buffer_config: Default::default(),
+        }
+    }
+
+    /// A second socket that sets `SO_REUSEADDR` must not be able to bind a
+    /// live media port. On Linux it could when the media socket also had the
+    /// flag (even set after bind), and the newer socket then receives every
+    /// datagram sent to the port. Unix only: see the sip-transport
+    /// `udp_port_hijack` test for the macOS and Windows semantics.
+    #[cfg(unix)]
+    fn assert_media_port_not_shareable(addr: SocketAddr, what: &str) {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
+        intruder.set_reuse_address(true).unwrap();
+        match intruder.bind(&addr.into()) {
+            Ok(()) => {
+                let intruder: std::net::UdpSocket = intruder.into();
+                intruder
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                sender.send_to(&[0x80, 0, 0, 1], addr).unwrap();
+                let mut buf = [0u8; 64];
+                let outcome = match intruder.recv_from(&mut buf) {
+                    Ok((len, _)) => format!("and received the {len}-byte datagram sent to it"),
+                    Err(err) => format!("(the probe datagram did not reach it: {err})"),
+                };
+                panic!(
+                    "hijack: a second SO_REUSEADDR socket bound the {what} port {addr} {outcome}"
+                );
+            }
+            Err(err) => assert_eq!(
+                err.kind(),
+                std::io::ErrorKind::AddrInUse,
+                "the intruder on the {what} port must be refused with EADDRINUSE, got {err}"
+            ),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reuse_flagged_socket_cannot_take_an_explicit_media_port() {
+        let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-port-hijack").await;
+        assert_media_port_not_shareable(rtp, "RTP");
+        assert_media_port_not_shareable(rtcp, "RTCP");
+        transport.close().await.unwrap();
+
+        // The port allocator binds through the same socket strategy.
+        let allocator = crate::transport::allocator::PortAllocator::new();
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let addr = probe.local_addr().unwrap();
+        drop(probe);
+        let socket = allocator
+            .create_validated_socket(addr)
+            .await
+            .expect("allocator binds an explicit media port");
+        assert_media_port_not_shareable(socket.local_addr().unwrap(), "allocator RTP");
+    }
+
+    #[tokio::test]
+    async fn rebinds_same_media_ports_after_close() {
+        // UDP has no TIME_WAIT: once a closed transport's sockets are gone, a
+        // new transport binds the same explicit RTP and RTCP ports at once,
+        // with no SO_REUSEADDR on either.
+        let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-rebind-first").await;
+        transport.close().await.unwrap();
+        drop(transport);
+
+        let rebound = UdpRtpTransport::new(explicit_media_config("media-rebind-second", rtp, rtcp))
+            .await
+            .expect("rebind the same RTP/RTCP ports right after close");
+        assert_eq!(rebound.local_rtp_addr().unwrap(), rtp);
+        assert_eq!(rebound.local_rtcp_addr().unwrap(), Some(rtcp));
+        rebound.close().await.unwrap();
+    }
+
     // -------- SRTP wrapping (Step 2B.2) ---------------------------------
 
     /// Build a matched pair of `SrtpContext`s from a single shared

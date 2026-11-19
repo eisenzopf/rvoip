@@ -86,6 +86,7 @@ memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]
 dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util", "dep:rustls"]
 
 [dev-dependencies]
+socket2 = { workspace = true }
 criterion = { workspace = true }
 # Paused-clock tests for the RFC 3550 RTCP report interval.
 tokio = { version = "1.41", features = ["full", "test-util"] }

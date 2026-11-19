@@ -249,6 +249,14 @@ returns before the underlying UDP socket is guaranteed released, so a subsequent
 the socket is closed before it returns), and/or set `SO_REUSEADDR` on the bind in
 `sip-transport`. **Effort: S–M.**
 
+**Note (0.5).** `SO_REUSEADDR` is not the fix, and SIP UDP binds no longer set
+it. UDP has no TIME_WAIT, so a port rebinds at once after its socket closes.
+While the old socket is still open, the flag on Linux only lets the new
+socket share the port and take all of its traffic (any other reuse-flagged
+socket could do the same), and on macOS, where this error was seen, a
+duplicate unicast bind needs `SO_REUSEPORT` instead. Close the old transport
+before binding its port again.
+
 ### 11. `rvoip-client` is a misleading stub
 
 **Symptom.** The crate advertised as the desktop/mobile/web **client SDK** can't actually

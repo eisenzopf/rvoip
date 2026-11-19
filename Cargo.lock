@@ -8001,6 +8001,7 @@ dependencies = [
  "rvoip-infra-common",
  "sha1 0.11.0",
  "sha2 0.11.1",
+ "socket2 0.6.5",
  "thiserror 2.0.19",
  "time",
  "tokio",

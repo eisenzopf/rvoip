@@ -59,10 +59,22 @@ impl PlatformType {
 /// Socket binding strategy for a specific platform
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlatformSocketStrategy {
-    /// Whether to use SO_REUSEADDR socket option
+    /// Whether to set `SO_REUSEADDR` on the socket. Off in every built-in
+    /// strategy.
+    ///
+    /// [`Self::apply_to_socket`] runs after bind, so the option never helps
+    /// the socket's own bind, and UDP has no TIME_WAIT to work around: a
+    /// closed media port can be bound again at once without it. Its only
+    /// effect is on later binds of a port this socket still holds. On Linux
+    /// any other socket that also sets `SO_REUSEADDR`, owned by any user, can
+    /// then bind the same address and port and receive every datagram sent
+    /// to it; on Windows a later `SO_REUSEADDR` socket can take the port
+    /// whatever this one sets. Turn it on only when that sharing is wanted.
     pub use_reuse_addr: bool,
 
-    /// Whether to use SO_REUSEPORT socket option (when available)
+    /// Whether to set `SO_REUSEPORT` on the socket (when available). Off in
+    /// every built-in strategy: it lets other sockets of the same user join
+    /// the port and receive a share of its datagrams.
     pub use_reuse_port: bool,
 
     /// Whether to explicitly set IPV6_V6ONLY option
@@ -92,7 +104,7 @@ impl PlatformSocketStrategy {
     /// Get the recommended socket strategy for Windows
     pub fn for_windows() -> Self {
         Self {
-            use_reuse_addr: true,
+            use_reuse_addr: false,
             use_reuse_port: false, // Not available on Windows
             set_ipv6_only: true,
             ipv6_only: true,           // Separate stacks is safer cross-platform
@@ -104,7 +116,7 @@ impl PlatformSocketStrategy {
     /// Get the recommended socket strategy for macOS
     pub fn for_macos() -> Self {
         Self {
-            use_reuse_addr: true,
+            use_reuse_addr: false,
             // One RTP session exclusively owns each bound media port.
             // SO_REUSEPORT can silently fan incoming datagrams across two
             // sockets if an external process opts into the same port.
@@ -119,7 +131,7 @@ impl PlatformSocketStrategy {
     /// Get the recommended socket strategy for Linux
     pub fn for_linux() -> Self {
         Self {
-            use_reuse_addr: true,
+            use_reuse_addr: false,
             use_reuse_port: false, // Different semantics on Linux, usually not needed
             set_ipv6_only: true,
             ipv6_only: true,
@@ -293,7 +305,7 @@ impl PlatformSocketStrategy {
 impl Default for PlatformSocketStrategy {
     fn default() -> Self {
         Self {
-            use_reuse_addr: true,
+            use_reuse_addr: false,
             use_reuse_port: false,
             set_ipv6_only: true,
             ipv6_only: true,
@@ -494,31 +506,20 @@ impl RtpSocketValidator {
         }
     }
 
-    /// Get a fallback strategy when the initial strategy fails
+    /// Get a fallback strategy when the initial strategy fails.
+    ///
+    /// Fallbacks never turn on `SO_REUSEADDR` or `SO_REUSEPORT`: the strategy
+    /// is applied after bind, so neither can fix a bind failure, and both
+    /// would let other sockets share the media port and take its datagrams.
     fn get_fallback_strategy(initial: &PlatformSocketStrategy) -> PlatformSocketStrategy {
         let mut fallback = initial.clone();
 
         match PlatformType::current() {
-            PlatformType::Windows => {
-                // Windows fallback: increase buffer sizes and wait time
+            PlatformType::Windows | PlatformType::Other => {
                 fallback.buffer_size *= 2;
                 fallback.rebind_wait_time_ms *= 2;
             }
-            PlatformType::MacOS => {
-                // macOS fallback: try opposite reuse_port setting
-                fallback.use_reuse_port = !initial.use_reuse_port;
-                fallback.rebind_wait_time_ms *= 2;
-            }
-            PlatformType::Linux => {
-                // Linux fallback: try with reuse_port
-                fallback.use_reuse_port = true;
-                fallback.rebind_wait_time_ms *= 2;
-            }
-            PlatformType::Other => {
-                // Generic fallback
-                fallback.use_reuse_addr = true;
-                fallback.use_reuse_port = true;
-                fallback.buffer_size *= 2;
+            PlatformType::MacOS | PlatformType::Linux => {
                 fallback.rebind_wait_time_ms *= 2;
             }
         }
@@ -526,31 +527,11 @@ impl RtpSocketValidator {
         fallback
     }
 
-    /// Get a fallback strategy specifically for RTCP-MUX issues
+    /// Get a fallback strategy specifically for RTCP-MUX issues. Like
+    /// [`Self::get_fallback_strategy`], it never turns on port sharing.
     fn get_rtcp_mux_fallback_strategy(initial: &PlatformSocketStrategy) -> PlatformSocketStrategy {
         let mut fallback = initial.clone();
-
-        match PlatformType::current() {
-            PlatformType::Windows => {
-                // Windows RTCP-MUX fallback
-                fallback.buffer_size *= 2;
-            }
-            PlatformType::MacOS => {
-                // macOS must have reuse_port for RTCP-MUX
-                fallback.use_reuse_port = true;
-            }
-            PlatformType::Linux => {
-                // Linux may need both for RTCP-MUX
-                fallback.use_reuse_addr = true;
-                fallback.use_reuse_port = true;
-            }
-            PlatformType::Other => {
-                // Generic fallback
-                fallback.use_reuse_addr = true;
-                fallback.use_reuse_port = true;
-            }
-        }
-
+        fallback.buffer_size *= 2;
         fallback
     }
 }
@@ -588,6 +569,27 @@ mod tests {
         assert_ne!(win_strategy, mac_strategy);
         assert_ne!(win_strategy, linux_strategy);
         assert_ne!(mac_strategy, linux_strategy);
+    }
+
+    #[test]
+    fn no_strategy_shares_media_ports() {
+        let strategies = [
+            PlatformSocketStrategy::for_current_platform(),
+            PlatformSocketStrategy::for_windows(),
+            PlatformSocketStrategy::for_macos(),
+            PlatformSocketStrategy::for_linux(),
+            PlatformSocketStrategy::default(),
+        ];
+        for strategy in strategies {
+            for candidate in [
+                RtpSocketValidator::get_fallback_strategy(&strategy),
+                RtpSocketValidator::get_rtcp_mux_fallback_strategy(&strategy),
+                strategy,
+            ] {
+                assert!(!candidate.use_reuse_addr, "{candidate:?}");
+                assert!(!candidate.use_reuse_port, "{candidate:?}");
+            }
+        }
     }
 
     #[tokio::test]
