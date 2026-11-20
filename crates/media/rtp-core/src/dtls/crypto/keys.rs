@@ -7,7 +7,7 @@ use crate::dtls::Result;
 use bytes::{Bytes, BytesMut};
 
 // Add crypto imports
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use p256::{ecdh::diffie_hellman, PublicKey, SecretKey};
 use sha1::Sha1;
 use sha2::{Digest, Sha256, Sha384};
@@ -321,14 +321,8 @@ pub fn generate_ecdhe_pre_master_secret(
         crate::error::Error::CryptoError(format!("Failed to parse public key: {}", e))
     })?;
 
-    // Parse the private key. `from_slice` also accepts (and left-pads)
-    // shorter scalars, so require the exact P-256 width first.
-    if private_key_bytes.len() != 32 {
-        return Err(crate::error::Error::CryptoError(
-            "Invalid P-256 private key length".into(),
-        ));
-    }
-    let private_key = SecretKey::from_slice(private_key_bytes).map_err(|e| {
+    // Parse the private key
+    let private_key = SecretKey::from_bytes(private_key_bytes.into()).map_err(|e| {
         crate::error::Error::CryptoError(format!("Failed to parse private key: {}", e))
     })?;
 
@@ -344,10 +338,10 @@ pub fn generate_ecdhe_pre_master_secret(
 
 /// Generate an ephemeral ECDH key pair for P-256 curve
 pub fn generate_ecdh_keypair() -> Result<(SecretKey, PublicKey)> {
-    use p256::elliptic_curve::Generate;
+    use rand::rngs::OsRng;
 
-    // Generate a new random private key from the system CSPRNG
-    let private_key = SecretKey::generate();
+    // Generate a new random private key
+    let private_key = SecretKey::random(&mut OsRng);
 
     // Derive the public key from the private key
     let public_key = PublicKey::from_secret_scalar(&private_key.to_nonzero_scalar());
@@ -494,39 +488,4 @@ pub fn calculate_verify_data(
     )?;
 
     Ok(verify_data)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ecdhe_pre_master_secret_agrees_on_both_sides() {
-        let (a_private, a_public) = generate_ecdh_keypair().unwrap();
-        let (b_private, b_public) = generate_ecdh_keypair().unwrap();
-        let a_public = encode_public_key(&a_public).unwrap();
-        let b_public = encode_public_key(&b_public).unwrap();
-        let a_private = encode_private_key(&a_private).unwrap();
-        let b_private = encode_private_key(&b_private).unwrap();
-
-        let a_secret = generate_ecdhe_pre_master_secret(&b_public, &a_private).unwrap();
-        let b_secret = generate_ecdhe_pre_master_secret(&a_public, &b_private).unwrap();
-
-        assert_eq!(a_secret.len(), 32);
-        assert_eq!(a_secret, b_secret);
-    }
-
-    #[test]
-    fn ecdhe_pre_master_secret_rejects_a_private_key_of_the_wrong_length() {
-        let (_, peer_public) = generate_ecdh_keypair().unwrap();
-        let peer_public = encode_public_key(&peer_public).unwrap();
-
-        for len in [0usize, 31, 33, 64] {
-            let private = vec![0x11u8; len];
-            assert!(
-                generate_ecdhe_pre_master_secret(&peer_public, &private).is_err(),
-                "a {len}-byte P-256 private key must be rejected"
-            );
-        }
-    }
 }

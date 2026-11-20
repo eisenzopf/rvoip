@@ -1,4 +1,3 @@
-use nom::Parser;
 use nom::{
     bytes::complete::{tag, take_while1},
     combinator::map_res,
@@ -25,21 +24,20 @@ pub fn ipv6_reference(input: &[u8]) -> ParseResult<'_, Host> {
 
     map_res(
         delimited(
-            tag(&b"["[..]),
+            tag(b"["),
             take_while1(|c: u8| c.is_ascii_hexdigit() || c == b':' || c == b'.' || c == b'%'),
-            tag(&b"]"[..]),
+            tag(b"]"),
         ),
         |bytes| {
             str::from_utf8(bytes)
-                .map_err(|_| nom::Err::<_>::Failure((input, nom::error::ErrorKind::Char)))
+                .map_err(|_| nom::Err::Failure((input, nom::error::ErrorKind::Char)))
                 .and_then(|s| {
                     ipv6_reference_address(s)
                         .ok_or(nom::Err::Failure((input, nom::error::ErrorKind::Verify)))
                 })
                 .map(|address| Host::Address(IpAddr::V6(address)))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// The IPv6 address inside an IPv6reference: the RFC 3986 `IPv6address`

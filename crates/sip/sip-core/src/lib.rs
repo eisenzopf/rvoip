@@ -197,7 +197,6 @@
 // Re-export core types and parsers
 
 // Declare modules
-pub mod body;
 pub mod builder;
 pub mod diagnostics;
 pub mod error;

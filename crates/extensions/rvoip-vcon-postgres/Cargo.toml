@@ -29,9 +29,7 @@ thiserror.workspace = true
 tracing.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "postgres", "chrono", "uuid", "json"] }
-# Process-level provider fallback for sqlx TLS (see `ensure_process_crypto_provider`).
-rustls = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

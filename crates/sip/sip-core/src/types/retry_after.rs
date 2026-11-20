@@ -55,7 +55,6 @@ use crate::parser::headers::retry_after::{parse_retry_after, RetryParam};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::Param;
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -439,8 +438,7 @@ impl FromStr for RetryAfter {
     /// assert_eq!(retry.get_param("reason"), Some("maintenance"));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        let result = all_consuming(parse_retry_after)
-            .parse(s.as_bytes())
+        let result = all_consuming(parse_retry_after)(s.as_bytes())
             .map(|(_, value)| {
                 let mut retry_after = RetryAfter::new(value.delay);
 

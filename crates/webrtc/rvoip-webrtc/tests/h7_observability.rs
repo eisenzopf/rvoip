@@ -38,7 +38,7 @@ async fn prometheus_endpoint_returns_text_format() {
     });
 
     // Drive one inbound session so counters are non-zero.
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("http");
@@ -279,11 +279,4 @@ async fn remote_dtls_fingerprint_returns_empty_for_outbound_before_answer() {
         fps.is_empty(),
         "outbound originate has no remote SDP yet, so no fingerprints"
     );
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

@@ -43,7 +43,6 @@ use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::GenericValue;
 use crate::types::param::Param;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -378,8 +377,7 @@ impl FromStr for ContentDisposition {
         use crate::parser::headers::content_disposition::parse_content_disposition;
         use nom::combinator::all_consuming;
 
-        all_consuming(parse_content_disposition)
-            .parse(s.as_bytes())
+        all_consuming(parse_content_disposition)(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, (dtype_bytes, params_vec))| {
                 // String is already a String type, so we don't need to_vec()

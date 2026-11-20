@@ -1,6 +1,5 @@
 use crate::json::value::SipValue;
 use crate::json::{SipJsonError, SipJsonResult};
-use nom::Parser;
 /// # Path-based Access to SIP Values
 ///
 /// This module provides functions and types for accessing SIP message data via dot-notation
@@ -800,7 +799,7 @@ fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
     use nom::combinator::{map, opt, recognize};
 
     use nom::multi::separated_list1;
-    use nom::sequence::delimited;
+    use nom::sequence::{delimited, tuple};
     use nom::IResult;
 
     // Parse a field name (alphanumeric + '_' + '-')
@@ -808,20 +807,18 @@ fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
         map(
             take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '-'),
             |name: &str| PathSegment::Field(name.to_string()),
-        )
-        .parse(i)
+        )(i)
     }
 
     // Parse an array index: [N]
     fn parse_index(i: &str) -> IResult<&str, PathSegment> {
         delimited(
             char('['),
-            map(recognize((opt(char('-')), digit1)), |s: &str| {
+            map(recognize(tuple((opt(char('-')), digit1))), |s: &str| {
                 PathSegment::Index(s.parse::<i32>().unwrap_or(0))
             }),
             char(']'),
-        )
-        .parse(i)
+        )(i)
     }
 
     // Parse a segment with optional index: field[index]
@@ -843,16 +840,16 @@ fn parse_path_nom(input: &str) -> nom::IResult<&str, Vec<PathSegment>> {
 
     // Parse just an index (no field name)
     fn parse_just_index(i: &str) -> IResult<&str, Vec<PathSegment>> {
-        map(parse_index, |idx| vec![idx]).parse(i)
+        map(parse_index, |idx| vec![idx])(i)
     }
 
     // A path segment is either a field (possibly with index) or just an index
     fn parse_segment(i: &str) -> IResult<&str, Vec<PathSegment>> {
-        alt((parse_field_with_index, parse_just_index)).parse(i)
+        alt((parse_field_with_index, parse_just_index))(i)
     }
 
     // Parse a path of dot-separated segments
-    let (remaining, segment_lists) = separated_list1(char('.'), parse_segment).parse(input)?;
+    let (remaining, segment_lists) = separated_list1(char('.'), parse_segment)(input)?;
 
     // Flatten the lists of segments
     let segments: Vec<PathSegment> = segment_lists.into_iter().flatten().collect();

@@ -1,6 +1,5 @@
 // Parsers for common address formats (name-addr / addr-spec)
 
-use nom::Parser;
 use nom::{
     branch::alt,
     combinator::{map, map_res, opt, recognize},
@@ -33,8 +32,7 @@ fn display_name(input: &[u8]) -> ParseResult<'_, String> {
         map_res(recognize(many1(terminated(token, opt(lws)))), |bytes| {
             str::from_utf8(bytes).map(|s| s.trim().to_string())
         }),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 /// addr-spec = SIP-URI / SIPS-URI / absoluteURI (RFC 3261 §25.1), all of
@@ -47,7 +45,7 @@ pub fn addr_spec(input: &[u8]) -> ParseResult<'_, Uri> {
 /// LAQUOT = SWS "<" and RAQUOT = ">" SWS: no whitespace inside the brackets.
 pub fn name_addr(input: &[u8]) -> ParseResult<'_, Address> {
     // Parse display name followed by optional whitespace
-    let (input, display_opt) = opt(terminated(display_name, opt(lws))).parse(input)?;
+    let (input, display_opt) = opt(terminated(display_name, opt(lws)))(input)?;
 
     // Parse the opening angle bracket
     let (input, _) = laquot(input)?;
@@ -107,8 +105,7 @@ pub fn name_addr_or_addr_spec(input: &[u8]) -> ParseResult<'_, Address> {
             uri,
             params: Vec::new(),
         }),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 #[cfg(test)]
@@ -211,7 +208,7 @@ mod tests {
         let input = b"<sip:test@example.com>".as_slice();
 
         // Parse the < character
-        let result = tag::<_, _, NomError<_>>(&b"<"[..])(input);
+        let result = tag::<_, _, NomError<_>>(b"<")(input);
         assert!(result.is_ok());
         let (input_after_bracket, _) = result.unwrap();
 
@@ -222,7 +219,7 @@ mod tests {
         let (input_after_uri, uri_part) = result.unwrap();
 
         // Parse the > character
-        let result = tag::<_, _, NomError<_>>(&b">"[..])(input_after_uri);
+        let result = tag::<_, _, NomError<_>>(b">")(input_after_uri);
         assert!(result.is_ok());
         let (final_rem, _) = result.unwrap();
 

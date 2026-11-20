@@ -1,4 +1,3 @@
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -17,7 +16,7 @@ use super::ipv6::ipv6_reference;
 // host = hostname / IPv4address / IPv6reference
 pub fn host(input: &[u8]) -> ParseResult<'_, Host> {
     // Order is important: try hostname first as IP addresses might contain valid domain chars
-    alt((hostname, ipv4_address, ipv6_reference)).parse(input)
+    alt((hostname, ipv4_address, ipv6_reference))(input)
 }
 
 // port = 1*DIGIT
@@ -71,7 +70,7 @@ pub fn port(input: &[u8]) -> ParseResult<'_, u16> {
 
 // hostport = host [ ":" port ]
 pub fn hostport(input: &[u8]) -> ParseResult<'_, (Host, Option<u16>)> {
-    pair(host, opt(preceded(tag(&b":"[..]), port))).parse(input)
+    pair(host, opt(preceded(tag(b":"), port)))(input)
 }
 
 #[cfg(test)]

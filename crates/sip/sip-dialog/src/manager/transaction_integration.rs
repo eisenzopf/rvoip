@@ -1002,11 +1002,9 @@ pub(crate) struct InviteFailoverPlan {
     /// never infer the reservation from the live vector length.
     pub reserved_attempt_slots: usize,
     pub current_transaction: Option<std::sync::Arc<TransactionKey>>,
-    /// Proof that this logical INVITE crossed the transaction layer's
-    /// wire-attempt boundary. Once true, an error can no longer be treated as
-    /// a local-only rollback, unless the transaction layer later proves that
-    /// the plan's first and only attempt failed before its write
-    /// (`settle_not_sent_invite_candidate`).
+    /// Monotonic proof that this logical INVITE crossed the transaction
+    /// layer's wire-attempt boundary. Once true, an error can no longer be
+    /// treated as a local-only rollback.
     pub wire_attempted: bool,
     pub phase: InviteFailoverPlanPhase,
     /// Compact terminal ownership needed to remove exact attempt indexes at
@@ -3910,22 +3908,6 @@ impl DialogManager {
         dialog_id: DialogId,
         transaction_id: TransactionKey,
     ) {
-        self.emit_invite_failure(
-            dialog_id,
-            transaction_id,
-            500,
-            "Local transaction processing failed",
-        )
-        .await;
-    }
-
-    async fn emit_invite_failure(
-        &self,
-        dialog_id: DialogId,
-        transaction_id: TransactionKey,
-        status_code: u16,
-        reason_phrase: &str,
-    ) {
         if self.get_session_id(&dialog_id).is_none() {
             return;
         }
@@ -3933,50 +3915,17 @@ impl DialogManager {
             .notify_session_layer(SessionCoordinationEvent::RequestFailed {
                 dialog_id: Some(dialog_id),
                 transaction_id,
-                status_code,
-                reason_phrase: reason_phrase.to_string(),
+                status_code: 500,
+                reason_phrase: "Local transaction processing failed".to_string(),
                 method: Method::Invite.to_string(),
             })
             .await
         {
             warn!(
                 error=%crate::transaction::safe_diagnostics::SafeOpaqueError::new(&error),
-                status_code,
-                "Failed to deliver exact initial-INVITE failure"
+                "Failed to deliver exact initial-INVITE internal failure"
             );
         }
-    }
-
-    /// Report a written INVITE that ended without a final response.
-    ///
-    /// RFC 3261 §8.1.3.1: a transaction timeout (Timer B) is treated as a 408
-    /// and a transport error as a 503 received by the TU. Without this the
-    /// call learned of either only from the session layer's setup watchdog.
-    /// An INVITE whose first write failed is skipped: its sender has already
-    /// returned the error to the caller, which owns that rollback.
-    async fn emit_unanswered_invite_failure(
-        &self,
-        dialog_id: DialogId,
-        transaction_id: &TransactionKey,
-        outcome: InviteFailoverAttemptOutcome,
-    ) {
-        if !self
-            .transaction_manager
-            .client_initial_send_succeeded(transaction_id)
-        {
-            return;
-        }
-        let (status_code, reason_phrase) = match outcome {
-            InviteFailoverAttemptOutcome::TransactionTimeout => (408, "Request Timeout"),
-            _ => (503, "Service Unavailable (transport failure)"),
-        };
-        self.emit_invite_failure(
-            dialog_id,
-            transaction_id.clone(),
-            status_code,
-            reason_phrase,
-        )
-        .await;
     }
 
     fn close_active_invite_failover_plan(
@@ -4646,21 +4595,6 @@ impl DialogManager {
                     {
                         InviteFailoverEventDisposition::Consumed
                     } else {
-                        // The replacement could not be dispatched and closed
-                        // the plan: this attempt's outcome ends the call.
-                        let terminal_dialog = {
-                            let plan = plan_arc.lock().await;
-                            matches!(
-                                plan.phase,
-                                InviteFailoverPlanPhase::Closed
-                                    | InviteFailoverPlanPhase::Exhausted
-                            )
-                            .then(|| plan.dialog_id.clone())
-                        };
-                        if let Some(dialog_id) = terminal_dialog {
-                            self.emit_unanswered_invite_failure(dialog_id, transaction_id, outcome)
-                                .await;
-                        }
                         InviteFailoverEventDisposition::Continue
                     }
                 } else {
@@ -4669,10 +4603,6 @@ impl DialogManager {
                         &mut plan,
                         InviteFailoverPlanPhase::Closed,
                     );
-                    let dialog_id = plan.dialog_id.clone();
-                    drop(plan);
-                    self.emit_unanswered_invite_failure(dialog_id, transaction_id, outcome)
-                        .await;
                     InviteFailoverEventDisposition::Continue
                 }
             }
@@ -5611,47 +5541,6 @@ impl DialogManager {
         true
     }
 
-    /// Settle an INVITE attempt that the transaction layer proved was never
-    /// offered to the transport, rewinding the plan's wire boundary. Only the
-    /// plan's first and only attempt qualifies: a concurrent failover to
-    /// another candidate, or any earlier attempt, may have reached the wire,
-    /// which keeps the logical INVITE wire-unknown.
-    async fn settle_not_sent_invite_candidate(
-        &self,
-        plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
-        lease: &InviteCandidateSendLease,
-        transaction_id: &TransactionKey,
-    ) -> bool {
-        let mut plan = plan.lock().await;
-        let attempts = plan.attempt_transaction_ids();
-        let only_attempt = attempts.len() == 1 && attempts[0].as_ref() == transaction_id;
-        let no_later_candidate = plan.active_payload.as_ref().is_none_or(|active| {
-            active.next_send_generation == lease.generation && active.pending_candidate.is_none()
-        });
-        if plan.id != lease.plan_id
-            || !matches!(
-                plan.phase,
-                InviteFailoverPlanPhase::Active
-                    | InviteFailoverPlanPhase::Closed
-                    | InviteFailoverPlanPhase::Exhausted
-            )
-            || !only_attempt
-            || !no_later_candidate
-        {
-            return false;
-        }
-        Self::set_invite_attempt_outcome(
-            &mut plan,
-            transaction_id,
-            InviteFailoverAttemptOutcome::ImmediateTransportFailure,
-        );
-        plan.wire_attempted = false;
-        if plan.phase == InviteFailoverPlanPhase::Active {
-            self.close_active_invite_failover_plan(&mut plan, InviteFailoverPlanPhase::Closed);
-        }
-        true
-    }
-
     async fn send_invite_failover_candidate(
         &self,
         plan: &std::sync::Arc<tokio::sync::Mutex<InviteFailoverPlan>>,
@@ -5923,7 +5812,6 @@ impl DialogManager {
             ));
         }
 
-        let mut first_wire_attempt = false;
         let stale_before_wire = {
             let mut plan = plan.lock().await;
             if !plan
@@ -5953,9 +5841,7 @@ impl DialogManager {
                 true
             } else {
                 // Monotonic boundary: after this store, even an immediate
-                // transport error is conservatively wire-unknown, unless the
-                // transaction layer proves the request was never written.
-                first_wire_attempt = !plan.wire_attempted;
+                // transport error is conservatively wire-unknown.
                 plan.wire_attempted = true;
                 false
             }
@@ -6026,28 +5912,7 @@ impl DialogManager {
                     }
                 }
             }
-            Ok(Err(error)) => {
-                if matches!(
-                    error,
-                    crate::transaction::error::Error::InitialRequestNotSent
-                ) && first_wire_attempt
-                    && self
-                        .settle_not_sent_invite_candidate(plan, &lease, &transaction_id)
-                        .await
-                {
-                    // Route preparation (connect, TLS handshake) failed before
-                    // the INVITE was offered to the transport. The peer never
-                    // saw it: release the attempt instead of retaining it for
-                    // CANCEL/BYE teardown.
-                    self.compensate_invite_candidate_transaction(&transaction_id, true)
-                        .await;
-                    cancellation_guard.disarm();
-                    return Err(InviteCandidateSendError::Fatal(
-                        crate::errors::DialogError::TransactionError {
-                            message: safe_operation_failure("invite_candidate_send", "not_sent"),
-                        },
-                    ));
-                }
+            Ok(Err(_error)) => {
                 self.retain_wire_unknown_invite_candidate(
                     plan,
                     lease.generation,
@@ -6167,94 +6032,6 @@ impl DialogManager {
         .map(|(transaction_id, destination, _completion)| (transaction_id, destination))
     }
 
-    /// The single candidate that sends `request` on the dialog's retained
-    /// TLS flow, or `None` when the dialog has no binding or the request's
-    /// exact next hop is not the bound one.
-    ///
-    /// A bound flow that has closed is an error: no new connection is
-    /// opened, except that a policy with a `renewal_authority` first opens
-    /// and certificate-verifies one to the fixed proxy endpoint (before any
-    /// SIP transaction exists) and rebinds the dialog to it.
-    async fn retained_tls_flow_target(
-        &self,
-        dialog_id: &DialogId,
-        request: &rvoip_sip_core::Request,
-        candidates: &[rvoip_sip_transport::resolver::ResolvedTarget],
-    ) -> DialogResult<Option<rvoip_sip_transport::resolver::ResolvedTarget>> {
-        // Clone the binding out; the map guard is never held across await.
-        let Some(binding) = self
-            .dialogs
-            .get(dialog_id)
-            .and_then(|dialog| dialog.tls_proxy_flow.clone())
-        else {
-            return Ok(None);
-        };
-        let Ok(next_hop) =
-            crate::transaction::transport::multiplexed::exact_next_hop_uri_for_request(request)
-        else {
-            return Ok(None);
-        };
-        let Some((candidate, mut route)) = candidates.iter().find_map(|candidate| {
-            binding
-                .route_for(&next_hop, candidate.addr, candidate.transport)
-                .map(|route| (candidate, route))
-        }) else {
-            return Ok(None);
-        };
-        if let Some(renewal) =
-            binding.renewal_route_for(&next_hop, candidate.addr, candidate.transport)
-        {
-            // Preparation writes no SIP bytes. Only a closed flow is renewed;
-            // any other preparation failure is reported, never retried.
-            let transport = self.transaction_manager.transport();
-            let message = rvoip_sip_core::Message::Request(request.clone());
-            match transport
-                .prepare_message_route(&message, route.clone())
-                .await
-            {
-                Ok(prepared) => route = prepared,
-                Err(rvoip_sip_transport::Error::TransportClosed) => {
-                    let prepared = transport
-                        .prepare_message_route(&message, renewal)
-                        .await
-                        .map_err(|_| {
-                            crate::errors::DialogError::routing_error(
-                                "TLS proxy flow renewal failed before request submission",
-                            )
-                        })?;
-                    let renewed = self.dialogs.get_mut(dialog_id).is_some_and(|mut dialog| {
-                        dialog.tls_proxy_flow.as_mut().is_some_and(|current| {
-                            current.retain_authenticated_renewal(&binding, &prepared)
-                        })
-                    });
-                    if !renewed {
-                        return Err(crate::errors::DialogError::routing_error(
-                            "TLS proxy flow binding changed during renewal",
-                        ));
-                    }
-                    debug!(dialog=%dialog_id, "Renewed closed TLS proxy flow");
-                    route = prepared;
-                }
-                Err(_) => {
-                    return Err(crate::errors::DialogError::routing_error(
-                        "TLS proxy flow preparation failed before request submission",
-                    ))
-                }
-            }
-        }
-        let mut target = candidate.clone();
-        target.addr = route.destination;
-        target.transport = rvoip_sip_transport::transport::TransportType::Tls;
-        // An accepted flow has no verified authority of its own; keep the
-        // next hop's, which the transport needs for a request but ignores
-        // when the exact flow is selected.
-        if route.authority.is_some() {
-            target.authority = route.authority;
-        }
-        target.flow_id = route.flow_id;
-        Ok(Some(target))
-    }
-
     async fn send_request_with_candidate_wire_plan_owned(
         &self,
         request: rvoip_sip_core::Request,
@@ -6319,19 +6096,6 @@ impl DialogManager {
             target.transport = rvoip_sip_transport::transport::TransportType::Tls;
             target.flow_id = route.flow_id;
             candidates = vec![target];
-        }
-        // Opt-in proxy/outbound TLS flow reuse (both off by default, so the
-        // dialog map is not consulted). Applies only while the request's
-        // exact next hop is the bound one; anything else routes normally.
-        if let Some(dialog_id) = tx_to_dialog {
-            if !is_initial_invite && self.tls_proxy_flow_routing_enabled() {
-                if let Some(target) = self
-                    .retained_tls_flow_target(dialog_id, &request, &candidates)
-                    .await?
-                {
-                    candidates = vec![target];
-                }
-            }
         }
 
         let total = candidates.len();
@@ -6403,11 +6167,8 @@ impl DialogManager {
                     return Ok((tx_id, target.addr, Some(completion)));
                 }
                 Err(e) => {
-                    let is_transport_failure = matches!(
-                        &e,
-                        crate::transaction::error::Error::TransportError { .. }
-                            | crate::transaction::error::Error::InitialRequestNotSent
-                    );
+                    let is_transport_failure =
+                        matches!(&e, crate::transaction::error::Error::TransportError { .. });
                     if is_transport_failure && idx + 1 < total {
                         debug!(
                             attempt,
@@ -7199,35 +6960,6 @@ impl DialogManager {
     ) -> DialogResult<()> {
         info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), status=response.status_code(), reason_len=response.reason_phrase().len(), dialog=%dialog_id, "Transaction received success response");
 
-        // Opt-in outbound TLS flow retention: read the certificate-verified
-        // route and the original request of this INVITE transaction before
-        // taking the dialog map guard. Skipped entirely when off (default).
-        let verified_outbound_tls = if transaction_id.method() == &Method::Invite
-            && response.status().is_success()
-            && self.outbound_tls_flow_retention_enabled()
-        {
-            match self
-                .transaction_manager
-                .transaction_route(transaction_id)
-                .await
-                .filter(|route| {
-                    route.transport_type == Some(rvoip_sip_transport::transport::TransportType::Tls)
-                        && route.authority.is_some()
-                        && route.flow_id.is_some()
-                }) {
-                Some(route) => self
-                    .transaction_manager
-                    .original_request(transaction_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|request| (route, request)),
-                None => None,
-            }
-        } else {
-            None
-        };
-
         // Update dialog state based on successful response
         let dialog_state_changed = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
@@ -7352,24 +7084,6 @@ impl DialogManager {
                             dialog.route_set = learned;
                         }
 
-                        // Opt-in: keep in-dialog requests of a dialog we
-                        // initiated over TLS on the INVITE's verified flow.
-                        if let (true, Some((route, original))) =
-                            (dialog.is_initiator, verified_outbound_tls.as_ref())
-                        {
-                            dialog.tls_proxy_flow =
-                                crate::dialog::tls_proxy_flow::verified_outbound_next_hop(
-                                    &dialog.route_set,
-                                    &dialog.remote_target,
-                                    original,
-                                )
-                                .and_then(|next_hop| {
-                                    crate::dialog::tls_proxy_flow::TlsProxyFlowBinding::admit_verified_outbound(
-                                        &next_hop, route,
-                                    )
-                                });
-                        }
-
                         // CRITICAL FIX: Update dialog lookup now that we have both tags
                         if let Some(tuple) = dialog.dialog_id_tuple() {
                             let key = crate::manager::utils::DialogUtils::create_lookup_key(
@@ -7439,8 +7153,7 @@ impl DialogManager {
         let deferred_session_ack = session_id_for_diag.is_some()
             && transaction_id.method() == &rvoip_sip_core::Method::Invite
             && response.status().is_success()
-            && rvoip_sip_core::body::session_description(&response.headers, &response.body)
-                .is_some();
+            && !response.body().is_empty();
 
         // Handle specific successful response types
         match response.status_code() {
@@ -7819,12 +7532,9 @@ impl DialogManager {
             183 => {
                 info!("Session progress for dialog {}", dialog_id);
 
-                // Check for early media (SDP in 183, possibly one part of a
-                // multipart body, RFC 5621)
-                if let Some(sdp) = rvoip_sip_core::body::session_description_text(
-                    &response.headers,
-                    &response.body,
-                ) {
+                // Check for early media (SDP in 183)
+                if !response.body().is_empty() {
+                    let sdp = String::from_utf8_lossy(response.body()).to_string();
                     if has_session_owner {
                         self.notify_session_layer(SessionCoordinationEvent::EarlyMedia {
                             dialog_id: dialog_id.clone(),
@@ -7945,13 +7655,14 @@ impl DialogManager {
         info!(transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id), dialog=%dialog_id, "ACK received; media may start on UAS side");
 
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
-        let negotiated_sdp =
-            rvoip_sip_core::body::session_description_text(&request.headers, &request.body);
-        if negotiated_sdp.is_some() {
+        let negotiated_sdp = if !request.body().is_empty() {
+            let sdp = String::from_utf8_lossy(request.body()).to_string();
             info!(body_len = request.body().len(), "ACK contains SDP body");
+            Some(sdp)
         } else {
             info!("ACK has no SDP body (normal for 2xx ACK)");
-        }
+            None
+        };
 
         info!(
             "🔔 About to emit AckReceived event for dialog {}",

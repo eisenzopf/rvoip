@@ -14,7 +14,6 @@ use std::fmt;
 ///
 /// See [RTCRtpTransceiver.direction](https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpTransceiver/direction).
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RTCRtpTransceiverDirection {
     /// Direction is not specified (internal use only).
     #[default]

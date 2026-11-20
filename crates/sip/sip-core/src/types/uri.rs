@@ -51,7 +51,6 @@
 // URI implementation moved from root directory
 // Implements URI types according to RFC 3261
 
-use nom::Parser;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -223,45 +222,8 @@ impl Host {
             Host::Address(addr) => addr.to_string(),
         }
     }
-
-    /// Format this host, with an optional port, as an RFC 3261 §25.1
-    /// `hostport = host [ ":" port ]`.
-    ///
-    /// Inside `hostport` (and every other SIP `host` position: URIs, Via
-    /// sent-by, Warning agents) an IPv6 address is an `IPv6reference`, so it
-    /// is bracketed (RFC 5118 §4.1). Use this, not [`Display`](fmt::Display),
-    /// whenever the result is written into a SIP host context.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
-    /// use std::str::FromStr;
-    ///
-    /// let v6 = Host::from_str("2001:db8::1").unwrap();
-    /// assert_eq!(v6.to_hostport(Some(5060)), "[2001:db8::1]:5060");
-    /// assert_eq!(v6.to_hostport(None), "[2001:db8::1]");
-    /// assert_eq!(Host::domain("example.com").to_hostport(Some(5060)), "example.com:5060");
-    /// ```
-    pub fn to_hostport(&self, port: Option<u16>) -> String {
-        let host = match self {
-            Host::Address(IpAddr::V6(address)) => format!("[{address}]"),
-            host => host.to_string(),
-        };
-        match port {
-            Some(port) => format!("{host}:{port}"),
-            None => host,
-        }
-    }
 }
 
-/// Writes the bare host: a domain name, or an IP address in its textual
-/// form *without* IPv6 brackets.
-///
-/// The bare form is what `received=` (RFC 3261 §18.2.1, RFC 5118 §4.5: an
-/// `IPv6address`, not an `IPv6reference`), SDP `c=`/`o=` (RFC 8866 §5.7) and
-/// socket-address parsing expect. SIP host contexts must bracket IPv6; use
-/// [`Host::to_hostport`] or the URI/Via `Display` implementations there.
 impl fmt::Display for Host {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -472,13 +434,13 @@ impl Uri {
 
     /// Returns the host and port (if present) formatted as a string
     ///
-    /// This is the RFC 3261 §25.1 `hostport`, so an IPv6 host is bracketed
-    /// (e.g. `[2001:db8::1]:5060`); see [`Host::to_hostport`].
-    ///
     /// # Returns
     /// The host and port as a string (e.g., "example.com:5060")
     pub fn host_port(&self) -> String {
-        self.host.to_hostport(self.port.filter(|port| *port > 0))
+        match self.port {
+            Some(port) if port > 0 => format!("{}:{}", self.host, port),
+            _ => self.host.to_string(),
+        }
     }
 
     /// Create a new SIP URI with a domain host
@@ -900,7 +862,7 @@ impl FromStr for Uri {
 
     fn from_str(s: &str) -> Result<Self> {
         // Use the nom parser from the parser module
-        match all_consuming(parse_uri).parse(s.as_bytes()) {
+        match all_consuming(parse_uri)(s.as_bytes()) {
             Ok((_rem, uri)) => Ok(uri),
             Err(e) => {
                 // For HTTP and HTTPS URIs, create a special case
@@ -1202,42 +1164,5 @@ mod user_escaping_tests {
         let built = Uri::sip("example.com").with_user("caf\u{e9}");
         assert_eq!(built.to_string(), "sip:caf%C3%A9@example.com");
         assert_eq!(uri(&built.to_string()), built);
-    }
-}
-
-#[cfg(test)]
-mod hostport_tests {
-    use super::*;
-
-    #[test]
-    fn hostport_brackets_ipv6_only() {
-        let v6 = Host::Address("2001:db8::1".parse().unwrap());
-        let v4 = Host::Address("192.0.2.1".parse().unwrap());
-        let domain = Host::domain("example.com");
-
-        // RFC 3261 §25.1 hostport: IPv6 is an IPv6reference.
-        assert_eq!(v6.to_hostport(Some(5060)), "[2001:db8::1]:5060");
-        assert_eq!(v6.to_hostport(None), "[2001:db8::1]");
-        assert_eq!(v4.to_hostport(Some(5060)), "192.0.2.1:5060");
-        assert_eq!(domain.to_hostport(None), "example.com");
-
-        // Display stays the bare address form used by `received=` and SDP.
-        assert_eq!(v6.to_string(), "2001:db8::1");
-
-        // The hostport text round-trips through the Via builder's parser.
-        assert_eq!(
-            crate::builder::headers::via::parse_sent_by(&v6.to_hostport(Some(5060))).unwrap(),
-            (v6, Some(5060))
-        );
-    }
-
-    #[test]
-    fn uri_host_port_brackets_ipv6() {
-        let uri = Uri::from_str("sip:alice@[2001:db8::1]:5070").unwrap();
-        assert_eq!(uri.host_port(), "[2001:db8::1]:5070");
-        let uri = Uri::from_str("sip:alice@[::1]").unwrap();
-        assert_eq!(uri.host_port(), "[::1]");
-        let uri = Uri::from_str("sip:alice@192.0.2.1:5070").unwrap();
-        assert_eq!(uri.host_port(), "192.0.2.1:5070");
     }
 }

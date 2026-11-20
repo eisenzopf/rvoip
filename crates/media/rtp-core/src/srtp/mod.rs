@@ -214,15 +214,6 @@ impl SrtpCryptoSuite {
     }
 }
 
-/// The master keys an [`SrtpContext`] was built from (see
-/// [`SrtpContext::master_keys`]). Deliberately not `Debug`: it holds keys.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SrtpMasterKeys {
-    key_rotation: key_derivation::KeyRotationFrequency,
-    outbound: (SrtpCryptoSuite, Vec<u8>, Vec<u8>),
-    inbound: (SrtpCryptoSuite, Vec<u8>, Vec<u8>),
-}
-
 /// SRTP context for a session
 pub struct SrtpContext {
     /// Whether encryption is enabled
@@ -891,26 +882,6 @@ impl SrtpContext {
         self.inbound_crypto.suite().validate()
     }
 
-    /// The master keys, suites and key rotation this context was built
-    /// from. Two contexts with equal master keys are one RFC 3711 crypto
-    /// context: its rollover counters and replay windows must carry on
-    /// rather than restart, or a restarted sender would reuse keystream and a
-    /// restarted receiver would mis-estimate the index after a wrap.
-    pub(crate) fn master_keys(&self) -> SrtpMasterKeys {
-        let direction = |crypto: &crypto::SrtpCrypto| {
-            (
-                crypto.suite().clone(),
-                crypto.master_key().key().to_vec(),
-                crypto.master_key().salt().to_vec(),
-            )
-        };
-        SrtpMasterKeys {
-            key_rotation: self.key_rotation,
-            outbound: direction(&self.outbound_crypto),
-            inbound: direction(&self.inbound_crypto),
-        }
-    }
-
     /// Set key rotation frequency
     pub fn set_key_rotation(&mut self, frequency: key_derivation::KeyRotationFrequency) {
         self.key_rotation = frequency;
@@ -1274,9 +1245,9 @@ mod tests {
             let key_len = suite.key_length;
             // Random keys and salts per run, shared by both contexts.
             let random = |len: usize| -> Vec<u8> {
-                use rand::Rng;
+                use rand::RngCore;
                 let mut bytes = vec![0u8; len];
-                rand::rng().fill_bytes(&mut bytes);
+                rand::thread_rng().fill_bytes(&mut bytes);
                 bytes
             };
             let (rtp_key, rtcp_key, rtp_salt, rtcp_salt) =
@@ -1638,8 +1609,9 @@ mod tests {
     }
 
     fn hot_keys(suite: &SrtpCryptoSuite) -> HotKeys {
-        use rand::RngExt;
-        let random = |len: usize| -> Vec<u8> { (0..len).map(|_| rand::rng().random()).collect() };
+        use rand::Rng;
+        let random =
+            |len: usize| -> Vec<u8> { (0..len).map(|_| rand::thread_rng().gen()).collect() };
         HotKeys {
             a_key: random(suite.key_length),
             b_key: random(suite.key_length),
@@ -2096,7 +2068,7 @@ mod tests {
 
     #[test]
     fn authenticated_cleartext_srtcp_is_rejected_without_state_mutation() {
-        use hmac::{Hmac, KeyInit, Mac};
+        use hmac::{Hmac, Mac};
         use sha1::Sha1;
 
         let (_, mut receiver) = contexts();

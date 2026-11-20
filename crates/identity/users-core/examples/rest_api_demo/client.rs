@@ -57,9 +57,7 @@ async fn main() -> Result<()> {
     // Wait for server to start
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // reqwest is built with `rustls-no-provider`: use the ring provider.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = Client::builder().build()?;
+    let client = Client::new();
 
     // Test 1: Health check
     println!("1️⃣ Testing health endpoint...");

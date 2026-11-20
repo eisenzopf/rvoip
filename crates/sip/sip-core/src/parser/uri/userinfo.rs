@@ -1,4 +1,3 @@
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
@@ -25,11 +24,10 @@ fn is_user_unreserved(c: u8) -> bool {
 // This adapts the existing ipv6_reference parser for use in userinfo
 fn ipv6_reference_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(delimited(
-        tag(&b"["[..]),
+        tag(b"["),
         take_while1(|c: u8| c.is_ascii_hexdigit() || c == b':' || c == b'.' || c == b'%'),
-        tag(&b"]"[..]),
-    ))
-    .parse(input)
+        tag(b"]"),
+    ))(input)
 }
 
 // user = 1*( unreserved / escaped / user-unreserved )
@@ -45,8 +43,7 @@ pub fn user(input: &[u8]) -> ParseResult<'_, &[u8]> {
             escaped,
             take_while1(is_user_unreserved),
         )))),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
@@ -56,13 +53,13 @@ fn is_password_char(c: u8) -> bool {
 }
 
 fn password_char(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((escaped, take_while1(is_password_char))).parse(input)
+    alt((escaped, take_while1(is_password_char)))(input)
 }
 
 // password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
 // Returns raw bytes, unescaping happens in userinfo
 pub fn password(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(many0(password_char)).parse(input)
+    recognize(many0(password_char))(input)
 }
 
 // userinfo = user [ ":" password ] "@"
@@ -104,17 +101,13 @@ pub fn userinfo(input: &[u8]) -> ParseResult<'_, (String, Option<String>)> {
 
     // Now proceed with parsing
     map_res(
-        terminated(
-            pair(user, opt(preceded(tag(&b":"[..]), password))),
-            tag(&b"@"[..]),
-        ),
+        terminated(pair(user, opt(preceded(tag(b":"), password))), tag(b"@")),
         |(user_bytes, pass_opt_bytes)| -> Result<(String, Option<String>), Error> {
             let user_str = unescape_uri_component(user_bytes)?;
             let pass_str_opt = pass_opt_bytes.map(unescape_uri_component).transpose()?;
             Ok((user_str, pass_str_opt))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Userinfo with each component's decoded value and its exact wire text:

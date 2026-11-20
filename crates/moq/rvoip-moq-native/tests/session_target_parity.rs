@@ -43,16 +43,7 @@ async fn assert_target_parity(policy: quic::SubstratePolicy) -> anyhow::Result<T
     let server_connection =
         server_connection.context("server stopped before accepting test connection")?;
 
-    // Both ends negotiate the same substrate and protocol; the raw-QUIC URL
-    // is endpoint-local (dialed target vs accepted server name).
-    assert_eq!(
-        client_connection.negotiated.substrate,
-        server_connection.negotiated.substrate
-    );
-    assert_eq!(
-        client_connection.negotiated.protocol,
-        server_connection.negotiated.protocol
-    );
+    assert_eq!(client_connection.negotiated, server_connection.negotiated);
     assert_eq!(client_connection.negotiated.protocol, "moqt-19");
     let substrate = client_connection.negotiated.substrate;
 

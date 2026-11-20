@@ -41,7 +41,7 @@ async fn server_builder_exposes_whip_and_ws_addrs() {
         .expect("originate");
     let offer_sdp = offerer.local_sdp(&handle.connection.id).expect("offer");
 
-    let client = ring_reqwest_builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client");
@@ -62,11 +62,4 @@ async fn server_builder_exposes_whip_and_ws_addrs() {
     assert!(matches!(event, AdapterEvent::InboundConnection { .. }));
 
     server.shutdown().await;
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

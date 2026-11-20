@@ -5,7 +5,6 @@
 
 // Core dialog manager implementation
 pub mod core;
-pub mod occupancy;
 
 /// Maximum dialog transaction-event dispatch workers accepted by configuration.
 pub const MAX_DIALOG_EVENT_DISPATCH_WORKERS: usize = 64;
@@ -33,7 +32,6 @@ pub mod transaction {
 
 // Re-export the main DialogManager
 pub use core::DialogManager;
-pub use occupancy::live_dialog_count;
 
 // Re-export the STIR/SHAKEN verify-decision type for the one event-hub
 // publish path without reaching into `manager::core`.

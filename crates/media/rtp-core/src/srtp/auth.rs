@@ -1,6 +1,7 @@
 use super::SrtpAuthenticationAlgorithm;
 use crate::error::Error;
 use crate::Result;
+use sha1::digest::generic_array::GenericArray;
 
 /// SHA-1's block length in bytes.
 const SHA1_BLOCK: usize = 64;
@@ -67,8 +68,12 @@ pub(crate) enum HmacSha1Key<'a> {
 /// SHA-1 instruction with no `vzeroupper` between them.
 #[inline(never)]
 fn sha1_compress(state: &mut [u32; 5], blocks: &[[u8; SHA1_BLOCK]]) {
-    // sha1 0.11 takes whole 64-byte blocks directly.
-    sha1::block_api::compress(state, blocks);
+    for block in blocks {
+        sha1::compress(
+            state,
+            std::slice::from_ref(GenericArray::from_slice(block.as_slice())),
+        );
+    }
 }
 
 /// Finish a SHA-1 hash that has absorbed `absorbed` bytes into `state` (a
@@ -522,7 +527,7 @@ impl SrtpReplayProtection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hmac::{Hmac, KeyInit, Mac};
+    use hmac::{Hmac, Mac};
 
     /// The `hmac` crate's HMAC-SHA1: the reference the tags are checked
     /// against.
@@ -536,8 +541,8 @@ mod tests {
     /// length; a reused absorbed key carries no state between tags.
     #[test]
     fn hmac_sha1_matches_the_reference_for_every_key_and_message_length() {
-        use rand::RngExt;
-        let mut rng = rand::rng();
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
         let check = |key: &[u8], data: &[u8], trailer: &[u8]| {
             let mut reference = HmacSha1::new_from_slice(key).unwrap();
             reference.update(data);
@@ -560,19 +565,17 @@ mod tests {
             }
         };
         for key_length in 0..=140 {
-            let key: Vec<u8> = (0..key_length).map(|_| rng.random()).collect();
-            let data: Vec<u8> = (0..rng.random_range(0..300))
-                .map(|_| rng.random())
-                .collect();
-            check(&key, &data, &rng.random::<u32>().to_be_bytes());
+            let key: Vec<u8> = (0..key_length).map(|_| rng.gen()).collect();
+            let data: Vec<u8> = (0..rng.gen_range(0..300)).map(|_| rng.gen()).collect();
+            check(&key, &data, &rng.gen::<u32>().to_be_bytes());
         }
-        let key: [u8; 20] = rng.random();
+        let key: [u8; 20] = rng.gen();
         for length in (0..=330).chain([1_172, 1_200, 1_500, 4_096]) {
-            let data: Vec<u8> = (0..length).map(|_| rng.random()).collect();
+            let data: Vec<u8> = (0..length).map(|_| rng.gen()).collect();
             check(&key, &data, &[]);
-            check(&key, &data, &rng.random::<u32>().to_be_bytes());
+            check(&key, &data, &rng.gen::<u32>().to_be_bytes());
         }
-        let trailer: Vec<u8> = (0..64).map(|_| rng.random()).collect();
+        let trailer: Vec<u8> = (0..64).map(|_| rng.gen()).collect();
         check(&key, &key, &trailer);
         assert!(
             hmac_sha1_tag(&key, &[], &[0; 65], 10).is_err(),
@@ -595,7 +598,7 @@ mod tests {
     fn every_srtp_sha1_computation_runs_in_the_out_of_line_compression() {
         const OUT_OF_LINE: [&str; 1] = ["sha1_compress"];
         const SHA1_WORK: [&str; 8] = [
-            "block_api::compress",
+            "sha1::compress",
             "HmacSha1::",
             "Hmac::<",
             "Sha1::",
@@ -669,14 +672,12 @@ mod tests {
     /// and errors, for random keys and data, at every tag length.
     #[test]
     fn a_keyed_hmac_state_tags_exactly_like_its_raw_key() {
-        use rand::RngExt;
-        let mut rng = rand::rng();
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
         for round in 0..64 {
-            let key: Vec<u8> = (0..20).map(|_| rng.random()).collect();
-            let data: Vec<u8> = (0..rng.random_range(0..300))
-                .map(|_| rng.random())
-                .collect();
-            let roc: u32 = rng.random();
+            let key: Vec<u8> = (0..20).map(|_| rng.gen()).collect();
+            let data: Vec<u8> = (0..rng.gen_range(0..300)).map(|_| rng.gen()).collect();
+            let roc: u32 = rng.gen();
             let core = hmac_sha1_core(&key).unwrap();
             for tag_length in [4, 10, 20] {
                 let raw = hmac_sha1_tag(&key, &data, &roc.to_be_bytes(), tag_length).unwrap();
@@ -763,8 +764,8 @@ mod tests {
     /// cached keyed state and agree with the allocating functions.
     #[test]
     fn in_place_twins_match_the_allocating_path_with_the_keyed_state() {
-        use rand::RngExt;
-        let key: Vec<u8> = (0..20).map(|_| rand::rng().random()).collect();
+        use rand::Rng;
+        let key: Vec<u8> = (0..20).map(|_| rand::thread_rng().gen()).collect();
         for (algorithm, tag_length) in [
             (SrtpAuthenticationAlgorithm::HmacSha1_80, 10),
             (SrtpAuthenticationAlgorithm::HmacSha1_32, 4),

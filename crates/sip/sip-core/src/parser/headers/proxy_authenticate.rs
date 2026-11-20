@@ -20,14 +20,13 @@
 //                     stale=FALSE,
 //                     algorithm=MD5
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, multispace0, multispace1},
     combinator::opt,
     error::{Error, ErrorKind},
-    sequence::{delimited, preceded, terminated},
+    sequence::{delimited, preceded, terminated, tuple},
     IResult,
 };
 
@@ -43,11 +42,10 @@ fn parse_lws(input: &[u8]) -> ParseResult<'_, ()> {
     let (input, _) = multispace0::<&[u8], Error<&[u8]>>(input)?;
 
     // Handle line folding (CRLF + WSP)
-    let (input, _) = opt((
+    let (input, _) = opt(tuple((
         tag::<_, &[u8], Error<&[u8]>>("\r\n"),
         multispace1::<&[u8], Error<&[u8]>>,
-    ))
-    .parse(input)?;
+    )))(input)?;
 
     Ok((input, ()))
 }
@@ -73,8 +71,7 @@ fn parse_quoted_string(input: &[u8]) -> ParseResult<'_, &[u8]> {
         char::<&[u8], Error<&[u8]>>('"'),
         take_while(|c| c != b'"' && c != b'\\'),
         char::<&[u8], Error<&[u8]>>('"'),
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parse an auth-param according to RFC 2617 Section 1.2
@@ -91,7 +88,7 @@ fn parse_auth_param(input: &[u8]) -> ParseResult<'_, AuthParam> {
     // Some parameters can have unquoted values according to RFC 2617
     // algorithm, qop, and stale can be tokens rather than quoted-strings
     let (input, value) = match name_str.to_ascii_lowercase().as_str() {
-        "algorithm" | "stale" | "qop" => alt((parse_quoted_string, parse_token)).parse(input)?,
+        "algorithm" | "stale" | "qop" => alt((parse_quoted_string, parse_token))(input)?,
         _ => parse_quoted_string(input)?,
     };
 
@@ -116,7 +113,7 @@ fn parse_auth_params(input: &[u8]) -> ParseResult<'_, Vec<AuthParam>> {
         // Handle commas with optional line folding
         let comma_parser = delimited(parse_lws, char::<&[u8], Error<&[u8]>>(','), parse_lws);
 
-        match preceded(comma_parser, parse_auth_param).parse(current_input) {
+        match preceded(comma_parser, parse_auth_param)(current_input) {
             Ok((remaining, param)) => {
                 params.push(param);
                 current_input = remaining;
@@ -243,8 +240,7 @@ pub fn parse_proxy_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>>
                 match preceded(
                     delimited(parse_lws, char::<&[u8], Error<&[u8]>>(','), parse_lws),
                     parse_challenge,
-                )
-                .parse(current_input)
+                )(current_input)
                 {
                     Ok((new_remaining, challenge)) => {
                         challenges.push(challenge);
@@ -264,12 +260,11 @@ pub fn parse_proxy_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>>
 pub fn proxy_authenticate_header(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     preceded(
         terminated(
-            tag_no_case(&b"Proxy-Authenticate"[..]),
+            tag_no_case(b"Proxy-Authenticate"),
             crate::parser::separators::hcolon,
         ),
         parse_proxy_authenticate,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]

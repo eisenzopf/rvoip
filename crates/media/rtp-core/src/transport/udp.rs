@@ -334,7 +334,7 @@ use super::allocator::{GlobalPortAllocator, PairingStrategy, PortAllocator};
 use super::rx_hot::{RxHot, RxHotVerdict};
 use super::srtp_rx::{OwnerSrtpRx, PreviousRecv, SrtpRecvShared, SrtpRecvSlot};
 use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
-use super::validation::{bind_media_udp_socket, PlatformSocketStrategy};
+use super::validation::PlatformSocketStrategy;
 use super::{RtpTransport, RtpTransportConfig, SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 use crate::error::Error;
 use crate::executor::{
@@ -941,38 +941,17 @@ impl Drop for PortAllocationCancellationGuard {
 /// Move-only authority to restore the exact SRTP state replaced by one
 /// successful context installation. Dropping it commits the replacement.
 pub struct SrtpContextRollback {
-    /// The displaced outbound context; `None` when the installed one was
-    /// kept because the replacement had the same master keys.
-    previous_send: Option<Option<crate::srtp::SrtpContext>>,
+    previous_send: Option<crate::srtp::SrtpContext>,
     /// The displaced inbound context, or the identity of the one the
-    /// owning receive loop held, which it gives back unchanged, with its
-    /// master keys; `None` when the installed one was kept.
-    previous_recv: Option<(PreviousRecv, Option<crate::srtp::SrtpMasterKeys>)>,
+    /// owning receive loop held, which it gives back unchanged.
+    previous_recv: PreviousRecv,
     previous_secure_media_required: bool,
     installed_generation: u64,
-}
-
-/// SRTCP state of a separate RTCP socket whose component is keyed on its
-/// own: DTLS-SRTP without RTP/RTCP multiplexing runs one handshake per
-/// component (RFC 5764 §4.1), so SRTCP on the RTCP port uses the RTCP
-/// handshake's keys rather than the RTP component's contexts.
-#[derive(Default)]
-struct RtcpComponentSecurity {
-    /// Irreversible: once set, RTCP on the separate socket passes only
-    /// through `send`/`recv` below, and is dropped while they are absent.
-    own_keying: AtomicBool,
-    send: parking_lot::Mutex<Option<crate::srtp::SrtpContext>>,
-    recv: parking_lot::Mutex<Option<crate::srtp::SrtpContext>>,
 }
 
 /// `latched_rtp_ssrc` value before any RTP stream has latched. Outside the
 /// 32-bit SSRC space, so it never equals a real sender.
 const NO_LATCHED_SSRC: u64 = u64::MAX;
-
-/// Where the receive loops hand demultiplexed DTLS datagrams.
-#[cfg(feature = "dtls-webrtc")]
-type DtlsSender =
-    Arc<parking_lot::Mutex<Option<mpsc::Sender<crate::transport::dtls_bridge::DtlsDatagram>>>>;
 
 pub struct UdpRtpTransport {
     /// RTP socket
@@ -1104,16 +1083,7 @@ pub struct UdpRtpTransport {
     /// [`classify_rtp_mux_packet`] are just dropped (the pre-DTLS-SRTP
     /// behavior). Set by [`Self::dtls_conn_adapter`].
     #[cfg(feature = "dtls-webrtc")]
-    dtls_tx: DtlsSender,
-
-    /// The same for the separate RTCP socket's own handshake (RFC 5764
-    /// §4.1). Set by [`Self::dtls_rtcp_conn_adapter`].
-    #[cfg(feature = "dtls-webrtc")]
-    rtcp_dtls_tx: DtlsSender,
-
-    /// SRTCP keys of the RTCP component when it is keyed separately; see
-    /// [`Self::require_rtcp_component_keying`].
-    rtcp_component: Arc<RtcpComponentSecurity>,
+    dtls_tx: Arc<parking_lot::Mutex<Option<mpsc::Sender<Bytes>>>>,
 
     #[cfg(feature = "memory-diagnostics")]
     _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
@@ -1158,8 +1128,8 @@ impl UdpRtpTransport {
         {
             // Generate a session ID if not provided
             let session_id = config.session_id.clone().unwrap_or_else(|| {
-                use rand::RngExt;
-                let random_suffix: u32 = rand::rng().random();
+                use rand::Rng;
+                let random_suffix: u32 = rand::thread_rng().gen();
                 format!("rtp-session-{}", random_suffix)
             });
             // Persist generated ownership so `close()` releases the exact
@@ -1213,7 +1183,7 @@ impl UdpRtpTransport {
         } else {
             // Traditional socket binding without the allocator
             // Create RTP socket
-            let socket_rtp = bind_media_udp_socket(config.local_rtp_addr)
+            let socket_rtp = UdpSocket::bind(config.local_rtp_addr)
                 .await
                 .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
 
@@ -1242,7 +1212,7 @@ impl UdpRtpTransport {
                 };
 
                 // Create RTCP socket
-                let socket_rtcp = bind_media_udp_socket(local_rtcp_addr)
+                let socket_rtcp = UdpSocket::bind(local_rtcp_addr)
                     .await
                     .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
 
@@ -1310,9 +1280,6 @@ impl UdpRtpTransport {
             )),
             #[cfg(feature = "dtls-webrtc")]
             dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
-            #[cfg(feature = "dtls-webrtc")]
-            rtcp_dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
-            rtcp_component: Arc::new(RtcpComponentSecurity::default()),
             #[cfg(feature = "memory-diagnostics")]
             _memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard::new(
                 "rtp_core.udp_transport",
@@ -1470,9 +1437,6 @@ impl UdpRtpTransport {
         let remote_rtp_addr = self.remote_rtp_addr.clone();
         let remote_rtcp_addr = self.remote_rtcp_addr.clone();
         let latched_rtp_ssrc = self.latched_rtp_ssrc.clone();
-        let rtcp_component = self.rtcp_component.clone();
-        #[cfg(feature = "dtls-webrtc")]
-        let rtcp_dtls_tx = self.rtcp_dtls_tx.clone();
 
         self.spawn_on_lane("rtp_core.udp_transport.rtcp_receiver_task", async move {
             let mut observed_generation = symmetric_rtp_generation.load(Ordering::Acquire);
@@ -1488,37 +1452,7 @@ impl UdpRtpTransport {
                 // Receive packet
                 match rtcp_socket.recv_from(&mut buffer).await {
                     Ok((size, addr)) => {
-                        // The RTCP component's own DTLS handshake shares
-                        // this port with SRTCP (RFC 5764 §4.1, RFC 7983).
-                        #[cfg(feature = "dtls-webrtc")]
-                        if classify_rtp_mux_packet(&buffer[..size]) == RtpMuxPacketClass::Dtls {
-                            forward_rtcp_dtls(
-                                &rtcp_dtls_tx,
-                                &buffer[..size],
-                                addr,
-                                policy,
-                                remote_rtp_addr.load().as_deref().copied(),
-                                remote_rtcp_addr.load().as_deref().copied(),
-                            );
-                            continue;
-                        }
-                        let rtcp_data = if rtcp_component.own_keying.load(Ordering::Acquire) {
-                            // Only the RTCP component's keys open SRTCP
-                            // here; until its handshake installs them,
-                            // nothing is accepted.
-                            let mut guard = rtcp_component.recv.lock();
-                            let Some(context) = guard.as_mut() else {
-                                trace!("RTCP component is not keyed yet; dropping packet");
-                                continue;
-                            };
-                            match context.unprotect_rtcp(&buffer[..size]) {
-                                Ok(plaintext) => plaintext,
-                                Err(error) => {
-                                    trace!("SRTCP unprotect failed; dropping packet: {error}");
-                                    continue;
-                                }
-                            }
-                        } else if secure_media_required.load(Ordering::Acquire) {
+                        let rtcp_data = if secure_media_required.load(Ordering::Acquire) {
                             let mut guard = srtp_recv.lock();
                             let Some(context) = guard.home.as_mut() else {
                                 trace!("SRTCP is required but no receive context is installed; dropping packet");
@@ -1613,9 +1547,6 @@ impl UdpRtpTransport {
     /// returns.
     pub async fn release_rtcp_socket(&self) -> Option<SocketAddr> {
         self.rtcp_mux.store(true, Ordering::Release);
-        // A handshake still waiting on the RTCP port fails at once.
-        #[cfg(feature = "dtls-webrtc")]
-        self.rtcp_dtls_tx.lock().take();
         let socket = self.rtcp_socket.swap(None)?;
         let task = self.rtcp_receiver_task.lock().take();
         if let Some(task) = task {
@@ -1715,9 +1646,7 @@ impl UdpRtpTransport {
     /// Build a [`Conn`](webrtc_util::conn::Conn) adapter for running a
     /// DTLS-SRTP handshake over this transport's RTP socket, sharing the
     /// port with RTP/RTCP. [`Self::set_remote_rtp_addr`] must be called
-    /// first. The adapter sends to the transport's live remote RTP address
-    /// rather than a copy taken here, so a later retarget (ICE nomination,
-    /// symmetric RTP) moves the handshake to the same destination as media.
+    /// first — the adapter needs a fixed peer to send handshake bytes to.
     ///
     /// From this point on, incoming datagrams the receive loop classifies
     /// as DTLS (RFC 7983) are routed to the returned adapter instead of
@@ -1727,11 +1656,16 @@ impl UdpRtpTransport {
     pub fn dtls_conn_adapter(
         &self,
     ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
-        if self.remote_rtp_addr.load().is_none() {
-            return Err(crate::error::Error::Transport(
-                "remote RTP address must be set before starting a DTLS handshake".to_string(),
-            ));
-        }
+        let remote = self
+            .remote_rtp_addr
+            .load()
+            .as_deref()
+            .copied()
+            .ok_or_else(|| {
+                crate::error::Error::Transport(
+                    "remote RTP address must be set before starting a DTLS handshake".to_string(),
+                )
+            })?;
 
         let (tx, rx) = mpsc::channel(64);
         *self.dtls_tx.lock() = Some(tx);
@@ -1739,140 +1673,10 @@ impl UdpRtpTransport {
         Ok(Arc::new(
             crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
                 self.rtp_socket.clone(),
-                Arc::clone(&self.remote_rtp_addr),
+                remote,
                 rx,
             ),
         ))
-    }
-
-    /// Build a [`Conn`](webrtc_util::conn::Conn) adapter for the RTCP
-    /// component's own DTLS-SRTP handshake over the separate RTCP socket
-    /// (RFC 5764 §4.1: without RTP/RTCP multiplexing each component carries
-    /// its own DTLS association on its own 5-tuple).
-    ///
-    /// Handshake bytes go to the peer's current RTCP address
-    /// ([`Self::set_remote_rtcp_addr`]). DTLS arriving on the RTCP socket is
-    /// accepted from that address, and, when the symmetric-RTP policy is on,
-    /// from another port on the RTP peer's IP (any IP when the policy allows
-    /// IP changes), never from the RTP peer's own address; the adapter then
-    /// answers that source, so a NAT that does not keep RTP + 1 adjacent
-    /// still completes the handshake. Use [`Self::install_rtcp_component_srtp_contexts`]
-    /// with the keys it derives.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the transport has no separate RTCP socket, RTCP is
-    /// multiplexed, or no remote RTCP address is known.
-    #[cfg(feature = "dtls-webrtc")]
-    pub fn dtls_rtcp_conn_adapter(
-        &self,
-    ) -> Result<Arc<crate::transport::dtls_bridge::DtlsUdpConnAdapter>> {
-        let socket = self
-            .rtcp_socket
-            .load_full()
-            .filter(|_| !self.rtcp_mux.load(Ordering::Acquire))
-            .ok_or_else(|| {
-                Error::InvalidState(
-                    "the RTCP component has no separate socket to run DTLS on".to_string(),
-                )
-            })?;
-        let remote = self
-            .remote_rtcp_addr
-            .load()
-            .as_deref()
-            .copied()
-            .ok_or_else(|| {
-                Error::Transport(
-                    "remote RTCP address must be set before starting the RTCP DTLS handshake"
-                        .to_string(),
-                )
-            })?;
-        let (tx, rx) = mpsc::channel(64);
-        *self.rtcp_dtls_tx.lock() = Some(tx);
-        // The RTCP component's destination is the adapter's own: the
-        // receive loop retargets it at the source a NAT'd peer's handshake
-        // arrives from without moving the transport's signalled RTCP
-        // address, which symmetric RTCP learning governs separately.
-        Ok(Arc::new(
-            crate::transport::dtls_bridge::DtlsUdpConnAdapter::new(
-                socket,
-                Arc::new(ArcSwapOption::from(Some(Arc::new(remote)))),
-                rx,
-            ),
-        ))
-    }
-
-    /// Key the separate RTCP socket on its own, for DTLS-SRTP without
-    /// RTP/RTCP multiplexing (RFC 5764 §4.1).
-    ///
-    /// From this call on, SRTCP sent and received on the separate RTCP
-    /// socket uses only the contexts given to
-    /// [`Self::install_rtcp_component_srtp_contexts`], never the RTP
-    /// component's. Until they are installed, RTCP on that socket fails
-    /// closed: inbound datagrams are dropped and sends return
-    /// [`Error::UnsupportedFeature`], which the RTCP scheduler treats as
-    /// "skip this report".
-    /// RTCP that travels on the RTP socket (multiplexing) is unaffected.
-    /// The latch is irreversible and also requires secure media (see
-    /// [`Self::require_secure_media`]).
-    ///
-    /// Returns `false`, latching nothing, when the transport has no
-    /// separate RTCP socket.
-    pub fn require_rtcp_component_keying(&self) -> bool {
-        if self.rtcp_socket.load().is_none() {
-            return false;
-        }
-        self.require_secure_media();
-        self.rtcp_component
-            .own_keying
-            .store(true, Ordering::Release);
-        true
-    }
-
-    /// Whether [`Self::require_rtcp_component_keying`] latched separate
-    /// RTCP keying.
-    pub fn rtcp_component_keying_required(&self) -> bool {
-        self.rtcp_component.own_keying.load(Ordering::Acquire)
-    }
-
-    /// Install the RTCP component's SRTCP contexts: `send` protects RTCP
-    /// leaving the separate RTCP socket, `recv` authenticates RTCP arriving
-    /// on it.
-    ///
-    /// # Errors
-    ///
-    /// Fails without installing anything when
-    /// [`Self::require_rtcp_component_keying`] has not latched separate
-    /// keying, or a context is not one of the reviewed, enabled suites.
-    pub fn install_rtcp_component_srtp_contexts(
-        &self,
-        send: crate::srtp::SrtpContext,
-        recv: crate::srtp::SrtpContext,
-    ) -> Result<()> {
-        if !self.rtcp_component_keying_required() {
-            return Err(Error::InvalidState(
-                "RTCP component keys need require_rtcp_component_keying first".to_string(),
-            ));
-        }
-        send.validate_for_secure_transport()?;
-        recv.validate_for_secure_transport()?;
-        *self.rtcp_component.send.lock() = Some(send);
-        *self.rtcp_component.recv.lock() = Some(recv);
-        Ok(())
-    }
-
-    /// Whether the RTCP component has its own SRTCP contexts installed.
-    pub fn rtcp_component_srtp_enabled(&self) -> bool {
-        self.rtcp_component.send.lock().is_some() && self.rtcp_component.recv.lock().is_some()
-    }
-
-    /// The separate RTCP socket while RTCP is not multiplexed.
-    fn active_rtcp_socket(&self) -> Option<Arc<UdpSocket>> {
-        if self.rtcp_mux.load(Ordering::Acquire) {
-            None
-        } else {
-            self.rtcp_socket.load_full()
-        }
     }
 
     /// Get the remote RTCP address
@@ -1924,9 +1728,8 @@ impl UdpRtpTransport {
     /// validation fails, so ignoring its error cannot downgrade subsequent
     /// traffic to plaintext. Only enabled contexts using one of the four exact
     /// reviewed AES-CM/HMAC suites are installed. A successful second call
-    /// replaces the contexts, except that a direction whose replacement has
-    /// the same master keys keeps its installed context (see
-    /// [`Self::replace_srtp_contexts`]).
+    /// replaces the contexts (used today only in tests; mid-call rekeying is
+    /// out of scope for this step).
     pub async fn set_srtp_contexts(
         &self,
         send: crate::srtp::SrtpContext,
@@ -1939,15 +1742,6 @@ impl UdpRtpTransport {
     /// Install a validated directional pair and return move-only authority to
     /// restore the immediately preceding pair. This is used across a SIP
     /// zero-wire commit boundary; dropping the token commits the replacement.
-    ///
-    /// A direction whose replacement was built from the same master keys,
-    /// suite and key rotation as its installed context keeps the installed
-    /// context, and the replacement is dropped. Equal master keys are the same
-    /// RFC 3711 crypto context (RFC 4568 section 7.1.4: an unchanged key in a
-    /// re-offer continues the session): restarting it would reset the
-    /// rollover counter and replay window, so a receiver would reject every
-    /// packet after a sequence wrap and accept replays, and a sender would
-    /// reuse keystream.
     pub async fn replace_srtp_contexts(
         &self,
         send: crate::srtp::SrtpContext,
@@ -1987,25 +1781,10 @@ impl UdpRtpTransport {
                 ));
             }
             let installed_generation = current_generation + 1;
-            let previous_send = if send_guard
-                .as_ref()
-                .is_some_and(|current| current.master_keys() == send.master_keys())
-            {
-                None
-            } else {
-                Some(std::mem::replace(&mut *send_guard, Some(send)))
-            };
-            let previous_recv = if recv_slot
-                .installed_keys()
-                .is_some_and(|current| *current == recv.master_keys())
-            {
-                None
-            } else {
-                let previous_keys = recv_slot.installed_keys().cloned();
-                // An owning receive loop adopts the new context before its
-                // next datagram and gives the old one back unchanged.
-                Some((self.srtp_recv.install(&mut recv_slot, recv), previous_keys))
-            };
+            let previous_send = std::mem::replace(&mut *send_guard, Some(send));
+            // An owning receive loop adopts the new context before its next
+            // datagram and gives the old one back unchanged.
+            let previous_recv = self.srtp_recv.install(&mut recv_slot, recv);
             // Hot call state: after the epoch moved, so the receive loop
             // re-checks it.
             self.ring_hot_doorbell();
@@ -2043,10 +1822,9 @@ impl UdpRtpTransport {
             .installed_generation
             .checked_add(1)
             .ok_or_else(|| Error::InvalidState("SRTP context generation exhausted".to_string()))?;
-        if rollback
-            .previous_recv
-            .as_ref()
-            .is_some_and(|(previous, _)| !self.srtp_recv.can_restore(&recv_slot, previous))
+        if !self
+            .srtp_recv
+            .can_restore(&recv_slot, &rollback.previous_recv)
         {
             // Unreachable for a current token (the owning receive loop keeps
             // or gives back the context it held); fail without changing state.
@@ -2055,12 +1833,9 @@ impl UdpRtpTransport {
                     .to_string(),
             ));
         }
-        if let Some(previous_send) = rollback.previous_send {
-            *send_guard = previous_send;
-        }
-        if let Some((previous_recv, keys)) = rollback.previous_recv {
-            self.srtp_recv.restore(&mut recv_slot, previous_recv, keys);
-        }
+        *send_guard = rollback.previous_send;
+        self.srtp_recv
+            .restore(&mut recv_slot, rollback.previous_recv);
         self.ring_hot_doorbell();
         self.srtp_context_generation
             .store(retired_generation, Ordering::Release);
@@ -2148,12 +1923,6 @@ impl UdpRtpTransport {
                 "protected SRTCP wire send requires secure media mode".to_string(),
             ));
         }
-        if self.rtcp_component_keying_required() && self.active_rtcp_socket().is_some() {
-            return Err(Error::InvalidState(
-                "the RTCP component is keyed on its own; RTP-component SRTCP cannot use it"
-                    .to_string(),
-            ));
-        }
         self.send_rtcp_wire_bytes_unchecked(bytes, dest).await
     }
 
@@ -2192,8 +1961,7 @@ impl UdpRtpTransport {
     }
 
     /// Protect an outbound RTCP compound as `send_rtcp_bytes` does: `None`
-    /// when it leaves as plaintext. This is the RTP component's SRTCP; see
-    /// [`Self::prepare_outbound_rtcp`] for the RTCP component's own keys.
+    /// when it leaves as plaintext.
     fn protect_outbound_rtcp(&self, bytes: &[u8]) -> Result<Option<Bytes>> {
         if !self.secure_media_required.load(Ordering::Acquire) {
             return Ok(None);
@@ -2205,71 +1973,24 @@ impl UdpRtpTransport {
         Ok(Some(context.protect_rtcp(bytes)?))
     }
 
-    /// Seed the pre-latch RTCP destination for callers that send before
-    /// media is received.
-    fn seed_prelatch_rtcp_destination(&self, dest: SocketAddr) {
-        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
-            seed_prelatch_destination(&self.remote_rtcp_addr, dest);
-        }
-    }
-
     /// The socket RTCP leaves from now (the separate RTCP socket while
     /// multiplexing is off, else `None` for the RTP socket), after seeding
     /// the pre-latch RTCP destination.
     fn rtcp_wire_socket(&self, dest: SocketAddr) -> Option<Arc<UdpSocket>> {
-        self.seed_prelatch_rtcp_destination(dest);
-        self.active_rtcp_socket()
-    }
-
-    /// The outbound wire form of one RTCP compound and the socket it leaves
-    /// from, shared by `send_rtcp_bytes` and `send_rtcp_bytes_now`.
-    ///
-    /// RFC 5764 §4.1: on a separate RTCP port whose component is keyed by its
-    /// own DTLS-SRTP handshake, RTCP is protected with that component's keys,
-    /// or not sent. `UnsupportedFeature` is the session scheduler's "skip
-    /// quietly while authenticated SRTCP is unavailable" signal: a call whose
-    /// RTCP handshake is pending or failed sends no RTCP without logging
-    /// every interval. The returned socket is the one checked, so RTCP keyed
-    /// for the RTCP component never leaves on the RTP socket.
-    fn prepare_outbound_rtcp(
-        &self,
-        bytes: &[u8],
-        dest: SocketAddr,
-    ) -> Result<(Option<Bytes>, Option<Arc<UdpSocket>>)> {
-        if self.rtcp_component_keying_required() {
-            if let Some(rtcp_socket) = self.active_rtcp_socket() {
-                let protected = {
-                    let mut guard = self.rtcp_component.send.lock();
-                    let context = guard.as_mut().ok_or_else(|| {
-                        Error::UnsupportedFeature(
-                            "the RTCP component's DTLS-SRTP keys are not installed".to_string(),
-                        )
-                    })?;
-                    context.protect_rtcp(bytes)?
-                };
-                self.seed_prelatch_rtcp_destination(dest);
-                return Ok((Some(protected), Some(rtcp_socket)));
-            }
+        if self.config.symmetric_rtp && !self.symmetric_rtp_latched.load(Ordering::Acquire) {
+            seed_prelatch_destination(&self.remote_rtcp_addr, dest);
         }
-        let protected = self.protect_outbound_rtcp(bytes)?;
-        Ok((protected, self.rtcp_wire_socket(dest)))
+        if self.rtcp_mux.load(Ordering::Acquire) {
+            None
+        } else {
+            self.rtcp_socket.load_full()
+        }
     }
 
     async fn send_rtcp_wire_bytes_unchecked(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
         let rtcp_socket = self.rtcp_wire_socket(dest);
-        self.send_rtcp_datagram(rtcp_socket.as_deref(), bytes, dest)
-            .await
-    }
-
-    /// Write one RTCP datagram on `rtcp_socket`, or on the RTP socket when
-    /// RTCP is multiplexed (`None`). The caller has seeded the destination.
-    async fn send_rtcp_datagram(
-        &self,
-        rtcp_socket: Option<&UdpSocket>,
-        bytes: &[u8],
-        dest: SocketAddr,
-    ) -> Result<()> {
         rtcp_socket
+            .as_deref()
             .unwrap_or(&self.rtp_socket)
             .send_to(bytes, dest)
             .await
@@ -2286,8 +2007,9 @@ impl UdpRtpTransport {
     /// through the same awaited `send_to`, already protected, so its SRTCP
     /// index is consumed exactly once.
     pub(crate) async fn send_rtcp_bytes_now(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        let (protected, rtcp_socket) = self.prepare_outbound_rtcp(bytes, dest)?;
+        let protected = self.protect_outbound_rtcp(bytes)?;
         let wire = protected.as_deref().unwrap_or(bytes);
+        let rtcp_socket = self.rtcp_wire_socket(dest);
         let socket = rtcp_socket.as_deref().unwrap_or(&self.rtp_socket);
         match socket.try_send_to(wire, dest) {
             Ok(_) => {
@@ -2714,10 +2436,10 @@ impl RtpTransport for UdpRtpTransport {
     }
 
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
-        let (protected, rtcp_socket) = self.prepare_outbound_rtcp(bytes, dest)?;
-        let wire = protected.as_deref().unwrap_or(bytes);
-        self.send_rtcp_datagram(rtcp_socket.as_deref(), wire, dest)
-            .await
+        match self.protect_outbound_rtcp(bytes)? {
+            Some(protected) => self.send_rtcp_wire_bytes_unchecked(&protected, dest).await,
+            None => self.send_rtcp_wire_bytes_unchecked(bytes, dest).await,
+        }
     }
 
     async fn receive_packet(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr)> {
@@ -2847,43 +2569,6 @@ impl Drop for UdpRtpTransport {
                 });
             }
         }
-    }
-}
-
-/// Hand a DTLS datagram that arrived on the separate RTCP socket to the RTCP
-/// component's handshake, when one is waiting and the source belongs to the
-/// call's peer: its signalled RTCP address or, with the symmetric-RTP policy
-/// on, another port on the RTP peer's IP (any IP when the policy allows IP
-/// changes), never the RTP peer's own address. The handshake answers the
-/// source it last accepted, which lets a NAT-mapped RTCP port complete it;
-/// DTLS authenticates the peer by its SDP fingerprint either way.
-#[cfg(feature = "dtls-webrtc")]
-fn forward_rtcp_dtls(
-    rtcp_dtls_tx: &DtlsSender,
-    datagram: &[u8],
-    source: SocketAddr,
-    policy: SymmetricRtpPolicy,
-    rtp_peer: Option<SocketAddr>,
-    signalled_rtcp: Option<SocketAddr>,
-) {
-    let from_peer = signalled_rtcp == Some(source)
-        || (policy.enabled
-            && rtp_peer.is_some_and(|peer| {
-                peer != source && (policy.allow_ip_change || peer.ip() == source.ip())
-            }));
-    if !from_peer {
-        trace!("DTLS on the RTCP port from a stranger; dropping datagram");
-        return;
-    }
-    let forwarded = rtcp_dtls_tx.lock().as_ref().is_some_and(|tx| {
-        tx.try_send(crate::transport::dtls_bridge::DtlsDatagram {
-            bytes: Bytes::copy_from_slice(datagram),
-            retarget: Some(source),
-        })
-        .is_ok()
-    });
-    if !forwarded {
-        trace!("no RTCP DTLS handshake is waiting; dropping datagram");
     }
 }
 
@@ -4114,117 +3799,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Bind a transport to explicit (non-zero) RTP and RTCP loopback ports.
-    async fn transport_on_explicit_media_ports(
-        session: &str,
-    ) -> (UdpRtpTransport, SocketAddr, SocketAddr) {
-        for _ in 0..20 {
-            let probe_rtp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let probe_rtcp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let rtp = probe_rtp.local_addr().unwrap();
-            let rtcp = probe_rtcp.local_addr().unwrap();
-            drop((probe_rtp, probe_rtcp));
-            // Another process can take a probed port in between; try again.
-            if let Ok(transport) =
-                UdpRtpTransport::new(explicit_media_config(session, rtp, rtcp)).await
-            {
-                return (transport, rtp, rtcp);
-            }
-        }
-        panic!("could not bind a media transport to explicit loopback ports");
-    }
-
-    fn explicit_media_config(
-        session: &str,
-        rtp: SocketAddr,
-        rtcp: SocketAddr,
-    ) -> RtpTransportConfig {
-        RtpTransportConfig {
-            local_rtp_addr: rtp,
-            local_rtcp_addr: Some(rtcp),
-            symmetric_rtp: true,
-            rtcp_mux: false,
-            session_id: Some(session.to_string()),
-            use_port_allocator: false,
-            buffer_config: Default::default(),
-        }
-    }
-
-    /// A second socket that sets `SO_REUSEADDR` must not be able to bind a
-    /// live media port. On Linux it could when the media socket also had the
-    /// flag (even set after bind), and the newer socket then receives every
-    /// datagram sent to the port; on Windows it could unless the media socket
-    /// set `SO_EXCLUSIVEADDRUSE`. See the sip-transport `udp_port_hijack` test
-    /// for the macOS semantics. rvoip's CI runs on Linux only, so the Windows
-    /// build of this test is compile-checked, not run.
-    #[cfg(any(unix, windows))]
-    fn assert_media_port_not_shareable(addr: SocketAddr, what: &str) {
-        use socket2::{Domain, Protocol, Socket, Type};
-        let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        intruder.set_reuse_address(true).unwrap();
-        match intruder.bind(&addr.into()) {
-            Ok(()) => {
-                let intruder: std::net::UdpSocket = intruder.into();
-                intruder
-                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                    .unwrap();
-                let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                sender.send_to(&[0x80, 0, 0, 1], addr).unwrap();
-                let mut buf = [0u8; 64];
-                let outcome = match intruder.recv_from(&mut buf) {
-                    Ok((len, _)) => format!("and received the {len}-byte datagram sent to it"),
-                    Err(err) => format!("(the probe datagram did not reach it: {err})"),
-                };
-                panic!(
-                    "hijack: a second SO_REUSEADDR socket bound the {what} port {addr} {outcome}"
-                );
-            }
-            // Windows reports the refusal as WSAEADDRINUSE or WSAEACCES.
-            Err(err) => assert!(
-                err.kind() == std::io::ErrorKind::AddrInUse
-                    || (cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied),
-                "the intruder on the {what} port must be refused with EADDRINUSE, got {err}"
-            ),
-        }
-    }
-
-    #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn reuse_flagged_socket_cannot_take_an_explicit_media_port() {
-        let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-port-hijack").await;
-        assert_media_port_not_shareable(rtp, "RTP");
-        assert_media_port_not_shareable(rtcp, "RTCP");
-        transport.close().await.unwrap();
-
-        // The port allocator binds through the same socket strategy.
-        let allocator = crate::transport::allocator::PortAllocator::new();
-        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
-        let socket = allocator
-            .create_validated_socket(addr)
-            .await
-            .expect("allocator binds an explicit media port");
-        assert_media_port_not_shareable(socket.local_addr().unwrap(), "allocator RTP");
-    }
-
-    #[tokio::test]
-    async fn rebinds_same_media_ports_after_close() {
-        // UDP has no TIME_WAIT: once a closed transport's sockets are gone, a
-        // new transport binds the same explicit RTP and RTCP ports at once,
-        // with no SO_REUSEADDR on either.
-        let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-rebind-first").await;
-        transport.close().await.unwrap();
-        drop(transport);
-
-        let rebound = UdpRtpTransport::new(explicit_media_config("media-rebind-second", rtp, rtcp))
-            .await
-            .expect("rebind the same RTP/RTCP ports right after close");
-        assert_eq!(rebound.local_rtp_addr().unwrap(), rtp);
-        assert_eq!(rebound.local_rtcp_addr().unwrap(), Some(rtcp));
-        rebound.close().await.unwrap();
-    }
-
     // -------- SRTP wrapping (Step 2B.2) ---------------------------------
 
     /// Build a matched pair of `SrtpContext`s from a single shared
@@ -4677,123 +4251,6 @@ mod tests {
         }
     }
 
-    /// An SRTP context pair (sender, receiver) sharing a key derived from
-    /// `seed`, so two pairs with different seeds cannot open each other.
-    fn make_seeded_srtp_ctx_pair(seed: u8) -> (crate::srtp::SrtpContext, crate::srtp::SrtpContext) {
-        use crate::srtp::{SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
-        // Keys are derived from `seed` and a per-process random salt: equal
-        // seeds still yield matching contexts within a run, and no key
-        // material is a literal.
-        static SALT: std::sync::OnceLock<[u8; 30]> = std::sync::OnceLock::new();
-        let salt = SALT.get_or_init(rand::random);
-        let key: Vec<u8> = salt[..16].iter().map(|byte| byte ^ seed).collect();
-        let master_salt: Vec<u8> = salt[16..]
-            .iter()
-            .map(|byte| byte ^ seed.wrapping_add(1))
-            .collect();
-        let ctx = || {
-            crate::srtp::SrtpContext::new(
-                SRTP_AES128_CM_SHA1_80,
-                SrtpCryptoKey::new(key.clone(), master_salt.clone()),
-            )
-            .unwrap()
-        };
-        (ctx(), ctx())
-    }
-
-    /// RFC 5764 §4.1: a separately keyed RTCP component sends nothing and
-    /// accepts nothing until its own keys arrive, never falls back to the
-    /// RTP component's keys, and then carries SRTCP under its own keys.
-    #[tokio::test]
-    async fn separately_keyed_rtcp_component_fails_closed_then_uses_only_its_own_keys() {
-        let config = |name: &str, rtcp_mux: bool| RtpTransportConfig {
-            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
-            local_rtcp_addr: (!rtcp_mux).then(|| "127.0.0.1:0".parse().unwrap()),
-            symmetric_rtp: false,
-            rtcp_mux,
-            session_id: Some(format!("rtcp-component-{name}")),
-            use_port_allocator: false,
-            buffer_config: Default::default(),
-        };
-        let muxed = UdpRtpTransport::new(config("muxed", true)).await.unwrap();
-        assert!(!muxed.require_rtcp_component_keying());
-        assert!(!muxed.rtcp_component_keying_required());
-        let (send, recv) = make_seeded_srtp_ctx_pair(9);
-        assert!(muxed
-            .install_rtcp_component_srtp_contexts(send, recv)
-            .is_err());
-        muxed.close().await.unwrap();
-
-        let transport_a = UdpRtpTransport::new(config("a", false)).await.unwrap();
-        let transport_b = UdpRtpTransport::new(config("b", false)).await.unwrap();
-        let (a_send, b_recv) = make_seeded_srtp_ctx_pair(1);
-        let (b_send, a_recv) = make_seeded_srtp_ctx_pair(3);
-        transport_a.set_srtp_contexts(a_send, a_recv).await.unwrap();
-        transport_b.set_srtp_contexts(b_send, b_recv).await.unwrap();
-        let (a_send, b_recv) = make_seeded_srtp_ctx_pair(5);
-        assert!(transport_b
-            .install_rtcp_component_srtp_contexts(a_send, b_recv)
-            .is_err());
-        assert!(transport_a.require_rtcp_component_keying());
-        assert!(transport_b.require_rtcp_component_keying());
-        let destination = transport_b.local_rtcp_socket_addr().unwrap();
-        let report = test_receiver_report(0x0a0b_0c0d);
-        let plaintext = report.serialize().unwrap();
-        let mut events = transport_b.subscribe();
-
-        // Unkeyed: sends are skipped, and RTP-component SRTCP cannot leave
-        // through the RTCP socket by any route.
-        assert!(matches!(
-            transport_a.send_rtcp(&report, destination).await,
-            Err(Error::UnsupportedFeature(_))
-        ));
-        let (mut rtp_component_send, _) = make_seeded_srtp_ctx_pair(1);
-        let rtp_keyed = rtp_component_send.protect_rtcp(&plaintext).unwrap();
-        assert!(transport_a
-            .send_protected_rtcp_bytes(&rtp_keyed, destination)
-            .await
-            .is_err());
-        // Unkeyed: plaintext and RTP-component SRTCP are both dropped.
-        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        peer.send_to(&plaintext, destination).await.unwrap();
-        peer.send_to(&rtp_keyed, destination).await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(150), events.recv())
-                .await
-                .is_err(),
-            "an unkeyed RTCP component accepted RTCP"
-        );
-
-        let (a_send, b_recv) = make_seeded_srtp_ctx_pair(5);
-        let (b_send, a_recv) = make_seeded_srtp_ctx_pair(7);
-        transport_a
-            .install_rtcp_component_srtp_contexts(a_send, a_recv)
-            .unwrap();
-        transport_b
-            .install_rtcp_component_srtp_contexts(b_send, b_recv)
-            .unwrap();
-        assert!(transport_b.rtcp_component_srtp_enabled());
-        // Still no fallback to the RTP component's keys once keyed.
-        let rtp_keyed = rtp_component_send.protect_rtcp(&plaintext).unwrap();
-        peer.send_to(&rtp_keyed, destination).await.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(150), events.recv())
-                .await
-                .is_err(),
-            "the RTCP component accepted the RTP component's SRTCP"
-        );
-        transport_a.send_rtcp(&report, destination).await.unwrap();
-        match tokio::time::timeout(Duration::from_secs(1), events.recv()).await {
-            Ok(Ok(RtpEvent::RtcpReceived { data, source })) => {
-                assert_eq!(data, plaintext);
-                assert_eq!(Some(source), transport_a.local_rtcp_socket_addr());
-            }
-            other => panic!("expected SRTCP under the RTCP component's keys, got {other:?}"),
-        }
-        transport_a.close().await.unwrap();
-        transport_b.close().await.unwrap();
-    }
-
     #[tokio::test]
     async fn secure_udp_paths_drop_plaintext_rtcp_then_accept_valid_srtcp() {
         for rtcp_mux in [true, false] {
@@ -4913,101 +4370,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_srtp_contexts_with_unchanged_keys_keeps_rollover_and_replay_state() {
-        let config = |name: &str| RtpTransportConfig {
-            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
-            local_rtcp_addr: None,
-            symmetric_rtp: true,
-            rtcp_mux: true,
-            session_id: Some(name.to_string()),
-            use_port_allocator: false,
-            buffer_config: Default::default(),
-        };
-        let sender = UdpRtpTransport::new(config("srtp-same-key-a"))
-            .await
-            .unwrap();
-        let receiver = UdpRtpTransport::new(config("srtp-same-key-b"))
-            .await
-            .unwrap();
-        let (a_send, b_recv) = make_srtp_ctx_pair();
-        let (b_send, a_recv) = make_srtp_ctx_pair();
-        sender.set_srtp_contexts(a_send, a_recv).await.unwrap();
-        receiver.set_srtp_contexts(b_send, b_recv).await.unwrap();
-        let mut events = receiver.subscribe();
-        let destination = receiver.local_rtp_addr().unwrap();
-
-        async fn delivered(events: &mut broadcast::Receiver<RtpEvent>, sequence: u16) -> bool {
-            tokio::time::timeout(tokio::time::Duration::from_millis(300), async {
-                loop {
-                    if let Ok(RtpEvent::MediaReceived {
-                        sequence_number: seq,
-                        ..
-                    }) = events.recv().await
-                    {
-                        if seq == sequence {
-                            break;
-                        }
-                    }
-                }
-            })
-            .await
-            .is_ok()
-        }
-        let packet = |sequence: u16| {
-            RtpPacket::new(
-                RtpHeader::new(0, sequence, u32::from(sequence), 0x0bad_cafe),
-                Bytes::from_static(b"same master key"),
-            )
-        };
-
-        sender.send_rtp(&packet(65_535), destination).await.unwrap();
-        assert!(delivered(&mut events, 65_535).await);
-
-        // A re-INVITE that keeps both master keys installs equal contexts,
-        // and this token restores nothing when rolled back.
-        let (b_send, b_recv) = make_srtp_ctx_pair();
-        let rollback = receiver
-            .replace_srtp_contexts(b_send, b_recv)
-            .await
-            .unwrap();
-        receiver.rollback_srtp_contexts(rollback).await.unwrap();
-        let (b_send, b_recv) = make_srtp_ctx_pair();
-        receiver.set_srtp_contexts(b_send, b_recv).await.unwrap();
-        assert!(receiver.srtp_enabled().await);
-
-        // Rollover counter 1: only the continuing context authenticates it.
-        sender.send_rtp(&packet(0), destination).await.unwrap();
-        assert!(
-            delivered(&mut events, 0).await,
-            "the packet after the sequence wrap must authenticate"
-        );
-        // The sender's own context also continued: its index did not restart.
-        let (a_send, a_recv) = make_srtp_ctx_pair();
-        sender.set_srtp_contexts(a_send, a_recv).await.unwrap();
-        sender.send_rtp(&packet(1), destination).await.unwrap();
-        assert!(delivered(&mut events, 1).await);
-
-        let (replay_send, _) = make_srtp_ctx_pair();
-        let mut replay_send = replay_send;
-        let replayed = replay_send
-            .protect(&packet(65_535))
-            .unwrap()
-            .serialize()
-            .unwrap();
-        sender
-            .get_socket()
-            .send_to(&replayed, destination)
-            .await
-            .unwrap();
-        assert!(
-            !delivered(&mut events, 65_535).await,
-            "the replay window must survive the replacement"
-        );
-        sender.close().await.unwrap();
-        receiver.close().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn srtp_aes256_round_trip_through_real_udp_sockets() {
         let cfg_a = RtpTransportConfig {
             local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
@@ -5113,7 +4475,6 @@ mod tests {
             .unwrap();
 
         let mut events = transport_b.subscribe();
-        let failures_before = crate::transport::srtp_unprotect_failures_total();
 
         let header = RtpHeader::new(0, 1, 12345, 0xdead_beef);
         let payload = Bytes::from_static(b"this should be dropped");
@@ -5130,12 +4491,6 @@ mod tests {
             waited.is_err(),
             "auth-failed packet must be silently dropped (got event {:?})",
             waited
-        );
-        // The drop is counted process-wide (other tests may add their own
-        // failures concurrently, never remove any).
-        assert!(
-            crate::transport::srtp_unprotect_failures_total() > failures_before,
-            "the dropped packet is counted"
         );
     }
 

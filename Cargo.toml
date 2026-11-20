@@ -62,8 +62,6 @@ members = [
     "crates/extensions/rvoip-vcon-postgres",
     "crates/extensions/rvoip-harness",
     "crates/extensions/rvoip-vapi",
-    "crates/extensions/rvoip-amazon-a2a",
-    "crates/extensions/rvoip-webex-byova",
     "crates/extensions/rvoip-stir-shaken",
     "crates/extensions/rvoip-keycloak",
     "crates/extensions/rvoip-redis",
@@ -74,9 +72,6 @@ members = [
     "crates/extensions/rvoip-saml",
     "crates/extensions/rvoip-webauthn",
     "crates/extensions/rvoip-ims-aka",
-
-    # tools/ — benchmark tools, never published.
-    "crates/tools/rvoip-bench-uas",
 ]
 
 exclude = [
@@ -123,7 +118,7 @@ homepage = "https://github.com/eisenzopf/rvoip"
 repository = "https://github.com/eisenzopf/rvoip"
 documentation = "https://docs.rs/rvoip"
 authors = ["RVOIP AUTHORS"]
-rust-version = "1.95"  # Minimum supported Rust version
+rust-version = "1.91"  # Minimum supported Rust version
 categories = ["network-programming", "multimedia", "web-programming"]
 keywords = ["sip", "voip", "rtp", "communication", "telephony"]
 
@@ -245,8 +240,6 @@ rvoip-users-core    = { path = "crates/identity/users-core", version = "0.4.0" }
 rvoip-vcon          = { path = "crates/extensions/rvoip-vcon", version = "0.4.0" }
 rvoip-vcon-postgres = { path = "crates/extensions/rvoip-vcon-postgres", version = "0.4.0" }
 rvoip-harness       = { path = "crates/extensions/rvoip-harness", version = "0.4.0" }
-rvoip-amazon-a2a    = { path = "crates/extensions/rvoip-amazon-a2a", version = "0.4.0" }
-rvoip-webex-byova   = { path = "crates/extensions/rvoip-webex-byova", version = "0.4.0" }
 rvoip-vapi          = { path = "crates/extensions/rvoip-vapi", version = "0.4.0" }
 rvoip               = { path = "crates/rvoip", version = "0.4.0" }
 rvoip-uctp          = { path = "crates/uctp/rvoip-uctp", version = "0.4.0" }
@@ -282,58 +275,57 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-thiserror = "2.0"
+thiserror = "1.0"
 anyhow = "1.0"
 bytes = { version = "1.5", features = ["serde"] }
 uuid = { version = "1.7", features = ["v4", "serde"] }
-axum = "0.8"
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["trace", "cors"] }
 proptest = "1.4"
 async-trait = "0.1"
 futures = "0.3"
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "6"
-parking_lot = "0.13"
-rand = "0.10"
+parking_lot = "0.12"
+rand = { version = "0.8", features = ["small_rng"] }
 clap = { version = "4.0", features = ["derive"] }
-toml = { version = "1.1", default-features = false }
 
 # Additional dependencies used by various crates
 serde_bytes = "0.11"
-base64 = "0.23"
-nom = "8"
-nom-language = "0.1"
+base64 = "0.22"
+nom = "7.1"
 log = "0.4"
-ordered-float = { version = "5", features = ["serde"] }
-socket2 = { version = "0.6", features = ["all"] }
+ordered-float = { version = "4.2.0", features = ["serde"] }
+socket2 = { version = "0.5", features = ["all"] }
+mio = { version = "0.8", features = ["os-poll", "net"] }
 # default-features=false drops rustls's default `aws_lc_rs` provider AND
 # `prefer-post-quantum` (which also requires aws_lc_rs) — otherwise the process
 # links two CryptoProviders (ring + aws-lc-rs) and rustls can't auto-select one.
 # We standardize on `ring`. "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.0"
-# Explicit-provider HTTPS clients (reqwest `rustls-no-provider` + `tls_backend_preconfigured`).
-rustls-platform-verifier = "0.7"
 url = "2"
 # Used by rvoip-webrtc tls-rustls feature for in-process HTTPS/WSS termination.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-axum-server = { version = "0.9", features = ["tls-rustls-ring"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 # Headless-Chromium driver for rvoip-webrtc's interop-browser dev-only test.
 # Requires a Chromium binary on PATH at test time. Default features disabled
 # to avoid pulling chromiumoxide_cdp's heavy proc-macro chain when the
 # feature isn't selected.
-chromiumoxide = { version = "0.8", default-features = false, features = ["tokio-runtime"] }
-sha2 = "0.11"
-sha1 = "0.11"
+chromiumoxide = { version = "0.7", default-features = false, features = ["tokio-runtime"] }
+sha2 = "0.10"
+sha1 = "0.10"
 zeroize = "1.9"
 subtle = "2.6"
-hmac = "0.13"
-aes = "0.9"
-md-5 = "0.11"
+hmac = "0.12"
+aes = "0.8"
+md-5 = "0.10"
 ring = "0.17"
 rcgen = "0.14"
 x509-parser = "0.18"
-webpki-roots = "1.0"
-serial_test = "4.0"
+webpki-roots = "0.26"
+serial_test = "3.1"
 fastrand = "2.0"
 
 # UCTP substrate deps — QUIC, WebTransport, length-prefix codec, metrics.
@@ -343,10 +335,10 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 # ring rustls provider (rustls/quinn are pinned to ring above). Force ring
 # so the process has exactly ONE rustls CryptoProvider — otherwise rustls
 # can't auto-select one and TLS/WSS paths panic at runtime.
-web-transport-quinn = { version = "0.13", default-features = false, features = ["ring"] }
-web-transport = "0.13"
+web-transport-quinn = { version = "0.11", default-features = false, features = ["ring"] }
+web-transport = "0.10.6"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
-metrics = "0.24"
+metrics = "0.23"
 # Qualified, attributed MOQT draft-19 forks. Package aliases retain the
 # upstream Rust crate names while the registry identities remain rvoip-owned.
 moq-transport = { package = "rvoip-moq-transport", path = "crates/moq/rvoip-moq-transport", version = "0.4.0" }
@@ -356,21 +348,21 @@ moq-relay-ietf = { package = "rvoip-moq-relay", path = "crates/moq/rvoip-moq-rel
 # transport, webrtc for the co-located PeerConnection media plane.
 # webrtc is pre-1.0 and API-volatile — pinned strictly. Bumping requires
 # verifying the WebRtcMediaBridge still compiles.
-tokio-tungstenite = "0.30"
+tokio-tungstenite = "0.29"
 webrtc = { package = "rvoip-webrtc-stack", path = "crates/webrtc/rvoip-webrtc-stack", version = "0.4.0" }
 hickory-resolver = { version = "0.26.1", default-features = false, features = ["tokio", "system-config"] }
 tracing-appender = "0.2"
 env_logger = "0.11"
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # 🔧 Optimization Profiles for Binary Size Reduction
 
 
 # Optional perf-test instrumentation (rvoip-sip `perf-tests` feature).
-console-subscriber = "0.5"
+console-subscriber = "0.4"
 dhat = "0.3"
 hdrhistogram = "7.5"
-sysinfo = "0.40"
+sysinfo = "0.31"
 [profile.release]
 # Speed-optimized release for a perf-sensitive networking library.
 # Was previously `opt-level = "s"` (size) — switched to 3 after

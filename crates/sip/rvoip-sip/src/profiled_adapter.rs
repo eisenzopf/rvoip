@@ -553,28 +553,7 @@ async fn run_child_events(
         }
 
         let terminal = terminal_event(&event);
-        let delivered = if let OrchestratorAdapterEvent::TerminalReceipt { event, consumed } = event
-        {
-            // Forward the producer's receipt: acknowledge only once the
-            // pool's own Orchestrator has consumed the terminal.
-            let delivered = matches!(
-                tokio::time::timeout(
-                    crate::adapter::SIP_RETAINED_TASK_TIMEOUT,
-                    pool.lifecycle
-                        .queue_or_deliver_orchestrator_terminal_with_receipt(
-                            &pool.events_tx,
-                            event
-                        ),
-                )
-                .await,
-                Ok(rvoip_core::adapter::TerminalDelivery::Queued
-                    | rvoip_core::adapter::TerminalDelivery::Fallback)
-            );
-            if delivered {
-                consumed.send_replace(true);
-            }
-            delivered
-        } else if let Some(terminal) = terminal.clone() {
+        let delivered = if let Some(terminal) = terminal.clone() {
             !matches!(
                 pool.lifecycle
                     .queue_or_deliver_orchestrator_terminal(&pool.events_tx, terminal)
@@ -619,11 +598,7 @@ fn terminal_event(event: &OrchestratorAdapterEvent) -> Option<AdapterEvent> {
     match event {
         OrchestratorAdapterEvent::Public(
             event @ (AdapterEvent::Ended { .. } | AdapterEvent::Failed { .. }),
-        )
-        | OrchestratorAdapterEvent::TerminalReceipt {
-            event: event @ (AdapterEvent::Ended { .. } | AdapterEvent::Failed { .. }),
-            ..
-        } => Some(event.clone()),
+        ) => Some(event.clone()),
         _ => None,
     }
 }
@@ -633,10 +608,7 @@ fn orchestrator_event_connection_id(event: &OrchestratorAdapterEvent) -> Option<
         OrchestratorAdapterEvent::AuthenticatedInboundConnection { connection, .. } => {
             Some(&connection.id)
         }
-        OrchestratorAdapterEvent::Public(event)
-        | OrchestratorAdapterEvent::TerminalReceipt { event, .. } => {
-            adapter_event_connection_id(event)
-        }
+        OrchestratorAdapterEvent::Public(event) => adapter_event_connection_id(event),
         _ => None,
     }
 }
@@ -652,7 +624,6 @@ fn adapter_event_connection_id(event: &AdapterEvent) -> Option<&ConnectionId> {
         | AdapterEvent::Failed { connection_id, .. }
         | AdapterEvent::Dtmf { connection_id, .. }
         | AdapterEvent::Quality { connection_id, .. }
-        | AdapterEvent::MediaCommitted { connection_id, .. }
         | AdapterEvent::Message { connection_id, .. }
         | AdapterEvent::DataMessage { connection_id, .. }
         | AdapterEvent::TransferStatus { connection_id, .. }

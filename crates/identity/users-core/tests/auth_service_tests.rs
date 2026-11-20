@@ -405,7 +405,7 @@ async fn tenant_bound_refresh_exchange_rejects_legacy_and_cross_tenant_tokens() 
     let legacy = encode(
         &Header::default(),
         &legacy,
-        &EncodingKey::from_secret(b"tenant-refresh-test-key").unwrap(),
+        &EncodingKey::from_secret(b"tenant-refresh-test-key"),
     )
     .unwrap();
     assert!(matches!(
@@ -424,7 +424,7 @@ async fn tenant_bound_refresh_exchange_rejects_legacy_and_cross_tenant_tokens() 
     let cross_tenant = encode(
         &Header::default(),
         &cross_tenant,
-        &EncodingKey::from_secret(b"tenant-refresh-test-key").unwrap(),
+        &EncodingKey::from_secret(b"tenant-refresh-test-key"),
     )
     .unwrap();
     assert!(matches!(

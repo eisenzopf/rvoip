@@ -64,37 +64,6 @@ use uuid::Uuid;
 
 use crate::transaction::error::{Error, Result};
 
-/// Retain the exact admitted transaction flow only when an in-dialog ACK
-/// preserves both the complete proxy route set and the remote target. The
-/// logical SIP proxy port need not be the stream peer's source port. Initial
-/// and direct dialogs, target refreshes, and changed routes use normal routing.
-pub(crate) fn ack_preserves_established_proxy_route(invite: &Request, ack: &Request) -> bool {
-    let routes = |request: &Request| {
-        request
-            .headers
-            .iter()
-            .filter_map(|header| match header {
-                TypedHeader::Route(route) => Some(route.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let original_routes = routes(invite);
-    invite.method() == Method::Invite
-        && ack.method() == Method::Ack
-        && invite
-            .to()
-            .and_then(To::tag)
-            .is_some_and(|tag| !tag.is_empty())
-        && !original_routes.is_empty()
-        && original_routes == routes(ack)
-        && invite.uri() == ack.uri()
-        && invite.call_id() == ack.call_id()
-        && invite.from().and_then(From::tag) == ack.from().and_then(From::tag)
-        && invite.to().and_then(To::tag) == ack.to().and_then(To::tag)
-        && invite.cseq().map(|cseq| cseq.seq) == ack.cseq().map(|cseq| cseq.seq)
-}
-
 /// Compact immutable fields from an INVITE that are required to construct a
 /// dialog-forming 2xx ACK after the client transaction has been retired.
 ///
@@ -108,9 +77,6 @@ pub(crate) struct Invite2xxAckTemplate {
     call_id: Option<CallId>,
     cseq_num: Option<u32>,
     via_transport: String,
-    // None denotes a dialog-forming INVITE. Some(empty) is an existing
-    // direct dialog and must not accept a new response Record-Route set.
-    in_dialog_routes: Option<Vec<Route>>,
 }
 
 impl Invite2xxAckTemplate {
@@ -121,19 +87,6 @@ impl Invite2xxAckTemplate {
             call_id: request.call_id().cloned(),
             cseq_num: request.cseq().map(|cseq| cseq.seq),
             via_transport: request.first_via_transport().unwrap_or("UDP").to_owned(),
-            in_dialog_routes: request
-                .to()
-                .filter(|to| to.tag().is_some_and(|tag| !tag.is_empty()))
-                .map(|_| {
-                    request
-                        .headers
-                        .iter()
-                        .filter_map(|header| match header {
-                            TypedHeader::Route(route) => Some(route.clone()),
-                            _ => None,
-                        })
-                        .collect()
-                }),
         }
     }
 }
@@ -281,29 +234,25 @@ pub(crate) fn create_ack_for_2xx_from_template(
         .header(TypedHeader::To(to))
         .header(TypedHeader::CallId(call_id))
         .header(TypedHeader::CSeq(CSeq::new(cseq_num, Method::Ack)))
-        .via_socket_addr(*local_addr, &template.via_transport, Some(&branch))
+        .via(
+            &local_addr.to_string(),
+            &template.via_transport,
+            Some(&branch),
+        )
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
-    if let Some(routes) = &template.in_dialog_routes {
-        // RFC 3261 §§12.2.1.1, 14.1: a re-INVITE may refresh the remote
-        // Contact target, but cannot replace the established route set. The
-        // original in-dialog request already owns its correctly ordered set.
-        for route in routes {
-            builder = builder.header(TypedHeader::Route(route.clone()));
+    // Build the ACK route set from Record-Route. For a UAC-created dialog,
+    // the route set is the response Record-Route values in reverse order
+    // (RFC 3261 §12.1.2). Do not copy Record-Route itself into the ACK.
+    let mut route_set = Vec::new();
+    for header in &ok_response.headers {
+        if let TypedHeader::RecordRoute(record_route) = header {
+            route_set.extend(record_route.iter().map(|entry| entry.address().clone()));
         }
-    } else {
-        // The initial UAC-created dialog adopts response Record-Route in
-        // reverse order (RFC 3261 §12.1.2), never the initial preloaded Route.
-        let mut route_set = Vec::new();
-        for header in &ok_response.headers {
-            if let TypedHeader::RecordRoute(record_route) = header {
-                route_set.extend(record_route.iter().map(|entry| entry.address().clone()));
-            }
-        }
-        for route_address in route_set.into_iter().rev() {
-            builder = builder.header(TypedHeader::Route(Route::with_address(route_address)));
-        }
+    }
+    for route_address in route_set.into_iter().rev() {
+        builder = builder.header(TypedHeader::Route(Route::with_address(route_address)));
     }
 
     Ok(builder.build())
@@ -480,82 +429,6 @@ mod tests {
     }
 
     #[test]
-    fn established_proxy_ack_flow_requires_exact_route_target_and_dialog_identity() {
-        let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@10.0.0.9:6000")
-            .unwrap()
-            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
-            .to("Bob", "sip:bob@example.com", Some("bob-tag"))
-            .call_id("exact-dialog")
-            .cseq(102)
-            .via("127.0.0.1:5061", "TLS", Some("z9hG4bK-original"))
-            .header(TypedHeader::Route(
-                Route::from_str("<sip:192.0.2.10:5061;transport=tls;lr>").unwrap(),
-            ))
-            .build();
-        let response =
-            SimpleResponseBuilder::response_from_request(&invite, StatusCode::Ok, Some("OK"))
-                .contact("sip:bob@10.0.0.9:6000", None)
-                .build();
-        let ack =
-            create_ack_for_2xx(&invite, &response, &"127.0.0.1:5061".parse().unwrap()).unwrap();
-        assert!(ack_preserves_established_proxy_route(&invite, &ack));
-        for mutation in [
-            "target",
-            "route",
-            "route_order",
-            "call_id",
-            "to_tag",
-            "from_tag",
-            "cseq",
-        ] {
-            let mut changed = ack.clone();
-            match mutation {
-                "target" => changed.uri = "sip:bob@10.0.0.9:6001".parse().unwrap(),
-                "route" => changed
-                    .headers
-                    .retain(|header| !matches!(header, TypedHeader::Route(_))),
-                "route_order" => changed.headers.push(TypedHeader::Route(
-                    Route::from_str("<sip:192.0.2.11:5061;transport=tls;lr>").unwrap(),
-                )),
-                "call_id" => changed.headers.iter_mut().for_each(|header| {
-                    if let TypedHeader::CallId(id) = header {
-                        *id = CallId::new("other-dialog");
-                    }
-                }),
-                "to_tag" => changed.headers.iter_mut().for_each(|header| {
-                    if let TypedHeader::To(to) = header {
-                        to.set_tag("other-tag");
-                    }
-                }),
-                "from_tag" => changed.headers.iter_mut().for_each(|header| {
-                    if let TypedHeader::From(from) = header {
-                        from.set_tag("other-tag");
-                    }
-                }),
-                "cseq" => changed.headers.iter_mut().for_each(|header| {
-                    if let TypedHeader::CSeq(cseq) = header {
-                        cseq.seq += 1;
-                    }
-                }),
-                _ => unreachable!(),
-            }
-            assert!(
-                !ack_preserves_established_proxy_route(&invite, &changed),
-                "{mutation}"
-            );
-        }
-        let mut direct = invite.clone();
-        direct
-            .headers
-            .retain(|header| !matches!(header, TypedHeader::Route(_)));
-        assert!(!ack_preserves_established_proxy_route(&direct, &ack));
-        assert!(!ack_preserves_established_proxy_route(
-            &create_test_invite(),
-            &ack
-        ));
-    }
-
-    #[test]
     fn test_create_ack_for_2xx() {
         let invite = create_test_invite();
         let ok_response = create_2xx_response(&invite);
@@ -654,80 +527,6 @@ mod tests {
             .uri
             .parameters
             .contains(&Param::Transport("tls".to_string())));
-    }
-
-    #[test]
-    fn reinvite_ack_keeps_established_routes_and_refreshes_only_contact_target() {
-        for has_routes in [false, true] {
-            let mut invite = create_test_invite();
-            let to = invite
-                .headers
-                .iter_mut()
-                .find(|header| matches!(header, TypedHeader::To(_)))
-                .unwrap();
-            match to {
-                TypedHeader::To(to) => to.set_tag("existing-remote"),
-                _ => unreachable!(),
-            }
-            let expected = if has_routes {
-                vec![
-                    "<sip:first.example.test;lr>",
-                    "<sips:second.example.test;transport=tls;lr>",
-                ]
-            } else {
-                Vec::new()
-            };
-            for route in &expected {
-                invite
-                    .headers
-                    .push(TypedHeader::Route(Route::from_str(route).unwrap()));
-            }
-            let mut response = create_2xx_response(&invite);
-            let response_to = response
-                .headers
-                .iter_mut()
-                .find(|header| matches!(header, TypedHeader::To(_)))
-                .unwrap();
-            *response_to = TypedHeader::To(invite.to().unwrap().clone());
-            response.headers.push(TypedHeader::RecordRoute(
-                RecordRoute::from_str("<sip:unrelated.example.test;lr>").unwrap(),
-            ));
-            let ack =
-                create_ack_for_2xx(&invite, &response, &"127.0.0.1:5060".parse().unwrap()).unwrap();
-            let actual: Vec<String> = ack
-                .headers
-                .iter()
-                .filter_map(|header| match header {
-                    TypedHeader::Route(route) => Some(route.to_string()),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(
-                actual, expected,
-                "the established empty/nonempty route set is immutable"
-            );
-            let contact = match response.header(&HeaderName::Contact).unwrap() {
-                TypedHeader::Contact(contact) => contact.addresses().next().unwrap().uri.clone(),
-                _ => unreachable!(),
-            };
-            assert_eq!(ack.uri(), &contact);
-            assert_eq!(ack.from(), invite.from());
-            assert_eq!(ack.to(), response.to());
-            assert!(ack.header(&HeaderName::RecordRoute).is_none());
-        }
-    }
-
-    #[test]
-    fn initial_invite_ack_does_not_reuse_preloaded_route_as_dialog_route() {
-        let mut invite = create_test_invite();
-        assert!(invite.to().unwrap().tag().is_none());
-        invite.headers.push(TypedHeader::Route(
-            Route::from_str("<sip:preloaded.example.test;lr>").unwrap(),
-        ));
-        let response = create_2xx_response(&invite);
-        let ack =
-            create_ack_for_2xx(&invite, &response, &"127.0.0.1:5060".parse().unwrap()).unwrap();
-        assert!(ack.header(&HeaderName::Route).is_none());
     }
 
     #[test]

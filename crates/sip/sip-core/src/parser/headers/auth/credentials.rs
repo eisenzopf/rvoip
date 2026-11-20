@@ -12,7 +12,6 @@ use crate::types::auth::Algorithm;
 use crate::types::auth::DigestParam;
 #[cfg(test)]
 use crate::types::auth::Qop;
-use nom::Parser;
 // Import the necessary types from types::auth
 use crate::types::auth::{AuthScheme, Credentials};
 use nom::{
@@ -28,7 +27,7 @@ use std::str::FromStr;
 // Simplified: Take everything until EOL or comma (as it's usually the only thing)
 fn basic_credentials_token(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // This might be too simple; a robust parser would check Base64 chars.
-    recognize(take_till1(|c| c == b'\r' || c == b'\n' || c == b',')).parse(input)
+    recognize(take_till1(|c| c == b'\r' || c == b'\n' || c == b','))(input)
 }
 
 // credentials = ("Digest" LWS digest-response)
@@ -50,8 +49,7 @@ pub fn credentials(input: &[u8]) -> ParseResult<'_, Credentials> {
     if input.len() >= 7
         && (&input[0..7] == b"Digest " || &input[0..7] == b"DIGEST " || &input[0..7] == b"digest ")
     {
-        let (rem, params) =
-            preceded(pair(tag_no_case("Digest"), lws), digest_credential).parse(input)?;
+        let (rem, params) = preceded(pair(tag_no_case("Digest"), lws), digest_credential)(input)?;
         return Ok((rem, Credentials::Digest { params }));
     }
 
@@ -60,7 +58,7 @@ pub fn credentials(input: &[u8]) -> ParseResult<'_, Credentials> {
         && (&input[0..6] == b"Basic " || &input[0..6] == b"BASIC " || &input[0..6] == b"basic ")
     {
         let (rem, token_bytes) =
-            preceded(pair(tag_no_case("Basic"), lws), basic_credentials_token).parse(input)?;
+            preceded(pair(tag_no_case("Basic"), lws), basic_credentials_token)(input)?;
 
         let token = std::str::from_utf8(token_bytes)
             .map_err(|_| {
@@ -77,8 +75,7 @@ pub fn credentials(input: &[u8]) -> ParseResult<'_, Credentials> {
         let (rem, token_bytes) = preceded(
             pair(tag_no_case("Bearer"), lws),
             basic_credentials_token, // We can reuse this for Bearer tokens
-        )
-        .parse(input)?;
+        )(input)?;
 
         let token = std::str::from_utf8(token_bytes)
             .map_err(|_| {

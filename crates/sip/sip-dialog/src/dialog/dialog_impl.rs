@@ -71,14 +71,6 @@ pub struct Dialog {
     #[serde(skip)]
     pub tls_contact_flow: Option<(Uri, rvoip_sip_transport::TransportRoute)>,
 
-    /// Exact TLS flow for in-dialog requests to a trusted record-routing
-    /// proxy (`DialogConfig::tls_proxy_flow_policies`) or, when
-    /// `DialogConfig::retain_outbound_tls_flow` is set, to the peer our
-    /// initial INVITE reached over TLS. `None` unless one of those opt-ins
-    /// admitted this dialog. Process-local: never serialized or restored.
-    #[serde(skip)]
-    pub tls_proxy_flow: Option<super::tls_proxy_flow::TlsProxyFlowBinding>,
-
     /// Route set for this dialog
     pub route_set: Vec<Uri>,
 
@@ -236,7 +228,6 @@ impl Dialog {
             secure_transport_required,
             allow_tls_contact_on_sips: false,
             tls_contact_flow: None,
-            tls_proxy_flow: None,
             route_set: Vec::new(),
             is_initiator,
             last_known_remote_addr: None,
@@ -285,9 +276,9 @@ impl Dialog {
 
     /// Generate a local tag for this dialog
     pub fn generate_local_tag(&self) -> String {
-        use rand::RngExt;
-        let mut rng = rand::rng();
-        format!("{:08x}", rng.random::<u32>())
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        format!("{:08x}", rng.gen::<u32>())
     }
 
     /// Confirm the dialog with a local tag
@@ -447,7 +438,6 @@ impl Dialog {
             secure_transport_required,
             allow_tls_contact_on_sips: false,
             tls_contact_flow: None,
-            tls_proxy_flow: None,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -570,7 +560,6 @@ impl Dialog {
             secure_transport_required,
             allow_tls_contact_on_sips: false,
             tls_contact_flow: None,
-            tls_proxy_flow: None,
             route_set,
             is_initiator,
             last_known_remote_addr: None,
@@ -750,11 +739,11 @@ impl Dialog {
                     TypedHeader::Contact(contacts) => contacts.0.first(),
                     _ => None,
                 })
-                .and_then(|contact| extract_uri_from_contact(contact).ok());
-            if refreshed_target
-                .as_ref()
-                .is_some_and(|uri| !self.permits_remote_target(uri))
-            {
+                .and_then(|contact| extract_uri_from_contact(contact).ok())
+                .map(|uri| self.normalize_tls_contact(uri));
+            if refreshed_target.as_ref().is_some_and(|uri| {
+                self.secure_transport_required && !matches!(uri.scheme(), Scheme::Sips)
+            }) {
                 debug!("Rejected non-SIPS Contact refresh on a secure dialog");
                 return false;
             }
@@ -790,33 +779,21 @@ impl Dialog {
         }
     }
 
-    /// Whether `remote_target` may become this dialog's remote target.
-    ///
-    /// A dialog formed over SIPS keeps requiring a `sips:` target, except
-    /// that a dialog that opted in to TLS Contact compatibility (set only
-    /// from a TLS ingress transaction) also accepts a `sip:` target that
-    /// names exactly one transport parameter, `tls`. The target is used as
-    /// given: RFC 3261 §§12.1.1 and 12.2.1.1 build in-dialog requests from
-    /// the peer's Contact, so rewriting `sip:` to `sips:` would change the
-    /// Request-URI the peer receives.
-    fn permits_remote_target(&self, remote_target: &Uri) -> bool {
-        if !self.secure_transport_required || matches!(remote_target.scheme(), Scheme::Sips) {
-            return true;
+    /// Map an explicit `sip:...;transport=tls` Contact to SIPS when this
+    /// dialog opted in to TLS Contact compatibility; other targets are unchanged.
+    fn normalize_tls_contact(&self, mut remote_target: Uri) -> Uri {
+        if self.secure_transport_required
+            && self.allow_tls_contact_on_sips
+            && matches!(remote_target.scheme(), Scheme::Sip)
+            && remote_target
+                .transport()
+                .is_some_and(|value| value.eq_ignore_ascii_case("tls"))
+        {
+            // Preserve explicit host, port, user and URI parameters. Only the
+            // internal routing target changes; captured wire messages stay original.
+            remote_target.scheme = Scheme::Sips;
         }
-        if !self.allow_tls_contact_on_sips || !matches!(remote_target.scheme(), Scheme::Sip) {
-            return false;
-        }
-        let mut transports = remote_target.parameters.iter().filter_map(|parameter| {
-            if let rvoip_sip_core::types::param::Param::Transport(value) = parameter {
-                Some(value.as_str())
-            } else {
-                None
-            }
-        });
-        matches!(
-            (transports.next(), transports.next()),
-            (Some(transport), None) if transport.eq_ignore_ascii_case("tls")
-        )
+        remote_target
     }
 
     /// Reuse an admitted direct TLS flow only while the request still targets
@@ -842,10 +819,10 @@ impl Dialog {
 
     /// Update the remote target while preserving the dialog-forming SIPS
     /// requirement. Returns `false` when the target would downgrade a secure
-    /// dialog and leaves the existing target unchanged. An accepted target is
-    /// stored exactly as given.
+    /// dialog and leaves the existing target unchanged.
     pub fn update_remote_target(&mut self, remote_target: Uri) -> bool {
-        if !self.permits_remote_target(&remote_target) {
+        let remote_target = self.normalize_tls_contact(remote_target);
+        if self.secure_transport_required && !matches!(remote_target.scheme(), Scheme::Sips) {
             return false;
         }
         self.remote_target = remote_target;

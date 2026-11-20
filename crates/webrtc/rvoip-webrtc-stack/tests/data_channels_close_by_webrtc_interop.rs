@@ -17,10 +17,10 @@ use std::time::{Duration, Instant};
 
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -118,16 +118,15 @@ async fn run_test() -> Result<()> {
     let socket = runtime.wrap_udp_socket(std_socket)?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Server)
-        .build();
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
 
     let config = RTCConfigurationBuilder::new().build();
 
     let mut rtc_pc = RTCPeerConnectionBuilder::new()
         .with_configuration(config.clone())
         .with_setting_engine(setting_engine)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created RTC peer connection");
 
     let dc_label = "test-channel";
@@ -151,7 +150,7 @@ async fn run_test() -> Result<()> {
 
     let offer = rtc_pc.create_offer(None)?;
     log::info!("RTC created offer");
-    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
+    rtc_pc.set_local_description(offer.clone())?;
     log::info!("RTC set local description");
 
     // Create webrtc peer (answerer)
@@ -192,7 +191,7 @@ async fn run_test() -> Result<()> {
     let rtc_answer = rtc::peer_connection::sdp::RTCSessionDescription::answer(
         answer_with_candidates.sdp.clone(),
     )?;
-    rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
+    rtc_pc.set_remote_description(rtc_answer)?;
     log::info!("RTC set remote description");
 
     // Run event loop
@@ -256,7 +255,7 @@ async fn run_test() -> Result<()> {
         }
 
         // Receive data channel messages on RTC side
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             if let RTCMessage::DataChannelMessage(channel_id, dc_msg) = message {
                 let data = String::from_utf8(dc_msg.data.to_vec()).unwrap_or_default();
                 log::info!("RTC received message on channel {}: '{}'", channel_id, data);

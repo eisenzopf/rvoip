@@ -13,7 +13,7 @@
 
 use std::fmt;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -936,13 +936,6 @@ impl EndpointIncomingCall {
     ///
     /// Returns `None` when the header is absent or the parsed INVITE is not
     /// available (see [`raw_request`](Self::raw_request)).
-    ///
-    /// This is the raw value the peer sent, not a verified fact: any peer can
-    /// put any `P-Asserted-Identity` or `X-*` header on an INVITE. Trust it
-    /// only as far as you trust the peer that sent it. For a caller number
-    /// the stack itself vouches for, use the adapter-observed
-    /// `observed_caller_number()` of the inbound connection context, which
-    /// is set only for a peer admitted by trusted-trunk policy.
     pub fn header(&self, name: &str) -> Option<String> {
         use crate::api::headers::view::SipHeaderView;
         let name = rvoip_sip_core::types::headers::HeaderName::from_str(name).ok()?;
@@ -2682,10 +2675,7 @@ impl EndpointBuilder {
                 let bind = self
                     .bind_addr
                     .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5060));
-                // An IPv4 loopback bind keeps the `Config::local` shape; an
-                // IPv6 loopback (`[::1]`) is honoured as bound, not rewritten
-                // to the IPv4 loopback.
-                if bind.ip().is_loopback() && bind.is_ipv4() {
+                if bind.ip().is_loopback() {
                     Ok(Config::local(name, bind.port()))
                 } else {
                     let mut config = Config::on(name, bind.ip(), bind.port());
@@ -2694,9 +2684,7 @@ impl EndpointBuilder {
                 }
             }
             EndpointProfile::LanPbx => {
-                let bind = self
-                    .bind_addr
-                    .unwrap_or_else(|| default_udp_bind(self.advertised_addr));
+                let bind = self.bind_addr.unwrap_or_else(default_udp_bind);
                 let advertised = self.advertised_addr.ok_or_else(|| {
                     SessionError::ConfigError(
                         "EndpointProfile::LanPbx requires advertised_addr".to_string(),
@@ -2705,12 +2693,10 @@ impl EndpointBuilder {
                 Ok(Config::lan_pbx(name, bind, advertised))
             }
             EndpointProfile::AsteriskUdp => {
-                let bind = self
-                    .bind_addr
-                    .unwrap_or_else(|| default_udp_bind(self.advertised_addr));
+                let bind = self.bind_addr.unwrap_or_else(default_udp_bind);
                 if let Some(advertised) = self.advertised_addr {
                     Ok(Config::lan_pbx(name, bind, advertised))
-                } else if bind.ip().is_loopback() && bind.is_ipv4() {
+                } else if bind.ip().is_loopback() {
                     let mut config = Config::local(name, bind.port());
                     config.bind_addr = bind;
                     Ok(config)
@@ -2726,9 +2712,7 @@ impl EndpointBuilder {
                 }
             }
             EndpointProfile::AsteriskTlsSrtpRegisteredFlow => {
-                let bind = self
-                    .bind_addr
-                    .unwrap_or_else(|| default_tls_bind(self.advertised_addr));
+                let bind = self.bind_addr.unwrap_or_else(default_tls_bind);
                 Ok(Config::asterisk_tls_registered_flow(
                     name,
                     bind,
@@ -2738,9 +2722,7 @@ impl EndpointBuilder {
                 ))
             }
             EndpointProfile::FreeSwitchInternal => {
-                let bind = self
-                    .bind_addr
-                    .unwrap_or_else(|| default_udp_bind(self.advertised_addr));
+                let bind = self.bind_addr.unwrap_or_else(default_udp_bind);
                 if let Some(advertised) = self.advertised_addr {
                     Ok(Config::lan_pbx(name, bind, advertised))
                 } else {
@@ -2750,13 +2732,8 @@ impl EndpointBuilder {
                 }
             }
             EndpointProfile::FreeSwitchTlsSrtpReachableContact => {
-                let bind = self
-                    .bind_addr
-                    .unwrap_or_else(|| default_udp_bind(self.advertised_addr));
-                // The TLS listener shares the UDP bind's address family.
-                let tls_bind = self
-                    .tls_bind_addr
-                    .unwrap_or_else(|| default_tls_bind(Some(bind)));
+                let bind = self.bind_addr.unwrap_or_else(default_udp_bind);
+                let tls_bind = self.tls_bind_addr.unwrap_or_else(default_tls_bind);
                 let cert = self.tls_cert_path.clone().ok_or_else(|| {
                     SessionError::ConfigError(
                         "EndpointProfile::FreeSwitchTlsSrtpReachableContact requires tls_cert_path"
@@ -2774,9 +2751,7 @@ impl EndpointBuilder {
                 ))
             }
             EndpointProfile::CarrierSbc => {
-                let bind = self
-                    .bind_addr
-                    .unwrap_or_else(|| default_tls_bind(self.advertised_addr));
+                let bind = self.bind_addr.unwrap_or_else(default_tls_bind);
                 let public = self.advertised_addr.ok_or_else(|| {
                     SessionError::ConfigError(
                         "EndpointProfile::CarrierSbc requires advertised_addr".to_string(),
@@ -2816,23 +2791,12 @@ struct EndpointParts {
     transport: EndpointTransport,
 }
 
-/// The unspecified address of `family_of`'s family (IPv4 when absent).
-///
-/// An endpoint uses one address family (see [`Config::validate`]), so a
-/// default bind follows the family of the address it is advertised at.
-fn unspecified_ip(family_of: Option<SocketAddr>) -> IpAddr {
-    match family_of {
-        Some(SocketAddr::V6(_)) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
-        _ => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-    }
+fn default_udp_bind() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5060)
 }
 
-fn default_udp_bind(family_of: Option<SocketAddr>) -> SocketAddr {
-    SocketAddr::new(unspecified_ip(family_of), 5060)
-}
-
-fn default_tls_bind(family_of: Option<SocketAddr>) -> SocketAddr {
-    SocketAddr::new(unspecified_ip(family_of), 5061)
+fn default_tls_bind() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 5061)
 }
 
 fn generate_sip_instance() -> String {
@@ -3184,81 +3148,6 @@ mod tests {
         coordinator.shutdown();
     }
 
-    /// `EndpointIncomingCall::header` returns the value of the first header
-    /// with that name, matches names case-insensitively (standard and
-    /// extension headers alike), and returns `None` for an absent header or a
-    /// call without a parsed INVITE.
-    #[tokio::test]
-    async fn endpoint_incoming_call_header_reads_first_matching_invite_header() {
-        let coordinator = UnifiedCoordinator::new(Config::local("endpoint-header", 0))
-            .await
-            .expect("coordinator");
-        let raw = "INVITE sip:+15551230000@127.0.0.1 SIP/2.0\r\n\
-                   Via: SIP/2.0/UDP 127.0.0.1:5070;branch=z9hG4bK-endpoint-header\r\n\
-                   Max-Forwards: 70\r\n\
-                   From: <sip:alice@example.test>;tag=from-tag\r\n\
-                   To: <sip:+15551230000@127.0.0.1>\r\n\
-                   Call-ID: endpoint-header-test\r\n\
-                   CSeq: 1 INVITE\r\n\
-                   X-Trunk-Id: first-trunk\r\n\
-                   P-Asserted-Identity: <sip:+15550001111@carrier.example.test>\r\n\
-                   x-trunk-id: second-trunk\r\n\
-                   Content-Length: 0\r\n\r\n";
-        let request = match rvoip_sip_core::parse_message(raw.as_bytes()).expect("parse INVITE") {
-            rvoip_sip_core::Message::Request(request) => request,
-            other => panic!("expected request, got {other:?}"),
-        };
-        let call_id = CallId::from_string("endpoint-header-test");
-        let incoming = EndpointIncomingCall::new(
-            IncomingCall::with_request_captured(
-                call_id,
-                "sip:alice@example.test".to_string(),
-                "sip:+15551230000@127.0.0.1".to_string(),
-                None,
-                Arc::clone(&coordinator),
-                Arc::new(request),
-                None,
-            ),
-            None,
-            EndpointTransport::Udp,
-        );
-
-        // First header of that name wins, whatever the case of either name.
-        assert_eq!(
-            incoming.header("X-Trunk-Id").as_deref(),
-            Some("first-trunk")
-        );
-        assert_eq!(
-            incoming.header("x-trunk-id").as_deref(),
-            Some("first-trunk")
-        );
-        assert_eq!(
-            incoming.header("X-TRUNK-ID").as_deref(),
-            Some("first-trunk")
-        );
-        // A standard header sip-core types is found by name too.
-        assert_eq!(
-            incoming.header("p-asserted-identity").as_deref(),
-            Some("<sip:+15550001111@carrier.example.test>")
-        );
-        assert_eq!(incoming.header("X-Absent"), None);
-
-        // Without a parsed INVITE there is nothing to read.
-        let bare = EndpointIncomingCall::new(
-            IncomingCall::new(
-                CallId::from_string("endpoint-header-bare"),
-                "sip:alice@example.test".to_string(),
-                "sip:bob@example.test".to_string(),
-                None,
-                Arc::clone(&coordinator),
-            ),
-            None,
-            EndpointTransport::Udp,
-        );
-        assert_eq!(bare.header("X-Trunk-Id"), None);
-        coordinator.shutdown();
-    }
-
     #[test]
     fn endpoint_builder_maps_asterisk_tls_profile() {
         let parts = Endpoint::builder()
@@ -3280,38 +3169,6 @@ mod tests {
         assert!(parts.config.srtp_required);
         assert_eq!(parts.config.local_uri, "sips:1001@pbx.example.test");
         assert!(parts.registration.is_some());
-    }
-
-    #[test]
-    fn endpoint_builder_honours_ipv6_binds() {
-        // Local profile: an IPv6 loopback bind is kept, not rewritten to
-        // 127.0.0.1, and the AoR brackets the address (RFC 5118 §4.1).
-        let parts = Endpoint::builder()
-            .name("alice")
-            .bind_addr("[::1]:5060".parse().unwrap())
-            .build_parts()
-            .unwrap();
-        assert_eq!(
-            parts.config.bind_addr,
-            "[::1]:5060".parse::<SocketAddr>().unwrap()
-        );
-        assert_eq!(parts.config.local_ip, "::1".parse::<IpAddr>().unwrap());
-        assert_eq!(parts.config.local_uri, "sip:alice@[::1]:5060");
-        parts.config.validate().unwrap();
-
-        // LAN PBX with an IPv6 advertised address: the default bind is the
-        // IPv6 unspecified address, so the config stays single-family.
-        let parts = Endpoint::builder()
-            .name("alice")
-            .profile(EndpointProfile::LanPbx)
-            .advertised_addr("[2001:db8::50]:5060".parse().unwrap())
-            .build_parts()
-            .unwrap();
-        assert_eq!(
-            parts.config.bind_addr,
-            "[::]:5060".parse::<SocketAddr>().unwrap()
-        );
-        parts.config.validate().unwrap();
     }
 
     #[test]

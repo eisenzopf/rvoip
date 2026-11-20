@@ -351,13 +351,6 @@ impl ClientTransactionData {
         )
     }
 
-    /// Whether the first transport write completed successfully, so any later
-    /// failure (Timer B/F, a closed stream flow) is an outcome of a request the
-    /// peer may have received rather than a failed send.
-    pub(crate) fn initial_send_succeeded(&self) -> bool {
-        self.initial_send_state.load(Ordering::Acquire) == INITIAL_SEND_SUCCEEDED
-    }
-
     /// Whether the runner is currently suspended inside the first transport
     /// write. It cannot service a queued termination command in this state, so
     /// the manager must abort the runner and perform terminal takeover rather
@@ -409,10 +402,7 @@ impl ClientTransactionData {
             notified.as_mut().enable();
             match self.initial_send_state.load(Ordering::Acquire) {
                 INITIAL_SEND_SUCCEEDED => return Ok(()),
-                // Route preparation failed before the write boundary: the
-                // request provably never reached the transport.
-                INITIAL_SEND_FAILED_BEFORE_WRITE => return Err(Error::InitialRequestNotSent),
-                INITIAL_SEND_FAILED_AFTER_WRITE_ATTEMPT => {
+                INITIAL_SEND_FAILED_BEFORE_WRITE | INITIAL_SEND_FAILED_AFTER_WRITE_ATTEMPT => {
                     return Err(Error::transport_error(
                         rvoip_sip_transport::Error::ProtocolError(
                             "initial request transport send failed".into(),

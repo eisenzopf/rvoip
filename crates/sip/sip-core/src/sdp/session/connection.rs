@@ -5,12 +5,12 @@
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{is_valid_hostname, is_valid_ipv4, is_valid_ipv6};
 use crate::types::sdp::ConnectionData;
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_while},
     character::complete::{digit1, space1},
     combinator::opt,
+    sequence::tuple,
     IResult,
 };
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -22,7 +22,7 @@ fn parse_network_type(input: &str) -> IResult<&str, &str> {
 
 /// Parse address type (IP4 or IP6)
 fn parse_address_type(input: &str) -> IResult<&str, &str> {
-    alt((tag("IP4"), tag("IP6"))).parse(input)
+    alt((tag("IP4"), tag("IP6")))(input)
 }
 
 /// Parse a connection address with optional TTL and multicast count
@@ -169,15 +169,14 @@ fn parse_connection_address_nom<'a>(
 /// Use nom to parse a connection line
 fn parse_connection_nom(input: &str) -> IResult<&str, ConnectionData> {
     // Format: c=<nettype> <addrtype> <connection-address>
-    let (input, _) = opt(tag("c=")).parse(input)?;
-    let (input, (net_type, _, addr_type, _, addr_with_ttl)) = (
+    let (input, _) = opt(tag("c="))(input)?;
+    let (input, (net_type, _, addr_type, _, addr_with_ttl)) = tuple((
         parse_network_type,
         space1,
         parse_address_type,
         space1,
         take_while(|c: char| c != '\r' && c != '\n'),
-    )
-        .parse(input)?;
+    ))(input)?;
 
     // Parse address with potential TTL/multicast parameters
     let (_, (address, ttl, count)) = parse_connection_address_nom(addr_with_ttl, addr_type)?;
