@@ -697,11 +697,8 @@ pub struct DialogManager {
     >,
     pub(crate) active_invite_failover_by_dialog: Arc<DashMap<DialogId, u64>>,
     /// Exact reverse index for active and retained logical INVITE plans.
-    /// Unlike `active_invite_failover_by_dialog`, entries outlive the active
-    /// operation while the dialog is still attached. Detaching the dialog
-    /// drops its terminal plans from this index (they stay reachable by exact
-    /// transaction key in `invite_failover_attempts`); only wire-unknown plans
-    /// keep their entries until exact teardown completes.
+    /// Unlike `active_invite_failover_by_dialog`, entries remain until the
+    /// corresponding late-response tombstones are removed.
     pub(crate) invite_failover_plans_by_dialog: Arc<DashMap<DialogId, Vec<u64>>>,
     pub(crate) invite_failover_attempts: Arc<
         DashMap<Arc<TransactionKey>, super::transaction_integration::InviteFailoverAttemptIndex>,
@@ -709,8 +706,6 @@ pub struct DialogManager {
     /// Exact reverse index for active and retained INVITE attempts. This is
     /// independent of `dialog_invite_transactions`, whose hot transaction
     /// routes are intentionally removed before the late-response tombstone.
-    /// Like `invite_failover_plans_by_dialog`, detaching the dialog drops the
-    /// entries of its terminal plans and keeps those of wire-unknown plans.
     pub(crate) invite_failover_attempts_by_dialog: Arc<DashMap<DialogId, Vec<Arc<TransactionKey>>>>,
     /// Exact ordered expiry index for active and retained INVITE plans. It is
     /// bounded to one current entry per retained plan and excludes the
@@ -1104,7 +1099,6 @@ impl DialogManager {
         let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
-        crate::manager::occupancy::register(&dialogs);
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
         // Create dialog event channel for subscription manager
@@ -1853,7 +1847,6 @@ impl DialogManager {
         let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
-        crate::manager::occupancy::register(&dialogs);
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
         let transaction_dialog_route_hash = Arc::new(DashMap::with_capacity(index_capacity));
         let weak_transaction_dialog_route_hash = Arc::downgrade(&transaction_dialog_route_hash);
@@ -4170,47 +4163,6 @@ impl DialogManager {
             .unwrap_or(false)
     }
 
-    /// Configured trusted TLS proxy-flow policies; empty when none.
-    pub(crate) fn tls_proxy_flow_policies(&self) -> Vec<crate::api::config::SipTlsProxyFlowPolicy> {
-        self.config
-            .read()
-            .ok()
-            .and_then(|g| {
-                g.as_ref()
-                    .map(|c| c.dialog_config().tls_proxy_flow_policies.clone())
-            })
-            .unwrap_or_default()
-    }
-
-    /// Whether locally initiated TLS dialogs keep their initial INVITE's flow.
-    pub(crate) fn outbound_tls_flow_retention_enabled(&self) -> bool {
-        self.config
-            .read()
-            .ok()
-            .and_then(|g| {
-                g.as_ref()
-                    .map(|c| c.dialog_config().retain_outbound_tls_flow)
-            })
-            .unwrap_or(false)
-    }
-
-    /// Whether any dialog can carry a [`TlsProxyFlowBinding`]. Both opt-ins
-    /// are off by default, so the send path skips the dialog lookup.
-    ///
-    /// [`TlsProxyFlowBinding`]: crate::dialog::tls_proxy_flow::TlsProxyFlowBinding
-    pub(crate) fn tls_proxy_flow_routing_enabled(&self) -> bool {
-        self.config
-            .read()
-            .ok()
-            .and_then(|g| {
-                g.as_ref().map(|c| {
-                    let dialog = c.dialog_config();
-                    dialog.retain_outbound_tls_flow || !dialog.tls_proxy_flow_policies.is_empty()
-                })
-            })
-            .unwrap_or(false)
-    }
-
     /// Check if auto-response to OPTIONS requests is enabled
     pub fn should_auto_respond_to_options(&self) -> bool {
         self.config
@@ -4337,8 +4289,8 @@ impl DialogManager {
 
     /// Store dialog mapping for incoming call
     ///
-    /// The request is not used; the crate-internal `store_incoming_call_mapping`
-    /// stores the same mapping without requiring the caller to copy it.
+    /// The request is not used; [`Self::store_incoming_call_mapping`] stores
+    /// the same mapping without requiring the caller to copy it.
     pub fn store_dialog_mapping(
         &self,
         session_id: &str,
@@ -8018,11 +7970,11 @@ mod outbound_flow_handler_tests {
     /// The plan marks an INVITE wire-unknown as soon as it hands it to the
     /// transaction layer, but the transaction layer retains it only once the
     /// wire boundary is crossed. A TLS peer that rejects the handshake during
-    /// route preparation is proven to fail before that boundary: the plan is
-    /// settled as never sent, its INVITE is not retained for CANCEL, and the
-    /// supervisor treats the dialog as settled rather than wait.
+    /// route preparation leaves a wire-unknown plan whose INVITE the
+    /// transaction layer has forgotten: no response or CANCEL can ever match
+    /// it, so the supervisor must treat it as settled rather than wait.
     #[tokio::test]
-    async fn route_preparation_failure_settles_plan_as_not_sent() {
+    async fn wire_unknown_plan_for_a_forgotten_invite_is_terminal() {
         use crate::manager::transaction_integration::{CandidateWirePlan, InviteFailoverPlanPhase};
 
         let manager = make_manager_with_transport_and_setup_timeout(
@@ -8059,20 +8011,16 @@ mod outbound_flow_handler_tests {
             .invite_failover_plans
             .iter()
             .next()
-            .expect("closed plan retained")
+            .expect("wire-unknown plan retained")
             .value()
             .clone();
         let invite = {
             let plan = plan.lock().await;
-            assert_eq!(plan.phase, InviteFailoverPlanPhase::Closed);
-            assert!(!plan.wire_attempted, "no INVITE byte reached the wire");
-            assert!(plan.current_transaction.is_none());
-            plan.retained_attempts
-                .first()
-                .cloned()
-                .expect("the one attempt is recorded")
+            assert_eq!(plan.phase, InviteFailoverPlanPhase::WireUnknown);
+            plan.current_transaction
+                .clone()
+                .expect("wire-unknown INVITE transaction retained")
         };
-        assert!(!manager.invite_failover_attempts.contains_key(&*invite));
 
         tokio::time::timeout(Duration::from_secs(2), async {
             while !manager
@@ -8083,7 +8031,7 @@ mod outbound_flow_handler_tests {
             }
         })
         .await
-        .expect("a never-sent INVITE is settled");
+        .expect("a forgotten wire-unknown INVITE settles");
         assert!(manager
             .transaction_manager
             .transaction_route(&invite)
@@ -8159,79 +8107,6 @@ mod outbound_flow_handler_tests {
                 .await,
             "a plan closed by the INVITE's transport error is terminal"
         );
-    }
-
-    /// RFC 3261 §8.1.3.1: a written INVITE that ends on Timer B is a 408 and
-    /// one whose transport failed (for example its stream flow closed, #311)
-    /// is a 503. Both reach the session layer as the call's failure instead
-    /// of leaving it to the setup watchdog.
-    #[tokio::test]
-    async fn unanswered_written_invite_reports_408_or_503_to_the_session() {
-        use crate::manager::transaction_integration::CandidateWirePlan;
-
-        for (index, (event_is_timeout, expected)) in
-            [(true, 408u16), (false, 503u16)].into_iter().enumerate()
-        {
-            let (manager, mut session_rx) = make_manager().await;
-            let dialog_id = DialogId::new();
-            manager
-                .dialog_to_session
-                .insert(dialog_id.clone(), format!("session-unanswered-{index}"));
-            let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
-                .unwrap()
-                .from("Alice", "sip:alice@example.com", Some("alice-unanswered"))
-                .to("Bob", "sip:bob@example.com", None)
-                .contact("sip:alice@127.0.0.1:5060", None)
-                .call_id(&format!("unanswered-written-invite-{index}"))
-                .cseq(1)
-                .via(
-                    "127.0.0.1:5060",
-                    "UDP",
-                    Some(&format!("z9hG4bK-unanswered-{index}")),
-                )
-                .max_forwards(70)
-                .build();
-            let (transaction, _) = manager
-                .send_request_with_candidate_wire_plan(
-                    request,
-                    vec![rvoip_sip_transport::resolver::ResolvedTarget::immediate(
-                        dest_addr(5104),
-                        rvoip_sip_transport::transport::TransportType::Udp,
-                    )],
-                    Some(&dialog_id),
-                    CandidateWirePlan::default(),
-                )
-                .await
-                .expect("initial INVITE written");
-            let event = if event_is_timeout {
-                TransactionEvent::TransactionTimeout {
-                    transaction_id: transaction.clone(),
-                }
-            } else {
-                TransactionEvent::TransportError {
-                    transaction_id: transaction.clone(),
-                }
-            };
-            manager.process_global_transaction_event(event).await;
-
-            let failure = tokio::time::timeout(Duration::from_secs(1), async {
-                loop {
-                    match session_rx.recv().await {
-                        Some(SessionCoordinationEvent::RequestFailed {
-                            dialog_id: Some(failed_dialog),
-                            status_code,
-                            method,
-                            ..
-                        }) if failed_dialog == dialog_id => return (status_code, method),
-                        Some(_) => {}
-                        None => panic!("session coordination closed"),
-                    }
-                }
-            })
-            .await
-            .expect("the unanswered INVITE fails the call");
-            assert_eq!(failure, (expected, "INVITE".to_string()));
-        }
     }
 
     #[tokio::test]

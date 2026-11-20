@@ -3,7 +3,6 @@
 // Handles parsing of transport protocols like RTP/AVP, UDP/TLS/RTP/SAVPF, etc.
 
 use crate::sdp::media::utils::tag_no_case;
-use nom::Parser;
 use nom::{branch::alt, combinator::value, IResult};
 
 /// Parse transport protocol
@@ -26,8 +25,7 @@ pub(crate) fn parse_transport_protocol(input: &str) -> IResult<&str, String> {
         value("TCP".to_string(), tag_no_case("TCP")),
         value("DCCP".to_string(), tag_no_case("DCCP")),
         value("SCTP".to_string(), tag_no_case("SCTP")),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 #[cfg(test)]

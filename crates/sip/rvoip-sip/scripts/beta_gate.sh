@@ -1066,10 +1066,10 @@ attestation_features() {
   local feature
   case "$MODE" in
     local)
-      automatic="generated-validation,dev-insecure-tls,test-hooks"
+      automatic="generated-validation,dev-insecure-tls"
       ;;
     full)
-      automatic="generated-validation,dev-insecure-tls,test-hooks,$(perf_features)"
+      automatic="generated-validation,dev-insecure-tls,$(perf_features)"
       ;;
     interop)
       automatic="dev-insecure-tls"
@@ -1705,18 +1705,18 @@ run_dependency_audit() {
 # Accepted Dependency Advisories
 
 - advisory: `RUSTSEC-2023-0071`
-- package: `rsa` 0.9.10
-- status: accepted, unreachable
-- path: `rvoip-webauthn` -> `webauthn-rs` 0.6.1-dev -> `crypto-glue` 0.1.15 -> `rsa` 0.9.10. Every other `rsa` user, `users-core` included, is on the fixed 0.10.0.
-- reason: the attack needs RSA private-key operations; a WebAuthn relying party only verifies RS256 signatures with authenticators' public keys.
-- remove when: `crypto-glue` targets `rsa` 0.10.0 final, so `webauthn-rs` >= 0.6.2 resolves next to `rsa` 0.10.0.
+- package: `rsa`
+- status: accepted beta risk
+- reason: RustSec reports no fixed upgrade is available.
+- affected paths:
+  - `users-core` RS256/JWK support from configured signing keys.
+  - `webauthn-rs` transitive crypto via `crypto-glue`.
+- beta stance: keep this advisory visible in release evidence and revisit before stable release or when upstream publishes a fixed upgrade path.
 
-- advisory: `RUSTSEC-2026-0387`
-- package: `crypto-bigint` 0.5.5
-- status: accepted, unreachable
-- paths: the same `webauthn-rs` -> `crypto-glue` 0.1.15 -> `elliptic-curve` 0.13 stack; dev-only via the `webrtc` 0.14 dev-dependency -> `dtls` 0.13. rtp-core's DTLS-SRTP (`dtls` 0.17.3) uses the fixed `crypto-bigint` 0.7.
-- reason: the relying party only verifies ECDSA signatures over public data; the dev path never ships.
-- remove when: the same `crypto-glue` release, and the `webrtc` 0.14 dev-dependency moves off `dtls` 0.13.
+- advisories: `RUSTSEC-2026-0185` (`quinn-proto`), `RUSTSEC-2026-0104` / `RUSTSEC-2026-0098` / `RUSTSEC-2026-0099` (`rustls-webpki`)
+- status: accepted beta risk
+- reason: transitive via the `quinn` (QUIC) and `rustls` stacks; no fixed upgrade adopted in the currently pinned versions.
+- beta stance: revisit when the pinned stacks bump `quinn-proto` >= 0.11.15 and `rustls-webpki` to the fixed line.
 EOF
   run_gate_continue "dependency advisory audit" env SECURITY_DIR="$security_dir" bash -c '
     set -euo pipefail
@@ -1726,9 +1726,9 @@ EOF
       exit 127
     fi
     set +e
-    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
+    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 > "$SECURITY_DIR/cargo-audit.txt" 2>&1
     audit_status=$?
-    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
+    cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0387 --ignore RUSTSEC-2026-0459 --ignore RUSTSEC-2026-0185 --ignore RUSTSEC-2026-0104 --ignore RUSTSEC-2026-0098 --ignore RUSTSEC-2026-0099 --json > "$SECURITY_DIR/cargo-audit.json" 2> "$SECURITY_DIR/cargo-audit-json.stderr"
     json_status=$?
     set -e
     {
@@ -1889,7 +1889,7 @@ run_local_gates() {
     crates/sip/rvoip-sip/scripts/test_docker_peer_snapshot.py \
     crates/sip/sip-proxy/tests/interop/scripts/test_state_snapshot.py
   run_gate_continue "public API compatibility" "$SCRIPT_DIR/check_public_api.sh"
-  run_gate_continue "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls,test-hooks
+  run_gate_continue "rvoip-sip all-target check" cargo check -p rvoip-sip --all-targets --features generated-validation,dev-insecure-tls
   run_gate_continue "claimed lower-crate check" cargo check \
     -p rvoip-sip-core \
     -p rvoip-sip-transport \
@@ -1916,12 +1916,10 @@ run_local_gates() {
   run_gate_continue "workspace unit tests" cargo test --workspace --exclude rvoip-sip --lib
   run_gate_continue "workspace target and integration tests" cargo test --workspace --exclude rvoip-sip --bins --examples --tests
   run_gate_continue "workspace doctests" cargo test --workspace --exclude rvoip-sip --doc
-  # rvoip-sip stages build with test-hooks, as the release catalog does:
-  # the RFC 4028 session-timer targets compile to nothing without it.
-  run_gate_continue "rvoip-sip unit tests" cargo test -p rvoip-sip --lib --features test-hooks
-  run_gate_continue "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls,test-hooks
-  run_gate_continue "rvoip-sip doctests" cargo test -p rvoip-sip --doc --features test-hooks
-  run_gate_continue "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls,test-hooks
+  run_gate_continue "rvoip-sip unit tests" cargo test -p rvoip-sip --lib
+  run_gate_continue "rvoip-sip integration tests" cargo test -p rvoip-sip --tests --features generated-validation,dev-insecure-tls
+  run_gate_continue "rvoip-sip doctests" cargo test -p rvoip-sip --doc
+  run_gate_continue "rvoip-sip examples compile" cargo build -p rvoip-sip --examples --features dev-insecure-tls
   run_downstream_compatibility_gates
   run_standalone_example_gates
   run_gate_continue "PBX analyzer unit tests" cargo test -p rvoip-sip --example pbx_analyze --features dev-insecure-tls
@@ -2344,7 +2342,8 @@ if [ -f "$ARTIFACT_DIR/security/accepted-advisories.md" ]; then
 
 ## Accepted Dependency Advisories
 
-- `RUSTSEC-2023-0071` (`rsa` 0.9.10) and `RUSTSEC-2026-0387` (`crypto-bigint` 0.5.5): accepted, unreachable; only via `rvoip-webauthn`'s `crypto-glue` 0.1.15 (signature verification only) and a dev-only `dtls` 0.13. See `deny.toml` for paths and removal conditions.
+- `RUSTSEC-2023-0071` (`rsa`): accepted beta risk because RustSec reports no fixed upgrade.
+- `RUSTSEC-2026-0185` (`quinn-proto`), `RUSTSEC-2026-0104`/`-0098`/`-0099` (`rustls-webpki`): accepted; transitive via the `quinn`/`rustls` stacks.
 - Affected paths: `users-core` RS256/JWK support and `webauthn-rs` transitive crypto.
 - Evidence: `security/accepted-advisories.md`.
 EOF

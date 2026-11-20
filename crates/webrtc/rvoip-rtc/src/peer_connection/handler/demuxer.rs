@@ -1,4 +1,4 @@
-use crate::peer_connection::event::TaggedRTCEventInternal;
+use crate::peer_connection::event::RTCEventInternal;
 use crate::peer_connection::message::internal::{
     DTLSMessage, RTCMessageInternal, RTPMessage, STUNMessage, TaggedRTCMessageInternal,
 };
@@ -19,7 +19,7 @@ fn match_range(lower: u8, upper: u8, buf: &[u8]) -> bool {
 }
 
 /// MatchFuncs as described in RFC7983
-/// <https://datatracker.ietf.org/doc/html/rfc7983>
+/// <https://tools.ietf.org/html/rfc7983>
 ///              +----------------+
 ///              |        [0..3] -+--> forward to STUN
 ///              |                |
@@ -47,7 +47,7 @@ fn match_srtp(b: &[u8]) -> bool {
 pub(crate) struct DemuxerHandlerContext {
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
-    pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    pub(crate) event_outs: VecDeque<RTCEventInternal>,
 }
 
 /// DemuxerHandler implements demuxing of STUN/DTLS/RTP/RTCP Protocol packets
@@ -69,13 +69,12 @@ impl<'a> DemuxerHandler<'a> {
     }
 }
 
-impl<'a>
-    sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, TaggedRTCEventInternal>
+impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RTCEventInternal>
     for DemuxerHandler<'a>
 {
     type Rout = TaggedRTCMessageInternal;
     type Wout = TaggedRTCMessageInternal;
-    type Eout = TaggedRTCEventInternal;
+    type Eout = RTCEventInternal;
     type Error = Error;
     type Time = Instant;
 
@@ -141,7 +140,7 @@ impl<'a>
         self.ctx.write_outs.pop_front()
     }
 
-    fn handle_event(&mut self, evt: TaggedRTCEventInternal) -> shared::error::Result<()> {
+    fn handle_event(&mut self, evt: RTCEventInternal) -> shared::error::Result<()> {
         self.ctx.event_outs.push_back(evt);
         Ok(())
     }

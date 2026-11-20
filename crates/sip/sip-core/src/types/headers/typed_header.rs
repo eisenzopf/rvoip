@@ -1,7 +1,6 @@
 use crate::error::{Error, Result};
 use chrono::{DateTime, FixedOffset};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -945,54 +944,51 @@ impl TryFrom<&Header> for TypedHeader {
         // Use all_consuming to ensure the specific parser consumes the entire value
         let parse_result = (|| match &header.name {
             // Address Headers
-            HeaderName::From => all_consuming(parser::headers::parse_from)
-                .parse(value_bytes)
+            HeaderName::From => all_consuming(parser::headers::parse_from)(value_bytes)
                 .map_err(Error::from)
                 .map(|(_, addr)| TypedHeader::From(addr)),
-            HeaderName::To => all_consuming(parser::headers::parse_to)
-                .parse(value_bytes)
+            HeaderName::To => all_consuming(parser::headers::parse_to)(value_bytes)
                 .map_err(Error::from)
                 .map(|(_, addr)| TypedHeader::To(addr)),
-            HeaderName::Contact => all_consuming(parser::headers::parse_contact)
-                .parse(value_bytes)
+            HeaderName::Contact => all_consuming(parser::headers::parse_contact)(value_bytes)
                 .map_err(Error::from)
                 .map(|(_, v)| TypedHeader::Contact(Contact(vec![v]))),
             HeaderName::ReplyTo => {
-                match all_consuming(parser::headers::reply_to::parse_reply_to).parse(value_bytes) {
+                match all_consuming(parser::headers::reply_to::parse_reply_to)(value_bytes) {
                     Ok((_, addr)) => Ok(TypedHeader::ReplyTo(addr)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
             HeaderName::Via => {
                 // Try to parse as regular Via header first
-                match all_consuming(parser::headers::parse_via).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_via)(value_bytes) {
                     Ok((_, v)) => Ok(TypedHeader::Via(Via(v))),
                     Err(e) => {
                         // If that fails, try to parse as just the via-params part (without "Via:" prefix)
-                        match all_consuming(parser::headers::via::parse_via_params_public)
-                            .parse(value_bytes)
-                        {
+                        match all_consuming(parser::headers::via::parse_via_params_public)(
+                            value_bytes,
+                        ) {
                             Ok((_, v)) => Ok(TypedHeader::Via(Via(v))),
                             Err(_) => Err(Error::from(e.to_owned())), // Return the original error
                         }
                     }
                 }
             }
-            HeaderName::Route => all_consuming(parser::headers::parse_route)
-                .parse(value_bytes)
+            HeaderName::Route => all_consuming(parser::headers::parse_route)(value_bytes)
                 .map(|(_, v)| TypedHeader::Route(v))
                 .map_err(Error::from),
-            HeaderName::RecordRoute => all_consuming(parser::headers::parse_record_route)
-                .parse(value_bytes)
-                .map(|(_, v)| TypedHeader::RecordRoute(v))
-                .map_err(Error::from),
+            HeaderName::RecordRoute => {
+                all_consuming(parser::headers::parse_record_route)(value_bytes)
+                    .map(|(_, v)| TypedHeader::RecordRoute(v))
+                    .map_err(Error::from)
+            }
             HeaderName::CallId => {
                 // Convert the raw header value to a string instead of using the parser
                 match std::str::from_utf8(value_bytes) {
                     Ok(s) => Ok(TypedHeader::CallId(CallId(s.trim().to_string()))),
                     Err(_) => {
                         // Try with the parser as a fallback
-                        match all_consuming(parser::headers::parse_call_id).parse(value_bytes) {
+                        match all_consuming(parser::headers::parse_call_id)(value_bytes) {
                             Ok((_, call_id)) => Ok(TypedHeader::CallId(call_id)),
                             Err(e) => {
                                 // For Call-ID, we'll be lenient - create it directly from bytes
@@ -1005,8 +1001,7 @@ impl TryFrom<&Header> for TypedHeader {
                     }
                 }
             }
-            HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)
-                .parse(value_bytes)
+            HeaderName::CSeq => all_consuming(parser::headers::parse_cseq)(value_bytes)
                 .map(|(_, cseq_struct)| TypedHeader::CSeq(cseq_struct))
                 .map_err(Error::from),
             HeaderName::Accept => {
@@ -1026,24 +1021,24 @@ impl TryFrom<&Header> for TypedHeader {
             }
             HeaderName::ContentType => {
                 // The HeaderValue::ContentType case is already handled at the beginning of the function
-                all_consuming(parse_content_type_value)
-                    .parse(value_bytes)
+                all_consuming(parse_content_type_value)(value_bytes)
                     .map(|(_, v)| TypedHeader::ContentType(ContentType(v)))
                     .map_err(Error::from)
             }
-            HeaderName::ContentLength => all_consuming(parser::headers::parse_content_length)
-                .parse(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_u64)| {
-                    let length = v_u64.try_into().map_err(|_| {
-                        Error::ParseError("Invalid Content-Length value (overflow)".into())
-                    })?;
-                    Ok(TypedHeader::ContentLength(ContentLength(length)))
-                }),
+            HeaderName::ContentLength => {
+                all_consuming(parser::headers::parse_content_length)(value_bytes)
+                    .map_err(Error::from)
+                    .and_then(|(_, v_u64)| {
+                        let length = v_u64.try_into().map_err(|_| {
+                            Error::ParseError("Invalid Content-Length value (overflow)".into())
+                        })?;
+                        Ok(TypedHeader::ContentLength(ContentLength(length)))
+                    })
+            }
             HeaderName::ContentDisposition => {
-                match all_consuming(parser::headers::content_disposition::parse_content_disposition)
-                    .parse(value_bytes)
-                {
+                match all_consuming(parser::headers::content_disposition::parse_content_disposition)(
+                    value_bytes,
+                ) {
                     Ok((_, (disp_type_str, params_vec))) => {
                         // Parse disposition type from string
                         let disposition_type = match disp_type_str.to_lowercase().as_str() {
@@ -1179,34 +1174,36 @@ impl TryFrom<&Header> for TypedHeader {
                     )))
                 }
             }
-            HeaderName::MaxForwards => all_consuming(parser::headers::parse_max_forwards)
-                .parse(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_u32)| {
-                    let forwards = v_u32.try_into().map_err(|_| {
-                        Error::ParseError("Invalid Max-Forwards value (overflow)".into())
-                    })?;
-                    Ok(TypedHeader::MaxForwards(MaxForwards(forwards)))
-                }),
-            HeaderName::Expires => all_consuming(parser::headers::parse_expires)
-                .parse(value_bytes)
+            HeaderName::MaxForwards => {
+                all_consuming(parser::headers::parse_max_forwards)(value_bytes)
+                    .map_err(Error::from)
+                    .and_then(|(_, v_u32)| {
+                        let forwards = v_u32.try_into().map_err(|_| {
+                            Error::ParseError("Invalid Max-Forwards value (overflow)".into())
+                        })?;
+                        Ok(TypedHeader::MaxForwards(MaxForwards(forwards)))
+                    })
+            }
+            HeaderName::Expires => all_consuming(parser::headers::parse_expires)(value_bytes)
                 .map(|(_, v)| TypedHeader::Expires(Expires(v)))
                 .map_err(Error::from),
-            HeaderName::MinExpires => all_consuming(parser::headers::parse_min_expires)
-                .parse(value_bytes)
-                .map_err(Error::from)
-                .and_then(|(_, v_u32)| {
-                    MinExpires::from_str(&v_u32.to_string()).map(TypedHeader::MinExpires)
-                }),
-            HeaderName::MimeVersion => all_consuming(parser::headers::parse_mime_version)
-                .parse(value_bytes)
-                .map_err(Error::from)
-                .map(|(_, parsed_version_u8)| {
-                    TypedHeader::MimeVersion(crate::types::mime_version::MimeVersion::new(
-                        parsed_version_u8.major.into(),
-                        parsed_version_u8.minor.into(),
-                    ))
-                }),
+            HeaderName::MinExpires => {
+                all_consuming(parser::headers::parse_min_expires)(value_bytes)
+                    .map_err(Error::from)
+                    .and_then(|(_, v_u32)| {
+                        MinExpires::from_str(&v_u32.to_string()).map(TypedHeader::MinExpires)
+                    })
+            }
+            HeaderName::MimeVersion => {
+                all_consuming(parser::headers::parse_mime_version)(value_bytes)
+                    .map_err(Error::from)
+                    .map(|(_, parsed_version_u8)| {
+                        TypedHeader::MimeVersion(crate::types::mime_version::MimeVersion::new(
+                            parsed_version_u8.major.into(),
+                            parsed_version_u8.minor.into(),
+                        ))
+                    })
+            }
             HeaderName::WwwAuthenticate => {
                 // Check if we're already dealing with a HeaderValue::WwwAuthenticate
                 // This case should have been handled earlier in the special cases
@@ -1218,8 +1215,7 @@ impl TryFrom<&Header> for TypedHeader {
                 }
 
                 // Otherwise parse from raw bytes
-                all_consuming(parser::headers::parse_www_authenticate)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::parse_www_authenticate)(value_bytes)
                     .map(|(_, v)| TypedHeader::WwwAuthenticate(WwwAuthenticate(v)))
                     .map_err(Error::from)
             }
@@ -1234,31 +1230,26 @@ impl TryFrom<&Header> for TypedHeader {
                 }
 
                 // Otherwise parse from raw bytes
-                all_consuming(parser::headers::parse_authorization)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::parse_authorization)(value_bytes)
                     .map(|(_, v)| TypedHeader::Authorization(v))
                     .map_err(Error::from)
             }
             HeaderName::ProxyAuthenticate => {
-                all_consuming(parser::headers::parse_proxy_authenticate)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::parse_proxy_authenticate)(value_bytes)
                     .map(|(_, v)| TypedHeader::ProxyAuthenticate(ProxyAuthenticate(v)))
                     .map_err(Error::from)
             }
             HeaderName::ProxyAuthorization => {
-                all_consuming(parser::headers::parse_proxy_authorization)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::parse_proxy_authorization)(value_bytes)
                     .map(|(_, v)| TypedHeader::ProxyAuthorization(ProxyAuthorization(v)))
                     .map_err(Error::from)
             }
             HeaderName::AuthenticationInfo => {
-                all_consuming(parser::headers::parse_authentication_info)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::parse_authentication_info)(value_bytes)
                     .map(|(_, v)| TypedHeader::AuthenticationInfo(AuthenticationInfo(v)))
                     .map_err(Error::from)
             }
-            HeaderName::Allow => all_consuming(parser::headers::allow::parse_allow)
-                .parse(value_bytes)
+            HeaderName::Allow => all_consuming(parser::headers::allow::parse_allow)(value_bytes)
                 .map(|(_, allow)| TypedHeader::Allow(allow))
                 .map_err(Error::from),
             HeaderName::Require => {
@@ -1270,33 +1261,31 @@ impl TryFrom<&Header> for TypedHeader {
                 Ok(TypedHeader::Supported(Supported::from_header(&header)?))
             }
             HeaderName::Unsupported => {
-                all_consuming(parser::headers::unsupported::parse_unsupported)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::unsupported::parse_unsupported)(value_bytes)
                     .map(|(_, strings)| TypedHeader::Unsupported(Unsupported::with_tags(strings)))
                     .map_err(Error::from)
             }
-            HeaderName::ProxyRequire => all_consuming(parser::headers::parse_proxy_require)
-                .parse(value_bytes)
-                .map(|(_, strings)| {
-                    TypedHeader::ProxyRequire(
-                        crate::types::proxy_require::ProxyRequire::from_strings(strings),
-                    )
-                })
-                .map_err(Error::from),
-            HeaderName::Date => all_consuming(parser::headers::parse_date)
-                .parse(value_bytes)
+            HeaderName::ProxyRequire => {
+                all_consuming(parser::headers::parse_proxy_require)(value_bytes)
+                    .map(|(_, strings)| {
+                        TypedHeader::ProxyRequire(
+                            crate::types::proxy_require::ProxyRequire::from_strings(strings),
+                        )
+                    })
+                    .map_err(Error::from)
+            }
+            HeaderName::Date => all_consuming(parser::headers::parse_date)(value_bytes)
                 .map(|(_, v)| TypedHeader::Date(v))
                 .map_err(Error::from),
-            HeaderName::Timestamp => all_consuming(parser::headers::parse_timestamp)
-                .parse(value_bytes)
+            HeaderName::Timestamp => all_consuming(parser::headers::parse_timestamp)(value_bytes)
                 .map(|(_, v)| TypedHeader::Timestamp(v))
                 .map_err(Error::from),
-            HeaderName::Organization => all_consuming(parser::headers::parse_organization)
-                .parse(value_bytes)
-                .map(|(_, org)| TypedHeader::Organization(org))
-                .map_err(Error::from),
-            HeaderName::Priority => all_consuming(parser::headers::parse_priority)
-                .parse(value_bytes)
+            HeaderName::Organization => {
+                all_consuming(parser::headers::parse_organization)(value_bytes)
+                    .map(|(_, org)| TypedHeader::Organization(org))
+                    .map_err(Error::from)
+            }
+            HeaderName::Priority => all_consuming(parser::headers::parse_priority)(value_bytes)
                 .map(|(_, priority)| {
                     TypedHeader::Priority(
                         crate::types::priority::Priority::from_str(&priority.to_string())
@@ -1306,13 +1295,11 @@ impl TryFrom<&Header> for TypedHeader {
                 .map_err(Error::from),
             HeaderName::Subject => {
                 // Use our Subject type directly from the parser
-                all_consuming(parser::headers::subject::parse_subject)
-                    .parse(value_bytes)
+                all_consuming(parser::headers::subject::parse_subject)(value_bytes)
                     .map(|(_, subject)| TypedHeader::Subject(subject))
                     .map_err(Error::from)
             }
-            HeaderName::Server => all_consuming(parser::headers::parse_server)
-                .parse(value_bytes)
+            HeaderName::Server => all_consuming(parser::headers::parse_server)(value_bytes)
                 .map(|(_, server_vals)| {
                     TypedHeader::Server(
                         server_vals
@@ -1335,8 +1322,7 @@ impl TryFrom<&Header> for TypedHeader {
                     )
                 })
                 .map_err(Error::from),
-            HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)
-                .parse(value_bytes)
+            HeaderName::UserAgent => all_consuming(parser::headers::parse_user_agent)(value_bytes)
                 .map(|(_, server_vals)| {
                     TypedHeader::UserAgent(
                         server_vals
@@ -1359,8 +1345,7 @@ impl TryFrom<&Header> for TypedHeader {
                     )
                 })
                 .map_err(Error::from),
-            HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)
-                .parse(value_bytes)
+            HeaderName::InReplyTo => all_consuming(parser::headers::parse_in_reply_to)(value_bytes)
                 .map(|(_, strings)| {
                     TypedHeader::InReplyTo(
                         crate::types::in_reply_to::InReplyTo::with_multiple_strings(strings),
@@ -1379,8 +1364,7 @@ impl TryFrom<&Header> for TypedHeader {
 
                 // Fallback to the original parsing logic
                 let parse_result =
-                    all_consuming(parser::headers::warning::parse_warning_value_list)
-                        .parse(value_bytes);
+                    all_consuming(parser::headers::warning::parse_warning_value_list)(value_bytes);
                 match parse_result {
                     Ok((_, parsed_values)) => {
                         let mut typed_warnings = Vec::new();
@@ -1462,8 +1446,7 @@ impl TryFrom<&Header> for TypedHeader {
                     }
 
                     // If direct FromStr parsing failed, try the standard parser
-                    match all_consuming(parser::headers::error_info::parse_error_info).parse(bytes)
-                    {
+                    match all_consuming(parser::headers::error_info::parse_error_info)(bytes) {
                         Ok((_, error_info_values)) => {
                             let mut list = ErrorInfoList::new();
                             for value in error_info_values {
@@ -1494,8 +1477,7 @@ impl TryFrom<&Header> for TypedHeader {
                     )));
                 }
             }
-            HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)
-                .parse(value_bytes)
+            HeaderName::AlertInfo => all_consuming(parser::headers::parse_alert_info)(value_bytes)
                 .map_err(Error::from)
                 .and_then(|(_, alert_info_values)| {
                     // Every value must convert; dropping one would forward a
@@ -1512,18 +1494,17 @@ impl TryFrom<&Header> for TypedHeader {
                         crate::types::alert_info::AlertInfoHeader { alert_info_list },
                     ))
                 }),
-            HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)
-                .parse(value_bytes)
+            HeaderName::CallInfo => all_consuming(parser::headers::parse_call_info)(value_bytes)
                 .map(|(_, call_info_values)| TypedHeader::CallInfo(CallInfo(call_info_values)))
                 .map_err(Error::from),
             HeaderName::ReferTo => {
-                match all_consuming(parser::headers::parse_refer_to).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_refer_to)(value_bytes) {
                     Ok((_, addr)) => Ok(TypedHeader::ReferTo(ReferTo::new(addr))),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
             HeaderName::ReferredBy => {
-                match all_consuming(parser::headers::parse_referred_by).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_referred_by)(value_bytes) {
                     Ok((_, addr)) => Ok(TypedHeader::ReferredBy(ReferredBy::new(addr))),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
@@ -1565,12 +1546,10 @@ impl TryFrom<&Header> for TypedHeader {
                     )))
                 }
             }
-            HeaderName::Reason => all_consuming(parser::headers::parse_reason)
-                .parse(value_bytes)
+            HeaderName::Reason => all_consuming(parser::headers::parse_reason)(value_bytes)
                 .map(|(_, v)| TypedHeader::Reason(v))
                 .map_err(Error::from),
-            HeaderName::SessionExpires => all_consuming(parse_session_expires)
-                .parse(value_bytes)
+            HeaderName::SessionExpires => all_consuming(parse_session_expires)(value_bytes)
                 .map(|(_, (delta, refresher, params))| {
                     TypedHeader::SessionExpires(SessionExpires::new_with_params(
                         delta, refresher, params,
@@ -1619,32 +1598,31 @@ impl TryFrom<&Header> for TypedHeader {
                 )?))
             }
             HeaderName::SipETag => {
-                match all_consuming(parser::headers::parse_sip_etag).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_sip_etag)(value_bytes) {
                     Ok((_, etag)) => Ok(TypedHeader::SipETag(etag)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
             HeaderName::SipIfMatch => {
-                match all_consuming(parser::headers::parse_sip_if_match).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_sip_if_match)(value_bytes) {
                     Ok((_, if_match)) => Ok(TypedHeader::SipIfMatch(if_match)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
             HeaderName::AllowEvents => {
-                match all_consuming(parser::headers::parse_allow_events).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_allow_events)(value_bytes) {
                     Ok((_, allow)) => Ok(TypedHeader::AllowEvents(allow)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
             HeaderName::PAssertedIdentity => {
-                match all_consuming(parser::headers::parse_p_asserted_identity).parse(value_bytes) {
+                match all_consuming(parser::headers::parse_p_asserted_identity)(value_bytes) {
                     Ok((_, pai)) => Ok(TypedHeader::PAssertedIdentity(pai)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
             HeaderName::PPreferredIdentity => {
-                match all_consuming(parser::headers::parse_p_preferred_identity).parse(value_bytes)
-                {
+                match all_consuming(parser::headers::parse_p_preferred_identity)(value_bytes) {
                     Ok((_, ppi)) => Ok(TypedHeader::PPreferredIdentity(ppi)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }

@@ -130,7 +130,6 @@ struct MidDialogCapture {
 }
 
 struct RawAuthUas {
-    port: u16,
     captures: Arc<Mutex<Vec<MidDialogCapture>>>,
     count: Arc<AtomicU32>,
     task: JoinHandle<()>,
@@ -163,74 +162,118 @@ impl RawAuthUas {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bye_407_retry_uses_proxy_authorization() {
-    run_in_dialog_auth_retry(ChallengedMethod::Bye, ChallengeKind::Proxy407).await;
+    run_in_dialog_auth_retry(36188, 36189, ChallengedMethod::Bye, ChallengeKind::Proxy407).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refer_407_retry_uses_proxy_authorization() {
-    run_in_dialog_auth_retry(ChallengedMethod::Refer, ChallengeKind::Proxy407).await;
+    run_in_dialog_auth_retry(
+        36190,
+        36191,
+        ChallengedMethod::Refer,
+        ChallengeKind::Proxy407,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn update_401_retry_uses_authorization() {
-    run_in_dialog_auth_retry(ChallengedMethod::Update, ChallengeKind::Origin401).await;
+    run_in_dialog_auth_retry(
+        36180,
+        36181,
+        ChallengedMethod::Update,
+        ChallengeKind::Origin401,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn update_407_retry_uses_proxy_authorization() {
-    run_in_dialog_auth_retry(ChallengedMethod::Update, ChallengeKind::Proxy407).await;
+    run_in_dialog_auth_retry(
+        36182,
+        36183,
+        ChallengedMethod::Update,
+        ChallengeKind::Proxy407,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reinvite_401_retry_commits_the_authenticated_answer() {
-    run_in_dialog_auth_retry(ChallengedMethod::Reinvite, ChallengeKind::Origin401).await;
+    run_in_dialog_auth_retry(
+        36192,
+        36193,
+        ChallengedMethod::Reinvite,
+        ChallengeKind::Origin401,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reinvite_407_retry_commits_the_authenticated_answer() {
-    run_in_dialog_auth_retry(ChallengedMethod::Reinvite, ChallengeKind::Proxy407).await;
+    run_in_dialog_auth_retry(
+        36194,
+        36195,
+        ChallengedMethod::Reinvite,
+        ChallengeKind::Proxy407,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn notify_401_retry_uses_authorization() {
-    run_in_dialog_auth_retry(ChallengedMethod::Notify, ChallengeKind::Origin401).await;
+    run_in_dialog_auth_retry(
+        36184,
+        36185,
+        ChallengedMethod::Notify,
+        ChallengeKind::Origin401,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn notify_407_retry_uses_proxy_authorization() {
-    run_in_dialog_auth_retry(ChallengedMethod::Notify, ChallengeKind::Proxy407).await;
+    run_in_dialog_auth_retry(
+        36186,
+        36187,
+        ChallengedMethod::Notify,
+        ChallengeKind::Proxy407,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn refer_notify_info_and_update_auth_int_sign_exact_bodies() {
-    for method in [
-        ChallengedMethod::Refer,
-        ChallengedMethod::Notify,
-        ChallengedMethod::Info,
-        ChallengedMethod::Update,
+    for (uas_port, uac_port, method) in [
+        (36200, 36201, ChallengedMethod::Refer),
+        (36202, 36203, ChallengedMethod::Notify),
+        (36204, 36205, ChallengedMethod::Info),
+        (36206, 36207, ChallengedMethod::Update),
     ] {
-        run_in_dialog_auth_retry(method, ChallengeKind::Origin401AuthInt).await;
+        run_in_dialog_auth_retry(uas_port, uac_port, method, ChallengeKind::Origin401AuthInt).await;
     }
 }
 
-async fn run_in_dialog_auth_retry(method: ChallengedMethod, challenge_kind: ChallengeKind) {
+async fn run_in_dialog_auth_retry(
+    uas_port: u16,
+    uac_port: u16,
+    method: ChallengedMethod,
+    challenge_kind: ChallengeKind,
+) {
     let _ = tracing_subscriber::fmt()
         .with_test_writer()
         .with_max_level(tracing::Level::WARN)
         .try_init();
 
-    // Ephemeral ports on both sides: fixed ports inside the OS ephemeral range
-    // collide with sockets other tests bind to port 0.
-    let uas = spawn_raw_auth_uas(method, challenge_kind).await;
-    let uas_port = uas.port;
-    let coord = UnifiedCoordinator::new(Config::local("alice", 0))
+    let uas = spawn_raw_auth_uas(uas_port, method, challenge_kind).await;
+    let coord = UnifiedCoordinator::new(Config::local("alice", uac_port))
         .await
         .expect("UAC coordinator");
     sleep(Duration::from_millis(150)).await;
 
     let target = format!("sip:bob@127.0.0.1:{uas_port}");
     let call_id = coord
-        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .invite(Some(format!("sip:alice@127.0.0.1:{uac_port}")), target)
         .with_credentials(Credentials::new("alice", "password").with_realm(REALM))
         .send()
         .await
@@ -394,11 +437,12 @@ async fn wait_until_active(coord: &Arc<UnifiedCoordinator>, call_id: &rvoip_sip:
 }
 
 async fn spawn_raw_auth_uas(
+    port: u16,
     challenged_method: ChallengedMethod,
     challenge_kind: ChallengeKind,
 ) -> RawAuthUas {
-    let sock = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("UAS bind"));
-    let port = sock.local_addr().expect("UAS addr").port();
+    let addr = format!("127.0.0.1:{port}");
+    let sock = Arc::new(UdpSocket::bind(&addr).await.expect("UAS bind"));
     let captures = Arc::new(Mutex::new(Vec::new()));
     let count = Arc::new(AtomicU32::new(0));
 
@@ -491,7 +535,6 @@ async fn spawn_raw_auth_uas(
     });
 
     RawAuthUas {
-        port,
         captures,
         count,
         task,

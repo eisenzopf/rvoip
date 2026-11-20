@@ -3,7 +3,6 @@
 // rplyto-spec = ( name-addr / addr-spec ) *( SEMI rplyto-param )
 // rplyto-param = generic-param
 
-use nom::Parser;
 use nom::{
     combinator::map,
     error::Error,
@@ -52,15 +51,14 @@ fn rplyto_spec(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params = params_vec; // Assign parsed generic params
             addr
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // Reply-To = "Reply-To" HCOLON rplyto-spec
 // Note: HCOLON handled elsewhere
 pub fn parse_reply_to(input: &[u8]) -> ParseResult<'_, ReplyToHeader> {
     // Validate that the input can be parsed as a Reply-To header
-    map(rplyto_spec, ReplyToHeader).parse(input)
+    map(rplyto_spec, ReplyToHeader)(input)
 }
 
 /// Parses a Reply-To header value.

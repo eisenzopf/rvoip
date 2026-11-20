@@ -1,10 +1,9 @@
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
     combinator::recognize,
     multi::many0,
-    sequence::pair,
+    sequence::{pair, tuple},
     IResult,
 };
 
@@ -41,73 +40,68 @@ pub fn separators(input: &[u8]) -> ParseResult<'_, &[u8]> {
 
 pub fn hcolon(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // HCOLON = *( SP / HTAB ) ":" SWS
-    recognize((
-        many0(alt((tag(&b" "[..]), tag(&b"\t"[..])))),
-        tag(&b":"[..]),
-        sws,
-    ))
-    .parse(input)
+    recognize(tuple((many0(alt((tag(b" "), tag(b"\t")))), tag(b":"), sws)))(input)
 }
 
 pub fn dquote(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    tag(&b"\""[..])(input)
+    tag(b"\"")(input)
 }
 
 // Separator wrappers with SWS
 pub fn star(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize((sws, tag(&b"*"[..]), sws)).parse(input)
+    recognize(tuple((sws, tag(b"*"), sws)))(input)
 }
 
 pub fn slash(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize((sws, tag(&b"/"[..]), sws)).parse(input)
+    recognize(tuple((sws, tag(b"/"), sws)))(input)
 }
 
 pub fn equal(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize((sws, tag(&b"="[..]), sws)).parse(input)
+    recognize(tuple((sws, tag(b"="), sws)))(input)
 }
 
 pub fn lparen(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LPAREN = SWS "("
     // RFC 3261 defines LPAREN as optional whitespace followed by open paren
-    recognize(pair(sws, tag(&b"("[..]))).parse(input)
+    recognize(pair(sws, tag(b"(")))(input)
 }
 
 pub fn rparen(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // RPAREN = ")" SWS
     // RFC 3261 defines RPAREN as close paren followed by optional whitespace
-    recognize(pair(tag(&b")"[..]), sws)).parse(input)
+    recognize(pair(tag(b")"), sws))(input)
 }
 
 pub fn raquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // RAQUOT = ">" SWS
-    recognize(pair(tag(&b">"[..]), sws)).parse(input)
+    recognize(pair(tag(b">"), sws))(input)
 }
 
 pub fn laquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LAQUOT = SWS "<"
-    recognize(pair(sws, tag(&b"<"[..]))).parse(input)
+    recognize(pair(sws, tag(b"<")))(input)
 }
 
 pub fn comma(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize((sws, tag(&b","[..]), sws)).parse(input)
+    recognize(tuple((sws, tag(b","), sws)))(input)
 }
 
 pub fn semi(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize((sws, tag(&b";"[..]), sws)).parse(input)
+    recognize(tuple((sws, tag(b";"), sws)))(input)
 }
 
 pub fn colon(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize((sws, tag(&b":"[..]), sws)).parse(input)
+    recognize(tuple((sws, tag(b":"), sws)))(input)
 }
 
 pub fn ldquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // LDQUOT = SWS DQUOTE
-    recognize(pair(sws, dquote)).parse(input)
+    recognize(pair(sws, dquote))(input)
 }
 
 pub fn rdquot(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // RDQUOT = DQUOTE SWS
-    recognize(pair(dquote, sws)).parse(input)
+    recognize(pair(dquote, sws))(input)
 }
 
 #[cfg(test)]
@@ -208,12 +202,12 @@ mod tests {
 
     #[test]
     fn test_star() {
-        // RFC spec allows for whitespace on both sides, implemented with delimited(sws, tag(&b"*"[..]), sws)
+        // RFC spec allows for whitespace on both sides, implemented with delimited(sws, tag(b"*"), sws)
 
         // Basic case - no whitespace
         let (rem, val) = star(b"*rest").unwrap();
         assert_eq!(rem, b"rest");
-        // With delimited(sws, tag(&b"*"[..]), sws), even with no whitespace, should just return "*"
+        // With delimited(sws, tag(b"*"), sws), even with no whitespace, should just return "*"
         assert_eq!(val, b"*");
 
         // With SWS before and after - should include all whitespace as per RFC

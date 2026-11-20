@@ -5,13 +5,12 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{to_result, token};
-use nom::Parser;
 use nom::{combinator::verify, IResult};
 
 /// Parser for MID value
 fn mid_parser(input: &str) -> IResult<&str, &str> {
     // MID is a token, which means it should consist of allowed token characters
-    verify(token, |s: &str| !s.is_empty()).parse(input)
+    verify(token, |s: &str| !s.is_empty())(input)
 }
 
 /// Parses mid attribute: `a=mid:<identification-tag>`

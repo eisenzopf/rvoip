@@ -82,27 +82,13 @@ pub struct NewCallRateLimit {
     /// New calls admitted back to back before the sustained rate applies.
     /// Values below 1 are treated as 1.
     pub burst: f64,
-    /// `Retry-After` seconds on the 503s this limit causes; `None` (the
-    /// default) omits the header. `Some(0)` also omits it.
-    pub retry_after_secs: Option<u32>,
 }
 
 impl NewCallRateLimit {
     /// A limit of `max_cps` sustained new calls per second with a burst of
-    /// `burst` calls. Its rejections carry no `Retry-After`.
+    /// `burst` calls.
     pub fn new(max_cps: f64, burst: f64) -> Self {
-        Self {
-            max_cps,
-            burst,
-            retry_after_secs: None,
-        }
-    }
-
-    /// Answer the rejections this limit causes with `Retry-After: seconds`
-    /// (RFC 3261 §21.5.4), so a caller backs off instead of retrying at once.
-    pub fn with_retry_after_secs(mut self, seconds: u32) -> Self {
-        self.retry_after_secs = Some(seconds);
-        self
+        Self { max_cps, burst }
     }
 }
 
@@ -258,8 +244,6 @@ pub struct NewCallAdmission {
     rate_tat_ns: AtomicU64,
     rate_max_cps_bits: AtomicU64,
     rate_burst_bits: AtomicU64,
-    /// `Retry-After` for rate-limit rejections (0 omits it).
-    rate_retry_after_secs: AtomicU32,
     epoch: Instant,
     decisions: AtomicU64,
     rejected: AtomicU64,
@@ -290,7 +274,6 @@ impl NewCallAdmission {
             rate_tat_ns: AtomicU64::new(0),
             rate_max_cps_bits: AtomicU64::new(0),
             rate_burst_bits: AtomicU64::new(0),
-            rate_retry_after_secs: AtomicU32::new(0),
             epoch: Instant::now(),
             decisions: AtomicU64::new(0),
             rejected: AtomicU64::new(0),
@@ -352,16 +335,13 @@ impl NewCallAdmission {
             .store(limit.max_cps.to_bits(), Ordering::Relaxed);
         self.rate_burst_bits
             .store(burst.to_bits(), Ordering::Relaxed);
-        self.rate_retry_after_secs
-            .store(limit.retry_after_secs.unwrap_or(0), Ordering::Relaxed);
         self.rate_tolerance_ns.store(tolerance, Ordering::Relaxed);
         self.rate_interval_ns.store(interval, Ordering::Release);
     }
 
     fn rate_limit(&self) -> Option<NewCallRateLimit> {
-        (self.rate_interval_ns.load(Ordering::Acquire) != 0).then(|| NewCallRateLimit {
-            retry_after_secs: nonzero(self.rate_retry_after_secs.load(Ordering::Relaxed)),
-            ..NewCallRateLimit::new(
+        (self.rate_interval_ns.load(Ordering::Acquire) != 0).then(|| {
+            NewCallRateLimit::new(
                 f64::from_bits(self.rate_max_cps_bits.load(Ordering::Relaxed)),
                 f64::from_bits(self.rate_burst_bits.load(Ordering::Relaxed)),
             )
@@ -421,7 +401,7 @@ impl NewCallAdmission {
             } else if !self.rate_allows() {
                 self.rate_limited.fetch_add(1, Ordering::Relaxed);
                 AdmissionDecision::Reject {
-                    retry_after_secs: nonzero(self.rate_retry_after_secs.load(Ordering::Relaxed)),
+                    retry_after_secs: None,
                 }
             } else {
                 AdmissionDecision::Admit
@@ -755,52 +735,6 @@ mod tests {
         assert!((0..100).all(|i| gate.decide(&format!("d{i}")) == AdmissionDecision::Admit));
         gate.set_rate_limit(Some(NewCallRateLimit::new(f64::NAN, 1.0)));
         assert_eq!(gate.stats().rate_limit, None);
-    }
-
-    #[test]
-    fn rate_limit_rejections_carry_its_retry_after() {
-        let limit = NewCallRateLimit::new(10.0, 10.0).with_retry_after_secs(2);
-        let gate = NewCallAdmission::new(
-            NewCallAdmissionConfig::new(AdmissionMode::Enforce).with_rate_limit(limit),
-        );
-        // A one-second burst: about `max_cps` calls pass back to back, then
-        // every rejection names the limit's Retry-After.
-        let decisions: Vec<_> = (0..40).map(|i| gate.decide(&format!("r{i}"))).collect();
-        let admitted = decisions
-            .iter()
-            .filter(|decision| **decision == AdmissionDecision::Admit)
-            .count();
-        assert!((10..=12).contains(&admitted), "burst admitted {admitted}");
-        assert!(decisions
-            .iter()
-            .filter(|decision| **decision != AdmissionDecision::Admit)
-            .all(|decision| *decision
-                == AdmissionDecision::Reject {
-                    retry_after_secs: Some(2)
-                }));
-        assert_eq!(gate.stats().rate_limit, Some(limit));
-        assert_eq!(gate.stats().rate_limited, 40 - admitted as u64);
-
-        // The level's own Retry-After still governs closed-gate rejections,
-        // and a limit without one keeps omitting the header.
-        gate.set_level(AdmissionLevel::closed(Some(7)));
-        assert_eq!(
-            gate.decide("closed"),
-            AdmissionDecision::Reject {
-                retry_after_secs: Some(7)
-            }
-        );
-        gate.set_level(AdmissionLevel::open());
-        gate.set_rate_limit(Some(NewCallRateLimit::new(1.0, 1.0)));
-        let rejections: Vec<_> = (0..5)
-            .map(|i| gate.decide(&format!("n{i}")))
-            .filter(|decision| *decision != AdmissionDecision::Admit)
-            .collect();
-        assert!(!rejections.is_empty());
-        assert!(rejections.iter().all(|decision| *decision
-            == AdmissionDecision::Reject {
-                retry_after_secs: None
-            }));
     }
 
     #[test]

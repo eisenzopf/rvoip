@@ -6,6 +6,7 @@ use crate::{
     JwtIssuer, Result, SqliteUserStore, User, UserStore,
 };
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use password_hash::{rand_core::OsRng, SaltString};
 use sqlx_sqlite::SqlitePool;
 use std::sync::Arc;
 
@@ -233,10 +234,10 @@ impl AuthenticationService {
             .map_err(|e| Error::InvalidPassword(e.user_message()))?;
 
         // Hash the password
-        // argon2 0.6 draws a 16-byte salt from the OS RNG itself.
+        let salt = SaltString::generate(&mut OsRng);
         let password_hash = self
             .argon2
-            .hash_password(request.password.as_bytes())
+            .hash_password(request.password.as_bytes(), &salt)
             .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to hash password: {}", e)))?
             .to_string();
 
@@ -330,9 +331,9 @@ impl AuthenticationService {
 
         // Add small random delay to further obscure timing (100-500 microseconds)
         let delay_us = {
-            use rand::RngExt;
-            let mut rng = rand::rng();
-            rng.random_range(100..500)
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            rng.gen_range(100..500)
         };
         tokio::time::sleep(Duration::from_micros(delay_us)).await;
 
@@ -501,9 +502,10 @@ impl AuthenticationService {
             .map_err(|e| Error::InvalidPassword(e.user_message()))?;
 
         // Hash new password
+        let salt = SaltString::generate(&mut OsRng);
         let new_hash = self
             .argon2
-            .hash_password(new_password.as_bytes())
+            .hash_password(new_password.as_bytes(), &salt)
             .map_err(|e| Error::Internal(anyhow::anyhow!("Failed to hash password: {}", e)))?
             .to_string();
 
@@ -526,21 +528,3 @@ impl AuthenticationService {
 
 // Re-export JwtIssuer config
 pub use crate::jwt::JwtConfig;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A PHC string produced by argon2 0.5 (rvoip 0.4) for
-    /// `SecurePassword2026`. Stored hashes must keep verifying after the
-    /// argon2 0.6 / password-hash 0.6 upgrade.
-    const ARGON2_0_5_HASH: &str = "$argon2id$v=19$m=1024,t=2,p=1$cnZvaXAtbGVnYWN5LXNhbHQ$OwGz7nKDs3kzS9prdJlqSgKchqmt6YXAUmRv0T4/3EE";
-
-    #[test]
-    fn hashes_stored_by_argon2_0_5_still_verify() {
-        let hash = PasswordHash::new(ARGON2_0_5_HASH).unwrap();
-        let argon2 = Argon2::default();
-        assert!(argon2.verify_password(b"SecurePassword2026", &hash).is_ok());
-        assert!(argon2.verify_password(b"WrongPassword2026", &hash).is_err());
-    }
-}

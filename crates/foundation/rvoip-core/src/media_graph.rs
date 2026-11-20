@@ -124,10 +124,6 @@ pub struct MediaGraphPolicy {
     /// Frames retained before the first sink is registered. The buffer is
     /// always bounded and drops its oldest frame on overflow.
     pub pre_sink_buffer_frames: usize,
-    /// Rolling window over which a route's drop ratio is measured. After the
-    /// warm-up, a route must also be observed in steady state for one full
-    /// window before the ratio can evict it, so a single catch-up burst is not
-    /// scored as chronic pressure.
     pub eviction_window: Duration,
     pub eviction_drop_ratio: f32,
     pub minimum_eviction_samples: usize,
@@ -144,26 +140,8 @@ pub struct MediaGraphPolicy {
     ///
     /// Drops during warm-up are still counted in `dropped_frames` and remain
     /// visible in [`MediaGraphSnapshot`]; only the eviction decision ignores
-    /// them. Set to `Duration::ZERO` to arm immediately: that also skips the
-    /// steady-state observation described on [`Self::eviction_window`].
+    /// them. Set to `Duration::ZERO` to arm immediately.
     pub eviction_warmup: Duration,
-    /// Lossless, ordered delivery for an exclusive application bridge.
-    ///
-    /// `None` (the default) keeps the real-time policy above: a full sink
-    /// queue drops its oldest frame and a chronically slow consumer is
-    /// evicted. `Some(stall)` instead stops reading the source while any sink
-    /// queue (or, before the first sink, the pre-sink buffer) is full, so
-    /// backpressure reaches the source's producer and no frame is dropped or
-    /// reordered. A sink whose queue stays full for `stall` is evicted as a
-    /// slow consumer, which fails the route observably instead of silently
-    /// discarding speech. Explicit flushes (barge-in) still discard queued
-    /// frames.
-    ///
-    /// One stalled sink holds every sink of the graph, so this is meant for
-    /// unpaced protocol bridges such as Webex BYOVA to Vapi, not for fan-out
-    /// to recorders or listeners. A stream asks for it through
-    /// [`crate::stream::MediaStream::lossless_delivery_stall_timeout`].
-    pub backpressure_stall_timeout: Option<Duration>,
 }
 
 impl Default for MediaGraphPolicy {
@@ -179,7 +157,6 @@ impl Default for MediaGraphPolicy {
             eviction_drop_ratio: 0.25,
             minimum_eviction_samples: 50,
             eviction_warmup: Duration::from_secs(3),
-            backpressure_stall_timeout: None,
         }
     }
 }
@@ -1619,11 +1596,6 @@ struct SinkQueue {
     /// this queue is idle (a lane-inline graph). `None` for every route of
     /// any other graph.
     inline_target: Option<MediaSinkTarget>,
-    /// Signalled whenever this queue frees a slot, so a backpressured graph
-    /// actor resumes reading its source. `Some` only for a lossless graph
-    /// (see [`MediaGraphPolicy::backpressure_stall_timeout`]), whose offers
-    /// never drop: the actor stops reading the source while any queue is full.
-    capacity_signal: Option<Arc<Notify>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1645,14 +1617,13 @@ impl SinkQueue {
         capacity: usize,
         peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
     ) -> Self {
-        Self::with_inline_target(capacity, peer_ticket, None, None)
+        Self::with_inline_target(capacity, peer_ticket, None)
     }
 
     fn with_inline_target(
         capacity: usize,
         peer_ticket: Option<crate::bridge::peer_switch::PeerRouteTicket>,
         inline_target: Option<MediaSinkTarget>,
-        capacity_signal: Option<Arc<Notify>>,
     ) -> Self {
         let capacity = capacity.max(1);
         Self {
@@ -1665,18 +1636,6 @@ impl SinkQueue {
             }),
             notify: Notify::new(),
             inline_target,
-            capacity_signal,
-        }
-    }
-
-    /// A lossless queue at or above capacity holds its graph's source.
-    fn is_backpressured(&self) -> bool {
-        self.capacity_signal.is_some() && self.depth() >= self.capacity
-    }
-
-    fn signal_capacity(&self) {
-        if let Some(signal) = self.capacity_signal.as_ref() {
-            signal.notify_one();
         }
     }
 
@@ -1714,10 +1673,7 @@ impl SinkQueue {
             if state.closed {
                 return OfferResult::Closed;
             }
-            // A lossless queue never discards: its actor stops reading the
-            // source while the queue is full, so a transcoder's re-framed run
-            // is the only way past capacity and it remains bounded.
-            let result = if state.frames.len() >= self.capacity && self.capacity_signal.is_none() {
+            let result = if state.frames.len() >= self.capacity {
                 state.frames.pop_front();
                 OfferResult::DroppedOldest
             } else {
@@ -1739,8 +1695,6 @@ impl SinkQueue {
         let mut state = self.state.lock().expect("media sink queue poisoned");
         let dropped = state.frames.len();
         state.frames.clear();
-        drop(state);
-        self.signal_capacity();
         dropped
     }
 
@@ -1755,8 +1709,6 @@ impl SinkQueue {
                     if self.inline_target.is_some() {
                         state.in_flight = true;
                     }
-                    drop(state);
-                    self.signal_capacity();
                     return Some(frame);
                 }
                 state.closed
@@ -1788,7 +1740,6 @@ impl SinkQueue {
             state.frames.clear();
         }
         self.notify.notify_waiters();
-        self.signal_capacity();
     }
 }
 
@@ -1813,10 +1764,6 @@ struct SinkRuntime {
     /// must not silently consume the warm-up and leave the first real burst
     /// scored as steady state.
     warmup_since: Option<Instant>,
-    /// First post-warm-up offer of the current uninterrupted steady state.
-    /// The drop ratio is judged only once this is a full `eviction_window`
-    /// old; it restarts whenever the rolling window empties.
-    observation_since: Option<Instant>,
     history: VecDeque<(Instant, bool)>,
     rolling_drops: usize,
     offered_frames: u64,
@@ -1844,6 +1791,10 @@ impl SinkRuntime {
             return false;
         }
 
+        if dropped {
+            self.rolling_drops = self.rolling_drops.saturating_add(1);
+        }
+        self.history.push_back((now, dropped));
         while self
             .history
             .front()
@@ -1853,27 +1804,7 @@ impl SinkRuntime {
                 self.rolling_drops = self.rolling_drops.saturating_sub(1);
             }
         }
-        // A quiet route must not age its steady state while offering nothing:
-        // once the window has emptied (after warm-up, renegotiation, or a gap
-        // longer than the window) the next offer starts a fresh observation.
-        if self.history.is_empty() {
-            self.observation_since = Some(now);
-        }
-        if dropped {
-            self.rolling_drops = self.rolling_drops.saturating_add(1);
-        }
-        self.history.push_back((now, dropped));
         if self.history.len() < policy.minimum_eviction_samples {
-            return false;
-        }
-        // The ratio is defined over `eviction_window`, so judge it only once a
-        // full window of steady state has been observed. With 20 ms frames the
-        // sample minimum fills in one second, and a consumer still catching up
-        // when the warm-up ends would otherwise be evicted for one burst.
-        // Queue capacity and drop-oldest still bound latency meanwhile. A zero
-        // warm-up keeps its documented arm-immediately meaning.
-        let observed = now.saturating_duration_since(*self.observation_since.get_or_insert(now));
-        if !policy.eviction_warmup.is_zero() && observed < policy.eviction_window {
             return false;
         }
         self.rolling_drops as f32 / self.history.len() as f32 > policy.eviction_drop_ratio
@@ -2003,8 +1934,7 @@ struct RtpClockTranslator {
     target_rate: u32,
     last_source: Option<u32>,
     last_target: u32,
-    /// Always in `0..source_rate`.
-    remainder: i64,
+    remainder: u64,
 }
 
 impl RtpClockTranslator {
@@ -2023,18 +1953,12 @@ impl RtpClockTranslator {
             self.last_target = source_timestamp;
             return source_timestamp;
         };
-        // RTP timestamps are serial numbers (RFC 3550): the wrapping
-        // difference is a signed offset, so a late frame steps back. Read as
-        // unsigned it is almost a whole source-clock wrap ahead, which scaled
-        // into the target clock would carry every later frame on the route
-        // far into the future. Euclidean division keeps the carried remainder
-        // non-negative, so a step back and forward again is exact.
-        let source_delta = i64::from(source_timestamp.wrapping_sub(last_source) as i32);
+        let source_delta = source_timestamp.wrapping_sub(last_source) as u64;
         let numerator = source_delta
-            .saturating_mul(i64::from(self.target_rate))
+            .saturating_mul(self.target_rate as u64)
             .saturating_add(self.remainder);
-        let target_delta = numerator.div_euclid(i64::from(self.source_rate));
-        self.remainder = numerator.rem_euclid(i64::from(self.source_rate));
+        let target_delta = numerator / self.source_rate as u64;
+        self.remainder = numerator % self.source_rate as u64;
         self.last_target = self.last_target.wrapping_add(target_delta as u32);
         self.last_target
     }
@@ -2866,85 +2790,9 @@ fn start_media_graph_placed(
         // snapshot was already published before spawning the actor.
         snapshot_tick.tick().await;
         activity_tick.tick().await;
-        // Lossless graphs (see `MediaGraphPolicy::backpressure_stall_timeout`)
-        // stop reading the source while a sink queue is full; every queue
-        // signals this when it frees a slot.
-        let capacity_signal = policy
-            .backpressure_stall_timeout
-            .map(|_| Arc::new(Notify::new()));
-        let mut backpressured_since: Option<tokio::time::Instant> = None;
 
         loop {
-            let backpressured = capacity_signal.is_some()
-                && if source_routing_started {
-                    sinks.values().any(|sink| sink.queue.is_backpressured())
-                } else {
-                    policy.pre_sink_buffer_frames > 0
-                        && pre_sink_buffer.len() >= policy.pre_sink_buffer_frames
-                };
-            // Only a routed graph can stall on a consumer. Before the first
-            // sink the source simply waits for one.
-            let stall_deadline = if backpressured && source_routing_started {
-                let since = *backpressured_since.get_or_insert_with(tokio::time::Instant::now);
-                policy.backpressure_stall_timeout.map(|stall| since + stall)
-            } else {
-                backpressured_since = None;
-                None
-            };
             tokio::select! {
-                _ = async {
-                    match capacity_signal.as_ref() {
-                        Some(signal) => signal.notified().await,
-                        None => std::future::pending().await,
-                    }
-                }, if backpressured => {}
-                _ = async {
-                    match stall_deadline {
-                        Some(deadline) => tokio::time::sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                }, if stall_deadline.is_some() => {
-                    backpressured_since = None;
-                    let stalled: Vec<MediaRouteId> = sinks
-                        .iter()
-                        .filter(|(_, sink)| sink.queue.is_backpressured())
-                        .map(|(route_id, _)| route_id.clone())
-                        .collect();
-                    let mut terminal = Vec::new();
-                    for route_id in stalled {
-                        if let Some(sink) = sinks.get(&route_id) {
-                            stats.record_eviction(route_id.clone(), sink);
-                            metrics::counter!(
-                                "rvoip_media_graph_evictions_total",
-                                "reason" => "lossless-stall"
-                            )
-                            .increment(1);
-                        }
-                        if remove_sink(&route_id, &mut sinks, &mut groups) {
-                            terminal.push(route_id);
-                        }
-                    }
-                    aggregate_metrics.set_sink_count(sinks.len());
-                    aggregate_metrics.set_codec_group_count(groups.len());
-                    publish_actor_snapshot(
-                        &snapshot_for_task,
-                        &graph_id_for_task,
-                        source_state,
-                        &source_codec,
-                        source_pt,
-                        &sinks,
-                        &groups,
-                        &stats,
-                    );
-                    snapshot_dirty = false;
-                    for route_id in terminal {
-                        terminate_route(
-                            &route_statuses_for_actor,
-                            &route_id,
-                            MediaGraphRouteTerminalReason::SlowConsumerEvicted,
-                        );
-                    }
-                }
                 command = command_rx.recv() => {
                     let Some(command) = command else {
                         source_state = MediaGraphSourceState::Shutdown;
@@ -2990,7 +2838,6 @@ fn start_media_graph_placed(
                                 policy.sink_queue_frames,
                                 peer_ticket.clone(),
                                 lane_inline.then(|| target.clone()),
-                                capacity_signal.clone(),
                             ));
                             let queue_for_task = Arc::clone(&queue);
                             let forwarding_for_task = Arc::clone(&forwarding);
@@ -3063,7 +2910,6 @@ fn start_media_graph_placed(
                                 queue,
                                 task: task_abort,
                                 warmup_since: None,
-                                observation_since: None,
                                 history: VecDeque::new(),
                                 rolling_drops: 0,
                                 delivery,
@@ -3337,7 +3183,7 @@ fn start_media_graph_placed(
                         }
                     }
                 }
-                frame = source.recv(), if !backpressured => {
+                frame = source.recv() => {
                     // A managed owner may have been dropped while the bounded
                     // control queue was full. Prune before routing the next
                     // frame so an orphan never receives further media.
@@ -3853,10 +3699,8 @@ fn update_sink_group(
     //
     // Clearing the history alongside the anchor is required for the same
     // reason the warm-up skips the push: retained drops would otherwise evict
-    // on the first offer after the new warm-up expired. The renegotiated media
-    // likewise earns a fresh steady-state observation.
+    // on the first offer after the new warm-up expired.
     sink.warmup_since = None;
-    sink.observation_since = None;
     sink.history.clear();
     sink.rolling_drops = 0;
     groups.retain(|_, group| !group.sinks.is_empty());
@@ -4498,80 +4342,6 @@ mod tests {
         graph.shutdown_and_wait().await.unwrap();
     }
 
-    /// A lossless graph holds its source instead of dropping: a burst far
-    /// larger than every queue reaches a slow consumer complete and in order.
-    #[tokio::test]
-    async fn lossless_graph_backpressures_a_burst_without_loss_or_reordering() {
-        let policy = MediaGraphPolicy {
-            sink_queue_frames: 2,
-            backpressure_stall_timeout: Some(Duration::from_secs(5)),
-            ..Default::default()
-        };
-        let (source_tx, source_rx) = mpsc::channel(4);
-        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy).unwrap();
-        let (target_tx, mut target_rx) = mpsc::channel(1);
-        let route = graph
-            .add_managed_sink(codec("pcmu", 8_000), target_tx)
-            .unwrap();
-        wait_for_route_state(&route.status(), MediaGraphRouteState::Active).await;
-        let producer = tokio::spawn(async move {
-            for index in 0..200u32 {
-                source_tx
-                    .send(frame_at((index % 251) as u8, index * 160))
-                    .await
-                    .unwrap();
-            }
-            // Keep the source open: closing it ends the graph and its routes.
-            source_tx
-        });
-        for index in 0..200u32 {
-            if index % 50 == 0 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            let received = tokio::time::timeout(Duration::from_secs(2), target_rx.recv())
-                .await
-                .expect("lossless delivery stalled")
-                .expect("lossless sink closed");
-            assert_eq!(received.payload[0], (index % 251) as u8);
-        }
-        let _source = producer.await.unwrap();
-        let snapshot = graph.snapshot().await;
-        assert_eq!(snapshot.dropped_frames, 0);
-        assert_eq!(snapshot.evictions, 0);
-        graph.shutdown_and_wait().await.unwrap();
-    }
-
-    /// A lossless consumer that stops draining fails its route after the
-    /// stall budget instead of silently discarding media.
-    #[tokio::test]
-    async fn lossless_graph_evicts_a_stalled_sink_after_its_budget() {
-        let policy = MediaGraphPolicy {
-            sink_queue_frames: 2,
-            backpressure_stall_timeout: Some(Duration::from_millis(100)),
-            ..Default::default()
-        };
-        let (source_tx, source_rx) = mpsc::channel(64);
-        let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy).unwrap();
-        let (target_tx, _target_rx) = mpsc::channel(1);
-        let route = graph
-            .add_managed_sink(codec("pcmu", 8_000), target_tx)
-            .unwrap();
-        wait_for_route_state(&route.status(), MediaGraphRouteState::Active).await;
-        for value in 0..16 {
-            source_tx.send(frame(value)).await.unwrap();
-        }
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(3), route.wait_terminal())
-                .await
-                .expect("stalled lossless sink was not evicted"),
-            MediaGraphRouteTerminalReason::SlowConsumerEvicted
-        );
-        let snapshot = graph.snapshot().await;
-        assert_eq!(snapshot.dropped_frames, 0);
-        assert_eq!(snapshot.evictions, 1);
-        graph.shutdown_and_wait().await.unwrap();
-    }
-
     #[tokio::test]
     async fn pre_sink_buffer_is_bounded_drop_oldest_and_flushes_in_order() {
         let policy = MediaGraphPolicy {
@@ -4893,7 +4663,6 @@ mod tests {
             minimum_eviction_samples: 4,
             // This test covers the steady-state predicate, so arm immediately.
             eviction_warmup: Duration::ZERO,
-            backpressure_stall_timeout: None,
         };
         let (target, _receiver) = mpsc::channel::<MediaFrame>(1);
         let task = tokio::spawn(async move { drop(target) });
@@ -4909,7 +4678,6 @@ mod tests {
             queue: Arc::new(SinkQueue::new(1)),
             task: task.abort_handle(),
             warmup_since: None,
-            observation_since: None,
             history: VecDeque::new(),
             rolling_drops: 0,
             delivery: Arc::new(RouteDelivery::default()),
@@ -4960,7 +4728,6 @@ mod tests {
             queue: Arc::new(SinkQueue::new(policy_queue_frames)),
             task: task.abort_handle(),
             warmup_since: Some(installed_at),
-            observation_since: None,
             history: VecDeque::new(),
             rolling_drops: 0,
             delivery: Arc::new(RouteDelivery::default()),
@@ -5076,8 +4843,7 @@ mod tests {
     }
 
     /// The heuristic must still do its job: a consumer that is slow *after*
-    /// establishment is a real problem and is still shed, once a full
-    /// `eviction_window` of steady state shows the pressure is chronic.
+    /// establishment is a real problem and is still shed.
     #[tokio::test]
     async fn a_sink_that_is_slow_after_warmup_is_still_evicted() {
         let policy = warmup_policy();
@@ -5086,15 +4852,10 @@ mod tests {
 
         let after = start + Duration::from_secs(4);
         let mut evicted = false;
-        for index in 0..600u32 {
+        for index in 0..80u32 {
             let at = after + Duration::from_millis(u64::from(index) * 20);
             // Half the offers dropped: far above the 25% policy.
             if sink.record_offer(at, index % 2 == 0, &policy) {
-                assert!(
-                    at.saturating_duration_since(after) >= policy.eviction_window,
-                    "evicted after only {:?} of steady state",
-                    at.saturating_duration_since(after)
-                );
                 evicted = true;
                 break;
             }
@@ -5103,92 +4864,6 @@ mod tests {
             evicted,
             "a chronically slow consumer must still be evicted after warm-up"
         );
-    }
-
-    /// A consumer that is still catching up when the warm-up expires drops a
-    /// burst, then drains at line rate. With 20 ms frames the 50-sample
-    /// minimum fills in one second, so a sample count alone scored that one
-    /// burst as chronic pressure and evicted the route the moment the warm-up
-    /// ended.
-    #[tokio::test]
-    async fn a_catch_up_burst_right_after_warmup_does_not_evict() {
-        let policy = warmup_policy();
-        let start = Instant::now();
-        let mut sink = eviction_test_sink(1, start);
-
-        let after = start + Duration::from_secs(4);
-        for index in 0..50u32 {
-            let at = after + Duration::from_millis(u64::from(index) * 20);
-            assert!(
-                !sink.record_offer(at, index < 36, &policy),
-                "offer {index} evicted a consumer one burst into steady state"
-            );
-        }
-        let recovered = after + Duration::from_secs(1);
-        for index in 0..600u32 {
-            let at = recovered + Duration::from_millis(u64::from(index) * 20);
-            assert!(
-                !sink.record_offer(at, false, &policy),
-                "offer {index} evicted a consumer that recovered from its burst"
-            );
-        }
-    }
-
-    /// A route that falls quiet long enough for its whole window to expire
-    /// (a held or muted source) starts a fresh observation when media resumes;
-    /// it does not inherit the age of the steady state before the gap.
-    #[tokio::test]
-    async fn a_burst_after_a_quiet_gap_restarts_the_steady_state_observation() {
-        let policy = warmup_policy();
-        let start = Instant::now();
-        let mut sink = eviction_test_sink(1, start);
-
-        let after = start + Duration::from_secs(4);
-        for index in 0..600u32 {
-            let at = after + Duration::from_millis(u64::from(index) * 20);
-            assert!(!sink.record_offer(at, false, &policy));
-        }
-        // Longer than `eviction_window` without an offer.
-        let resumed = after + Duration::from_secs(12) + policy.eviction_window * 2;
-        for index in 0..50u32 {
-            let at = resumed + Duration::from_millis(u64::from(index) * 20);
-            assert!(
-                !sink.record_offer(at, index < 36, &policy),
-                "offer {index} evicted a resumed route on its first burst"
-            );
-        }
-    }
-
-    /// Renegotiation clears the window and re-arms the warm-up, so the
-    /// renegotiated media must also earn a fresh steady-state observation.
-    #[tokio::test]
-    async fn renegotiation_restarts_the_steady_state_observation() {
-        let policy = warmup_policy();
-        let start = Instant::now();
-        let mut sink = eviction_test_sink(1, start);
-        for index in 0..750u64 {
-            let at = start + Duration::from_millis(index * 20);
-            assert!(!sink.record_offer(at, false, &policy));
-        }
-
-        // Renegotiation: same reset update_sink_group performs.
-        sink.warmup_since = None;
-        sink.history.clear();
-        sink.rolling_drops = 0;
-
-        let resumed = start + Duration::from_secs(16);
-        for index in 0..175u64 {
-            let at = resumed + Duration::from_millis(index * 20);
-            assert!(!sink.record_offer(at, false, &policy));
-        }
-        // Half a second past the new warm-up: 25 drops in 75 window samples.
-        let burst = resumed + Duration::from_millis(3_500);
-        for index in 0..50u32 {
-            assert!(
-                !sink.record_offer(burst, index >= 25, &policy),
-                "renegotiated media inherited the old route's steady-state age"
-            );
-        }
     }
 
     /// `Duration::ZERO` preserves the original arm-immediately behaviour for
@@ -5301,7 +4976,6 @@ mod tests {
             minimum_eviction_samples: 4,
             // This test covers the steady-state predicate, so arm immediately.
             eviction_warmup: Duration::ZERO,
-            backpressure_stall_timeout: None,
         };
         let (source_tx, source_rx) = mpsc::channel(64);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy).unwrap();
@@ -5334,7 +5008,6 @@ mod tests {
             minimum_eviction_samples: 4,
             // This test covers the steady-state predicate, so arm immediately.
             eviction_warmup: Duration::ZERO,
-            backpressure_stall_timeout: None,
         };
         let (source_tx, source_rx) = mpsc::channel(64);
         let graph = start_media_graph(source_rx, codec("pcmu", 8_000), policy).unwrap();
@@ -5701,48 +5374,6 @@ mod tests {
         assert_eq!(snapshot.source_payload_type, 0);
         assert_eq!(snapshot.sinks[0].target_payload_type, 8);
         graph.shutdown();
-    }
-
-    /// A frame that arrives late (its RTP timestamp behind the previous one)
-    /// must translate to a late target timestamp. Read as an unsigned delta it
-    /// was almost a whole source-clock wrap ahead, which pushed the frame and,
-    /// through the carried target clock, every later frame on the route about
-    /// 2^32 / 3 samples into the future for a 48 kHz -> 16 kHz route.
-    #[test]
-    fn rtp_clock_translation_keeps_a_late_frame_late() {
-        let mut clock = RtpClockTranslator::new(48_000, 16_000);
-        let first = clock.translate(100_000);
-        let second = clock.translate(100_960);
-        let late = clock.translate(100_000);
-        let next = clock.translate(101_920);
-        assert_eq!(second.wrapping_sub(first), 320);
-        assert_eq!(late, first);
-        assert_eq!(next.wrapping_sub(first), 640);
-    }
-
-    /// A one-sample step back across zero and forward again must return to
-    /// the same target timestamp, including when the rates do not divide
-    /// evenly and a fractional remainder is carried.
-    #[test]
-    fn rtp_clock_translation_reverses_fractional_offsets_across_zero() {
-        for (source_rate, target_rate) in [
-            (48_000, 16_000),
-            (48_000, 8_000),
-            (8_000, 48_000),
-            (44_100, 16_000),
-        ] {
-            let mut clock = RtpClockTranslator::new(source_rate, target_rate);
-            assert_eq!(clock.translate(0), 0);
-            let late = clock.translate(u32::MAX);
-            // One source sample back is floor(-target / source) target samples.
-            let expected_backstep = i64::from(target_rate).div_euclid(i64::from(source_rate))
-                + i64::from(target_rate % source_rate != 0);
-            assert_eq!(late, 0u32.wrapping_sub(expected_backstep as u32));
-            assert_eq!(clock.translate(0), 0);
-            assert_eq!(clock.translate(source_rate / 100), target_rate / 100);
-            assert_eq!(clock.translate(0), 0);
-            assert_eq!(clock.translate(source_rate), target_rate);
-        }
     }
 
     #[test]

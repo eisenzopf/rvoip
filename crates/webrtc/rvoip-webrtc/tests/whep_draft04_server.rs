@@ -11,7 +11,7 @@ use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::{WebRtcConfig, WebRtcServer, WebRtcServerBuilder, WhepServerMode};
 
 fn http() -> reqwest::Client {
-    ring_reqwest_builder()
+    reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .expect("HTTP client")
@@ -328,11 +328,4 @@ async fn legacy_server_offer_requires_explicit_mode_and_is_observable() {
     wait_for_no_http_tasks(&server).await;
     assert_eq!(server.adapter().metrics().active_http_resources, 0);
     server.shutdown().await;
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

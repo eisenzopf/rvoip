@@ -2,7 +2,6 @@
 
 use crate::statistics::stats::peer_connection::RTCPeerConnectionStats;
 use crate::statistics::stats::{RTCStats, RTCStatsType};
-use shared::time::SystemInstant;
 use std::time::Instant;
 
 /// Accumulated peer connection level statistics.
@@ -32,7 +31,7 @@ impl PeerConnectionStatsAccumulator {
     pub fn snapshot(&self, now: Instant) -> RTCPeerConnectionStats {
         RTCPeerConnectionStats {
             stats: RTCStats {
-                timestamp: SystemInstant::now(now),
+                timestamp: now,
                 typ: RTCStatsType::PeerConnection,
                 id: "RTCPeerConnection".to_string(),
             },
@@ -45,7 +44,6 @@ impl PeerConnectionStatsAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::statistics::accumulator::assert_stamped_at;
 
     #[test]
     fn test_default() {
@@ -106,7 +104,7 @@ mod tests {
 
         assert_eq!(stats.stats.id, "RTCPeerConnection");
         assert_eq!(stats.stats.typ, RTCStatsType::PeerConnection);
-        assert_stamped_at(stats.stats.timestamp, now);
+        assert_eq!(stats.stats.timestamp, now);
         assert_eq!(stats.data_channels_opened, 2);
         assert_eq!(stats.data_channels_closed, 1);
     }

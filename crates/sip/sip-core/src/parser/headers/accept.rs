@@ -9,14 +9,13 @@ use crate::parser::token::token; // Use the token parser instead
 use crate::parser::ParseResult;
 use crate::types::accept::Accept as AcceptHeader; // Specific header type
 use crate::types::param::Param;
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
     character::complete::char,
     combinator::{map, map_res, opt, recognize, value},
     error::ErrorKind,
-    sequence::{pair, preceded},
+    sequence::{pair, preceded, tuple},
 };
 use ordered_float::NotNan;
 use serde::{Deserialize, Serialize};
@@ -102,14 +101,16 @@ fn qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
     alt((
         // "0" [ "." 0*3DIGIT ]
         map_res(
-            recognize((
+            recognize(tuple((
                 char('0'),
-                opt((char('.'), take_while_m_n(0, 3, |c: u8| c.is_ascii_digit()))),
-            )),
+                opt(tuple((
+                    char('.'),
+                    take_while_m_n(0, 3, |c: u8| c.is_ascii_digit()),
+                ))),
+            ))),
             |bytes| {
-                let s = std::str::from_utf8(bytes).map_err(|_| {
-                    nom::Err::<_>::Error(nom::error::Error::new(bytes, ErrorKind::Char))
-                })?;
+                let s = std::str::from_utf8(bytes)
+                    .map_err(|_| nom::Err::Error(nom::error::Error::new(bytes, ErrorKind::Char)))?;
                 let val = s.parse::<f32>().map_err(|_| {
                     nom::Err::Error(nom::error::Error::new(bytes, ErrorKind::Float))
                 })?;
@@ -119,27 +120,25 @@ fn qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
         ),
         // "1" [ "." 0*3("0") ] - strictly using the ABNF definition
         alt((
-            map(tag(&b"1"[..]), |_| NotNan::new(1.0).unwrap()),
-            map(tag(&b"1."[..]), |_| NotNan::new(1.0).unwrap()),
-            map(tag(&b"1.0"[..]), |_| NotNan::new(1.0).unwrap()),
-            map(tag(&b"1.00"[..]), |_| NotNan::new(1.0).unwrap()),
-            map(tag(&b"1.000"[..]), |_| NotNan::new(1.0).unwrap()),
+            map(tag(b"1"), |_| NotNan::new(1.0).unwrap()),
+            map(tag(b"1."), |_| NotNan::new(1.0).unwrap()),
+            map(tag(b"1.0"), |_| NotNan::new(1.0).unwrap()),
+            map(tag(b"1.00"), |_| NotNan::new(1.0).unwrap()),
+            map(tag(b"1.000"), |_| NotNan::new(1.0).unwrap()),
         )),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // accept-param = ( "q" EQUAL qvalue ) / generic-param
 fn accept_param(input: &[u8]) -> ParseResult<'_, Param> {
     alt((
         // "q" EQUAL qvalue
-        map((tag_no_case(&b"q"[..]), equal, qvalue), |(_, _, q)| {
+        map(tuple((tag_no_case(b"q"), equal, qvalue)), |(_, _, q)| {
             Param::Q(q)
         }),
         // generic-param
         generic_param,
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // accept-range = media-range [ accept-params ]
@@ -157,18 +156,16 @@ fn accept_range(input: &[u8]) -> ParseResult<'_, (String, String, Vec<Param>)> {
                 .to_string();
             (type_str, subtype_str, params)
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // media-range = ( "*/*" / ( m-type SLASH "*" ) / ( m-type SLASH m-subtype ) )
 fn media_range(input: &[u8]) -> ParseResult<'_, (&[u8], &[u8])> {
     alt((
-        value((b"*" as &[u8], b"*" as &[u8]), tag(&b"*/*"[..])),
-        pair(m_type, preceded(slash, tag(&b"*"[..]))),
+        value((b"*" as &[u8], b"*" as &[u8]), tag(b"*/*")),
+        pair(m_type, preceded(slash, tag(b"*"))),
         pair(m_type, preceded(slash, m_subtype)),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // Accept = "Accept" HCOLON [ accept-value *(COMMA accept-value) ]
@@ -214,8 +211,7 @@ pub fn parse_accept(input: &[u8]) -> ParseResult<'_, AcceptHeader> {
         });
 
         AcceptHeader(accept_values)
-    })
-    .parse(input)
+    })(input)
 }
 
 #[cfg(test)]

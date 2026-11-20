@@ -18,7 +18,6 @@ use nom::combinator::opt;
 use nom::error::{make_error, ErrorKind};
 use nom::sequence::{preceded, terminated};
 use nom::Err;
-use nom::Parser;
 
 /// Parse a WWW-Authenticate header value (everything after the header name and HCOLON)
 ///
@@ -61,8 +60,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     // Trim any leading whitespace
     let (input, _) = opt(take_while(|c| {
         c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'
-    }))
-    .parse(processed_input)?;
+    }))(processed_input)?;
 
     // Parse the first challenge
     match challenge(input) {
@@ -75,8 +73,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
                 // Skip any whitespace
                 let (r, _) = opt(take_while(|c| {
                     c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'
-                }))
-                .parse(rest)?;
+                }))(rest)?;
 
                 // If there's no more content or it doesn't start with a comma, we're done
                 if r.is_empty() || r[0] != b',' {
@@ -90,8 +87,7 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
                     opt(take_while(|c| {
                         c == b' ' || c == b'\t' || c == b'\r' || c == b'\n'
                     })),
-                )
-                .parse(r)?;
+                )(r)?;
 
                 // If there's no more content after the comma and whitespace, that's an error
                 if r.is_empty() {
@@ -141,12 +137,11 @@ pub fn parse_www_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
 pub fn www_authenticate_header(input: &[u8]) -> ParseResult<'_, Vec<Challenge>> {
     preceded(
         terminated(
-            tag_no_case(&b"WWW-Authenticate"[..]),
+            tag_no_case(b"WWW-Authenticate"),
             crate::parser::separators::hcolon,
         ),
         parse_www_authenticate,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]
@@ -402,7 +397,7 @@ mod tests {
     fn test_trailing_content() {
         // We should reject content after the parsed challenge
         let input = b"Digest realm=\"atlanta.com\" INVALID";
-        let result = all_consuming(parse_www_authenticate).parse(input);
+        let result = all_consuming(parse_www_authenticate)(input);
         assert!(result.is_err());
     }
 

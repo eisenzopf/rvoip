@@ -4238,12 +4238,7 @@ fn stateless_proxy_branch(request: &Request, local_addr: SocketAddr) -> String {
         }
     }
     let digest = hasher.finalize();
-    let mut branch = String::with_capacity("z9hG4bK-proxy-".len() + digest.len() * 2);
-    branch.push_str("z9hG4bK-proxy-");
-    for byte in digest {
-        let _ = std::fmt::Write::write_fmt(&mut branch, format_args!("{byte:02x}"));
-    }
-    branch
+    format!("z9hG4bK-proxy-{:x}", digest)
 }
 
 fn push_proxy_via(

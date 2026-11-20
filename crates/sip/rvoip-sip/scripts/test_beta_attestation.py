@@ -1394,7 +1394,7 @@ class BetaAttestationTests(unittest.TestCase):
             WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/BETA_RELEASE_CHECKLIST.md"
         ).read_text(encoding="utf-8")
         release_notes = (
-            WORKSPACE_ROOT / "docs/release/RELEASE_NOTES_NEXT.md"
+            WORKSPACE_ROOT / "crates/sip/rvoip-sip/docs/RELEASE_NOTES_NEXT.md"
         ).read_text(encoding="utf-8")
         self.assertRegex(
             crate_manifest,

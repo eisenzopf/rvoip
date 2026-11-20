@@ -47,7 +47,6 @@ ordered-float.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-nom-language.workspace = true
 
 # Integration tests configuration
 [[test]]

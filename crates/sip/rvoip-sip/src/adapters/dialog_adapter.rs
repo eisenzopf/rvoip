@@ -2034,8 +2034,8 @@ impl DialogAdapter {
         let jitter_secs = if jitter_cap_secs == 0 {
             0
         } else {
-            use rand::RngExt;
-            rand::rng().random_range(0..=jitter_cap_secs)
+            use rand::Rng;
+            rand::thread_rng().gen_range(0..=jitter_cap_secs)
         };
         now + Duration::from_secs(base_secs.saturating_sub(jitter_secs).max(1))
     }
@@ -2949,19 +2949,13 @@ impl DialogAdapter {
                             commit_owned_invite(operation, Ok(())).await
                         }
                         Err(error) => {
+                            let value = Err(redacted_invite_dispatch_error(failure, error));
                             match wire_outcome {
                                 InitialInviteWireOutcome::ZeroWire => {
-                                    // The dialog layer proved no INVITE byte
-                                    // was offered to the transport.
-                                    let value = Err(SessionError::InviteNotSent(
-                                        failure.diagnostic().to_string(),
-                                    ));
                                     rollback_owned_invite(operation, value).await
                                 }
                                 InitialInviteWireOutcome::Sent
                                 | InitialInviteWireOutcome::Unknown => {
-                                    let value =
-                                        Err(redacted_invite_dispatch_error(failure, error));
                                     commit_owned_invite(operation, value).await
                                 }
                             }

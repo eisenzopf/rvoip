@@ -5,7 +5,7 @@
 //! verification is a separate call because it needs a password the caller
 //! resolves from the USERNAME, per the RFC 8489 §9.2.4 ordering.
 
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -54,7 +54,7 @@ impl TransactionId {
     #[must_use]
     pub fn random() -> Self {
         let mut id = [0_u8; TXN_ID_LEN];
-        rand::RngExt::fill(&mut rand::rng(), &mut id[..]);
+        rand::Rng::fill(&mut rand::thread_rng(), &mut id[..]);
         Self(id)
     }
 }

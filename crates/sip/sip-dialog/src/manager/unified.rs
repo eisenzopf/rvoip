@@ -257,11 +257,7 @@ impl std::fmt::Debug for InstalledInitialInvite {
 /// What is known about wire emission when an initial-INVITE dispatch finishes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialInviteWireOutcome {
-    /// Dispatch failed before any SIP byte of the INVITE was offered to the
-    /// transport: for example target resolution, request construction or
-    /// admission failed, or route preparation (connection setup, TLS
-    /// handshake) failed. The peer never saw the INVITE, so no CANCEL/BYE is
-    /// owed and the local state has been rolled back.
+    /// Dispatch failed before any transaction attempt could reach transport.
     ZeroWire,
     /// The transaction layer accepted one INVITE for transmission.
     Sent,
@@ -3339,7 +3335,6 @@ mod staged_initial_invite_tests {
         ack_sends: AtomicUsize,
         bye_sends: AtomicUsize,
         failures_remaining: AtomicUsize,
-        invite_prepare_failures_remaining: AtomicUsize,
         cancel_prepare_failures_remaining: AtomicUsize,
         block_cancel_send: AtomicBool,
         cancel_send_gate: tokio::sync::Semaphore,
@@ -3356,7 +3351,6 @@ mod staged_initial_invite_tests {
                 ack_sends: AtomicUsize::new(0),
                 bye_sends: AtomicUsize::new(0),
                 failures_remaining: AtomicUsize::new(0),
-                invite_prepare_failures_remaining: AtomicUsize::new(0),
                 cancel_prepare_failures_remaining: AtomicUsize::new(0),
                 block_cancel_send: AtomicBool::new(false),
                 cancel_send_gate: tokio::sync::Semaphore::new(0),
@@ -3390,11 +3384,6 @@ mod staged_initial_invite_tests {
                 .lock()
                 .expect("wire method observation lock")
                 .clone()
-        }
-
-        fn fail_next_invite_prepares(&self, count: usize) {
-            self.invite_prepare_failures_remaining
-                .store(count, Ordering::SeqCst);
         }
 
         fn fail_next_cancel_prepares(&self, count: usize) {
@@ -3473,23 +3462,6 @@ mod staged_initial_invite_tests {
             message: &rvoip_sip_core::Message,
             route: rvoip_sip_transport::TransportRoute,
         ) -> TransportResult<rvoip_sip_transport::TransportRoute> {
-            let is_invite = matches!(
-                message,
-                rvoip_sip_core::Message::Request(request) if request.method() == Method::Invite
-            );
-            if is_invite
-                && self
-                    .invite_prepare_failures_remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                        (remaining > 0).then(|| remaining - 1)
-                    })
-                    .is_ok()
-            {
-                return Err(rvoip_sip_transport::error::Error::ConnectFailed(
-                    route.destination,
-                    std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
-                ));
-            }
             let is_cancel = matches!(
                 message,
                 rvoip_sip_core::Message::Request(request) if request.method() == Method::Cancel
@@ -4140,175 +4112,6 @@ mod staged_initial_invite_tests {
         assert!(manager
             .initial_invite_installs
             .contains_key(owner.dialog_id()));
-    }
-
-    async fn real_transport_manager(
-        transport: Arc<dyn Transport>,
-        transport_events: mpsc::Receiver<TransportEvent>,
-        from_uri: &str,
-    ) -> UnifiedDialogManager {
-        let local_addr = transport.local_addr().expect("transport address");
-        let (transaction_manager, mut transaction_events) =
-            TransactionManager::new_with_config(transport, transport_events, Some(16), None)
-                .await
-                .expect("transaction manager");
-        tokio::spawn(async move { while transaction_events.recv().await.is_some() {} });
-        let config = DialogManagerConfig::client(local_addr)
-            .with_from_uri(from_uri)
-            .build();
-        UnifiedDialogManager::new(Arc::new(transaction_manager), config)
-            .await
-            .expect("dialog manager")
-    }
-
-    /// Dispatch one initial INVITE to `to_uri` and require a proven
-    /// zero-wire completion with exact local rollback.
-    async fn expect_zero_wire_dispatch(
-        manager: &UnifiedDialogManager,
-        from_uri: &str,
-        to_uri: String,
-    ) {
-        let plan = manager
-            .plan_initial_invite(
-                None,
-                crate::api::unified::InviteRequestOptions {
-                    from_uri: from_uri.to_string(),
-                    to_uri,
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("plan");
-        let installed = manager.install_initial_invite(plan).expect("install");
-        let owner = installed.owner().clone();
-        let completion = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            manager.dispatch_initial_invite(installed).wait(),
-        )
-        .await
-        .expect("dispatch timeout");
-        assert_eq!(completion.owner(), &owner);
-        assert_eq!(
-            completion.wire_outcome(),
-            InitialInviteWireOutcome::ZeroWire
-        );
-        assert!(completion.error().is_some());
-        assert!(completion.transaction_id().is_none());
-        assert!(!manager.core.has_dialog(owner.dialog_id()));
-        assert!(!manager
-            .initial_invite_installs
-            .contains_key(owner.dialog_id()));
-    }
-
-    #[tokio::test]
-    async fn route_preparation_failure_before_write_is_zero_wire() {
-        let (manager, transport, _events) = make_test_manager().await;
-        transport.fail_next_invite_prepares(1);
-        let plan = manager
-            .plan_initial_invite(Some("session-prepare".to_string()), options("call-prepare"))
-            .await
-            .expect("plan");
-        let installed = manager.install_initial_invite(plan).expect("install");
-        let owner = installed.owner().clone();
-
-        let completion = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            manager.dispatch_initial_invite(installed).wait(),
-        )
-        .await
-        .expect("dispatch timeout");
-        // Route preparation (connect, TLS handshake) failed before any SIP
-        // byte was offered to the transport: the peer cannot have seen the
-        // INVITE, so the dispatch is a proven zero-wire failure and the
-        // exact local state is rolled back without CANCEL/BYE supervision.
-        assert_eq!(
-            completion.wire_outcome(),
-            InitialInviteWireOutcome::ZeroWire
-        );
-        assert!(completion.error().is_some());
-        assert!(completion.transaction_id().is_none());
-        assert_eq!(transport.sends(), 0);
-        assert!(!manager.core.has_dialog(owner.dialog_id()));
-        assert!(manager
-            .core
-            .session_to_dialog
-            .get("session-prepare")
-            .is_none());
-        assert!(!manager
-            .initial_invite_installs
-            .contains_key(owner.dialog_id()));
-        assert!(manager.initial_invite_cleanup_tasks.is_empty());
-        tokio::time::timeout(std::time::Duration::from_secs(5), manager.stop())
-            .await
-            .expect("manager stop deadline")
-            .expect("zero-wire dispatch leaves no protocol work to drain");
-    }
-
-    #[tokio::test]
-    async fn tcp_connection_refused_initial_invite_is_zero_wire() {
-        // A port whose listener has closed: a connect attempt is refused.
-        let refused_addr = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("reserve port")
-            .local_addr()
-            .expect("refused address");
-        let (transport, transport_events) =
-            rvoip_sip_transport::TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(16), None)
-                .await
-                .expect("tcp transport");
-        let transport = Arc::new(transport);
-        let manager =
-            real_transport_manager(transport.clone(), transport_events, "sip:alice@127.0.0.1")
-                .await;
-        expect_zero_wire_dispatch(
-            &manager,
-            "sip:alice@127.0.0.1",
-            format!("sip:bob@{refused_addr};transport=tcp"),
-        )
-        .await;
-        manager.stop().await.expect("manager stop");
-        transport.close().await.expect("transport close");
-    }
-
-    #[tokio::test]
-    async fn tls_handshake_failure_initial_invite_is_zero_wire() {
-        use tokio::io::AsyncWriteExt;
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let peer_addr = listener.local_addr().expect("listener address");
-        // Accept TCP, then answer the ClientHello with bytes that are not a
-        // TLS record. The handshake fails before any SIP request can be
-        // written on the connection.
-        let peer = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            socket
-                .write_all(b"not a TLS record\r\n")
-                .await
-                .expect("write");
-            let _ = socket.shutdown().await;
-            socket
-        });
-        let (transport, transport_events) = rvoip_sip_transport::TlsTransport::client_only(
-            "127.0.0.1:0".parse().unwrap(),
-            None,
-            rvoip_sip_transport::TlsClientConfig::default(),
-        )
-        .await
-        .expect("tls transport");
-        let transport = Arc::new(transport);
-        let manager =
-            real_transport_manager(transport.clone(), transport_events, "sips:alice@127.0.0.1")
-                .await;
-        expect_zero_wire_dispatch(
-            &manager,
-            "sips:alice@127.0.0.1",
-            format!("sips:bob@{peer_addr};transport=tls"),
-        )
-        .await;
-        drop(peer.await.expect("peer task"));
-        manager.stop().await.expect("manager stop");
-        transport.close().await.expect("transport close");
     }
 
     #[tokio::test]

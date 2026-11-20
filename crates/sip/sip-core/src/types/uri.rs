@@ -51,7 +51,6 @@
 // URI implementation moved from root directory
 // Implements URI types according to RFC 3261
 
-use nom::Parser;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
@@ -900,7 +899,7 @@ impl FromStr for Uri {
 
     fn from_str(s: &str) -> Result<Self> {
         // Use the nom parser from the parser module
-        match all_consuming(parse_uri).parse(s.as_bytes()) {
+        match all_consuming(parse_uri)(s.as_bytes()) {
             Ok((_rem, uri)) => Ok(uri),
             Err(e) => {
                 // For HTTP and HTTPS URIs, create a special case

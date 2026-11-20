@@ -43,7 +43,6 @@ use crate::parser::headers::parse_allow;
 use crate::types::header::{Header, HeaderName, TypedHeaderTrait};
 use crate::types::Method;
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -264,9 +263,7 @@ impl FromStr for Allow {
     /// assert!(allow.allows(&Method::Extension("MEETING".into())));
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        let (_, methods_bytes) = all_consuming(parse_allow)
-            .parse(s.as_bytes())
-            .map_err(Error::from)?;
+        let (_, methods_bytes) = all_consuming(parse_allow)(s.as_bytes()).map_err(Error::from)?;
         Ok(methods_bytes)
     }
 }
@@ -339,8 +336,7 @@ impl TypedHeaderTrait for Allow {
         };
 
         // Parse the header value
-        let allow = all_consuming(parse_allow)
-            .parse(bytes)
+        let allow = all_consuming(parse_allow)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
 

@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::packet::RtpPacket;
 use crate::Result;
 use aes::{
-    cipher::{Array, KeyIvInit, StreamCipher},
+    cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher},
     Aes128, Aes256,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -132,11 +132,6 @@ impl SrtpCrypto {
 
     pub(crate) fn suite(&self) -> &SrtpCryptoSuite {
         &self.suite
-    }
-
-    /// The master key and salt the session keys were derived from.
-    pub(crate) fn master_key(&self) -> &SrtpCryptoKey {
-        &self.master_key
     }
 
     /// Hot call state: the RTP session key material the packed SRTP block
@@ -931,16 +926,16 @@ pub(super) fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(
             iv.len()
         )));
     }
-    let iv = <&Array<u8, _>>::try_from(&iv[0..16]).expect("length checked above");
+    let iv = GenericArray::from_slice(&iv[0..16]);
 
     match key.len() {
         16 => {
-            let key = <&Array<u8, _>>::try_from(key).expect("length checked above");
+            let key = GenericArray::from_slice(key);
             let mut cipher = Aes128Ctr64BE::new(key, iv);
             cipher.apply_keystream(data);
         }
         32 => {
-            let key = <&Array<u8, _>>::try_from(key).expect("length checked above");
+            let key = GenericArray::from_slice(key);
             let mut cipher = Aes256Ctr64BE::new(key, iv);
             cipher.apply_keystream(data);
         }
