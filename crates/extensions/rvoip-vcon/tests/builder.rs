@@ -597,7 +597,7 @@ fn jws_rejects_hmac_tampering_and_missing_signatures() {
     let vcon = complete_vcon();
     let hmac = sign_jws(
         &vcon,
-        &EncodingKey::from_secret(b"not-allowed").unwrap(),
+        &EncodingKey::from_secret(b"not-allowed"),
         Algorithm::HS256,
         CertificateReference::X5u("https://keys.example/hmac.pem".into()),
     );

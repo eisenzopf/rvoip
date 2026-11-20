@@ -44,7 +44,6 @@ use crate::parser::headers::reply_to::parse_reply_to; // Use the parser
 use crate::types::address::Address; // Or maybe UriWithParams?
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize}; // Add import
 use std::fmt;
 use std::str::FromStr;
@@ -584,8 +583,7 @@ impl FromStr for ReplyTo {
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         // Use all_consuming to ensure entire input is parsed
-        let result = all_consuming(parse_reply_to)
-            .parse(s.as_bytes())
+        let result = all_consuming(parse_reply_to)(s.as_bytes())
             .map(|(_rem, header)| header)
             .map_err(|e| Error::from(e.to_owned()));
 
@@ -629,9 +627,7 @@ mod tests {
         let uri = Uri {
             scheme: Scheme::Sip,
             user: Some("user".to_string()),
-            user_wire: None,
             password: None,
-            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),
@@ -649,9 +645,7 @@ mod tests {
         let uri2 = Uri {
             scheme: Scheme::Sip,
             user: Some("user".to_string()),
-            user_wire: None,
             password: None,
-            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),
@@ -679,9 +673,7 @@ mod tests {
         let uri = Uri {
             scheme: Scheme::Sip,
             user: Some("support".to_string()),
-            user_wire: None,
             password: None,
-            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),
@@ -832,9 +824,7 @@ mod tests {
         let uri = Uri {
             scheme: Scheme::Http,
             user: None,
-            user_wire: None,
             password: None,
-            password_wire: None,
             host: Host::Domain("example.com".to_string()),
             port: None,
             parameters: Vec::new(),

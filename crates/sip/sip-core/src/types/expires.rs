@@ -44,7 +44,6 @@
 use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -175,8 +174,7 @@ impl FromStr for Expires {
         use crate::parser::headers::expires::parse_expires;
 
         // Use map_err and From to convert Nom error to crate::Error::ParseError
-        all_consuming(parse_expires)
-            .parse(s.as_bytes())
+        all_consuming(parse_expires)(s.as_bytes())
             .map_err(Error::from)
             .map(|(_, value)| Expires(value))
     }

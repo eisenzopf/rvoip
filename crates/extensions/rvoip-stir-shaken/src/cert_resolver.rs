@@ -33,7 +33,7 @@ pub struct ReqwestCertResolver {
 impl ReqwestCertResolver {
     pub fn new() -> Self {
         Self {
-            client: crate::ring_http_client_builder()
+            client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
                 .expect("reqwest client should build with default config"),

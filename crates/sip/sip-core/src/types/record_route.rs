@@ -55,7 +55,6 @@ use crate::types::uri::Uri;
 use crate::types::Address;
 use crate::types::{HeaderName, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
@@ -320,7 +319,7 @@ impl FromStr for RecordRoute {
     /// assert!(result.is_err());
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        match all_consuming(parse_record_route).parse(s.as_bytes()) {
+        match all_consuming(parse_record_route)(s.as_bytes()) {
             Ok((_, rr_header)) => Ok(rr_header),
             Err(e) => Err(Error::ParseError(format!(
                 "Failed to parse Record-Route header: {:?}",
@@ -436,8 +435,7 @@ impl TypedHeaderTrait for RecordRoute {
         };
 
         // Parse the header value
-        let record_route = all_consuming(parse_record_route)
-            .parse(bytes)
+        let record_route = all_consuming(parse_record_route)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
 

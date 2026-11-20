@@ -4,19 +4,18 @@
 //! Includes parsers for sctp-port and max-message-size attributes.
 
 use crate::error::{Error, Result};
-use nom::Parser;
 use nom::{character::complete::digit1, combinator::map_res, IResult};
 
 /// Parser for sctp-port attribute
 /// Format: a=sctp-port:<port>
 fn sctp_port_parser(input: &str) -> IResult<&str, u16> {
-    map_res(digit1, |s: &str| s.parse::<u16>()).parse(input)
+    map_res(digit1, |s: &str| s.parse::<u16>())(input)
 }
 
 /// Parser for max-message-size attribute
 /// Format: a=max-message-size:<size>
 fn max_message_size_parser(input: &str) -> IResult<&str, u64> {
-    map_res(digit1, |s: &str| s.parse::<u64>()).parse(input)
+    map_res(digit1, |s: &str| s.parse::<u64>())(input)
 }
 
 /// Parses sctp-port attribute, which specifies the SCTP port for data channels

@@ -184,20 +184,14 @@ async fn run_bridge(
     let host = cpal::default_host();
     let input = choose_device(&host, true, input_device.as_deref())?;
     let output = choose_device(&host, false, output_device.as_deref())?;
-    let input_name = input
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "input".into());
-    let output_name = output
-        .description()
-        .map(|d| d.name().to_string())
-        .unwrap_or_else(|_| "output".into());
+    let input_name = input.name().unwrap_or_else(|_| "input".into());
+    let output_name = output.name().unwrap_or_else(|_| "output".into());
     log::info!("audio route: {input_name} -> {output_name}");
 
     let input_config = input.default_input_config()?;
     let output_config = output.default_output_config()?;
-    let input_sample_rate = input_config.sample_rate();
-    let output_sample_rate = output_config.sample_rate();
+    let input_sample_rate = input_config.sample_rate().0;
+    let output_sample_rate = output_config.sample_rate().0;
     let input_channels = input_config.channels() as usize;
     let output_channels = output_config.channels() as usize;
 
@@ -354,13 +348,13 @@ fn build_input_stream(
     let sample_format = device.default_input_config()?.sample_format();
     let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_input_stream(
-            *config,
+            config,
             move |data: &[f32], _| send_input_samples(data, channels, &tx, &muted),
             err_fn,
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_input_stream(
-            *config,
+            config,
             move |data: &[i16], _| {
                 let converted = data
                     .iter()
@@ -372,7 +366,7 @@ fn build_input_stream(
             None,
         )?,
         cpal::SampleFormat::U16 => device.build_input_stream(
-            *config,
+            config,
             move |data: &[u16], _| {
                 let converted = data
                     .iter()
@@ -427,19 +421,19 @@ fn build_output_stream(
     let sample_format = device.default_output_config()?.sample_format();
     let stream = match sample_format {
         cpal::SampleFormat::F32 => device.build_output_stream(
-            *config,
+            config,
             move |data: &mut [f32], _| fill_output(data, channels, &playback, |s| s),
             err_fn,
             None,
         )?,
         cpal::SampleFormat::I16 => device.build_output_stream(
-            *config,
+            config,
             move |data: &mut [i16], _| fill_output(data, channels, &playback, float_to_i16),
             err_fn,
             None,
         )?,
         cpal::SampleFormat::U16 => device.build_output_stream(
-            *config,
+            config,
             move |data: &mut [u16], _| {
                 fill_output(data, channels, &playback, |sample| {
                     ((sample.clamp(-1.0, 1.0) * 0.5 + 0.5) * u16::MAX as f32) as u16
@@ -631,8 +625,8 @@ fn choose_device(
             .into_iter()
             .find(|device| {
                 device
-                    .description()
-                    .map(|d| d.name().to_ascii_lowercase().contains(&needle))
+                    .name()
+                    .map(|name| name.to_ascii_lowercase().contains(&needle))
                     .unwrap_or(false)
             })
             .ok_or_else(|| anyhow::anyhow!("audio device matching '{selector}' not found"));
@@ -658,7 +652,7 @@ pub fn list_devices(direction: AudioDirection) -> Vec<(String, String)> {
     };
     match devices {
         Ok(devs) => devs
-            .filter_map(|d| d.description().ok().map(|d| d.name().to_string()))
+            .filter_map(|d| d.name().ok())
             .map(|name| (name.clone(), name))
             .collect(),
         Err(_) => Vec::new(),

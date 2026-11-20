@@ -14,10 +14,10 @@ use tokio::time::timeout;
 
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -34,8 +34,6 @@ use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfigu
 use webrtc::peer_connection::offer_answer_options::RTCOfferOptions;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState as WebrtcRTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as WebrtcRTCSessionDescription;
-
-mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 const TEST_MESSAGE_1: &str = "Hello before restart!";
@@ -71,7 +69,6 @@ async fn create_webrtc_peer() -> Result<Arc<WebrtcPeerConnection>> {
 /// Test ICE restart between webrtc (offerer) and rtc (answerer)
 #[tokio::test]
 async fn test_ice_restart_interop() -> Result<()> {
-    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -149,9 +146,8 @@ async fn test_ice_restart_interop() -> Result<()> {
     let rtc_local_addr = rtc_socket.local_addr()?;
     log::info!("RTC peer bound to {}", rtc_local_addr);
 
-    let rtc_setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Client)
-        .build();
+    let mut rtc_setting_engine = SettingEngine::default();
+    rtc_setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
 
     let rtc_config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -163,7 +159,7 @@ async fn test_ice_restart_interop() -> Result<()> {
     let mut rtc_pc = RTCPeerConnectionBuilder::new()
         .with_configuration(rtc_config)
         .with_setting_engine(rtc_setting_engine)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created rtc peer connection");
 
     // Add local candidate for rtc peer
@@ -187,7 +183,7 @@ async fn test_ice_restart_interop() -> Result<()> {
         rtc::peer_connection::sdp::RTCSessionDescription::offer(webrtc_offer.sdp.clone())?;
 
     // Set remote description on rtc peer
-    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
+    rtc_pc.set_remote_description(rtc_offer)?;
     log::info!("RTC peer set remote description");
 
     // Create answer
@@ -195,7 +191,7 @@ async fn test_ice_restart_interop() -> Result<()> {
     log::info!("RTC peer created answer");
 
     // Set local description on rtc peer
-    rtc_pc.set_local_description(Instant::now(), rtc_answer.clone())?;
+    rtc_pc.set_local_description(rtc_answer.clone())?;
     log::info!("RTC peer set local description");
 
     // Convert rtc answer to webrtc format
@@ -244,8 +240,10 @@ async fn test_ice_restart_interop() -> Result<()> {
                         rtc_connected = true;
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(channel_id)) => {
-                    if let Some(dc) = rtc_pc.data_channel(channel_id) {
+                RTCPeerConnectionEvent::OnDataChannel(dc_event) => {
+                    if let RTCDataChannelEvent::OnOpen(channel_id) = dc_event
+                        && let Some(dc) = rtc_pc.data_channel(channel_id)
+                    {
                         log::info!("RTC data channel '{}'-'{}' opened", dc.label(), dc.id());
                         rtc_dc_id = Some(channel_id);
                     }
@@ -254,7 +252,7 @@ async fn test_ice_restart_interop() -> Result<()> {
             }
         }
 
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -263,7 +261,6 @@ async fn test_ice_restart_interop() -> Result<()> {
                     log::info!("RTC received message: {}", msg_str);
                     rtc_received_messages.lock().await.push(msg_str.to_string());
                 }
-                _ => {}
             }
         }
 
@@ -381,7 +378,7 @@ async fn test_ice_restart_interop() -> Result<()> {
 
         while let Some(_event) = rtc_pc.poll_event() {}
 
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -390,7 +387,6 @@ async fn test_ice_restart_interop() -> Result<()> {
                     log::info!("RTC received message: {}", msg_str);
                     rtc_received_messages.lock().await.push(msg_str.to_string());
                 }
-                _ => {}
             }
         }
 
@@ -424,7 +420,7 @@ async fn test_ice_restart_interop() -> Result<()> {
     if let Some(channel_id) = rtc_dc_id
         && let Some(mut dc) = rtc_pc.data_channel(channel_id)
     {
-        dc.send_text(Instant::now(), ECHO_MESSAGE_1.to_owned())?;
+        dc.send_text(ECHO_MESSAGE_1.to_owned())?;
         log::info!("RTC sent: {}", ECHO_MESSAGE_1);
     }
 
@@ -484,13 +480,13 @@ async fn test_ice_restart_interop() -> Result<()> {
         rtc::peer_connection::sdp::RTCSessionDescription::offer(restart_offer.sdp.clone())?;
 
     // Process restart on rtc peer
-    rtc_pc.set_remote_description(Instant::now(), rtc_restart_offer)?;
+    rtc_pc.set_remote_description(rtc_restart_offer)?;
     log::info!("RTC peer set remote description for restart");
 
     let rtc_restart_answer = rtc_pc.create_answer(None)?;
     log::info!("RTC peer created restart answer");
 
-    rtc_pc.set_local_description(Instant::now(), rtc_restart_answer.clone())?;
+    rtc_pc.set_local_description(rtc_restart_answer.clone())?;
     log::info!("RTC peer set local description for restart");
 
     // Convert restart answer to webrtc format
@@ -535,12 +531,12 @@ async fn test_ice_restart_interop() -> Result<()> {
                         rtc_connected = true;
                     }
                 }
-                RTCPeerConnectionEvent::OnDataChannel(_) => {}
+                RTCPeerConnectionEvent::OnDataChannel(_dc_event) => {}
                 _ => {}
             }
         }
 
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -549,7 +545,6 @@ async fn test_ice_restart_interop() -> Result<()> {
                     log::info!("RTC received message after restart: {}", msg_str);
                     rtc_received_messages.lock().await.push(msg_str.to_string());
                 }
-                _ => {}
             }
         }
 
@@ -613,7 +608,7 @@ async fn test_ice_restart_interop() -> Result<()> {
 
         while let Some(_event) = rtc_pc.poll_event() {}
 
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -622,7 +617,6 @@ async fn test_ice_restart_interop() -> Result<()> {
                     log::info!("RTC received message after restart: {}", msg_str);
                     rtc_received_messages.lock().await.push(msg_str.to_string());
                 }
-                _ => {}
             }
         }
 
@@ -659,7 +653,7 @@ async fn test_ice_restart_interop() -> Result<()> {
     if let Some(channel_id) = rtc_dc_id
         && let Some(mut dc) = rtc_pc.data_channel(channel_id)
     {
-        dc.send_text(Instant::now(), ECHO_MESSAGE_2.to_owned())?;
+        dc.send_text(ECHO_MESSAGE_2.to_owned())?;
         log::info!("RTC sent after restart: {}", ECHO_MESSAGE_2);
     }
 

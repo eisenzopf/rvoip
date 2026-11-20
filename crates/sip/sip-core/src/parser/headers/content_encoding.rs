@@ -2,7 +2,6 @@
 // Content-Encoding = ( "Content-Encoding" / "e" ) HCOLON content-coding *(COMMA content-coding)
 // content-coding = token
 
-use nom::Parser;
 use nom::{
     combinator::opt,
     error::{Error as NomError, ErrorKind},
@@ -21,7 +20,7 @@ use std::str;
 // content-coding = token
 fn content_coding(input: &[u8]) -> ParseResult<'_, String> {
     // Handle any leading whitespace, including line folding
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     // Parse the token
     let (input, coding_bytes) = token(input)?;
@@ -32,7 +31,7 @@ fn content_coding(input: &[u8]) -> ParseResult<'_, String> {
         .to_string();
 
     // Handle any trailing whitespace
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     Ok((input, coding))
 }
@@ -47,15 +46,14 @@ pub fn parse_content_encoding(input: &[u8]) -> ParseResult<'_, Vec<String>> {
     }
 
     // Handle any leading whitespace, including line folding
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     // Parse at least one content-coding, separated by commas
     let (input, codings) = separated_list1(
         // Handle whitespace around the comma
         preceded(opt(sws), terminated(comma, opt(lws))),
         content_coding,
-    )
-    .parse(input)?;
+    )(input)?;
 
     // Handle any trailing whitespace
     let (input, _) = sws(input)?;

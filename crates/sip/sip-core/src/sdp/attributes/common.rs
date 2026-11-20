@@ -6,7 +6,6 @@
 use crate::error::{Error, Result};
 use crate::parser::token::is_token_char;
 use crate::types::sdp::ParsedAttribute;
-use nom::Parser;
 use nom::{
     bytes::complete::{take_till1, take_while1},
     character::complete::{char, digit1},
@@ -27,7 +26,7 @@ pub fn token(input: &str) -> IResult<&str, &str> {
 
 /// Parses a positive integer
 pub fn positive_integer(input: &str) -> IResult<&str, u32> {
-    map_res(digit1, |s: &str| s.parse::<u32>()).parse(input)
+    map_res(digit1, |s: &str| s.parse::<u32>())(input)
 }
 
 /// Parses an identifier that can include alphanumeric characters, hyphens, and underscores
@@ -80,8 +79,7 @@ pub fn key_value_pair(input: &str) -> IResult<&str, (&str, &str)> {
         token,
         char('='),
         take_till1(|c: char| c.is_ascii_whitespace() || c == ';'),
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Converts nom IResult to our Result type

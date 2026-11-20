@@ -311,7 +311,6 @@ fn read_plain_rtp_baseline_delta(
     })
 }
 
-#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_srtp_overhead() {
     let points = parse_sweep_env("RVOIP_PERF_SWEEP_SRTP_CALLS").unwrap_or_else(|| {

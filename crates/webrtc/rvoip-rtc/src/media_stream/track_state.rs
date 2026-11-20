@@ -31,7 +31,6 @@ use std::fmt;
 /// assert_eq!(state.to_string(), "ended");
 /// ```
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum MediaStreamTrackState {
     /// Unspecified or unknown state.
     Unspecified,

@@ -73,7 +73,7 @@ async fn whip_webrtc_bridged_to_quic_leg_via_orchestrator() {
     let pub_conn = pub_handle.connection.id.clone();
     let offer_sdp = publisher.local_sdp(&pub_conn).expect("offer");
 
-    let client = ring_reqwest_builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client");
@@ -146,11 +146,4 @@ async fn whip_webrtc_bridged_to_quic_leg_via_orchestrator() {
     publisher.accept(pub_conn).await.expect("publisher accept");
 
     server.shutdown().await;
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

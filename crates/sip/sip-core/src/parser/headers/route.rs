@@ -3,7 +3,6 @@
 // route-param  =  name-addr *( SEMI rr-param )
 // rr-param     =  generic-param
 
-use nom::Parser;
 use nom::{combinator::map, sequence::pair};
 
 // Import from base parser modules
@@ -39,8 +38,7 @@ fn route_param(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params = params_vec;
             addr
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // Route = "Route" HCOLON route-param *(COMMA route-param)
@@ -53,8 +51,7 @@ pub fn parse_route(input: &[u8]) -> ParseResult<'_, RouteHeader> {
 
             RouteHeader(entries)
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]
@@ -178,9 +175,8 @@ mod tests {
         // Empty route
         assert!(parse_route(b"").is_err());
 
-        // A malformed SIP URI (an absoluteURI like <invalid:uri> is valid
-        // addr-spec syntax, RFC 3261 §25.1)
-        assert!(parse_route(b"<sip:>").is_err());
+        // Invalid URI
+        assert!(parse_route(b"<invalid:uri>").is_err());
     }
 
     #[test]

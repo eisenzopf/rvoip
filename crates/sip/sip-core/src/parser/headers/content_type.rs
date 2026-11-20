@@ -13,13 +13,12 @@
 // m-attribute = token
 // m-value = token / quoted-string
 
-use nom::Parser;
 use nom::{
     branch::alt,
     combinator::{map_res, opt},
     error::{Error as NomError, ErrorKind},
     multi::many0,
-    sequence::{separated_pair, terminated},
+    sequence::{separated_pair, terminated, tuple},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -92,7 +91,7 @@ pub fn parse_content_type_value(input: &[u8]) -> ParseResult<'_, ContentTypeValu
     }
 
     // Handle leading whitespace, including line folding
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     // Parse the media type and subtype with proper whitespace handling
     let (input, (m_type, m_subtype)) = parse_media_type_with_whitespace(input)?;
@@ -121,12 +120,11 @@ pub fn parse_content_type_value(input: &[u8]) -> ParseResult<'_, ContentTypeValu
 // Parse the media type and subtype part (m-type SLASH m-subtype) with proper whitespace handling
 fn parse_media_type_with_whitespace(input: &[u8]) -> ParseResult<'_, (String, String)> {
     // Parse type, slash, and subtype with proper whitespace handling
-    let (input, (m_type_bytes, _, m_subtype_bytes)) = (
+    let (input, (m_type_bytes, _, m_subtype_bytes)) = tuple((
         terminated(token, opt(lws)), // type token followed by optional whitespace
         terminated(slash, opt(lws)), // slash followed by optional whitespace
         token,                       // subtype token
-    )
-        .parse(input)?;
+    ))(input)?;
 
     // Convert to strings
     let m_type = str::from_utf8(m_type_bytes)
@@ -142,7 +140,7 @@ fn parse_media_type_with_whitespace(input: &[u8]) -> ParseResult<'_, (String, St
 
 // Parse the media parameters (*(SEMI m-parameter)) with proper whitespace handling
 fn parse_media_parameters(input: &[u8]) -> ParseResult<'_, HashMap<String, String>> {
-    let (input, params) = many0(parse_media_parameter).parse(input)?;
+    let (input, params) = many0(parse_media_parameter)(input)?;
 
     // Create a HashMap from the parameter pairs
     let parameters = params.into_iter().collect::<HashMap<_, _>>();
@@ -153,7 +151,7 @@ fn parse_media_parameters(input: &[u8]) -> ParseResult<'_, HashMap<String, Strin
 // Parse a single media parameter (SEMI m-parameter) with proper whitespace handling
 fn parse_media_parameter(input: &[u8]) -> ParseResult<'_, (String, String)> {
     // Parse a semicolon followed by a parameter
-    let (input, _) = terminated(semi, opt(lws)).parse(input)?;
+    let (input, _) = terminated(semi, opt(lws))(input)?;
 
     // Parse the parameter name and value
     let (input, (name_bytes, value)) = separated_pair(
@@ -162,19 +160,17 @@ fn parse_media_parameter(input: &[u8]) -> ParseResult<'_, (String, String)> {
         alt((
             // Parse quoted string value
             map_res(quoted_string, |bytes| {
-                crate::parser::common_params::unquote_string(bytes).map_err(|_| {
-                    nom::Err::<_>::Error(NomError::new(bytes, ErrorKind::AlphaNumeric))
-                })
+                crate::parser::common_params::unquote_string(bytes)
+                    .map_err(|_| nom::Err::Error(NomError::new(bytes, ErrorKind::AlphaNumeric)))
             }),
             // Parse token value
             map_res(token, |bytes| {
-                str::from_utf8(bytes).map(String::from).map_err(|_| {
-                    nom::Err::<_>::Error(NomError::new(bytes, ErrorKind::AlphaNumeric))
-                })
+                str::from_utf8(bytes)
+                    .map(String::from)
+                    .map_err(|_| nom::Err::Error(NomError::new(bytes, ErrorKind::AlphaNumeric)))
             }),
         )),
-    )
-    .parse(input)?;
+    )(input)?;
 
     // Convert parameter name to lowercase string (parameters are case-insensitive)
     let name = str::from_utf8(name_bytes)

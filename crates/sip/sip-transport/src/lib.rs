@@ -18,10 +18,8 @@ mod tests;
 
 // Re-export commonly used types and functions
 pub use error::{Error, Result};
-pub use resolver::{
-    select_transport_for_uri, AddressFamily, ResolvedTarget, Resolver, ResolverError,
-};
-pub use transport::tcp::{TcpFlowConfig, TcpTransport};
+pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
+pub use transport::tcp::TcpTransport;
 pub use transport::tls::{
     IngressAdmissionHook, IngressVerdict, TlsClientAuthMode, TlsClientConfig, TlsFlowConfig,
     TlsFlowStats, TlsReceiveBackpressurePolicy, TlsServerClientAuthConfig, TlsTransport,

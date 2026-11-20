@@ -3,9 +3,9 @@
 use crate::peer_connection::PeerConnectionRef;
 use crate::runtime::{Mutex, Receiver};
 use bytes::BytesMut;
+use rtc::interceptor::{Interceptor, NoopInterceptor};
 use rtc::shared::error::{Error, Result};
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::peer_connection::driver::PeerConnectionDriverEvent;
 pub use rtc::data_channel::{
@@ -25,14 +25,7 @@ pub trait DataChannel: Send + Sync + 'static {
     async fn max_retransmits(&self) -> Result<Option<u16>>;
     async fn protocol(&self) -> Result<String>;
     async fn negotiated(&self) -> Result<bool>;
-    /// Connection-local handle for this channel. It is not the SCTP stream
-    /// id and differs between the two peers; see [`DataChannel::stream_id`].
     fn id(&self) -> RTCDataChannelId;
-    /// The SCTP stream id carrying this channel (W3C `RTCDataChannel.id`),
-    /// or `None` until one is assigned. Both peers see the same value.
-    async fn stream_id(&self) -> Result<Option<u16>> {
-        Ok(None)
-    }
     async fn ready_state(&self) -> Result<RTCDataChannelState>;
     async fn buffered_amount_high_threshold(&self) -> Result<u32>;
     async fn set_buffered_amount_high_threshold(&self, threshold: u32) -> Result<()>;
@@ -97,22 +90,28 @@ pub enum DataChannelEvent {
 /// Concrete async data channel implementation (generic over interceptor type).
 ///
 /// This wraps a data channel and provides async send/receive APIs.
-pub(crate) struct DataChannelImpl {
+pub(crate) struct DataChannelImpl<I = NoopInterceptor>
+where
+    I: Interceptor,
+{
     /// Unique identifier for this data channel
     id: RTCDataChannelId,
 
     /// Inner PeerConnection Reference
-    inner: Arc<PeerConnectionRef>,
+    inner: Arc<PeerConnectionRef<I>>,
 
     /// event receiver
     evt_rx: Mutex<Receiver<DataChannelEvent>>,
 }
 
-impl DataChannelImpl {
+impl<I> DataChannelImpl<I>
+where
+    I: Interceptor,
+{
     /// Create a new data channel wrapper
     pub(crate) fn new(
         id: RTCDataChannelId,
-        inner: Arc<PeerConnectionRef>,
+        inner: Arc<PeerConnectionRef<I>>,
         evt_rx: Receiver<DataChannelEvent>,
     ) -> Self {
         Self {
@@ -124,7 +123,10 @@ impl DataChannelImpl {
 }
 
 #[async_trait::async_trait]
-impl DataChannel for DataChannelImpl {
+impl<I> DataChannel for DataChannelImpl<I>
+where
+    I: Interceptor + 'static,
+{
     /// label represents a label that can be used to distinguish this
     /// DataChannel object from other DataChannel objects. Scripts are
     /// allowed to create multiple DataChannel objects with the same label.
@@ -197,14 +199,6 @@ impl DataChannel for DataChannelImpl {
     /// value, it will not change.
     fn id(&self) -> RTCDataChannelId {
         self.id
-    }
-
-    async fn stream_id(&self) -> Result<Option<u16>> {
-        let mut peer_connection = self.inner.core.lock().await;
-        Ok(peer_connection
-            .data_channel(self.id)
-            .ok_or(Error::ErrDataChannelClosed)?
-            .stream_id())
     }
 
     /// ready_state represents the state of the DataChannel object.
@@ -298,7 +292,7 @@ impl DataChannel for DataChannelImpl {
             peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?
-                .send(Instant::now(), data)?;
+                .send(data)?;
         }
 
         // Wake the driver so it flushes SCTP output (poll_write) and checks
@@ -328,7 +322,7 @@ impl DataChannel for DataChannelImpl {
             peer_connection
                 .data_channel(self.id)
                 .ok_or(Error::ErrDataChannelClosed)?
-                .send_text(Instant::now(), text)?;
+                .send_text(text)?;
         }
 
         self.inner

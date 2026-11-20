@@ -132,10 +132,10 @@ impl InviteBuilder {
         let to_uri_string = to_uri.into();
         Self {
             from_uri: Some(from_uri.into()),
-            from_display_name: None, // No display name: `<uri>` only
+            from_display_name: None, // Will use default "User"
             from_tag: Some(from_tag.into()),
             to_uri: Some(to_uri_string.clone()),
-            to_display_name: None, // No display name: `<uri>` only
+            to_display_name: None, // Will use default "User"
             to_tag: Some(to_tag.into()),
             request_uri: Some(to_uri_string), // Default to To URI for re-INVITE
             call_id: Some(call_id.into()),
@@ -349,14 +349,14 @@ impl InviteBuilder {
 
         // Add From header
         builder = builder.from(
-            self.from_display_name.as_deref().unwrap_or(""),
+            self.from_display_name.as_deref().unwrap_or("User"),
             &from_uri,
             Some(&from_tag),
         );
 
         // Add To header
         builder = builder.to(
-            self.to_display_name.as_deref().unwrap_or(""),
+            self.to_display_name.as_deref().unwrap_or("User"),
             &to_uri,
             self.to_tag.as_deref(),
         );
@@ -365,7 +365,7 @@ impl InviteBuilder {
         builder = builder
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via_socket_addr(local_addr, &via_transport, Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
         // INVITE establishes or refreshes a dialog, so Contact is mandatory.
@@ -772,11 +772,11 @@ impl ByeBuilder {
             .map_err(|e| Error::Other(format!("Failed to create request builder: {}", e)))?;
 
         builder = builder
-            .from("", &from_uri, Some(&from_tag))
-            .to("", &to_uri, Some(&to_tag))
+            .from("User", &from_uri, Some(&from_tag))
+            .to("User", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via_socket_addr(local_addr, &via_transport, Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into())
             .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
@@ -959,14 +959,14 @@ impl RegisterBuilder {
 
         builder = builder
             .from(
-                self.from_display_name.as_deref().unwrap_or(""),
+                self.from_display_name.as_deref().unwrap_or("User"),
                 &from_uri,
                 Some(&from_tag),
             )
             .to("", &aor_uri, None)
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via_socket_addr(local_addr, &via_transport, Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into())
             .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
@@ -1291,11 +1291,11 @@ impl InDialogRequestBuilder {
             .map_err(|e| Error::Other(format!("Failed to create request builder: {}", e)))?;
 
         builder = builder
-            .from("", &from_uri, Some(&from_tag))
-            .to("", &to_uri, Some(&to_tag))
+            .from("User", &from_uri, Some(&from_tag))
+            .to("User", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via_socket_addr(local_addr, &via_transport, Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
         let has_contact_override = self
@@ -1635,15 +1635,15 @@ pub mod quick {
 
         let request = SimpleRequestBuilder::new(Method::Options, target_uri)?
             .from(
-                "",
+                "User",
                 from_uri,
                 Some(&format!("tag-{}", Uuid::new_v4().simple())),
             )
-            .to("", target_uri, None)
+            .to("User", target_uri, None)
             .call_id(&format!("options-{}", Uuid::new_v4()))
             .cseq(1)
-            .via_socket_addr(
-                local_addr,
+            .via(
+                &local_addr.to_string(),
                 &via_transport_for_uris(target_uri, Some(from_uri)),
                 Some(&generate_branch()),
             )
@@ -1671,15 +1671,15 @@ pub mod quick {
 
         let request = SimpleRequestBuilder::new(Method::Message, target_uri)?
             .from(
-                "",
+                "User",
                 from_uri,
                 Some(&format!("tag-{}", Uuid::new_v4().simple())),
             )
-            .to("", target_uri, None)
+            .to("User", target_uri, None)
             .call_id(&format!("message-{}", Uuid::new_v4()))
             .cseq(1)
-            .via_socket_addr(
-                local_addr,
+            .via(
+                &local_addr.to_string(),
                 &via_transport_for_uris(target_uri, Some(from_uri)),
                 Some(&generate_branch()),
             )
