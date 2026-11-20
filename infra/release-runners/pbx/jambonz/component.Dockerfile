@@ -1,4 +1,4 @@
-FROM docker.io/library/node@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
+FROM docker.io/library/node@sha256:d862bb5d082c5ae0210ac07e8c0344cb8cf7bef6d78e9b8c50c179da923108ea
 
 ARG SOURCE_URL
 ARG SOURCE_SHA256

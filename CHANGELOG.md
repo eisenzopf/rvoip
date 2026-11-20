@@ -1558,6 +1558,13 @@ outcome unchanged, and add no configuration.
       fixed in the tests, not the library: a reused RTP sequence space, a
       stale retained-capacity snapshot, and fixed ports inside the ephemeral
       range (#436–#440).
+- The Jambonz OSS interoperability peer is re-pinned to the 0.9.15 release
+  line (`sbc-inbound` `c5a2ca73…`, `sbc-outbound` `ef2a9ada…`), which upstream
+  shipped after 0.9.14 and which failed `interop.jambonz-latest`. Upstream's
+  only change is Node 24.22.1 for a TLS vulnerability (`engines.node >=
+  24.22.1`), so the lab's pinned source builder image moves from Node 20.20.2
+  to `node:24.22.1`. The codeload tarball digests use the same method, which
+  reproduces the 0.9.14 digests exactly.
 
 ### Documentation
 
