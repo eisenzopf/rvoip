@@ -7,7 +7,6 @@
 
 use crate::types::MinSE;
 use nom::character::complete::u32 as parse_u32_nom; // ADDED import
-use nom::Parser;
 use nom::{
     character::complete::multispace0,
     combinator::eof,
@@ -32,14 +31,14 @@ where
     let (input, val) = parse_u32_nom(input)?; // CHANGED to parse_u32_nom
                                               // Ensure that after delta_seconds, there's only optional whitespace and EOF.
                                               // Any parameters would cause `eof` to fail.
-    let (input, _) = terminated(multispace0, eof).parse(input)?;
+    let (input, _) = terminated(multispace0, eof)(input)?;
     Ok((input, MinSE { delta_seconds: val }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom_language::error::VerboseError;
+    use nom::error::VerboseError;
 
     #[test]
     fn test_parse_min_se_value_valid() {

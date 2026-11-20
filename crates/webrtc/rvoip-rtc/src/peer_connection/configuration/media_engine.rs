@@ -81,7 +81,7 @@
 //mod media_engine_test;
 
 use crate::peer_connection::sdp::{
-    MediaDescriptionExt, codecs_from_media_description, rtp_extensions_from_media_description,
+    codecs_from_media_description, rtp_extensions_from_media_description,
 };
 use crate::rtp_transceiver::direction::RTCRtpTransceiverDirection;
 use crate::rtp_transceiver::fmtp;
@@ -186,12 +186,6 @@ pub const MIME_TYPE_ULP_FEC: &str = "video/ulpfec";
 /// Note: MIME type matching is case-insensitive.
 pub const MIME_TYPE_TELEPHONE_EVENT: &str = "audio/telephone-event";
 
-/// SMPTE ST 336 (KLV) metadata MIME type
-///
-/// Used for transmitting KLV (key-length-value) metadata.
-/// Note: MIME type matching is case-insensitive.
-pub const MIME_TYPE_SMPTE336M: &str = "application/smpte336m";
-
 const VALID_EXT_IDS: Range<u16> = 1..15;
 
 #[derive(Default, Clone)]
@@ -232,7 +226,6 @@ impl MediaEngineHeaderExtension {
 /// ## Default Configuration
 ///
 /// ```
-/// # use std::time::Instant;
 /// use rtc::peer_connection::RTCPeerConnectionBuilder;
 /// use rtc::peer_connection::configuration::media_engine::MediaEngine;
 ///
@@ -242,7 +235,7 @@ impl MediaEngineHeaderExtension {
 ///
 /// let pc = RTCPeerConnectionBuilder::new()
 ///     .with_media_engine(media_engine)
-///     .build(Instant::now())?;
+///     .build()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -294,15 +287,12 @@ pub struct MediaEngine {
     // If we have attempted to negotiate a codec type yet.
     pub(crate) negotiated_video: bool,
     pub(crate) negotiated_audio: bool,
-    pub(crate) negotiated_application: bool,
     pub(crate) negotiate_multi_codecs: bool,
 
     pub(crate) video_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) audio_codecs: Vec<RTCRtpCodecParameters>,
-    pub(crate) application_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) negotiated_video_codecs: Vec<RTCRtpCodecParameters>,
     pub(crate) negotiated_audio_codecs: Vec<RTCRtpCodecParameters>,
-    pub(crate) negotiated_application_codecs: Vec<RTCRtpCodecParameters>,
 
     pub(crate) header_extensions: Vec<MediaEngineHeaderExtension>,
     pub(crate) negotiated_header_extensions: HashMap<u16, MediaEngineHeaderExtension>,
@@ -343,10 +333,6 @@ impl MediaEngine {
     /// # Ok(())
     /// # }
     /// ```
-    /// # Errors
-    ///
-    /// Returns an error if one of the default codecs cannot be registered; with an unmodified
-    /// `MediaEngine` this does not happen.
     pub fn register_default_codecs(&mut self) -> Result<()> {
         // Default Audio Codecs
         for codec in [
@@ -412,23 +398,6 @@ impl MediaEngine {
                 parameter: "pli".to_owned(),
             },
         ];
-
-        // RFC 4588 retransmission (RTX) codec. The `apt` (associated payload
-        // type) fmtp parameter points at the primary codec this RTX stream
-        // repairs. Browsers offer an RTX codec for every video codec by default
-        // and drop RTX negotiation for any primary we do not pair one with, so
-        // register one RTX codec per primary video codec.
-        let rtx_codec = |payload_type: PayloadType, apt: PayloadType| RTCRtpCodecParameters {
-            rtp_codec: RTCRtpCodec {
-                mime_type: MIME_TYPE_RTX.to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: format!("apt={apt}"),
-                rtcp_feedback: vec![],
-            },
-            payload_type,
-        };
-
         for codec in vec![
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
@@ -440,7 +409,6 @@ impl MediaEngine {
                 },
                 payload_type: 96,
             },
-            rtx_codec(97, 96),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_VP9.to_owned(),
@@ -451,7 +419,6 @@ impl MediaEngine {
                 },
                 payload_type: 98,
             },
-            rtx_codec(99, 98),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_VP9.to_owned(),
@@ -462,7 +429,6 @@ impl MediaEngine {
                 },
                 payload_type: 100,
             },
-            rtx_codec(101, 100),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_H264.to_owned(),
@@ -475,7 +441,6 @@ impl MediaEngine {
                 },
                 payload_type: 102,
             },
-            rtx_codec(103, 102),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_H264.to_owned(),
@@ -488,7 +453,6 @@ impl MediaEngine {
                 },
                 payload_type: 127,
             },
-            rtx_codec(104, 127),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_H264.to_owned(),
@@ -501,7 +465,6 @@ impl MediaEngine {
                 },
                 payload_type: 125,
             },
-            rtx_codec(105, 125),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_H264.to_owned(),
@@ -514,7 +477,6 @@ impl MediaEngine {
                 },
                 payload_type: 108,
             },
-            rtx_codec(109, 108),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_H264.to_owned(),
@@ -539,7 +501,6 @@ impl MediaEngine {
                 },
                 payload_type: 123,
             },
-            rtx_codec(124, 123),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_AV1.to_owned(),
@@ -550,7 +511,6 @@ impl MediaEngine {
                 },
                 payload_type: 41,
             },
-            rtx_codec(106, 41),
             RTCRtpCodecParameters {
                 rtp_codec: RTCRtpCodec {
                     mime_type: MIME_TYPE_HEVC.to_owned(),
@@ -561,7 +521,16 @@ impl MediaEngine {
                 },
                 payload_type: 126,
             },
-            rtx_codec(107, 126),
+            RTCRtpCodecParameters {
+                rtp_codec: RTCRtpCodec {
+                    mime_type: "video/ulpfec".to_owned(),
+                    clock_rate: 90000,
+                    channels: 0,
+                    sdp_fmtp_line: "".to_owned(),
+                    rtcp_feedback: vec![],
+                },
+                payload_type: 116,
+            },
         ] {
             self.register_codec(codec, RtpCodecKind::Video)?;
         }
@@ -622,9 +591,6 @@ impl MediaEngine {
     /// # Ok(())
     /// # }
     /// ```
-    /// # Errors
-    ///
-    /// Returns [`Error::ErrUnknownType`] if `typ` is not `Audio`, `Video` or `Application`.
     pub fn register_codec(
         &mut self,
         codec: RTCRtpCodecParameters,
@@ -639,10 +605,6 @@ impl MediaEngine {
                 MediaEngine::add_codec(&mut self.video_codecs, codec);
                 Ok(())
             }
-            RtpCodecKind::Application => {
-                MediaEngine::add_codec(&mut self.application_codecs, codec);
-                Ok(())
-            }
             _ => Err(Error::ErrUnknownType),
         }
     }
@@ -653,13 +615,6 @@ impl MediaEngine {
     /// The `allowed_direction` controls for which transceiver directions the extension matches. If
     /// set to `None` it matches all directions. The `SendRecv` direction would match all transceiver
     /// directions apart from `Inactive`. Inactive only matches inactive.
-    ///
-    /// # Errors
-    ///
-    /// - [`Error::ErrRegisterHeaderExtensionInvalidDirection`] if `allowed_direction` is
-    ///   `Unspecified`.
-    /// - [`Error::ErrRegisterHeaderExtensionNoFreeID`] if every valid one-byte extension id
-    ///   (RFC 8285) is already taken.
     pub fn register_header_extension(
         &mut self,
         extension: RTCRtpHeaderExtensionCapability,
@@ -706,26 +661,24 @@ impl MediaEngine {
         Ok(())
     }
 
-    /// Adds a feedback mechanism to all already-registered codecs.
-    ///
-    /// Registering the same mechanism twice is a no-op the second time.
+    /// register_feedback adds feedback mechanism to already registered codecs.
     pub fn register_feedback(&mut self, feedback: RTCPFeedback, typ: RtpCodecKind) {
-        let codecs = match typ {
-            RtpCodecKind::Video => &mut self.video_codecs,
-            RtpCodecKind::Audio => &mut self.audio_codecs,
-            _ => return,
-        };
-
-        for codec in codecs {
-            // Matched on both fields: `nack` and `nack pli` are distinct mechanisms that share a
-            // type, so comparing types alone would drop the second one.
-            if !codec.rtp_codec.rtcp_feedback.contains(&feedback) {
-                codec.rtp_codec.rtcp_feedback.push(feedback.clone());
+        match typ {
+            RtpCodecKind::Video => {
+                for v in &mut self.video_codecs {
+                    v.rtp_codec.rtcp_feedback.push(feedback.clone());
+                }
             }
+            RtpCodecKind::Audio => {
+                for a in &mut self.audio_codecs {
+                    a.rtp_codec.rtcp_feedback.push(feedback.clone());
+                }
+            }
+            _ => {}
         }
     }
 
-    /// Returns the negotiated id for a header extension.
+    /// get_header_extension_id returns the negotiated ID for a header extension.
     /// If the Header Extension isn't enabled ok will be false
     pub fn get_header_extension_id(
         &self,
@@ -750,7 +703,6 @@ impl MediaEngine {
         MediaEngine {
             video_codecs: self.video_codecs.clone(),
             audio_codecs: self.audio_codecs.clone(),
-            application_codecs: self.application_codecs.clone(),
             header_extensions: self.header_extensions.clone(),
             ..Default::default()
         }
@@ -784,13 +736,6 @@ impl MediaEngine {
                 }
             }
         }
-        if self.negotiated_application {
-            for codec in &self.negotiated_application_codecs {
-                if codec.payload_type == payload_type {
-                    return Ok((codec.clone(), RtpCodecKind::Application));
-                }
-            }
-        }
         if !self.negotiated_video {
             for codec in &self.video_codecs {
                 if codec.payload_type == payload_type {
@@ -802,13 +747,6 @@ impl MediaEngine {
             for codec in &self.audio_codecs {
                 if codec.payload_type == payload_type {
                     return Ok((codec.clone(), RtpCodecKind::Audio));
-                }
-            }
-        }
-        if !self.negotiated_application {
-            for codec in &self.application_codecs {
-                if codec.payload_type == payload_type {
-                    return Ok((codec.clone(), RtpCodecKind::Application));
                 }
             }
         }
@@ -824,11 +762,10 @@ impl MediaEngine {
         exact_matches: &[RTCRtpCodecParameters],
         partial_matches: &[RTCRtpCodecParameters],
     ) -> Result<(RTCRtpCodecParameters, CodecMatch)> {
-        let codecs = match typ {
-            RtpCodecKind::Audio => &self.audio_codecs,
-            RtpCodecKind::Video => &self.video_codecs,
-            RtpCodecKind::Application => &self.application_codecs,
-            RtpCodecKind::Unspecified => unreachable!(),
+        let codecs = if typ == RtpCodecKind::Audio {
+            &self.audio_codecs
+        } else {
+            &self.video_codecs
         };
 
         let remote_fmtp = fmtp::parse(
@@ -951,8 +888,6 @@ impl MediaEngine {
                 MediaEngine::add_codec(&mut self.negotiated_audio_codecs, codec);
             } else if typ == RtpCodecKind::Video {
                 MediaEngine::add_codec(&mut self.negotiated_video_codecs, codec);
-            } else if typ == RtpCodecKind::Application {
-                MediaEngine::add_codec(&mut self.negotiated_application_codecs, codec);
             }
         }
     }
@@ -963,16 +898,10 @@ impl MediaEngine {
         desc: &SessionDescription,
     ) -> Result<()> {
         for media in &desc.media_descriptions {
-            if media.is_webrtc_datachannel() {
-                continue;
-            }
-
             let typ = if media.media_name.media.to_lowercase() == "audio" {
                 RtpCodecKind::Audio
             } else if media.media_name.media.to_lowercase() == "video" {
                 RtpCodecKind::Video
-            } else if media.media_name.media.to_lowercase() == "application" {
-                RtpCodecKind::Application
             } else {
                 RtpCodecKind::Unspecified
             };
@@ -981,8 +910,6 @@ impl MediaEngine {
                 self.negotiated_audio = true;
             } else if !self.negotiated_video && typ == RtpCodecKind::Video {
                 self.negotiated_video = true;
-            } else if !self.negotiated_application && typ == RtpCodecKind::Application {
-                self.negotiated_application = true;
             } else {
                 // update header extesions from remote sdp if codec is negotiated, Firefox
                 // would send updated header extension in renegotiation.
@@ -990,7 +917,9 @@ impl MediaEngine {
                 // then the two media secontions have different rtp header extensions in offer
                 self.update_header_extension_from_media_section(media)?;
 
-                if !self.negotiate_multi_codecs || typ == RtpCodecKind::Unspecified {
+                if !self.negotiate_multi_codecs
+                    || (typ != RtpCodecKind::Audio && typ != RtpCodecKind::Video)
+                {
                     continue;
                 }
             }
@@ -1075,12 +1004,6 @@ impl MediaEngine {
                 self.negotiated_audio_codecs.clone()
             } else {
                 self.audio_codecs.clone()
-            }
-        } else if typ == RtpCodecKind::Application {
-            if self.negotiated_application {
-                self.negotiated_application_codecs.clone()
-            } else {
-                self.application_codecs.clone()
             }
         } else {
             vec![]
@@ -1211,225 +1134,5 @@ impl MediaEngine {
         }
 
         false
-    }
-}
-
-#[cfg(test)]
-mod default_fec_codec_test {
-    use super::*;
-
-    // Issue #837: the default media engine must not offer ULPFEC. The receive path does
-    // not recover media from ULPFEC packets, so advertising it invites a peer to send
-    // repair packets we cannot use. `MIME_TYPE_ULP_FEC` stays exported for applications
-    // that register it deliberately; only the *default* registration is removed.
-    #[test]
-    fn default_codecs_do_not_offer_ulpfec() {
-        let mut me = MediaEngine::default();
-        me.register_default_codecs().unwrap();
-
-        let ulpfec: Vec<_> = me
-            .video_codecs
-            .iter()
-            .filter(|c| {
-                UniCase::new(c.rtp_codec.mime_type.as_str()) == UniCase::new(MIME_TYPE_ULP_FEC)
-            })
-            .map(|c| c.payload_type)
-            .collect();
-
-        assert!(
-            ulpfec.is_empty(),
-            "default codecs must not advertise ULPFEC while the receive path cannot \
-             recover it; found payload type(s) {ulpfec:?}"
-        );
-    }
-
-    // The constant remains part of the public API so an application can opt in.
-    #[test]
-    fn ulpfec_remains_registerable_explicitly() {
-        let mut me = MediaEngine::default();
-        me.register_default_codecs().unwrap();
-        me.register_codec(
-            RTCRtpCodecParameters {
-                rtp_codec: RTCRtpCodec {
-                    mime_type: MIME_TYPE_ULP_FEC.to_owned(),
-                    clock_rate: 90000,
-                    channels: 0,
-                    sdp_fmtp_line: "".to_owned(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 116,
-            },
-            RtpCodecKind::Video,
-        )
-        .expect("an application may still register ULPFEC itself");
-
-        assert!(me.video_codecs.iter().any(|c| {
-            UniCase::new(c.rtp_codec.mime_type.as_str()) == UniCase::new(MIME_TYPE_ULP_FEC)
-        }));
-    }
-}
-
-#[cfg(test)]
-mod default_rtx_codec_test {
-    use super::*;
-    use crate::rtp_transceiver::rtp_sender::rtp_codec::{find_rtx_payload_type, parse_rtx_apt};
-
-    // RFC 4588 / issue #119: register_default_codecs must register a video/rtx
-    // codec (apt=<primary>) for every primary video codec, otherwise browser
-    // RTX offers get dropped during negotiation.
-    #[test]
-    fn default_codecs_register_rtx_for_every_primary() {
-        let mut me = MediaEngine::default();
-        me.register_default_codecs().unwrap();
-
-        let mut primary_payload_types = vec![];
-        let mut rtx_apts = vec![];
-        for codec in &me.video_codecs {
-            if UniCase::new(codec.rtp_codec.mime_type.as_str()) == UniCase::new(MIME_TYPE_RTX) {
-                let apt = parse_rtx_apt(&codec.rtp_codec.sdp_fmtp_line)
-                    .expect("rtx codec must carry an apt= parameter");
-                rtx_apts.push(apt);
-            } else {
-                primary_payload_types.push(codec.payload_type);
-            }
-        }
-
-        assert!(!rtx_apts.is_empty(), "no RTX codecs were registered");
-
-        for pt in &primary_payload_types {
-            assert!(
-                rtx_apts.contains(pt),
-                "primary payload type {pt} has no associated RTX codec (apt={pt})"
-            );
-            // find_rtx_payload_type must locate our RTX pt by its apt.
-            assert!(
-                find_rtx_payload_type(*pt, &me.video_codecs).is_some(),
-                "find_rtx_payload_type failed for primary payload type {pt}"
-            );
-        }
-    }
-
-    #[test]
-    fn default_video_codec_payload_types_are_unique() {
-        let mut me = MediaEngine::default();
-        me.register_default_codecs().unwrap();
-
-        let mut seen = std::collections::HashSet::new();
-        for codec in &me.video_codecs {
-            assert!(
-                seen.insert(codec.payload_type),
-                "duplicate video payload type {} ({})",
-                codec.payload_type,
-                codec.rtp_codec.mime_type
-            );
-        }
-    }
-}
-
-#[cfg(test)]
-mod register_feedback_test {
-    use super::*;
-
-    fn video_codec(payload_type: PayloadType) -> RTCRtpCodecParameters {
-        RTCRtpCodecParameters {
-            rtp_codec: RTCRtpCodec {
-                mime_type: MIME_TYPE_VP8.to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: "".to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type,
-        }
-    }
-
-    fn feedback(typ: &str, parameter: &str) -> RTCPFeedback {
-        RTCPFeedback {
-            typ: typ.to_owned(),
-            parameter: parameter.to_owned(),
-        }
-    }
-
-    fn count(me: &MediaEngine, typ: &str, parameter: &str) -> usize {
-        me.video_codecs[0]
-            .rtp_codec
-            .rtcp_feedback
-            .iter()
-            .filter(|fb| fb.typ == typ && fb.parameter == parameter)
-            .count()
-    }
-
-    // `configure_congestion_control` and `configure_twcc_receiver_only` both need transport-cc,
-    // and an application that calls one alongside `register_default_interceptors` calls both.
-    // Without dedupe the codec accumulates one `a=rtcp-fb:<pt> transport-cc` per caller, and the
-    // answer goes out with the line repeated.
-    #[test]
-    fn registering_the_same_feedback_twice_adds_it_once() {
-        let mut me = MediaEngine::default();
-        me.register_codec(video_codec(96), RtpCodecKind::Video)
-            .unwrap();
-
-        me.register_feedback(feedback("transport-cc", ""), RtpCodecKind::Video);
-        me.register_feedback(feedback("transport-cc", ""), RtpCodecKind::Video);
-
-        assert_eq!(1, count(&me, "transport-cc", ""));
-    }
-
-    // The dedupe matches on type *and* parameter. `nack` and `nack pli` share a type but are
-    // different mechanisms, and comparing types alone would silently drop the second.
-    #[test]
-    fn feedback_of_the_same_type_with_different_parameters_both_register() {
-        let mut me = MediaEngine::default();
-        me.register_codec(video_codec(96), RtpCodecKind::Video)
-            .unwrap();
-
-        me.register_feedback(feedback("nack", ""), RtpCodecKind::Video);
-        me.register_feedback(feedback("nack", "pli"), RtpCodecKind::Video);
-
-        assert_eq!(1, count(&me, "nack", ""));
-        assert_eq!(1, count(&me, "nack", "pli"));
-    }
-
-    // A codec registered *after* the feedback does not have it — `register_feedback` only touches
-    // codecs already present. Pinning this so the dedupe is not mistaken for a guarantee that
-    // every codec ends up with every mechanism.
-    #[test]
-    fn feedback_applies_only_to_codecs_already_registered() {
-        let mut me = MediaEngine::default();
-        me.register_codec(video_codec(96), RtpCodecKind::Video)
-            .unwrap();
-        me.register_feedback(feedback("transport-cc", ""), RtpCodecKind::Video);
-        me.register_codec(video_codec(98), RtpCodecKind::Video)
-            .unwrap();
-
-        assert_eq!(1, count(&me, "transport-cc", ""));
-        assert!(me.video_codecs[1].rtp_codec.rtcp_feedback.is_empty());
-    }
-
-    // Audio and video are separate lists; registering for one must not reach the other.
-    #[test]
-    fn feedback_does_not_cross_between_audio_and_video() {
-        let mut me = MediaEngine::default();
-        me.register_codec(video_codec(96), RtpCodecKind::Video)
-            .unwrap();
-        me.register_codec(
-            RTCRtpCodecParameters {
-                rtp_codec: RTCRtpCodec {
-                    mime_type: MIME_TYPE_OPUS.to_owned(),
-                    clock_rate: 48000,
-                    channels: 2,
-                    sdp_fmtp_line: "".to_owned(),
-                    rtcp_feedback: vec![],
-                },
-                payload_type: 111,
-            },
-            RtpCodecKind::Audio,
-        )
-        .unwrap();
-
-        me.register_feedback(feedback("transport-cc", ""), RtpCodecKind::Video);
-
-        assert_eq!(1, count(&me, "transport-cc", ""));
-        assert!(me.audio_codecs[0].rtp_codec.rtcp_feedback.is_empty());
     }
 }

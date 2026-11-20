@@ -51,8 +51,6 @@
 // URI implementation moved from root directory
 // Implements URI types according to RFC 3261
 
-use nom::Parser;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -223,45 +221,8 @@ impl Host {
             Host::Address(addr) => addr.to_string(),
         }
     }
-
-    /// Format this host, with an optional port, as an RFC 3261 §25.1
-    /// `hostport = host [ ":" port ]`.
-    ///
-    /// Inside `hostport` (and every other SIP `host` position: URIs, Via
-    /// sent-by, Warning agents) an IPv6 address is an `IPv6reference`, so it
-    /// is bracketed (RFC 5118 §4.1). Use this, not [`Display`](fmt::Display),
-    /// whenever the result is written into a SIP host context.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use rvoip_sip_core::prelude::*;
-    /// use std::str::FromStr;
-    ///
-    /// let v6 = Host::from_str("2001:db8::1").unwrap();
-    /// assert_eq!(v6.to_hostport(Some(5060)), "[2001:db8::1]:5060");
-    /// assert_eq!(v6.to_hostport(None), "[2001:db8::1]");
-    /// assert_eq!(Host::domain("example.com").to_hostport(Some(5060)), "example.com:5060");
-    /// ```
-    pub fn to_hostport(&self, port: Option<u16>) -> String {
-        let host = match self {
-            Host::Address(IpAddr::V6(address)) => format!("[{address}]"),
-            host => host.to_string(),
-        };
-        match port {
-            Some(port) => format!("{host}:{port}"),
-            None => host,
-        }
-    }
 }
 
-/// Writes the bare host: a domain name, or an IP address in its textual
-/// form *without* IPv6 brackets.
-///
-/// The bare form is what `received=` (RFC 3261 §18.2.1, RFC 5118 §4.5: an
-/// `IPv6address`, not an `IPv6reference`), SDP `c=`/`o=` (RFC 8866 §5.7) and
-/// socket-address parsing expect. SIP host contexts must bracket IPv6; use
-/// [`Host::to_hostport`] or the URI/Via `Display` implementations there.
 impl fmt::Display for Host {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -355,28 +316,14 @@ impl From<Ipv6Addr> for Host {
 /// assert_eq!(uri.port, Some(5060));
 /// assert_eq!(uri.transport(), Some("tcp"));
 /// ```
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Uri {
     /// URI scheme (sip, sips, tel)
     pub scheme: Scheme,
-    /// User part (optional), with all `%HH` escapes decoded.
+    /// User part (optional)
     pub user: Option<String>,
-    /// The user part exactly as it appeared on the wire, when this URI was
-    /// parsed; `None` for URIs built in code.
-    ///
-    /// RFC 3261 §19.1.4 makes a `reserved` character and its escape different
-    /// URIs (`sip:%2B1@h` is not `sip:+1@h`), and the decoded [`Self::user`]
-    /// cannot tell them apart. Rendering uses this form while it still decodes
-    /// to [`Self::user`], so a parsed URI keeps its identity when it is sent
-    /// again. Assigning a different `user` makes it stale, and
-    /// the user is then rendered from [`Self::user`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_wire: Option<String>,
-    /// Password (optional, deprecated), with all `%HH` escapes decoded.
+    /// Password (optional, deprecated)
     pub password: Option<String>,
-    /// The password exactly as it appeared on the wire; see [`Self::user_wire`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub password_wire: Option<String>,
     /// Host (required)
     pub host: Host,
     /// Port (optional)
@@ -388,25 +335,6 @@ pub struct Uri {
     /// Raw URI string for custom schemes
     pub raw_uri: Option<String>,
 }
-
-/// Structural equality of the logical (decoded) components, as before the
-/// wire fields existed: [`Uri::user_wire`] and [`Uri::password_wire`] are
-/// ignored, so a parsed URI equals the same URI built in code. This is not the
-/// RFC 3261 §19.1.4 URI comparison.
-impl PartialEq for Uri {
-    fn eq(&self, other: &Self) -> bool {
-        self.scheme == other.scheme
-            && self.user == other.user
-            && self.password == other.password
-            && self.host == other.host
-            && self.port == other.port
-            && self.parameters == other.parameters
-            && self.headers == other.headers
-            && self.raw_uri == other.raw_uri
-    }
-}
-
-impl Eq for Uri {}
 
 impl fmt::Debug for Uri {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -451,9 +379,7 @@ impl Uri {
         Uri {
             scheme,
             user: None,
-            user_wire: None,
             password: None,
-            password_wire: None,
             host,
             port: None,
             parameters: Vec::new(),
@@ -472,13 +398,13 @@ impl Uri {
 
     /// Returns the host and port (if present) formatted as a string
     ///
-    /// This is the RFC 3261 §25.1 `hostport`, so an IPv6 host is bracketed
-    /// (e.g. `[2001:db8::1]:5060`); see [`Host::to_hostport`].
-    ///
     /// # Returns
     /// The host and port as a string (e.g., "example.com:5060")
     pub fn host_port(&self) -> String {
-        self.host.to_hostport(self.port.filter(|port| *port > 0))
+        match self.port {
+            Some(port) if port > 0 => format!("{}:{}", self.host, port),
+            _ => self.host.to_string(),
+        }
     }
 
     /// Create a new SIP URI with a domain host
@@ -634,9 +560,7 @@ impl Uri {
         Uri {
             scheme,
             user: None,
-            user_wire: None,
             password: None,
-            password_wire: None,
             host: Host::domain("unknown.host"), // Placeholder host
             port: None,
             parameters: Vec::new(),
@@ -678,7 +602,6 @@ impl Uri {
     /// Self for method chaining
     pub fn with_user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
-        self.user_wire = None;
         self
     }
 
@@ -695,7 +618,6 @@ impl Uri {
     /// but supported for compatibility.
     pub fn with_password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
-        self.password_wire = None;
         self
     }
 
@@ -817,24 +739,13 @@ impl fmt::Display for Uri {
         write!(f, "{}:", self.scheme)?;
 
         // User info (username and optional password)
-        // `user = 1*( ... )` (RFC 3261 §25.1): an empty user has no userinfo.
-        if let Some(user) = self.user.as_deref().filter(|user| !user.is_empty()) {
-            f.write_str(&userinfo_wire_form(
-                user,
-                self.user_wire.as_deref(),
-                USER_LITERAL_EXTRA,
-            ))?;
+        if let Some(ref user) = self.user {
+            let escaped_user = escape_user_info(user);
+            write!(f, "{}", escaped_user)?;
 
             if let Some(ref password) = self.password {
-                write!(
-                    f,
-                    ":{}",
-                    userinfo_wire_form(
-                        password,
-                        self.password_wire.as_deref(),
-                        PASSWORD_LITERAL_EXTRA
-                    )
-                )?;
+                let escaped_password = escape_user_info(password);
+                write!(f, ":{}", escaped_password)?;
             }
 
             write!(f, "@")?;
@@ -855,24 +766,15 @@ impl fmt::Display for Uri {
             }
         }
 
-        // uri-parameters: pname [ "=" pvalue ], each 1*paramchar (RFC 3261
-        // §25.1). Names and values are stored decoded, so anything outside
-        // paramchar (including '%') is escaped.
+        // Parameters (;key=value or ;key)
         for param in &self.parameters {
-            write!(f, ";{}", escape_uri_text(param.key(), URI_PARAM_LITERAL))?;
-            if let Some(value) = param.value() {
-                write!(f, "={}", escape_uri_text(&value, URI_PARAM_LITERAL))?;
-            }
+            write!(f, ";{}", param)?;
         }
 
-        // Headers (?key=value&key=value), in name order so the same URI
-        // always renders the same bytes; their order carries no meaning
-        // (RFC 3261 §19.1.4).
+        // Headers (?key=value&key=value)
         if !self.headers.is_empty() {
-            let mut headers: Vec<_> = self.headers.iter().collect();
-            headers.sort();
             let mut first = true;
-            for (key, value) in headers {
+            for (key, value) in &self.headers {
                 if first {
                     write!(f, "?")?;
                     first = false;
@@ -881,12 +783,7 @@ impl fmt::Display for Uri {
                 }
 
                 // URL-encode key and value
-                write!(
-                    f,
-                    "{}={}",
-                    escape_uri_text(key, URI_HEADER_LITERAL),
-                    escape_uri_text(value, URI_HEADER_LITERAL)
-                )?;
+                write!(f, "{}={}", escape_param(key), escape_param(value))?;
             }
         }
 
@@ -900,7 +797,7 @@ impl FromStr for Uri {
 
     fn from_str(s: &str) -> Result<Self> {
         // Use the nom parser from the parser module
-        match all_consuming(parse_uri).parse(s.as_bytes()) {
+        match all_consuming(parse_uri)(s.as_bytes()) {
             Ok((_rem, uri)) => Ok(uri),
             Err(e) => {
                 // For HTTP and HTTPS URIs, create a special case
@@ -923,9 +820,7 @@ impl FromStr for Uri {
                     return Ok(Uri {
                         scheme,
                         user: None,
-                        user_wire: None,
                         password: None,
-                        password_wire: None,
                         host: Host::domain(host_part),
                         port: None,
                         parameters: Vec::new(),
@@ -958,106 +853,80 @@ impl<'a> From<&'a str> for Uri {
 
 // --- Helper functions (escape/unescape, validation) ---
 
-/// `user-unreserved` (RFC 3261 §25.1): characters the `user` grammar allows
-/// literally besides `unreserved`. Headers render URIs in name-addr form
-/// (`<uri>`), as §20 requires when a URI contains `,` `;` or `?`.
-const USER_LITERAL_EXTRA: &[u8] = b"&=+$,;?/";
+/// Escape URI user info component according to RFC 3261
+///
+/// This escapes characters in the user info component (username/password)
+/// using percent-encoding as specified in the RFC.
+///
+/// # Parameters
+/// - `s`: The string to escape
+///
+/// # Returns
+/// The escaped string
+fn escape_user_info(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 3); // Worst case: all chars need escaping (×3)
 
-/// Characters the `password` grammar allows literally besides `unreserved`.
-const PASSWORD_LITERAL_EXTRA: &[u8] = b"&=+$,";
-
-/// `unreserved` = alphanum / mark (RFC 3261 §25.1).
-fn is_unreserved_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b)
-}
-
-fn hex_digit(b: u8) -> Option<u8> {
-    (b as char).to_digit(16).map(|d| d as u8)
-}
-
-fn push_escaped(out: &mut String, b: u8) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    out.push('%');
-    out.push(HEX[(b >> 4) as usize] as char);
-    out.push(HEX[(b & 0x0F) as usize] as char);
-}
-
-/// Decode every `%HH` escape. `None` if an escape is malformed or the result
-/// is not UTF-8.
-fn percent_decode(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            let high = hex_digit(*bytes.get(i + 1)?)?;
-            let low = hex_digit(*bytes.get(i + 2)?)?;
-            out.push((high << 4) | low);
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).ok()
-}
-
-/// The wire form of a userinfo component: the received `wire` text while it
-/// still decodes to `value`, otherwise `value` escaped per the RFC 3261 §25.1
-/// grammar (`unreserved` and `literal_extra` literal, every other byte,
-/// including `%`, as an uppercase `%HH` escape).
-fn userinfo_wire_form<'a>(
-    value: &'a str,
-    wire: Option<&'a str>,
-    literal_extra: &[u8],
-) -> Cow<'a, str> {
-    if let Some(wire) = wire {
-        let matches_value = if wire.contains('%') {
-            percent_decode(wire).as_deref() == Some(value)
-        } else {
-            wire == value
-        };
-        if matches_value {
-            return Cow::Borrowed(wire);
+    for c in s.chars() {
+        match c {
+            'a'..='z'
+            | 'A'..='Z'
+            | '0'..='9'
+            | '-'
+            | '_'
+            | '.'
+            | '!'
+            | '~'
+            | '*'
+            | '\''
+            | '('
+            | ')' => {
+                result.push(c);
+            }
+            _ => {
+                // Escape all other characters
+                for byte in c.to_string().bytes() {
+                    result.push('%');
+                    result.push_str(&format!("{:02X}", byte));
+                }
+            }
         }
     }
 
-    let literal_ok = |b: u8| is_unreserved_byte(b) || literal_extra.contains(&b);
-    if value.bytes().all(literal_ok) {
-        return Cow::Borrowed(value);
-    }
-    let mut out = String::with_capacity(value.len() * 3);
-    for b in value.bytes() {
-        if literal_ok(b) {
-            out.push(b as char);
-        } else {
-            push_escaped(&mut out, b);
-        }
-    }
-    Cow::Owned(out)
+    result
 }
 
-/// `param-unreserved`: characters `paramchar` allows besides `unreserved`.
-const URI_PARAM_LITERAL: &[u8] = b"[]/:&+$";
+/// Escape URI parameters and headers
+fn escape_param(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 3);
 
-/// `hnv-unreserved`: characters `hname` / `hvalue` allow besides
-/// `unreserved`.
-const URI_HEADER_LITERAL: &[u8] = b"[]/?:+$";
-
-/// Escape a decoded URI parameter or header name or value: `unreserved` and
-/// `literal_extra` stay literal, every other byte (including '%') becomes an
-/// uppercase `%HH` escape.
-fn escape_uri_text(text: &str, literal_extra: &[u8]) -> String {
-    let literal_ok = |b: u8| is_unreserved_byte(b) || literal_extra.contains(&b);
-    let mut out = String::with_capacity(text.len() * 3);
-    for b in text.bytes() {
-        if literal_ok(b) {
-            out.push(b as char);
-        } else {
-            push_escaped(&mut out, b);
+    for c in s.chars() {
+        match c {
+            'a'..='z'
+            | 'A'..='Z'
+            | '0'..='9'
+            | '-'
+            | '_'
+            | '.'
+            | '!'
+            | '~'
+            | '*'
+            | '\''
+            | '('
+            | ')'
+            | '+' => {
+                result.push(c);
+            }
+            _ => {
+                // Escape all other characters
+                for byte in c.to_string().bytes() {
+                    result.push('%');
+                    result.push_str(&format!("{:02X}", byte));
+                }
+            }
         }
     }
-    out
+
+    result
 }
 
 #[cfg(test)]
@@ -1089,155 +958,5 @@ mod diagnostic_safety_tests {
                 "debug leaked {secret}: {rendered}"
             );
         }
-    }
-}
-
-#[cfg(test)]
-mod user_escaping_tests {
-    use super::*;
-    use crate::types::address::Address;
-
-    fn uri(s: &str) -> Uri {
-        Uri::from_str(s).unwrap()
-    }
-
-    #[test]
-    fn e164_user_keeps_plus_literal() {
-        let parsed = uri("sip:+15551234567@example.com");
-        assert_eq!(parsed.user.as_deref(), Some("+15551234567"));
-        assert_eq!(parsed.to_string(), "sip:+15551234567@example.com");
-
-        let built = Uri::sip("example.com").with_user("+15551234567");
-        assert_eq!(built.to_string(), "sip:+15551234567@example.com");
-        assert_eq!(built, parsed);
-    }
-
-    #[test]
-    fn escaped_reserved_characters_keep_their_identity() {
-        // §19.1.4: a reserved character is not equivalent to its escape.
-        // A received escaped `+` is sent again as received, not as `+`.
-        let escaped = uri("sip:%2b15551234567@example.com");
-        assert_eq!(escaped.user.as_deref(), Some("+15551234567"));
-        assert_eq!(escaped.to_string(), "sip:%2b15551234567@example.com");
-        assert_eq!(
-            uri("sip:+15551234567@example.com").to_string(),
-            "sip:+15551234567@example.com"
-        );
-    }
-
-    #[test]
-    fn received_escapes_are_preserved_and_user_is_decoded() {
-        let escaped = uri("sip:%61lice@atlanta.com");
-        assert_eq!(escaped.user.as_deref(), Some("alice"));
-        assert_eq!(escaped.to_string(), "sip:%61lice@atlanta.com");
-        // `==` compares the decoded components.
-        assert_eq!(escaped, Uri::sip("atlanta.com").with_user("alice"));
-    }
-
-    #[test]
-    fn empty_user_renders_without_userinfo() {
-        let built = Uri::sip("example.com").with_user("");
-        assert_eq!(built.to_string(), "sip:example.com");
-    }
-
-    #[test]
-    fn rfc4475_escaped_user_keeps_logical_value_and_wire_identity() {
-        // RFC 4475 esc01: the logical user is "sips:user@example.com".
-        let parsed = uri("sip:sips%3Auser%40example.com@example.net");
-        assert_eq!(parsed.user.as_deref(), Some("sips:user@example.com"));
-        assert_eq!(
-            parsed.to_string(),
-            "sip:sips%3Auser%40example.com@example.net"
-        );
-    }
-
-    #[test]
-    fn telephone_subscriber_user_renders_literally_and_round_trips() {
-        // §19.1.6 / §25.1: `;` and `=` are user-unreserved.
-        let text = "sip:+15551234567;isub=1411@gw.example.com;user=phone";
-        let parsed = uri(text);
-        assert_eq!(parsed.user.as_deref(), Some("+15551234567;isub=1411"));
-        assert_eq!(parsed.to_string(), text);
-
-        let built = Uri::sip("gw.example.com").with_user("+15551234567;isub=1411");
-        assert_eq!(
-            built.to_string(),
-            "sip:+15551234567;isub=1411@gw.example.com"
-        );
-        // §20: headers carry it in name-addr form.
-        assert_eq!(
-            Address::new(built).to_string(),
-            "<sip:+15551234567;isub=1411@gw.example.com>"
-        );
-    }
-
-    #[test]
-    fn built_user_and_password_render_per_grammar_and_round_trip() {
-        let built = Uri {
-            password: Some("p&q=r+s$t,u;v w".to_string()),
-            ..Uri::sip("example.com").with_user("a&b=c+d$e/f,g;h?i j@k:l%")
-        };
-        let rendered = built.to_string();
-        assert_eq!(
-            rendered,
-            "sip:a&b=c+d$e/f,g;h?i%20j%40k%3Al%25:p&q=r+s$t,u%3Bv%20w@example.com"
-        );
-
-        let reparsed = uri(&rendered);
-        assert_eq!(reparsed.user, built.user);
-        assert_eq!(reparsed.password, built.password);
-        assert_eq!(reparsed.to_string(), rendered);
-        assert_eq!(reparsed, built);
-    }
-
-    #[test]
-    fn stale_wire_form_is_ignored_after_user_changes() {
-        let mut parsed = uri("sip:%2B15551234567@example.com");
-        parsed.user = Some("+15550000000".to_string());
-        assert_eq!(parsed.to_string(), "sip:+15550000000@example.com");
-    }
-
-    #[test]
-    fn non_ascii_user_renders_escaped() {
-        let built = Uri::sip("example.com").with_user("caf\u{e9}");
-        assert_eq!(built.to_string(), "sip:caf%C3%A9@example.com");
-        assert_eq!(uri(&built.to_string()), built);
-    }
-}
-
-#[cfg(test)]
-mod hostport_tests {
-    use super::*;
-
-    #[test]
-    fn hostport_brackets_ipv6_only() {
-        let v6 = Host::Address("2001:db8::1".parse().unwrap());
-        let v4 = Host::Address("192.0.2.1".parse().unwrap());
-        let domain = Host::domain("example.com");
-
-        // RFC 3261 §25.1 hostport: IPv6 is an IPv6reference.
-        assert_eq!(v6.to_hostport(Some(5060)), "[2001:db8::1]:5060");
-        assert_eq!(v6.to_hostport(None), "[2001:db8::1]");
-        assert_eq!(v4.to_hostport(Some(5060)), "192.0.2.1:5060");
-        assert_eq!(domain.to_hostport(None), "example.com");
-
-        // Display stays the bare address form used by `received=` and SDP.
-        assert_eq!(v6.to_string(), "2001:db8::1");
-
-        // The hostport text round-trips through the Via builder's parser.
-        assert_eq!(
-            crate::builder::headers::via::parse_sent_by(&v6.to_hostport(Some(5060))).unwrap(),
-            (v6, Some(5060))
-        );
-    }
-
-    #[test]
-    fn uri_host_port_brackets_ipv6() {
-        let uri = Uri::from_str("sip:alice@[2001:db8::1]:5070").unwrap();
-        assert_eq!(uri.host_port(), "[2001:db8::1]:5070");
-        let uri = Uri::from_str("sip:alice@[::1]").unwrap();
-        assert_eq!(uri.host_port(), "[::1]");
-        let uri = Uri::from_str("sip:alice@192.0.2.1:5070").unwrap();
-        assert_eq!(uri.host_port(), "192.0.2.1:5070");
     }
 }

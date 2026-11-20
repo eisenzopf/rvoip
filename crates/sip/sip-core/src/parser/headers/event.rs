@@ -26,8 +26,7 @@ use crate::types::header::TypedHeaderTrait;
 use crate::types::headers::HeaderName;
 use crate::types::param::Param as RichParam;
 #[cfg(test)]
-use crate::Error;
-use nom::Parser; // For processing semicolon_params0 output
+use crate::Error; // For processing semicolon_params0 output
 
 // Import main Error type for the crate and Hdr (HeaderName, TypedHeader) + Event types
 use crate::types::event::{Event, EventType, ParamValue, Params};
@@ -38,7 +37,7 @@ use nom::{
     character::complete::multispace0, // For SWS/OWS
     combinator::{eof, map, opt},
     error::Error as NomError,
-    sequence::{delimited, pair, preceded, terminated},
+    sequence::{delimited, pair, preceded, terminated, tuple},
     IResult,
 };
 
@@ -55,8 +54,7 @@ fn parse_event_type_value(input: &[u8]) -> IResult<&[u8], EventType, NomError<&[
         map(token, |tok_bytes: &[u8]| {
             EventType::Token(String::from_utf8_lossy(tok_bytes).into_owned())
         }),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // Parser for event parameters using semicolon_params0
@@ -83,8 +81,7 @@ fn parse_event_params(input: &[u8]) -> IResult<&[u8], (Option<String>, Params), 
             }
         }
         (id_val, other_params_map)
-    })
-    .parse(input)
+    })(input)
 }
 
 /// Parses the value part of an Event header (the content after "Event: ").
@@ -92,7 +89,7 @@ fn parse_event_params(input: &[u8]) -> IResult<&[u8], (Option<String>, Params), 
 /// Returns types::headers::event::Event
 pub fn parse_event_header_value(input: &[u8]) -> IResult<&[u8], Event, NomError<&[u8]>> {
     let core_event_parser = map(
-        (parse_event_type_value, opt(parse_event_params)),
+        tuple((parse_event_type_value, opt(parse_event_params))),
         |(event_type, params_opt)| {
             let (id, params) = params_opt.unwrap_or_else(|| (None, Params::new()));
             Event {
@@ -105,10 +102,9 @@ pub fn parse_event_header_value(input: &[u8]) -> IResult<&[u8], Event, NomError<
 
     // The event value itself, then ensure only optional whitespace and EOF remain.
     map(
-        terminated(core_event_parser, (multispace0, eof)),
+        terminated(core_event_parser, tuple((multispace0, eof))),
         |event| event, // event is the output of core_event_parser
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parses a full Event header line, including the "Event:" part.
@@ -116,10 +112,9 @@ pub fn parse_event_header_value(input: &[u8]) -> IResult<&[u8], Event, NomError<
 /// Returns types::headers::event::Event
 pub fn parse_event_header(input: &[u8]) -> IResult<&[u8], Event, NomError<&[u8]>> {
     preceded(
-        pair(tag_no_case(&b"Event"[..]), hcolon), // Use hcolon
+        pair(tag_no_case(b"Event"), hcolon), // Use hcolon
         parse_event_header_value,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]

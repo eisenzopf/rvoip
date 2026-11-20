@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::packet::RtpPacket;
 use crate::Result;
 use aes::{
-    cipher::{Array, KeyIvInit, StreamCipher},
+    cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher},
     Aes128, Aes256,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -84,7 +84,7 @@ struct SrtpSessionKeys {
     rtp_enc_key: Vec<u8>,
 
     /// Key for RTP authentication
-    rtp_authenticator: super::auth::SrtpAuthenticator,
+    rtp_auth_key: Vec<u8>,
 
     /// Salt for RTP encryption
     rtp_salt: Vec<u8>,
@@ -134,19 +134,12 @@ impl SrtpCrypto {
         &self.suite
     }
 
-    /// The master key and salt the session keys were derived from.
-    pub(crate) fn master_key(&self) -> &SrtpCryptoKey {
-        &self.master_key
-    }
-
     /// Hot call state: the RTP session key material the packed SRTP block
-    /// copies, as (encryption key, salt, keyed HMAC-SHA1 state, tag length).
+    /// copies, as (encryption key, salt, authentication key, tag length).
     /// `None` unless the suite is AES-CM with HMAC-SHA1 and the keys are
     /// derived (every suite `SrtpCryptoSuite::validate` admits), so the block
     /// is only built where its path is the session-key path, byte for byte.
-    pub(crate) fn rtp_hot_material(
-        &self,
-    ) -> Option<(&[u8], &[u8], &super::auth::HmacSha1Core, usize)> {
+    pub(crate) fn rtp_hot_material(&self) -> Option<(&[u8], &[u8], &[u8], usize)> {
         if self.suite.encryption != SrtpEncryptionAlgorithm::AesCm
             || self.suite.authentication == SrtpAuthenticationAlgorithm::Null
         {
@@ -156,7 +149,7 @@ impl SrtpCrypto {
         Some((
             keys.rtp_enc_key.as_slice(),
             keys.rtp_salt.as_slice(),
-            keys.rtp_authenticator.keyed_mac()?,
+            keys.rtp_auth_key.as_slice(),
             self.suite.tag_length,
         ))
     }
@@ -218,11 +211,7 @@ impl SrtpCrypto {
         // Store the derived keys
         let session_keys = SrtpSessionKeys {
             rtp_enc_key,
-            rtp_authenticator: super::auth::SrtpAuthenticator::new(
-                self.suite.authentication,
-                rtp_auth_key,
-                self.suite.tag_length,
-            ),
+            rtp_auth_key,
             rtp_salt,
             rtcp_enc_key,
             rtcp_auth_key,
@@ -355,9 +344,14 @@ impl SrtpCrypto {
                 .session_keys
                 .as_ref()
                 .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
-            return session_keys
-                .rtp_authenticator
-                .append_auth_tag(buffer, start, roc);
+            return super::auth::SrtpAuthenticator::append_auth_tag(
+                self.suite.authentication,
+                super::auth::HmacSha1Key::Raw(&session_keys.rtp_auth_key),
+                self.suite.tag_length,
+                buffer,
+                start,
+                roc,
+            );
         }
         let session_keys = self
             .session_keys
@@ -382,9 +376,14 @@ impl SrtpCrypto {
             &iv,
         )?;
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            session_keys
-                .rtp_authenticator
-                .append_auth_tag(buffer, start, roc)?;
+            super::auth::SrtpAuthenticator::append_auth_tag(
+                self.suite.authentication,
+                super::auth::HmacSha1Key::Raw(&session_keys.rtp_auth_key),
+                self.suite.tag_length,
+                buffer,
+                start,
+                roc,
+            )?;
         }
         Ok(())
     }
@@ -403,10 +402,15 @@ impl SrtpCrypto {
             .as_ref()
             .ok_or_else(|| Error::SrtpError("Session keys not derived".to_string()))?;
 
+        // Create an authenticator
+        let authenticator = super::auth::SrtpAuthenticator::new(
+            self.suite.authentication,
+            session_keys.rtp_auth_key.clone(),
+            self.suite.tag_length,
+        );
+
         // Calculate the authentication tag
-        session_keys
-            .rtp_authenticator
-            .calculate_auth_tag(packet_data, roc)
+        authenticator.calculate_auth_tag(packet_data, roc)
     }
 
     /// Decrypt an SRTP packet in the initial rollover cycle.
@@ -457,11 +461,15 @@ impl SrtpCrypto {
 
         // Verify authentication if enabled
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
+            // Create an authenticator
+            let authenticator = super::auth::SrtpAuthenticator::new(
+                self.suite.authentication,
+                session_keys.rtp_auth_key.clone(),
+                self.suite.tag_length,
+            );
+
             // Verify the authentication tag
-            let is_valid =
-                session_keys
-                    .rtp_authenticator
-                    .verify_auth_tag(packet_data, auth_tag, roc)?;
+            let is_valid = authenticator.verify_auth_tag(packet_data, auth_tag, roc)?;
             if !is_valid {
                 return Err(Error::AuthenticationFailed(
                     "SRTP authentication tag mismatch".to_string(),
@@ -574,7 +582,10 @@ impl SrtpCrypto {
         let (packet_data, auth_tag) = data.split_at_mut(tag_start);
 
         if self.suite.authentication != SrtpAuthenticationAlgorithm::Null {
-            let is_valid = session_keys.rtp_authenticator.verify_auth_tag_in_place(
+            let is_valid = super::auth::SrtpAuthenticator::verify_auth_tag_in_place(
+                self.suite.authentication,
+                super::auth::HmacSha1Key::Raw(&session_keys.rtp_auth_key),
+                self.suite.tag_length,
                 packet_data,
                 auth_tag,
                 roc,
@@ -931,16 +942,16 @@ pub(super) fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<(
             iv.len()
         )));
     }
-    let iv = <&Array<u8, _>>::try_from(&iv[0..16]).expect("length checked above");
+    let iv = GenericArray::from_slice(&iv[0..16]);
 
     match key.len() {
         16 => {
-            let key = <&Array<u8, _>>::try_from(key).expect("length checked above");
+            let key = GenericArray::from_slice(key);
             let mut cipher = Aes128Ctr64BE::new(key, iv);
             cipher.apply_keystream(data);
         }
         32 => {
-            let key = <&Array<u8, _>>::try_from(key).expect("length checked above");
+            let key = GenericArray::from_slice(key);
             let mut cipher = Aes256Ctr64BE::new(key, iv);
             cipher.apply_keystream(data);
         }

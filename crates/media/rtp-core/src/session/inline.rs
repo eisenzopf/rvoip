@@ -555,9 +555,9 @@ mod tests {
     /// run time rather than hard-coded, and shared by every context a test
     /// builds so both ends of a call agree.
     fn test_srtp_key() -> &'static ([u8; 16], [u8; 14]) {
-        use rand::RngExt;
+        use rand::Rng;
         static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
-        KEY.get_or_init(|| (rand::rng().random(), rand::rng().random()))
+        KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()))
     }
 
     fn srtp_context() -> SrtpContext {
@@ -916,9 +916,9 @@ mod tests {
     /// The keys a rekey moves to: a second random master key and salt per
     /// test process, independent of [`test_srtp_key`].
     fn rekeyed_context() -> SrtpContext {
-        use rand::RngExt;
+        use rand::Rng;
         static KEY: std::sync::OnceLock<([u8; 16], [u8; 14])> = std::sync::OnceLock::new();
-        let (key, salt) = KEY.get_or_init(|| (rand::rng().random(), rand::rng().random()));
+        let (key, salt) = KEY.get_or_init(|| (rand::thread_rng().gen(), rand::thread_rng().gen()));
         SrtpContext::new(
             SRTP_AES128_CM_SHA1_80,
             SrtpCryptoKey::new(key.to_vec(), salt.to_vec()),
@@ -1055,9 +1055,10 @@ mod tests {
             .unwrap()
         };
         // A separate RTCP socket: its receive task unprotects SRTCP with the
-        // same context, so the RTP loop must not own it. The session binds
-        // the RTCP socket on an ephemeral port itself: probing for a free
-        // port and binding it again later races parallel tests for it.
+        // same context, so the RTP loop must not own it.
+        let rtcp_port = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let rtcp_addr = rtcp_port.local_addr().unwrap();
+        drop(rtcp_port);
         let non_mux = {
             let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
             RtpSession::new_event_driven_with_rtcp_socket(
@@ -1066,15 +1067,11 @@ mod tests {
                     ..RtpSessionConfig::default()
                 },
                 crate::transport::SymmetricRtpPolicy::default(),
-                "127.0.0.1:0".parse().unwrap(),
+                rtcp_addr,
             )
             .await
             .unwrap()
         };
-        let rtcp_addr = non_mux.local_rtcp_addr().expect("a separate RTCP socket");
-        assert_ne!(rtcp_addr.port(), 0);
-        assert_ne!(Some(rtcp_addr), non_mux.local_addr().ok());
-        assert!(!non_mux.rtcp_mux());
         for mut session in [session, non_mux] {
             assert!(session.inline_rx_enabled());
             udp(&session)
@@ -1459,20 +1456,6 @@ mod tests {
             arrivals.push(std::time::Instant::now());
         }
         let gap = arrivals[1].duration_since(arrivals[0]);
-        // Pin the sender state for the close. `we_sent` (RFC 3550 §6.4) holds
-        // while the packet count differs from the one recorded two reports
-        // ago. With the media sent before both periodic reports, the closing
-        // report type depended on how many reports' bookkeeping had landed
-        // by the close, which a starved runner reorders: an SR from one
-        // executor and an RR from the other. Back on the 5 s minimum, at most
-        // one report already drawn on the fast interval can still follow, so
-        // one more media packet sent now keeps both executors senders however
-        // late the close runs.
-        session.set_rtcp_reduced_minimum(false);
-        session
-            .send_packet(480, Bytes::from(vec![0xd5; 160]), false)
-            .await
-            .unwrap();
         session.close().await.unwrap();
         // A report already in flight may precede the closing compound; the
         // report task is gone after it.
@@ -1524,16 +1507,9 @@ mod tests {
                 ]
             );
             assert!(v2.periodic[1][0].contains("fraction=0 cumulative=1 highest=4"));
-            // The media packet sent right before the close keeps the session
-            // a sender (RFC 3550 §6.4): the closing compound is an SR.
-            assert!(
-                v2.closing[0].starts_with(&format!(
-                    "SR ssrc={LOCAL_SSRC:08x} packets=3 octets=480 blocks="
-                )),
-                "{:?}",
-                v2.closing
-            );
-            assert!(v2.closing[0].contains("fraction=0 cumulative=1 highest=4"));
+            // SR or RR, depending on whether the session still counts as a
+            // sender two intervals after its media (RFC 3550 §6.4).
+            assert!(v2.closing[0].contains(&format!("R ssrc={LOCAL_SSRC:08x}")));
             assert_eq!(v2.closing[1], "SDES chunks=1");
             assert_eq!(
                 v2.closing[2],

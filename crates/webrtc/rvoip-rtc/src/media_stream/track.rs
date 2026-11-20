@@ -1,10 +1,73 @@
-//! `MediaStreamTrack` implementation.
+//! MediaStreamTrack API
 //!
-//! This module is private; the type is re-exported from
-//! [`crate::media_stream`]. All user-facing documentation and examples live on
-//! [`MediaStreamTrack`] itself, so that rustdoc renders them and their doctests run.
+//! This module implements the `MediaStreamTrack` interface as defined in the
+//! [W3C Media Capture and Streams specification](https://www.w3.org/TR/mediacapture-streams/#mediastreamtrack).
 //!
-//! # Specification
+//! A [`MediaStreamTrack`] represents a single media track within a media stream, such as
+//! an audio track from a microphone or a video track from a camera. Each track has properties
+//! like enabled/disabled state, mute status, and lifecycle state (live or ended).
+//!
+//! # Examples
+//!
+//! ## Creating a video track
+//!
+//! ```
+//! use rtc::media_stream::MediaStreamTrack;
+//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+//! use rtc::rtp_transceiver::rtp_sender::{RTCRtpEncodingParameters, RTCRtpCodingParameters};
+//! use rtc::peer_connection::configuration::media_engine::MIME_TYPE_VP8;
+//!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let codec = RTCRtpCodec {
+//!     mime_type: MIME_TYPE_VP8.to_string(),
+//!     clock_rate: 90000,
+//!     channels: 0,
+//!     sdp_fmtp_line: String::new(),
+//!     rtcp_feedback: vec![],
+//! };
+//!
+//! let video_track = MediaStreamTrack::new(
+//!     "stream-123".to_string(),
+//!     "track-456".to_string(),
+//!     "Front Camera".to_string(),
+//!     RtpCodecKind::Video,
+//!     vec![RTCRtpEncodingParameters {
+//!         rtp_coding_parameters: RTCRtpCodingParameters {
+//!             ssrc: Some(789012),
+//!             ..Default::default()
+//!         },
+//!         codec,
+//!         ..Default::default()
+//!     }],
+//! );
+//!
+//! assert_eq!(video_track.kind(), RtpCodecKind::Video);
+//! assert_eq!(video_track.label(), "Front Camera");
+//! assert!(video_track.enabled());
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Controlling track state
+//!
+//! ```
+//! # use rtc::media_stream::MediaStreamTrack;
+//! # use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RtpCodecKind};
+//! # fn example(mut track: MediaStreamTrack) {
+//! // Disable the track temporarily
+//! track.set_enabled(false);
+//! assert!(!track.enabled());
+//!
+//! // Re-enable the track
+//! track.set_enabled(true);
+//! assert!(track.enabled());
+//!
+//! // Stop the track permanently
+//! track.stop();
+//! # }
+//! ```
+//!
+//! # Specifications
 //!
 //! - [W3C MediaStreamTrack](https://www.w3.org/TR/mediacapture-streams/#mediastreamtrack)
 //! - [MDN MediaStreamTrack](https://developer.mozilla.org/en-US/docs/Web/API/MediaStreamTrack)
@@ -66,25 +129,6 @@ pub type MediaStreamTrackId = String;
 /// assert!(track.enabled());
 /// assert!(!track.muted());
 /// # Ok(())
-/// # }
-/// ```
-///
-/// ## Controlling track state
-///
-/// ```
-/// use rtc::media_stream::MediaStreamTrack;
-///
-/// # fn example(mut track: MediaStreamTrack) {
-/// // Disable the track temporarily
-/// track.set_enabled(false);
-/// assert!(!track.enabled());
-///
-/// // Re-enable the track
-/// track.set_enabled(true);
-/// assert!(track.enabled());
-///
-/// // Stop the track permanently — a stopped track cannot be restarted
-/// track.stop();
 /// # }
 /// ```
 #[derive(Default, Debug, Clone)]
@@ -274,7 +318,7 @@ impl MediaStreamTrack {
     ///
     /// # Specification
     ///
-    /// See [RFC 8851 - RTP Payload Format Restrictions](https://datatracker.ietf.org/doc/html/rfc8851).
+    /// See [RFC 8851 - RTP Payload Format Restrictions](https://www.rfc-editor.org/rfc/rfc8851.html).
     ///
     /// # Examples
     ///
@@ -402,7 +446,7 @@ impl MediaStreamTrack {
     ///
     /// # Specification
     ///
-    /// See [RFC 3550 - RTP: A Transport Protocol for Real-Time Applications](https://datatracker.ietf.org/doc/html/rfc3550#section-5.1).
+    /// See [RFC 3550 - RTP: A Transport Protocol for Real-Time Applications](https://www.rfc-editor.org/rfc/rfc3550.html#section-5.1).
     ///
     /// # Examples
     ///
@@ -522,7 +566,6 @@ impl MediaStreamTrack {
         self.muted
     }
 
-    /// Sets the muted state of the track.
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
     }
@@ -750,12 +793,10 @@ impl MediaStreamTrack {
             .map(|coding| &coding.codec)
     }
 
-    /// Returns the RTP encoding parameters (codings) configured for this track.
     pub fn codings(&self) -> &[RTCRtpEncodingParameters] {
         &self.codings
     }
 
-    /// Adds an RTP encoding parameter (coding) to the track.
     pub fn add_coding(&mut self, coding: RTCRtpEncodingParameters) {
         self.codings.push(coding);
     }

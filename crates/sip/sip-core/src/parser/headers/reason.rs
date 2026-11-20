@@ -4,7 +4,6 @@
 // reason-param = "cause" EQUAL cause / "text" EQUAL quoted-string / generic-param
 // cause = 1*DIGIT
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while1},
@@ -12,7 +11,7 @@ use nom::{
     combinator::{map, map_res},
     error::{Error as NomError, ErrorKind},
     multi::many0,
-    sequence::{pair, preceded},
+    sequence::{pair, preceded, tuple},
 };
 use std::str;
 
@@ -36,39 +35,36 @@ fn protocol(input: &[u8]) -> ParseResult<'_, String> {
         |b: &[u8]| {
             str::from_utf8(b)
                 .map(|s| s.to_string())
-                .map_err(|_| nom::Err::<_>::Error(NomError::new(b, ErrorKind::AlphaNumeric)))
+                .map_err(|_| nom::Err::Error(NomError::new(b, ErrorKind::AlphaNumeric)))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // Define parser for the cause parameter
 fn cause_param(input: &[u8]) -> ParseResult<'_, u16> {
     preceded(
-        pair(tag_no_case(&b"cause"[..]), equal),
+        pair(tag_no_case(b"cause"), equal),
         map_res(digit1, |b: &[u8]| {
             str::from_utf8(b)
-                .map_err(|_| nom::Err::<_>::Error(NomError::new(b, ErrorKind::Digit)))
+                .map_err(|_| nom::Err::Error(NomError::new(b, ErrorKind::Digit)))
                 .and_then(|s| {
                     s.parse::<u16>()
                         .map_err(|_| nom::Err::Error(NomError::new(b, ErrorKind::Digit)))
                 })
         }),
-    )
-    .parse(input)
+    )(input)
 }
 
 // Define parser for the text parameter
 fn text_param(input: &[u8]) -> ParseResult<'_, String> {
     preceded(
-        pair(tag_no_case(&b"text"[..]), equal),
+        pair(tag_no_case(b"text"), equal),
         map_res(quoted_string, |b: &[u8]| {
             str::from_utf8(b)
                 .map(|s| s.to_string())
-                .map_err(|_| nom::Err::<_>::Error(NomError::new(b, ErrorKind::AlphaNumeric)))
+                .map_err(|_| nom::Err::Error(NomError::new(b, ErrorKind::AlphaNumeric)))
         }),
-    )
-    .parse(input)
+    )(input)
 }
 
 // Define parser for reason parameters (cause, text, or generic)
@@ -77,8 +73,7 @@ fn reason_param(input: &[u8]) -> ParseResult<'_, ReasonParam> {
         map(cause_param, ReasonParam::Cause),
         map(text_param, ReasonParam::Text),
         map(generic_param, ReasonParam::Generic),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // Define enum for reason parameters
@@ -102,7 +97,7 @@ enum ReasonParam {
 /// ```
 pub fn parse_reason(input: &[u8]) -> ParseResult<'_, Reason> {
     map_res(
-        (protocol, many0(preceded(semi, reason_param))),
+        tuple((protocol, many0(preceded(semi, reason_param)))),
         |(protocol_str, params)| {
             let mut cause: Option<u16> = None;
             let mut text: Option<String> = None;
@@ -119,11 +114,10 @@ pub fn parse_reason(input: &[u8]) -> ParseResult<'_, Reason> {
             // The cause parameter is mandatory according to RFC 3326
             match cause {
                 Some(c) => Ok(Reason::new(protocol_str, c, text)),
-                None => Err(nom::Err::<_>::Error(NomError::new(input, ErrorKind::Digit))),
+                None => Err(nom::Err::Error(NomError::new(input, ErrorKind::Digit))),
             }
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]

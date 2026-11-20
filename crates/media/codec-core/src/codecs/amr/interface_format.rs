@@ -175,11 +175,13 @@ pub fn if2_pack(
         }
     }
 
+    let mut position = if2_header_bits(variant);
     if if2_has_fqi(variant) {
         if2_set_bit(variant, &mut out, 4, quality_ok);
     }
-    for (position, &bit) in (if2_header_bits(variant)..).zip(bits) {
+    for &bit in bits {
         if2_set_bit(variant, &mut out, position, bit != 0);
+        position += 1;
     }
     Ok(out)
 }
@@ -222,10 +224,12 @@ pub fn if2_unpack(variant: AmrVariant, data: &[u8]) -> Result<If2Frame> {
     }
 
     let quality_ok = !if2_has_fqi(variant) || if2_get_bit(variant, data, 4);
-    let start = if2_header_bits(variant);
-    let bits: Vec<u8> = (start..start + if2_core_bits(frame_type))
-        .map(|position| u8::from(if2_get_bit(variant, data, position)))
-        .collect();
+    let mut position = if2_header_bits(variant);
+    let mut bits = Vec::with_capacity(if2_core_bits(frame_type));
+    for _ in 0..if2_core_bits(frame_type) {
+        bits.push(u8::from(if2_get_bit(variant, data, position)));
+        position += 1;
+    }
     Ok(If2Frame {
         frame_type,
         quality_ok,

@@ -10,7 +10,6 @@ use std::fmt;
 
 /// Codec kind identifying the media type.
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum RtpCodecKind {
     /// Unspecified or unknown codec type
     #[default]
@@ -23,10 +22,6 @@ pub enum RtpCodecKind {
     /// Video codec
     #[serde(rename = "video")]
     Video = 2,
-
-    /// Non-audio/video RTP-carried application data
-    #[serde(rename = "application")]
-    Application = 3,
 }
 
 impl From<&str> for RtpCodecKind {
@@ -34,7 +29,6 @@ impl From<&str> for RtpCodecKind {
         match raw {
             "audio" => RtpCodecKind::Audio,
             "video" => RtpCodecKind::Video,
-            "application" => RtpCodecKind::Application,
             _ => RtpCodecKind::Unspecified,
         }
     }
@@ -45,7 +39,6 @@ impl From<u8> for RtpCodecKind {
         match v {
             1 => RtpCodecKind::Audio,
             2 => RtpCodecKind::Video,
-            3 => RtpCodecKind::Application,
             _ => RtpCodecKind::Unspecified,
         }
     }
@@ -56,7 +49,6 @@ impl fmt::Display for RtpCodecKind {
         let s = match *self {
             RtpCodecKind::Audio => "audio",
             RtpCodecKind::Video => "video",
-            RtpCodecKind::Application => "application",
             RtpCodecKind::Unspecified => UNSPECIFIED_STR,
         };
         write!(f, "{s}")
@@ -67,7 +59,7 @@ impl fmt::Display for RtpCodecKind {
 ///
 /// ## Specifications
 ///
-/// * [W3C](https://www.w3.org/TR/webrtc/#dictionary-rtcrtpcodec-members)
+/// * [W3C](https://w3c.github.io/webrtc-pc/#dictionary-rtcrtpcodeccapability-members)
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct RTCRtpCodec {
     /// MIME type of the codec (e.g., "video/VP8", "audio/opus")
@@ -113,8 +105,6 @@ impl RTCRtpCodec {
             Ok(Box::<rtp::codec::g7xx::G7xxPayloader>::default())
         } else if mime_type == MIME_TYPE_AV1.to_lowercase() {
             Ok(Box::<rtp::codec::av1::Av1Payloader>::default())
-        } else if mime_type == MIME_TYPE_SMPTE336M.to_lowercase() {
-            Ok(Box::<rtp::codec::smpte336m::Smpte336mPayloader>::default())
         } else {
             Err(Error::ErrNoPayloaderForCodec)
         }
@@ -241,54 +231,14 @@ pub(crate) fn find_rtx_payload_type(
     needle: PayloadType,
     haystack: &[RTCRtpCodecParameters],
 ) -> Option<PayloadType> {
+    let apt_str = format!("apt={}", needle);
     for c in haystack {
-        // Match on the parsed `apt` value rather than the whole fmtp line, so an
-        // RTX codec carrying extra parameters (e.g. `apt=96;rtx-time=3000`, RFC
-        // 4588 §8.1) is still associated with its primary.
-        if parse_rtx_apt(&c.rtp_codec.sdp_fmtp_line) == Some(needle) {
+        if apt_str == c.rtp_codec.sdp_fmtp_line {
             return Some(c.payload_type);
         }
     }
 
     None
-}
-
-/// Parses the associated payload type (`apt`) from an RTX codec's fmtp line.
-///
-/// RFC 4588 §8.1 defines the `apt` parameter, which maps a retransmission
-/// payload type to the payload type of the stream it repairs. The fmtp line may
-/// carry additional parameters (e.g. `apt=96;rtx-time=3000`), so the value is
-/// extracted from the `apt=` token rather than compared against the whole line.
-///
-/// # Parameters
-///
-/// * `sdp_fmtp_line` - The RTX codec's fmtp line, e.g. `"apt=96"`
-///
-/// # Returns
-///
-/// The associated (primary) payload type if an `apt=` token is present, else None.
-pub(crate) fn parse_rtx_apt(sdp_fmtp_line: &str) -> Option<PayloadType> {
-    sdp_fmtp_line
-        .split(';')
-        .filter_map(|param| param.trim().strip_prefix("apt="))
-        .find_map(|value| value.trim().parse::<PayloadType>().ok())
-}
-
-/// Whether `codec` repairs another stream rather than carrying media of its own.
-///
-/// Covers retransmission (RTX, RFC 4588) and forward error correction (FlexFEC, ULPFEC, RED).
-/// These are not alternative media formats a peer chooses between — they accompany whichever
-/// primary codec was chosen — which is why codec preferences leave them in place. See
-/// [setCodecPreferences](https://www.w3.org/TR/webrtc/#dom-rtcrtptransceiver-setcodecpreferences):
-///
-/// > Codecs of type RTX, RED and FEC are always supported […] and are not affected by this method.
-pub(crate) fn is_repair_codec(codec: &RTCRtpCodec) -> bool {
-    let mime_type = codec.mime_type.to_lowercase();
-    let subtype = mime_type
-        .split_once('/')
-        .map_or(mime_type.as_str(), |(_, subtype)| subtype);
-
-    matches!(subtype, "rtx" | "ulpfec" | "red") || subtype.starts_with("flexfec")
 }
 
 // For now, only FlexFEC is supported.
@@ -334,59 +284,6 @@ pub(crate) fn rtcp_feedback_intersection(
     }
 
     out
-}
-
-#[cfg(test)]
-mod rtx_apt_test {
-    use super::{RTCRtpCodec, RTCRtpCodecParameters, find_rtx_payload_type, parse_rtx_apt};
-
-    fn rtx(payload_type: u8, fmtp: &str) -> RTCRtpCodecParameters {
-        RTCRtpCodecParameters {
-            rtp_codec: RTCRtpCodec {
-                mime_type: "video/rtx".to_owned(),
-                clock_rate: 90000,
-                channels: 0,
-                sdp_fmtp_line: fmtp.to_owned(),
-                rtcp_feedback: vec![],
-            },
-            payload_type,
-        }
-    }
-
-    #[test]
-    fn find_rtx_payload_type_tolerates_extra_apt_params() {
-        // A remote may append rtx-time to the apt fmtp (RFC 4588 §8.1); the
-        // association must still succeed rather than dropping RTX from the answer.
-        let haystack = vec![rtx(97, "apt=96;rtx-time=3000"), rtx(99, "apt=98")];
-        assert_eq!(find_rtx_payload_type(96, &haystack), Some(97));
-        assert_eq!(find_rtx_payload_type(98, &haystack), Some(99));
-        assert_eq!(find_rtx_payload_type(100, &haystack), None);
-    }
-
-    #[test]
-    fn parses_plain_apt() {
-        assert_eq!(parse_rtx_apt("apt=96"), Some(96));
-        assert_eq!(parse_rtx_apt("apt=127"), Some(127));
-        assert_eq!(parse_rtx_apt("apt=0"), Some(0));
-    }
-
-    #[test]
-    fn parses_apt_with_extra_params() {
-        // RFC 4588 §8.1 allows an optional rtx-time parameter alongside apt.
-        assert_eq!(parse_rtx_apt("apt=96;rtx-time=3000"), Some(96));
-        assert_eq!(parse_rtx_apt("rtx-time=3000;apt=102"), Some(102));
-        assert_eq!(parse_rtx_apt("apt=98 ; rtx-time=1000"), Some(98));
-    }
-
-    #[test]
-    fn returns_none_without_apt() {
-        assert_eq!(parse_rtx_apt(""), None);
-        assert_eq!(parse_rtx_apt("profile-id=0"), None);
-        assert_eq!(parse_rtx_apt("apt="), None);
-        assert_eq!(parse_rtx_apt("apt=notanumber"), None);
-        // Out of the u8 payload-type range.
-        assert_eq!(parse_rtx_apt("apt=300"), None);
-    }
 }
 
 #[cfg(test)]
@@ -448,5 +345,43 @@ mod tests {
 
         assert_eq!(quality, CodecMatch::Exact);
         assert_eq!(matched.payload_type, 111);
+    }
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    fn codec(
+        payload_type: PayloadType,
+        mime_type: &str,
+        clock_rate: u32,
+        channels: u16,
+        fmtp: &str,
+    ) -> RTCRtpCodecParameters {
+        RTCRtpCodecParameters {
+            rtp_codec: RTCRtpCodec {
+                mime_type: mime_type.to_owned(),
+                clock_rate,
+                channels,
+                sdp_fmtp_line: fmtp.to_owned(),
+                rtcp_feedback: vec![],
+            },
+            payload_type,
+        }
+    }
+
+    #[test]
+    fn telephone_event_match_respects_clock_rate() {
+        let haystack = [
+            codec(101, MIME_TYPE_TELEPHONE_EVENT, 8_000, 1, "0-15"),
+            codec(110, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15"),
+        ];
+        let needle = codec(0, MIME_TYPE_TELEPHONE_EVENT, 48_000, 1, "0-15");
+
+        let (matched, quality) = codec_parameters_fuzzy_search(&needle.rtp_codec, &haystack);
+
+        assert_eq!(quality, CodecMatch::Exact);
+        assert_eq!(matched.payload_type, 110);
     }
 }

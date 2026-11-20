@@ -170,7 +170,7 @@ pub struct KeycloakOidcProvider {
 impl KeycloakOidcProvider {
     /// Fetch `.well-known/openid-configuration` for a Keycloak realm.
     pub async fn discover(config: KeycloakConfig) -> Result<Self, KeycloakError> {
-        let client = crate::ring_http_client();
+        let client = reqwest::Client::new();
         let metadata = client
             .get(config.discovery_url()?)
             .send()
@@ -327,7 +327,7 @@ impl KeycloakPasswordGrantClient {
     pub fn new(config: KeycloakConfig) -> Self {
         Self {
             config,
-            client: crate::ring_http_client(),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -522,7 +522,7 @@ mod tests {
                     .unwrap(),
                 ),
             },
-            client: crate::ring_http_client(),
+            client: reqwest::Client::new(),
         }
     }
 
@@ -567,42 +567,4 @@ mod tests {
             rvoip_auth_core::AuthenticationMethod::Oidc
         );
     }
-}
-
-/// Build a reqwest client whose TLS runs on the ring rustls provider
-/// (see [`ring_http_client_builder`]).
-pub(crate) fn ring_http_client() -> reqwest::Client {
-    ring_http_client_builder()
-        .build()
-        .expect("reqwest client builds with the ring rustls provider")
-}
-
-/// Start a reqwest client builder whose TLS runs on the ring rustls provider.
-///
-/// reqwest is built with `rustls-no-provider`, so on its own it would read the
-/// process-level rustls default. It is handed a ready `ClientConfig` instead:
-/// the provider is named explicitly, and nothing is read from or installed as
-/// the process default. Server certificates are checked by the platform
-/// verifier, as reqwest's own rustls backend does; if that verifier cannot be
-/// initialised, `ClientBuilder::build` returns the error.
-fn ring_http_client_builder() -> reqwest::ClientBuilder {
-    match ring_https_client_config() {
-        Ok(config) => reqwest::Client::builder().tls_backend_preconfigured(config),
-        // An unrecognised preconfigured backend makes `build()` fail, which
-        // is where reqwest reports its own TLS initialisation errors.
-        Err(_) => reqwest::Client::builder().tls_backend_preconfigured(()),
-    }
-}
-
-/// The HTTPS client configuration behind [`ring_http_client_builder`].
-fn ring_https_client_config() -> std::result::Result<rustls::ClientConfig, rustls::Error> {
-    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
-    let verifier = rustls_platform_verifier::Verifier::new(provider.clone())?;
-    let mut config = rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .dangerous()
-        .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(config)
 }

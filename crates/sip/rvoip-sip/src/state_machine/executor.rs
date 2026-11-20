@@ -882,9 +882,6 @@ pub(crate) struct OutboundSessionStateInput {
     credentials: Option<crate::types::Credentials>,
     auth: Option<crate::auth::SipClientAuth>,
     pai_uri: Option<String>,
-    /// Offer plain RTP (`RTP/AVP`) for this call (carrier trunks, legacy
-    /// peers) instead of the endpoint's secure/WebRTC profile.
-    plain_rtp: bool,
     transferor_session_id: Option<SessionId>,
     transferor_lifecycle_handle: Option<SessionRegistryHandle>,
     extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
@@ -903,7 +900,6 @@ impl OutboundSessionStateInput {
             credentials,
             auth,
             pai_uri,
-            plain_rtp: false,
             transferor_session_id,
             transferor_lifecycle_handle,
             extra_headers,
@@ -919,7 +915,6 @@ impl OutboundSessionStateInput {
             credentials: snapshot.credentials.clone(),
             auth: snapshot.auth.clone(),
             pai_uri,
-            plain_rtp: snapshot.plain_rtp,
             transferor_session_id: snapshot.transfer_leg.clone(),
             transferor_lifecycle_handle,
             extra_headers: snapshot.extra_headers.clone(),
@@ -1086,7 +1081,6 @@ impl EventStateInput {
             session.credentials = input.credentials;
             session.auth = input.auth;
             session.pai_uri = input.pai_uri;
-            session.plain_rtp_offer = input.plain_rtp;
             session.is_transfer_call = input.transferor_session_id.is_some();
             session.transferor_session_id = input.transferor_session_id;
             session.transferor_lifecycle_handle = input.transferor_lifecycle_handle;
@@ -3753,23 +3747,6 @@ impl StateMachine {
                     // identity while retaining the exact transaction, timing,
                     // status override, and response headers that the action
                     // deliberately left untouched.
-                    session.call_state = old_state;
-                    session.entered_state_at = pre_event_snapshot.state().entered_state_at;
-                }
-                // A local hold/resume is committed only by the peer's 2xx
-                // (RFC 3261 §14.1). When its re-INVITE could not be sent,
-                // SendReINVITE has already rolled back the offer and pending
-                // re-INVITE; leaving the call in HoldPending/Resuming would
-                // strand it there with no transaction to complete it, and
-                // every later hold, resume or hangup would find no row.
-                // Return to the pre-event state and keep the original error.
-                if matches!(action, Action::SendReINVITE)
-                    && matches!(
-                        (old_state, &event),
-                        (CallState::Active, EventType::HoldCall)
-                            | (CallState::OnHold, EventType::ResumeCall)
-                    )
-                {
                     session.call_state = old_state;
                     session.entered_state_at = pre_event_snapshot.state().entered_state_at;
                 }

@@ -27,9 +27,8 @@ aws-live = ["aws-control"]
 # `server` adds the batteries-included SIP → Amazon Connect screen-pop server
 # (`ConnectScreenPopServer`): a SIP UAS + media bridge. Pulls the SIP stack and
 # the media-core transcoder, so it is off by default for users who only want
-# the adapter. The bridge carries Opus on the Connect leg, so it also enables
-# Opus in rvoip-core's media graph, which refuses Opus streams without it.
-server = ["dep:rvoip-sip", "dep:rvoip-sip-core", "dep:rvoip-media-core", "rvoip-core/opus"]
+# the adapter.
+server = ["dep:rvoip-sip", "dep:rvoip-sip-core", "dep:rvoip-media-core"]
 
 [dependencies]
 rvoip-core.workspace = true
@@ -52,22 +51,21 @@ url = "2"
 zeroize.workspace = true
 
 # Chime signaling: protobuf-over-secure-WebSocket.
-prost = "0.14"
+prost = "0.13"
 base64 = { workspace = true }
 # Pinned to the workspace's `ring` provider; used to install the process-default
 # rustls CryptoProvider before the Chime wss connect (the AWS SDK also links
 # aws-lc-rs, so rustls can't auto-select and must be told to use ring).
 rustls = { workspace = true }
-webpki-roots = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 
 # AWS control plane (optional — see `aws-control` feature).
 # Keep these exact: newer generated SDK releases have a higher MSRV than the
-# workspace Rust 1.95.0 contract. The optional-feature CI lane compiles this
+# workspace Rust 1.91.0 contract. The optional-feature CI lane compiles this
 # graph so an incompatible SDK cannot enter through a lockfile refresh.
-aws-config = { version = "=1.13.2", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
-aws-sdk-connect = { version = "=1.226.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-smithy-types = { version = "=1.9.4", optional = true }
+aws-config = { version = "=1.8.14", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
+aws-sdk-connect = { version = "=1.161.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-smithy-types = { version = "=1.4.5", optional = true }
 # Logging for the `connect-probe` binary (which requires `aws-control`); kept out
 # of the library's adapter-only dependency tree.
 tracing-subscriber = { workspace = true, optional = true }
@@ -81,7 +79,7 @@ rvoip-sip-core = { workspace = true, optional = true }
 rvoip-media-core = { workspace = true, optional = true, features = ["opus"] }
 
 [build-dependencies]
-prost-build = "0.14"
+prost-build = "0.13"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

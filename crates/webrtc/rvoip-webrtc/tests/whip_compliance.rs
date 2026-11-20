@@ -38,7 +38,7 @@ async fn whip_post_returns_etag_and_accept_patch() {
         }
     });
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("http");
@@ -100,7 +100,7 @@ async fn whip_initial_answer_full_gathers_even_when_ws_trickle_is_enabled() {
         }
     });
 
-    let response = ring_reqwest_builder()
+    let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("http")
@@ -134,7 +134,7 @@ async fn whip_post_rejects_wrong_content_type() {
         }
     });
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("http");
@@ -164,7 +164,7 @@ async fn healthz_and_readyz_respond() {
         }
     });
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("http");
@@ -204,7 +204,7 @@ async fn whip_per_ip_rate_limit_429s_after_cap() {
         }
     });
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("http");
@@ -248,7 +248,7 @@ async fn session_cap_returns_503() {
         }
     });
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("http");
@@ -285,11 +285,4 @@ async fn session_cap_returns_503() {
     );
 
     serve.abort();
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

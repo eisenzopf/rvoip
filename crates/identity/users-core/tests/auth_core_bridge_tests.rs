@@ -122,7 +122,7 @@ async fn configured_tenant_bridge_rejects_tenantless_signed_token() {
     let tenantless = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(b"bridge-test-secret").unwrap(),
+        &EncodingKey::from_secret(b"bridge-test-secret"),
     )
     .unwrap();
     let provider = UsersCoreAuthProvider::shared(Arc::new(seeded.service));
@@ -146,7 +146,7 @@ async fn configured_tenant_bridge_rejects_differently_tenant_bound_signed_token(
     let other_tenant = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(b"bridge-test-secret").unwrap(),
+        &EncodingKey::from_secret(b"bridge-test-secret"),
     )
     .unwrap();
     let provider = UsersCoreAuthProvider::shared(Arc::new(seeded.service));
@@ -187,7 +187,7 @@ async fn tenantless_bridge_accepts_only_tenantless_signed_tokens() {
     let tenant_bound = encode(
         &Header::default(),
         &tenant_bound_claims,
-        &EncodingKey::from_secret(b"bridge-test-secret").unwrap(),
+        &EncodingKey::from_secret(b"bridge-test-secret"),
     )
     .unwrap();
     let provider = UsersCoreAuthProvider::shared(Arc::new(service));

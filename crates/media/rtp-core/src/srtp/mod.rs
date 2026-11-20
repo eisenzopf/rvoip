@@ -214,15 +214,6 @@ impl SrtpCryptoSuite {
     }
 }
 
-/// The master keys an [`SrtpContext`] was built from (see
-/// [`SrtpContext::master_keys`]). Deliberately not `Debug`: it holds keys.
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SrtpMasterKeys {
-    key_rotation: key_derivation::KeyRotationFrequency,
-    outbound: (SrtpCryptoSuite, Vec<u8>, Vec<u8>),
-    inbound: (SrtpCryptoSuite, Vec<u8>, Vec<u8>),
-}
-
 /// SRTP context for a session
 pub struct SrtpContext {
     /// Whether encryption is enabled
@@ -259,7 +250,7 @@ pub struct SrtpContext {
 }
 
 /// Hot call state: one RTP direction's per-packet SRTP state, packed into
-/// three cache lines instead of the eight or nine the session-key path
+/// three or four cache lines instead of the eight or nine the session-key path
 /// touches (the context's suite and session-key headers, the heap key, salt
 /// and authentication key `Vec`s, the HMAC key schedule run per packet, and
 /// the per-SSRC map's header, control bytes and bucket).
@@ -270,8 +261,8 @@ pub struct SrtpContext {
 ///   plus the salt, the key and tag lengths and the authentication
 ///   algorithm.
 /// - Line 1: the AES key.
-/// - Line 2: the HMAC-SHA1 inner and outer states keyed once with the
-///   authentication key (40 bytes).
+/// - Line 2: the HMAC-SHA1 state keyed once with the authentication key (64
+///   bytes; 96, spilling into line 3, when hmac's `reset` feature is on).
 ///
 /// The key material is a copy of the immutable session keys, so the
 /// keystream, tags, replay and rollover decisions and every error are those
@@ -305,11 +296,11 @@ pub(crate) struct SrtpHot {
 
 impl SrtpDirectionHot {
     fn build(crypto: &crypto::SrtpCrypto) -> Option<Self> {
-        let (key, salt, mac, tag_len) = crypto.rtp_hot_material()?;
+        let (key, salt, auth_key, tag_len) = crypto.rtp_hot_material()?;
         if key.len() > 32 || salt.len() != 14 || tag_len > 20 {
             return None;
         }
-        let mac = mac.clone();
+        let mac = auth::hmac_sha1_core(auth_key).ok()?;
         let mut key_line = [0u8; 32];
         key_line[..key.len()].copy_from_slice(key);
         let mut salt_copy = [0u8; 14];
@@ -384,7 +375,7 @@ impl SrtpDirectionHot {
         }
         let tag_start = data.len() - tag_len;
         let (packet_data, auth_tag) = data.split_at_mut(tag_start);
-        let is_valid = auth::SrtpAuthenticator::verify_auth_tag_in_place_with(
+        let is_valid = auth::SrtpAuthenticator::verify_auth_tag_in_place(
             self.stream.auth,
             auth::HmacSha1Key::Keyed(&self.mac),
             tag_len,
@@ -422,7 +413,7 @@ impl SrtpDirectionHot {
         let packet_index = (u64::from(roc) << 16) | u64::from(sequence);
         let iv = key_derivation::create_srtp_iv_array(&self.stream.salt, ssrc, packet_index)?;
         crypto::aes_cm_encrypt(&mut buffer[start + header_size..], self.key(), &iv)?;
-        auth::SrtpAuthenticator::append_auth_tag_with(
+        auth::SrtpAuthenticator::append_auth_tag(
             self.stream.auth,
             auth::HmacSha1Key::Keyed(&self.mac),
             usize::from(self.stream.tag_len),
@@ -891,26 +882,6 @@ impl SrtpContext {
         self.inbound_crypto.suite().validate()
     }
 
-    /// The master keys, suites and key rotation this context was built
-    /// from. Two contexts with equal master keys are one RFC 3711 crypto
-    /// context: its rollover counters and replay windows must carry on
-    /// rather than restart, or a restarted sender would reuse keystream and a
-    /// restarted receiver would mis-estimate the index after a wrap.
-    pub(crate) fn master_keys(&self) -> SrtpMasterKeys {
-        let direction = |crypto: &crypto::SrtpCrypto| {
-            (
-                crypto.suite().clone(),
-                crypto.master_key().key().to_vec(),
-                crypto.master_key().salt().to_vec(),
-            )
-        };
-        SrtpMasterKeys {
-            key_rotation: self.key_rotation,
-            outbound: direction(&self.outbound_crypto),
-            inbound: direction(&self.inbound_crypto),
-        }
-    }
-
     /// Set key rotation frequency
     pub fn set_key_rotation(&mut self, frequency: key_derivation::KeyRotationFrequency) {
         self.key_rotation = frequency;
@@ -1274,9 +1245,9 @@ mod tests {
             let key_len = suite.key_length;
             // Random keys and salts per run, shared by both contexts.
             let random = |len: usize| -> Vec<u8> {
-                use rand::Rng;
+                use rand::RngCore;
                 let mut bytes = vec![0u8; len];
-                rand::rng().fill_bytes(&mut bytes);
+                rand::thread_rng().fill_bytes(&mut bytes);
                 bytes
             };
             let (rtp_key, rtcp_key, rtp_salt, rtcp_salt) =
@@ -1638,8 +1609,9 @@ mod tests {
     }
 
     fn hot_keys(suite: &SrtpCryptoSuite) -> HotKeys {
-        use rand::RngExt;
-        let random = |len: usize| -> Vec<u8> { (0..len).map(|_| rand::rng().random()).collect() };
+        use rand::Rng;
+        let random =
+            |len: usize| -> Vec<u8> { (0..len).map(|_| rand::thread_rng().gen()).collect() };
         HotKeys {
             a_key: random(suite.key_length),
             b_key: random(suite.key_length),
@@ -1709,9 +1681,10 @@ mod tests {
             2 * CACHE_LINE,
             "keyed HMAC on line 2"
         );
-        // The inner and outer SHA-1 states.
-        assert_eq!(std::mem::size_of::<auth::HmacSha1Core>(), 40);
-        assert_eq!(std::mem::size_of::<SrtpDirectionHot>(), 3 * CACHE_LINE);
+        // 64 bytes, or 96 when a dependency enables hmac's `reset` feature.
+        assert!(std::mem::size_of::<auth::HmacSha1Core>() <= 96);
+        assert_eq!(std::mem::size_of::<SrtpDirectionHot>() % CACHE_LINE, 0);
+        assert!(std::mem::size_of::<SrtpDirectionHot>() <= 4 * CACHE_LINE);
         let suite = SRTP_AES256_CM_SHA1_80;
         let (packed, _) = hot_pair(&suite, &hot_keys(&suite), true);
         let hot = packed.hot.as_deref().unwrap();
@@ -2096,7 +2069,7 @@ mod tests {
 
     #[test]
     fn authenticated_cleartext_srtcp_is_rejected_without_state_mutation() {
-        use hmac::{Hmac, KeyInit, Mac};
+        use hmac::{Hmac, Mac};
         use sha1::Sha1;
 
         let (_, mut receiver) = contexts();

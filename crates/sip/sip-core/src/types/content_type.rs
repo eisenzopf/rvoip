@@ -44,7 +44,6 @@ use crate::parser::headers::content_type::parse_content_type_value;
 use crate::parser::headers::content_type::ContentTypeValue;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -333,8 +332,7 @@ impl FromStr for ContentType {
     /// assert_eq!(multipart.to_string(), "multipart/mixed;boundary=\"unique-boundary-1\"");
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        all_consuming(parse_content_type_value)
-            .parse(s.as_bytes())
+        all_consuming(parse_content_type_value)(s.as_bytes())
             .map_err(Error::from)
             .map(|(_, value)| ContentType(value))
     }

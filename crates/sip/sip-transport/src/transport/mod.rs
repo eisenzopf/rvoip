@@ -19,7 +19,7 @@ pub mod udp;
 pub mod ws;
 
 pub use runtime::HandshakeAdmissionConfig;
-pub use tcp::{TcpFlowConfig, TcpTransport};
+pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
 pub use udp::{UdpParseConfig, UdpParseDispatch, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
@@ -33,35 +33,6 @@ pub(crate) fn validate_typed_outbound_message(message: &Message) -> Result<()> {
     rvoip_sip_core::validation::validate_typed_outbound_message(message).map_err(|_| {
         Error::ProtocolError("outbound typed SIP message failed wire-safety validation".to_string())
     })
-}
-
-/// Open an outbound TCP connection for a stream transport (TCP or TLS).
-///
-/// With `source` set to a specified IP of the same address family as
-/// `remote`, the socket is bound to `(source, 0)` before connecting, so the
-/// flow leaves from that address rather than the one the kernel's routing
-/// table would pick. Otherwise this is a plain `TcpStream::connect`.
-pub(crate) async fn connect_stream_from(
-    remote: SocketAddr,
-    source: Option<IpAddr>,
-) -> std::io::Result<tokio::net::TcpStream> {
-    let Some(source) = source.filter(|ip| !ip.is_unspecified()) else {
-        return tokio::net::TcpStream::connect(remote).await;
-    };
-    let socket = match (source, remote) {
-        (IpAddr::V4(_), SocketAddr::V4(_)) => tokio::net::TcpSocket::new_v4()?,
-        (IpAddr::V6(_), SocketAddr::V6(_)) => tokio::net::TcpSocket::new_v6()?,
-        _ => {
-            tracing::debug!(
-                %source,
-                destination = %remote,
-                "outbound source address family differs from the destination; not binding"
-            );
-            return tokio::net::TcpStream::connect(remote).await;
-        }
-    };
-    socket.bind(SocketAddr::new(source, 0))?;
-    socket.connect(remote).await
 }
 
 /// Return a log-safe method label without reflecting extension method text.
@@ -364,25 +335,6 @@ pub enum TransportEvent {
         connection_metadata: Option<TransportConnectionMetadata>,
     },
 
-    /// A request that does not parse, reduced to the header fields a 400
-    /// (Bad Request) response is built from (see
-    /// `rvoip_sip_core::validation::recover_request_for_rejection`). The
-    /// transaction layer answers it statelessly with 400 and never processes
-    /// it (RFC 4475 §3.1.2).
-    MalformedRequest {
-        /// The request's Via, From, To, Call-ID and CSeq, with a placeholder
-        /// start line.
-        request: rvoip_sip_core::Request,
-        /// The remote address that sent the message.
-        source: SocketAddr,
-        /// The local address that received the message.
-        destination: SocketAddr,
-        /// Transport flavour that received the message.
-        transport_type: TransportType,
-        /// Exact connection-oriented flow that carried the message.
-        flow_id: Option<TransportFlowId>,
-    },
-
     /// Error occurred in the transport
     Error {
         /// Error description
@@ -510,15 +462,6 @@ impl fmt::Debug for TransportEvent {
                     .field("connection_metadata", connection_metadata)
                     .finish()
             }
-            Self::MalformedRequest {
-                transport_type,
-                flow_id,
-                ..
-            } => formatter
-                .debug_struct("MalformedRequest")
-                .field("transport_type", transport_type)
-                .field("flow_present", &flow_id.is_some())
-                .finish_non_exhaustive(),
             Self::Error { error } => formatter
                 .debug_struct("Error")
                 .field("error_present", &!error.is_empty())

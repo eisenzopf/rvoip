@@ -216,7 +216,7 @@ impl JwksJwtValidator {
     /// algorithms, leeway, required claims). Most callers should use
     /// [`Self::new`] + the `with_*` builders.
     pub fn new_with_validation(jwks_url: Url, validation: Validation) -> Self {
-        let client = crate::ring_http_client_builder()
+        let client = reqwest::Client::builder()
             .user_agent("rvoip-auth-core/0.1 (jwks)")
             .timeout(Duration::from_secs(10))
             .build()

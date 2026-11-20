@@ -148,16 +148,15 @@ pub mod vcon;
 pub mod virtual_publisher;
 
 pub use adapter::{
-    AdapterEvent, AdapterKind, CommittedAudioMedia, ConnectionAdapter, ConnectionHandle, EndReason,
+    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, ExternalConnectionReferenceError, InboundAssertedIdentity,
     InboundConnectionContext, InboundContextError, InboundRoutingHint, InboundSignalingMetadata,
-    ObservedCallerNumber, ObservedCallerSource, OriginateContext, OriginateRequest,
-    OutboundActivation, PlaybackCompletionSender, PlaybackHandle, PlaybackOutcome,
-    PlaybackWaitError, RejectReason, SignatureHeaders, TransferAttemptId, TransferStatus,
-    TransferTarget, TrustedSignalingMetadata, TrustedSignalingProvenance,
-    MAX_EXTERNAL_CONNECTION_REFERENCES, MAX_EXTERNAL_REFERENCE_KIND_BYTES,
-    MAX_EXTERNAL_REFERENCE_VALUE_BYTES, MAX_INBOUND_ASSERTED_IDENTITY_BYTES,
-    MAX_INBOUND_ROUTING_HINT_BYTES,
+    OriginateContext, OriginateRequest, OutboundActivation, PlaybackCompletionSender,
+    PlaybackHandle, PlaybackOutcome, PlaybackWaitError, RejectReason, SignatureHeaders,
+    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
+    TrustedSignalingProvenance, MAX_EXTERNAL_CONNECTION_REFERENCES,
+    MAX_EXTERNAL_REFERENCE_KIND_BYTES, MAX_EXTERNAL_REFERENCE_VALUE_BYTES,
+    MAX_INBOUND_ASSERTED_IDENTITY_BYTES, MAX_INBOUND_ROUTING_HINT_BYTES,
 };
 pub use bridge::{
     BridgeDestinationReplacement, BridgeError, BridgeHandle, BridgeManager,
@@ -198,8 +197,8 @@ pub use inbound_admission::{
     MAX_STAGED_INBOUND_DATA_CAPACITY, MAX_STAGED_INBOUND_DATA_LABELS,
 };
 pub use media_graph::{
-    start_media_graph, start_media_graph_on, MediaGraphActivityObservation, MediaGraphHandle,
-    MediaGraphPolicy, DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
+    start_media_graph, MediaGraphActivityObservation, MediaGraphHandle, MediaGraphPolicy,
+    DEFAULT_MEDIA_GRAPH_MAX_SINKS, MEDIA_GRAPH_ACTIVITY_OBSERVATION_INTERVAL,
 };
 pub use message::{ContentType, Message, MessageOrigin, MessageRecipients};
 pub use operational_events::{
@@ -208,8 +207,7 @@ pub use operational_events::{
     OperationalTransferTarget,
 };
 pub use orchestrator::{
-    Orchestrator, OutboundPeerLease, PeerHandoffReceipt, PreparedOutboundConnection,
-    PreparedPeerHandoff,
+    Orchestrator, PeerHandoffReceipt, PreparedOutboundConnection, PreparedPeerHandoff,
 };
 pub use participant::{Participant, ParticipantKind, ParticipantRole};
 pub use rvoip_core_traits::data::{

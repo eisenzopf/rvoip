@@ -34,7 +34,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    connect_stream_from, next_transport_flow_id,
+    next_transport_flow_id,
     runtime::{
         next_trust_context, ConnectionDirection, ConnectionLifecycleConfig, DialAdmission,
         OutboundDialCoordinator, TransportTaskSet,
@@ -405,15 +405,6 @@ pub struct TlsFlowConfig {
     pub tcp_nodelay: bool,
     /// Hook consulted for every parsed inbound message. Default: `None`.
     pub ingress_admission: Option<IngressAdmissionHook>,
-    /// Bind every dialed TLS socket to the transport's local IP address
-    /// before connecting, so the flow leaves from that address instead of
-    /// the one the kernel's routing table picks. Use it on a host with
-    /// several addresses where each transport (listener and Contact) owns
-    /// one of them, such as a multi-source load generator. The local port is
-    /// chosen by the kernel. Has no effect when the transport's local IP is
-    /// unspecified (`0.0.0.0` / `::`) or of a different address family than
-    /// the destination. Default: `false` (the kernel picks the source).
-    pub bind_outbound_to_local_ip: bool,
     counters: Arc<TlsFlowCounters>,
 }
 
@@ -424,7 +415,6 @@ impl Default for TlsFlowConfig {
             receive_pause_max: DEFAULT_TLS_RECEIVE_PAUSE_MAX,
             tcp_nodelay: true,
             ingress_admission: None,
-            bind_outbound_to_local_ip: false,
             counters: Arc::default(),
         }
     }
@@ -454,19 +444,6 @@ impl TlsFlowConfig {
     pub fn with_ingress_admission(mut self, hook: IngressAdmissionHook) -> Self {
         self.ingress_admission = Some(hook);
         self
-    }
-
-    /// Bind dialed TLS sockets to the transport's local IP address. See
-    /// [`TlsFlowConfig::bind_outbound_to_local_ip`].
-    pub fn with_bind_outbound_to_local_ip(mut self, enabled: bool) -> Self {
-        self.bind_outbound_to_local_ip = enabled;
-        self
-    }
-
-    /// Source address for a dialed socket of a transport whose local address
-    /// is `local_addr`, or `None` to let the kernel choose.
-    fn outbound_source(&self, local_addr: SocketAddr) -> Option<std::net::IpAddr> {
-        self.bind_outbound_to_local_ip.then(|| local_addr.ip())
     }
 
     /// Snapshot of the counters shared by every transport built from this
@@ -1494,30 +1471,8 @@ impl TlsTransport {
                             }
                             None => {}
                         }
-                        match try_parse_tls_frame(&mut buffer) {
-                            Ok(Some(TlsFrame::MalformedRequest(request))) => {
-                                let message = rvoip_sip_core::Message::Request(request.clone());
-                                if !flow.admit_ingress(&message, remote_addr, &tx_for_pong) {
-                                    continue;
-                                }
-                                // Best effort: a 400 is never worth stalling reads.
-                                if event_tx
-                                    .try_send(TransportEvent::MalformedRequest {
-                                        request,
-                                        source: remote_addr,
-                                        destination: local_addr,
-                                        transport_type: TransportType::Tls,
-                                        flow_id: Some(flow_id),
-                                    })
-                                    .is_err()
-                                {
-                                    debug!(
-                                        source = %remote_addr,
-                                        "Dropping 400 for a malformed TLS request"
-                                    );
-                                }
-                            }
-                            Ok(Some(TlsFrame::Message(message, raw_bytes))) => {
+                        match try_parse_one(&mut buffer) {
+                            Ok(Some((message, raw_bytes))) => {
                                 if !flow.admit_ingress(&message, remote_addr, &tx_for_pong) {
                                     continue;
                                 }
@@ -1795,12 +1750,9 @@ impl TlsTransport {
                                 .try_acquire_owned()
                                 .map_err(|_| Error::ConnectionPoolExhausted)?;
                             let tls_stream = tokio::time::timeout_at(deadline, async {
-                                let tcp_stream = connect_stream_from(
-                                    remote_addr,
-                                    flow.outbound_source(local_addr),
-                                )
-                                .await
-                                .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
+                                let tcp_stream = TcpStream::connect(remote_addr)
+                                    .await
+                                    .map_err(|e| Error::ConnectFailed(remote_addr, e))?;
                                 flow.apply_socket_options(&tcp_stream);
                                 connector
                                     .connect(server_name, tcp_stream)
@@ -2251,7 +2203,6 @@ mod auth_boundary_tests {
         assert_eq!(flow.receive_pause_max, Duration::from_secs(600));
         assert!(flow.tcp_nodelay);
         assert!(flow.ingress_admission.is_none());
-        assert!(!flow.bind_outbound_to_local_ip);
         assert_eq!(flow.stats(), TlsFlowStats::default());
 
         let lifecycle =
@@ -2850,109 +2801,6 @@ mod auth_boundary_tests {
         assert!(matches!(result, Err(Error::InvalidState(_))));
     }
 
-    /// Linux routes all of 127.0.0.0/8 to loopback; other hosts (macOS) only
-    /// answer on 127.0.0.1 unless an alias is configured.
-    fn second_loopback_address() -> Option<std::net::IpAddr> {
-        let address: std::net::IpAddr = "127.0.0.2".parse().unwrap();
-        std::net::TcpListener::bind((address, 0))
-            .is_ok()
-            .then_some(address)
-    }
-
-    #[tokio::test]
-    async fn dialed_tls_flow_leaves_from_local_ip_only_when_configured() {
-        let Some(source_ip) = second_loopback_address() else {
-            eprintln!("skipping: 127.0.0.2 is not a local address on this host");
-            return;
-        };
-        let (_directory, cert_path, key_path) = write_test_certificate();
-        let client_config = TlsClientConfig {
-            extra_ca_path: Some(cert_path.clone()),
-            ..TlsClientConfig::default()
-        };
-        let (server, mut server_events) = TlsTransport::bind_with_client_config(
-            "127.0.0.1:0".parse().unwrap(),
-            &cert_path,
-            &key_path,
-            None,
-            client_config.clone(),
-        )
-        .await
-        .unwrap();
-        let destination = server.local_addr().unwrap();
-
-        for (bind_outbound, expected_ip) in [
-            (true, source_ip),
-            (false, "127.0.0.1".parse::<std::net::IpAddr>().unwrap()),
-        ] {
-            let (client, _client_events) = TlsTransport::client_only_with_flow_config(
-                SocketAddr::new(source_ip, 0),
-                None,
-                None,
-                client_config.clone(),
-                HandshakeAdmissionConfig::default(),
-                TlsFlowConfig::default().with_bind_outbound_to_local_ip(bind_outbound),
-            )
-            .await
-            .unwrap();
-            let request = SimpleRequestBuilder::new(Method::Options, "sips:service@localhost")
-                .unwrap()
-                .from("alice", "sips:alice@localhost", Some("tag"))
-                .to("service", "sips:service@localhost", None)
-                .call_id(&format!("tls-source-bind-{bind_outbound}"))
-                .cseq(1)
-                .build();
-            client
-                .send_message_on_route(
-                    Message::Request(request),
-                    TransportRoute::new(destination)
-                        .with_transport_type(TransportType::Tls)
-                        .with_authority(TransportAuthority::dns("localhost").unwrap()),
-                )
-                .await
-                .unwrap();
-            // Skip lifecycle events, such as the previous client's close.
-            let source = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    match server_events.recv().await {
-                        Some(TransportEvent::MessageReceived { source, .. }) => break source,
-                        Some(_) => continue,
-                        None => panic!("server event channel closed"),
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(
-                source.ip(),
-                expected_ip,
-                "bind_outbound_to_local_ip = {bind_outbound}"
-            );
-            client.close().await.unwrap();
-        }
-        server.close().await.unwrap();
-    }
-
-    /// SIP TLS/WSS configurations name the crate's ring provider explicitly.
-    /// This test binary links both rustls providers (the `aws_lc_rs`
-    /// dev-dependency feature), so rustls cannot infer a process default:
-    /// building either configuration through the implicit default would panic.
-    #[test]
-    fn tls_configs_use_the_explicit_provider_with_both_rustls_providers_linked() {
-        let (_directory, cert_path, key_path) = write_test_certificate();
-        let server = build_server_config(
-            &cert_path,
-            &key_path,
-            &TlsServerClientAuthConfig::default(),
-            "SIP TLS",
-        )
-        .expect("server config");
-        let client = build_client_config(&TlsClientConfig::default()).expect("client config");
-        let provider = rustls_crypto_provider();
-        assert!(Arc::ptr_eq(server.crypto_provider(), &provider));
-        assert!(Arc::ptr_eq(client.crypto_provider(), &provider));
-    }
-
     fn write_test_certificate() -> (tempfile::TempDir, PathBuf, PathBuf) {
         use std::io::Write;
 
@@ -3352,17 +3200,8 @@ mod auth_boundary_tests {
             tokio::join!(client.connect(destination), client.connect(destination));
         assert!(first.is_ok(), "first dial failed: {first:?}");
         assert!(second.is_ok(), "second dial failed: {second:?}");
+        tokio::task::yield_now().await;
         assert_eq!(client.connections.lock().await.len(), 1);
-        // The client's handshake can finish before the server's accept task
-        // records the connection; wait for it rather than for one yield.
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while server.connections.lock().await.is_empty() {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "server never recorded the accepted connection"
-            );
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
         assert_eq!(server.connections.lock().await.len(), 1);
 
         client.close().await.unwrap();
@@ -3563,23 +3402,15 @@ enum KeepAliveFrame {
 /// Select the workspace's canonical rustls provider before using rustls's
 /// process-default builders.
 ///
-/// Every SIP TLS/WSS configuration is built on this provider explicitly.
-///
-/// A dependency graph can compile both rustls provider features (for example
-/// MoQ brings `aws-lc-rs` while SIP transport is pinned to `ring`); rustls
-/// then cannot infer a process-level provider and its `builder()` functions
-/// panic. Naming the provider here keeps SIP TLS independent of, and from
-/// ever installing, the process-level default.
-pub(crate) fn rustls_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-    static PROVIDER: std::sync::OnceLock<Arc<rustls::crypto::CryptoProvider>> =
-        std::sync::OnceLock::new();
-    PROVIDER
-        .get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))
-        .clone()
-}
-
-fn tls_protocol_error(error: rustls::Error) -> Error {
-    Error::TlsCertificateError(format!("TLS protocol versions: {error}"))
+/// A full-workspace test binary can legitimately unify dependencies that
+/// compile both rustls provider features (for example, MoQ currently brings
+/// `aws-lc-rs` while SIP transport is pinned to `ring`). In that configuration
+/// rustls cannot infer a provider and its otherwise-convenient `builder()`
+/// functions panic. Installing `ring` here keeps provider selection at the TLS
+/// transport boundary. If another subsystem already selected a provider, the
+/// failed installation is harmless and the established process default wins.
+fn ensure_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Strip a leading RFC 5626 §3.5.1 keep-alive frame (pong / ping) off
@@ -3605,12 +3436,10 @@ pub(crate) fn build_server_config(
     client_auth: &TlsServerClientAuthConfig,
     transport_label: &str,
 ) -> Result<ServerConfig> {
-    let provider = rustls_crypto_provider();
+    ensure_rustls_crypto_provider();
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
-    let builder = ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(tls_protocol_error)?;
+    let builder = ServerConfig::builder();
     let builder = match client_auth.mode {
         TlsClientAuthMode::Disabled => builder.with_no_client_auth(),
         TlsClientAuthMode::Optional | TlsClientAuthMode::Required => {
@@ -3638,7 +3467,7 @@ pub(crate) fn build_server_config(
                     ca_path.display()
                 )));
             }
-            let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider);
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
             let verifier = if client_auth.mode == TlsClientAuthMode::Optional {
                 verifier.allow_unauthenticated().build()
             } else {
@@ -3690,11 +3519,7 @@ pub(crate) fn verified_peer_metadata(
 /// CA bundle (added to the same root store) and an insecure-skip mode
 /// (dev only — accepts any cert without identity verification).
 pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
-    let client_builder = || {
-        ClientConfig::builder_with_provider(rustls_crypto_provider())
-            .with_safe_default_protocol_versions()
-            .map_err(tls_protocol_error)
-    };
+    ensure_rustls_crypto_provider();
     if cfg.client_cert_path.is_some() ^ cfg.client_key_path.is_some() {
         return Err(Error::InvalidState(
             "TLS client certificate and key must be provided together".to_string(),
@@ -3708,7 +3533,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
                 "TLS client built with insecure_skip_verify=true — \
                  server certificates will NOT be validated. Dev only."
             );
-            let builder = client_builder()?
+            let builder = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier));
             return match (&cfg.client_cert_path, &cfg.client_key_path) {
@@ -3803,7 +3628,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
         );
     }
 
-    let builder = client_builder()?.with_root_certificates(root_store);
+    let builder = ClientConfig::builder().with_root_certificates(root_store);
     match (&cfg.client_cert_path, &cfg.client_key_path) {
         (Some(cert_path), Some(key_path)) => {
             let certs = load_certs(cert_path)?;
@@ -3937,27 +3762,7 @@ pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
 /// over-limit framing. Mirrors
 /// `transport::tcp::connection::TcpConnection::try_parse_message` so TLS
 /// framing matches TCP's behaviour exactly.
-/// One framed unit read from a TLS stream.
-enum TlsFrame {
-    Message(rvoip_sip_core::Message, bytes::Bytes),
-    /// A framed request that does not parse, reduced to what a 400 (Bad
-    /// Request) needs; the stream stays framed (RFC 4475 §3.1.2).
-    MalformedRequest(rvoip_sip_core::Request),
-}
-
-/// [`try_parse_tls_frame`] for tests that expect a parsed message.
-#[cfg(test)]
 fn try_parse_one(buffer: &mut BytesMut) -> Result<Option<(rvoip_sip_core::Message, bytes::Bytes)>> {
-    match try_parse_tls_frame(buffer)? {
-        Some(TlsFrame::Message(message, raw_bytes)) => Ok(Some((message, raw_bytes))),
-        Some(TlsFrame::MalformedRequest(_)) => Err(Error::ParseError(
-            "SIP parser rejected framed TLS message".to_string(),
-        )),
-        None => Ok(None),
-    }
-}
-
-fn try_parse_tls_frame(buffer: &mut BytesMut) -> Result<Option<TlsFrame>> {
     if buffer.is_empty() {
         return Ok(None);
     }
@@ -3981,27 +3786,17 @@ fn try_parse_tls_frame(buffer: &mut BytesMut) -> Result<Option<TlsFrame>> {
     match rvoip_sip_core::parse_message(&raw_bytes) {
         Ok(message) => {
             buffer.advance(frame.total_bytes);
-            Ok(Some(TlsFrame::Message(message, raw_bytes)))
+            Ok(Some((message, raw_bytes)))
         }
-        Err(_) => match rvoip_sip_core::validation::recover_request_for_rejection(&raw_bytes) {
-            Some(request) => {
-                debug!(
-                    error_class = "sip-syntax",
-                    "Answering malformed SIP TLS request with 400"
-                );
-                buffer.advance(frame.total_bytes);
-                Ok(Some(TlsFrame::MalformedRequest(request)))
-            }
-            None => {
-                warn!(
-                    error_class = "sip-syntax",
-                    "Rejecting malformed SIP TLS message"
-                );
-                Err(Error::ParseError(
-                    "SIP parser rejected framed TLS message".to_string(),
-                ))
-            }
-        },
+        Err(_) => {
+            warn!(
+                error_class = "sip-syntax",
+                "Rejecting malformed SIP TLS message"
+            );
+            Err(Error::ParseError(
+                "SIP parser rejected framed TLS message".to_string(),
+            ))
+        }
     }
 }
 

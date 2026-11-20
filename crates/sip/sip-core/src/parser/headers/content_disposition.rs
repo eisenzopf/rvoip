@@ -4,7 +4,6 @@
 // disp-param = handling-param / generic-param
 // handling-param = "handling" EQUAL ( "optional" / "required" / other-handling (token) )
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -28,7 +27,7 @@ use crate::types::content_disposition::{DispositionParam, DispositionType, Handl
 // disp-extension-token = token
 fn disp_type(input: &[u8]) -> ParseResult<'_, DispositionType> {
     // Handle any leading whitespace including line folding
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     map_res(
         alt((
@@ -53,8 +52,7 @@ fn disp_type(input: &[u8]) -> ParseResult<'_, DispositionType> {
                     )
                 })
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parses the Content-Disposition header value.
@@ -71,8 +69,7 @@ pub fn parse_content_disposition(input: &[u8]) -> ParseResult<'_, (String, Vec<D
     let (input, params_vec) = many0(preceded(
         terminated(semi, opt(lws)), // Handle whitespace after semicolon, including line folding
         disp_param,
-    ))
-    .parse(input)?;
+    ))(input)?;
 
     // Handle any trailing whitespace
     let (input, _) = sws(input)?;
@@ -99,7 +96,7 @@ pub fn parse_content_disposition(input: &[u8]) -> ParseResult<'_, (String, Vec<D
 // handling-param parser
 fn handling_param(input: &[u8]) -> ParseResult<'_, Handling> {
     // Handle any leading whitespace including line folding for parameter name
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     preceded(
         pair(tag_no_case("handling"), terminated(equal, opt(lws))), // Allow whitespace after equals
@@ -121,20 +118,18 @@ fn handling_param(input: &[u8]) -> ParseResult<'_, Handling> {
                     })
             },
         ),
-    )
-    .parse(input)
+    )(input)
 }
 
 // Define the disp_param parser function
 fn disp_param(input: &[u8]) -> ParseResult<'_, DispositionParam> {
     // Handle any leading whitespace for the parameter
-    let (input, _) = opt(lws).parse(input)?;
+    let (input, _) = opt(lws)(input)?;
 
     alt((
         map(handling_param, DispositionParam::Handling),
         map(generic_param, DispositionParam::Generic), // Use existing generic_param parser
-    ))
-    .parse(input)
+    ))(input)
 }
 
 #[cfg(test)]

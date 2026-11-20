@@ -13,7 +13,6 @@ use rtc::rtp_transceiver::{RtpStreamId, SSRC};
 use rtc::shared::error::flatten_errs;
 use rtc::{rtcp, rtp};
 use std::collections::HashMap;
-use std::time::Instant;
 
 const RTP_OUTBOUND_MTU: usize = 1200;
 
@@ -35,7 +34,6 @@ impl TrackLocalStaticSample {
                 let sequencer: Box<dyn Sequencer> = Box::new(rtp::sequence::new_random_sequencer());
                 let packetizer: Mutex<Box<dyn Packetizer>> =
                     Mutex::new(Box::new(rtp::packetizer::new_packetizer(
-                        Instant::now(),
                         RTP_OUTBOUND_MTU,
                         0, // Value is handled when writing
                         ssrc,
@@ -84,7 +82,7 @@ impl TrackLocalStaticSample {
             if sample.prev_dropped_packets > 0 {
                 packetizer.skip_samples(samples * sample.prev_dropped_packets as u32);
             }
-            packetizer.packetize(sample.timestamp, &sample.data, samples)?
+            packetizer.packetize(&sample.data, samples)?
         } else {
             vec![]
         };

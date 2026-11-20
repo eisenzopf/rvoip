@@ -99,21 +99,6 @@ pub const RTCP_XR_PARAMETER: &str = "rtcp_xr";
 /// an update changes it.
 pub const RTCP_REDUCED_MINIMUM_PARAMETER: &str = "rtcp_reduced_minimum";
 
-/// [`MediaConfig::parameters`] key naming the RFC 4733 telephone-event
-/// format a session negotiated, as `<payload type>/<clock rate>` (for
-/// example `101/8000`). Absent when the session negotiated no
-/// telephone-event. Set it with [`MediaConfig::with_telephone_event`].
-pub const TELEPHONE_EVENT_PARAMETER: &str = "telephone_event";
-
-/// The RFC 4733 telephone-event format one session negotiated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TelephoneEventFormat {
-    /// RTP payload type of telephone-event on this session.
-    pub payload_type: u8,
-    /// Telephone-event RTP clock rate in hertz.
-    pub clock_rate: u32,
-}
-
 /// Media configuration for a session
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MediaConfig {
@@ -175,51 +160,6 @@ impl MediaConfig {
             }
         }
         self
-    }
-
-    /// Record the RFC 4733 telephone-event format the session negotiated
-    /// ([`TELEPHONE_EVENT_PARAMETER`]), or clear it with `None`.
-    ///
-    /// A transcoding bridge relays DTMF to a leg only when that leg has one,
-    /// under its payload type and clock. Like the fmtp, `None` removes a
-    /// value an earlier negotiation left behind.
-    #[must_use]
-    pub fn with_telephone_event(mut self, format: Option<TelephoneEventFormat>) -> Self {
-        match format {
-            Some(format) => {
-                self.parameters.insert(
-                    TELEPHONE_EVENT_PARAMETER.to_string(),
-                    format!("{}/{}", format.payload_type, format.clock_rate),
-                );
-            }
-            None => {
-                self.parameters.remove(TELEPHONE_EVENT_PARAMETER);
-            }
-        }
-        self
-    }
-
-    /// The telephone-event format recorded by
-    /// [`Self::with_telephone_event`], if any and well formed.
-    pub fn telephone_event(&self) -> Option<TelephoneEventFormat> {
-        let (payload_type, clock_rate) = self
-            .parameters
-            .get(TELEPHONE_EVENT_PARAMETER)?
-            .split_once('/')?;
-        let payload_type = payload_type
-            .trim()
-            .parse::<u8>()
-            .ok()
-            .filter(|pt| *pt < 128)?;
-        let clock_rate = clock_rate
-            .trim()
-            .parse::<u32>()
-            .ok()
-            .filter(|rate| *rate > 0)?;
-        Some(TelephoneEventFormat {
-            payload_type,
-            clock_rate,
-        })
     }
 
     /// Set or clear the AMR discontinuous-transmission opt-in
@@ -588,43 +528,18 @@ pub struct RtpSessionWrapper {
     /// replaced with silence. This maintains RTP flow for NAT traversal
     /// and prevents remote endpoint timeouts.
     pub is_muted: bool,
-    /// Where asynchronous media keying (DTLS-SRTP) stands; gates outbound
-    /// audio frames before they reach the secure-only transport.
-    pub(super) secure_keying: SecureKeyingState,
     /// The session's RTP send handle, captured when the session started (it
     /// shares the session's sender, so it follows destination changes and
-    /// the sender's close). Explicitly typed sends use it without locking
-    /// `session`; its default payload type is a construction-time snapshot,
-    /// so it is used only with an explicit payload type.
+    /// the sender's close).
     pub(super) typed_send_handle: Option<rvoip_rtp_core::RtpSendHandle>,
     /// TX generation fence for senders cached outside this map
     /// ([`super::PreparedG711Sender`]). Bumped, under the shard guard,
-    /// whenever `transmission_enabled`, `is_muted` or `secure_keying`
-    /// changes; retired when the wrapper is removed.
+    /// whenever `transmission_enabled` or `is_muted` changes; retired when
+    /// the wrapper is removed.
     pub(super) tx_gate: Arc<DialogTxGate>,
 
     #[cfg(feature = "memory-diagnostics")]
     pub memory_guard: rvoip_infra_common::memory_diagnostics::ObjectGuard,
-}
-
-/// Progress of the media keys a dialog's outbound audio waits for.
-///
-/// SDES-SRTP and plain RTP never leave [`Self::Ready`]: their keys (or
-/// their absence) are settled before media starts. DTLS-SRTP latches the
-/// transport secure-only before its handshake, so outbound audio frames
-/// that arrive in between cannot be protected.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-#[cfg_attr(not(feature = "dtls-srtp"), allow(dead_code))]
-pub(crate) enum SecureKeyingState {
-    /// Nothing to wait for: frames go to the transport.
-    #[default]
-    Ready,
-    /// A key-agreement handshake is in flight. Outbound audio frames are
-    /// dropped (real-time audio is stale by the time keys exist) rather
-    /// than reported as errors.
-    Pending,
-    /// Key agreement failed; this dialog can never send protected media.
-    Failed(String),
 }
 
 /// Per-dialog TX generation. A cached sender is valid only while the epoch

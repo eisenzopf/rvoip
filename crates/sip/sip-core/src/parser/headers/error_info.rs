@@ -2,13 +2,12 @@
 // Error-Info = "Error-Info" HCOLON error-uri *(COMMA error-uri)
 // error-uri = LAQUOT absoluteURI RAQUOT *( SEMI generic-param )
 
-use nom::Parser;
 use nom::{
     bytes::complete::{tag, tag_no_case, take_until},
     character::complete::space0,
     combinator::map_res,
     multi::{many0, separated_list1},
-    sequence::{delimited, pair, preceded},
+    sequence::{delimited, pair, preceded, tuple},
     Err,
 };
 use std::str;
@@ -91,8 +90,7 @@ fn enclosed_uri(input: &[u8]) -> ParseResult<'_, String> {
 
             Ok(trimmed.to_string())
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parses a parameter (;name=value or ;name)
@@ -100,18 +98,16 @@ fn param(input: &[u8]) -> ParseResult<'_, Param> {
     preceded(
         pair(semi, space0), // Allow whitespace after semicolon
         generic_param,
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parse a comment enclosed in parentheses
 fn error_info_comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
     delimited(
-        (space0, tag(&b"("[..])), // Allow whitespace before opening parenthesis
+        tuple((space0, tag(b"("))), // Allow whitespace before opening parenthesis
         take_until(")"),
-        tag(&b")"[..]),
-    )
-    .parse(input)
+        tag(b")"),
+    )(input)
 }
 
 /// Parses an error-info-value, which is an error-uri followed by optional parameters and an optional comment.
@@ -123,7 +119,7 @@ fn error_info_value(input: &[u8]) -> ParseResult<'_, ErrorInfoValue> {
     let (mut remaining, uri_str) = enclosed_uri(input)?;
 
     // Parse parameters
-    let (remaining_after_params, params) = many0(param).parse(remaining)?;
+    let (remaining_after_params, params) = many0(param)(remaining)?;
     remaining = remaining_after_params;
 
     // Parse optional comment
@@ -141,9 +137,7 @@ fn error_info_value(input: &[u8]) -> ParseResult<'_, ErrorInfoValue> {
         Uri {
             scheme: Scheme::Sip,
             user: None,
-            user_wire: None,
             password: None,
-            password_wire: None,
             host,
             port: None,
             parameters: Vec::new(),
@@ -196,7 +190,7 @@ fn trailing_comma_check(input: &[u8]) -> ParseResult<'_, &[u8]> {
 
     // If there's a comma, it should be followed by a non-empty URI
     if input[0] == b',' {
-        let (input, _) = tag(&b","[..])(input)?;
+        let (input, _) = tag(b",")(input)?;
         let (input, _) = space0(input)?;
 
         // Now we should have a URI starting with '<'
@@ -219,10 +213,9 @@ pub fn parse_error_info(input: &[u8]) -> ParseResult<'_, Vec<ErrorInfoValue>> {
 
     // Parse list of error_info_values separated by commas
     let (input, items) = separated_list1(
-        (space0, comma, space0), // Allow whitespace around commas
+        tuple((space0, comma, space0)), // Allow whitespace around commas
         error_info_value,
-    )
-    .parse(input)?;
+    )(input)?;
 
     // Check for trailing comma
     let (input, _) = trailing_comma_check(input)?;
@@ -243,10 +236,9 @@ pub fn parse_error_info(input: &[u8]) -> ParseResult<'_, Vec<ErrorInfoValue>> {
 /// Example: `Error-Info: <sip:busy@example.com>;reason=busy`
 pub fn full_parse_error_info(input: &[u8]) -> ParseResult<'_, Vec<ErrorInfoValue>> {
     preceded(
-        pair(tag_no_case(&b"Error-Info"[..]), (hcolon, space0)), // Allow whitespace after colon
+        pair(tag_no_case(b"Error-Info"), tuple((hcolon, space0))), // Allow whitespace after colon
         parse_error_info,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]

@@ -3,7 +3,6 @@
 // rec-route = name-addr *( SEMI rr-param )
 // rr-param = generic-param
 
-use nom::Parser;
 use nom::{combinator::map, sequence::pair};
 
 // Import from base parser modules
@@ -23,8 +22,7 @@ fn parse_record_route_address(input: &[u8]) -> ParseResult<'_, Address> {
             address.params = record_route_params;
             address
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parse a Record-Route header value as defined in RFC 3261 Section 20.31
@@ -38,8 +36,7 @@ pub fn parse_record_route(input: &[u8]) -> ParseResult<'_, RecordRouteHeader> {
 
             RecordRouteHeader(entries)
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]

@@ -18,7 +18,6 @@
 // - Extensions: single character followed by subtags
 // - Private use: 'x' followed by subtags
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while_m_n},
@@ -138,8 +137,7 @@ fn primary_tag_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         take_while_m_n(1, 8, |c: u8| c.is_ascii_alphabetic()),
         no_underscore, // Explicitly disallow underscores
-    )
-    .parse(input)
+    )(input)
 }
 
 // subtag = 1*8ALPHANUM
@@ -148,8 +146,7 @@ fn subtag_part(input: &[u8]) -> ParseResult<'_, &[u8]> {
     verify(
         take_while_m_n(1, 8, |c: u8| c.is_ascii_alphanumeric()),
         no_underscore, // Explicitly disallow underscores
-    )
-    .parse(input)
+    )(input)
 }
 
 // Extended language subtag: 3 ALPHA characters per RFC 5646
@@ -176,7 +173,7 @@ fn language_range(input: &[u8]) -> ParseResult<'_, String> {
         map_res(
             recognize(pair(
                 primary_tag_part,
-                many0(preceded(tag(&b"-"[..]), subtag_part)),
+                many0(preceded(tag(b"-"), subtag_part)),
             )),
             |bytes: &[u8]| {
                 // Validate the full tag as per RFC 5646
@@ -188,7 +185,7 @@ fn language_range(input: &[u8]) -> ParseResult<'_, String> {
                     || primary.len() > 8
                     || !primary.iter().all(|&c| c.is_ascii_alphabetic())
                 {
-                    return Err(nom::Err::<_>::Error(nom::error::Error::new(
+                    return Err(nom::Err::Error(nom::error::Error::new(
                         bytes,
                         nom::error::ErrorKind::Alpha,
                     )));
@@ -214,29 +211,28 @@ fn language_range(input: &[u8]) -> ParseResult<'_, String> {
         // RFC 5646 grandfathered tags (rare, but preserved for compatibility)
         map(
             alt((
-                tag_no_case(&b"i-ami"[..]),
-                tag_no_case(&b"i-bnn"[..]),
-                tag_no_case(&b"i-default"[..]),
-                tag_no_case(&b"i-enochian"[..]),
-                tag_no_case(&b"i-hak"[..]),
-                tag_no_case(&b"i-klingon"[..]),
-                tag_no_case(&b"i-lux"[..]),
-                tag_no_case(&b"i-mingo"[..]),
-                tag_no_case(&b"i-navajo"[..]),
-                tag_no_case(&b"i-pwn"[..]),
-                tag_no_case(&b"i-tao"[..]),
-                tag_no_case(&b"i-tay"[..]),
-                tag_no_case(&b"i-tsu"[..]),
-                tag_no_case(&b"sgn-be-fr"[..]),
-                tag_no_case(&b"sgn-be-nl"[..]),
-                tag_no_case(&b"sgn-ch-de"[..]),
+                tag_no_case(b"i-ami"),
+                tag_no_case(b"i-bnn"),
+                tag_no_case(b"i-default"),
+                tag_no_case(b"i-enochian"),
+                tag_no_case(b"i-hak"),
+                tag_no_case(b"i-klingon"),
+                tag_no_case(b"i-lux"),
+                tag_no_case(b"i-mingo"),
+                tag_no_case(b"i-navajo"),
+                tag_no_case(b"i-pwn"),
+                tag_no_case(b"i-tao"),
+                tag_no_case(b"i-tay"),
+                tag_no_case(b"i-tsu"),
+                tag_no_case(b"sgn-be-fr"),
+                tag_no_case(b"sgn-be-nl"),
+                tag_no_case(b"sgn-ch-de"),
             )),
             |bytes| String::from_utf8_lossy(bytes).to_string().to_lowercase(),
         ),
         // Wildcard
-        map(tag(&b"*"[..]), |_| "*".to_string()),
-    ))
-    .parse(input)
+        map(tag(b"*"), |_| "*".to_string()),
+    ))(input)
 }
 
 // Validate q-value according to RFC specifications:
@@ -281,8 +277,7 @@ fn language(input: &[u8]) -> ParseResult<'_, LanguageInfo> {
                 params: other_params,
             }
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // Define structure for Accept-Language value
@@ -297,11 +292,10 @@ pub struct AcceptLanguageValue {
 pub fn parse_accept_language(input: &[u8]) -> ParseResult<'_, Vec<LanguageInfo>> {
     // First parse the header name and HCOLON (case-insensitive)
     preceded(
-        pair(tag_no_case(&b"Accept-Language"[..]), hcolon),
+        pair(tag_no_case(b"Accept-Language"), hcolon),
         // Then parse the optional list of languages
         opt(comma_separated_list0(language)),
-    )
-    .parse(input)
+    )(input)
     .map(|(rem, langs_opt)| {
         let mut langs = langs_opt.unwrap_or_else(Vec::new);
         // Sort languages by q-value (highest first) per RFC 2616

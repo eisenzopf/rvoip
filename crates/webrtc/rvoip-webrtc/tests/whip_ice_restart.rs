@@ -44,7 +44,7 @@ async fn whip_patch_ice_restart_returns_new_answer() {
         .expect("originate");
     let initial_offer = offerer.local_sdp(&handle.connection.id).expect("offer");
 
-    let client = ring_reqwest_builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .expect("client");
@@ -107,11 +107,4 @@ async fn whip_patch_ice_restart_returns_new_answer() {
     assert!(restart_answer.contains("m=audio"));
 
     server.abort();
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

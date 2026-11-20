@@ -5,7 +5,6 @@
 //! (simulcast streams) of the same media source.
 
 use crate::error::{Error, Result};
-use nom::Parser;
 use nom::{
     bytes::complete::take_while1,
     character::complete::char,
@@ -96,7 +95,7 @@ fn parse_rid(input: &str) -> IResult<&str, &str> {
 
 /// Parse a simulcast alternative
 fn parse_simulcast_alternative(input: &str) -> IResult<&str, SimulcastAlternative> {
-    let (input, status) = opt(char('~')).parse(input)?;
+    let (input, status) = opt(char('~'))(input)?;
     let (input, rid) = parse_rid(input)?;
 
     Ok((
@@ -125,8 +124,7 @@ fn parse_simulcast_version(input: &str) -> IResult<&str, SimulcastVersion> {
     map(
         separated_list1(char(','), parse_simulcast_alternative),
         |alternatives| SimulcastVersion { alternatives },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parse simulcast stream versions
@@ -139,7 +137,7 @@ fn parse_simulcast_stream_versions(input: &str) -> IResult<&str, Vec<SimulcastVe
         )));
     }
 
-    separated_list1(char(';'), parse_simulcast_version).parse(input)
+    separated_list1(char(';'), parse_simulcast_version)(input)
 }
 
 /// Parse simulcast attribute as per RFC 8853

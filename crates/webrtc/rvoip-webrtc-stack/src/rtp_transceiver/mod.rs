@@ -6,7 +6,7 @@ pub mod rtp_sender;
 use crate::error::Error;
 use crate::media_stream::track_local::TrackLocalContext;
 use crate::media_stream::{track_local::TrackLocal, track_remote::TrackRemote};
-use crate::peer_connection::PeerConnectionRef;
+use crate::peer_connection::{Interceptor, NoopInterceptor, PeerConnectionRef};
 use crate::runtime::Mutex;
 use rtc::media_stream::MediaStreamId;
 use rtc::rtp_transceiver::RTCRtpTransceiverId;
@@ -66,20 +66,26 @@ pub trait RtpTransceiver: Send + Sync + 'static {
 /// Concrete async rtp transceiver implementation (generic over interceptor type).
 ///
 /// This wraps a rtp transceiver and provides async send/receive APIs.
-pub(crate) struct RtpTransceiverImpl {
+pub(crate) struct RtpTransceiverImpl<I = NoopInterceptor>
+where
+    I: Interceptor,
+{
     /// Unique identifier for this rtp transceiver
     id: RTCRtpTransceiverId,
 
     /// Inner PeerConnection Reference
-    inner: Arc<PeerConnectionRef>,
+    inner: Arc<PeerConnectionRef<I>>,
 
     sender: Mutex<Option<Arc<dyn RtpSender>>>,
     receiver: Mutex<Option<Arc<dyn RtpReceiver>>>,
 }
 
-impl RtpTransceiverImpl {
+impl<I> RtpTransceiverImpl<I>
+where
+    I: Interceptor,
+{
     /// Create a new rtp transceiver wrapper
-    pub(crate) fn new(id: RTCRtpTransceiverId, inner: Arc<PeerConnectionRef>) -> Self {
+    pub(crate) fn new(id: RTCRtpTransceiverId, inner: Arc<PeerConnectionRef<I>>) -> Self {
         Self {
             id,
             inner,
@@ -117,7 +123,10 @@ impl RtpTransceiverImpl {
 }
 
 #[async_trait::async_trait]
-impl RtpTransceiver for RtpTransceiverImpl {
+impl<I> RtpTransceiver for RtpTransceiverImpl<I>
+where
+    I: Interceptor + 'static,
+{
     fn id(&self) -> RTCRtpTransceiverId {
         self.id
     }

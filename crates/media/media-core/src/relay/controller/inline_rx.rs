@@ -1205,10 +1205,9 @@ fn deliver_frame_inline(
                 || state.decoded_audio_frame_count == 100
                 || state.decoded_audio_frame_count == 101
             {
-                trace!(
+                info!(
                     "✅ Sent decoded audio frame #{} to callback for dialog {}",
-                    state.decoded_audio_frame_count,
-                    dialog_id
+                    state.decoded_audio_frame_count, dialog_id
                 );
             }
             false

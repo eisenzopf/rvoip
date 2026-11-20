@@ -1,7 +1,6 @@
 // Parser for CSeq header (RFC 3261 Section 20.16)
 // CSeq = "CSeq" HCOLON 1*DIGIT LWS Method
 
-use nom::Parser;
 use nom::{
     bytes::complete::tag_no_case,
     character::complete::digit1,
@@ -57,8 +56,7 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<'_, (u32, Method)> {
 
             Ok((seq_num, method))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parses the CSeq value part (without header name and colon)
@@ -77,7 +75,7 @@ fn cseq_value_method(input: &[u8]) -> ParseResult<'_, (u32, Method)> {
 /// assert_eq!(cseq.method(), &Method::Invite);
 /// ```
 pub fn parse_cseq(input: &[u8]) -> ParseResult<'_, CSeq> {
-    map(cseq_value_method, |(seq, method)| CSeq::new(seq, method)).parse(input)
+    map(cseq_value_method, |(seq, method)| CSeq::new(seq, method))(input)
 }
 
 /// Full parser that handles the complete header including name and colon
@@ -99,7 +97,7 @@ pub fn parse_cseq(input: &[u8]) -> ParseResult<'_, CSeq> {
 /// assert_eq!(cseq.method(), &Method::Invite);
 /// ```
 pub fn full_parse_cseq(input: &[u8]) -> ParseResult<'_, CSeq> {
-    preceded(pair(tag_no_case(&b"CSeq"[..]), hcolon), parse_cseq).parse(input)
+    preceded(pair(tag_no_case(b"CSeq"), hcolon), parse_cseq)(input)
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 use crate::{CreateUserRequest, Error, Result, UpdateUserRequest, User, UserFilter};
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx_core::{query::query, raw_sql::raw_sql, row::Row, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, raw_sql::raw_sql, row::Row};
 use sqlx_sqlite::{SqlitePool, SqliteRow};
 
 #[cfg(feature = "postgres")]
@@ -81,7 +81,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    for &(id, sql) in MIGRATIONS {
+    for (id, sql) in MIGRATIONS {
         let applied = query("SELECT 1 FROM schema_migrations WHERE id = ?")
             .bind(id)
             .fetch_optional(pool)
@@ -283,9 +283,7 @@ impl UserStore for SqliteUserStore {
         }
 
         // Execute with proper parameter binding
-        // Only fixed SQL fragments and numbered placeholders are appended to
-        // `query_str`; every filter value is bound below.
-        let mut query = query(AssertSqlSafe(query_str));
+        let mut query = query(&query_str);
         for param in params {
             query = query.bind(param);
         }
@@ -319,7 +317,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
         &self,
         request: crate::api_keys::CreateApiKeyRequest,
     ) -> Result<(crate::ApiKey, String)> {
-        use rand::RngExt;
+        use rand::Rng;
         use sha2::{Digest, Sha256};
 
         // Validate the request first
@@ -328,8 +326,8 @@ impl crate::ApiKeyStore for SqliteUserStore {
         // Generate the actual API key
         let raw_key = format!(
             "rvoip_ak_live_{}",
-            rand::rng()
-                .sample_iter(&rand::distr::Alphanumeric)
+            rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
                 .take(32)
                 .map(char::from)
                 .collect::<String>()
@@ -338,7 +336,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
         // Hash the key for storage
         let mut hasher = Sha256::new();
         hasher.update(raw_key.as_bytes());
-        let key_hash = hex::encode(hasher.finalize());
+        let key_hash = format!("{:x}", hasher.finalize());
 
         let api_key = crate::ApiKey {
             id: crate::User::new_id(),
@@ -378,7 +376,7 @@ impl crate::ApiKeyStore for SqliteUserStore {
         // Hash the provided key
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
-        let key_hash = hex::encode(hasher.finalize());
+        let key_hash = format!("{:x}", hasher.finalize());
 
         let row = query(
             "SELECT id, user_id, name, key_hash, permissions, active, expires_at, last_used, created_at

@@ -40,12 +40,12 @@
 
 use crate::error::{Error, Result};
 use crate::types::sdp::{RepeatTime, TimeDescription};
-use nom::Parser;
 use nom::{
     bytes::complete::{tag, take_while1},
     character::complete::{digit1, space1},
     combinator::{map_res, opt, recognize},
     multi::separated_list1,
+    sequence::tuple,
     IResult,
 };
 
@@ -61,7 +61,7 @@ use nom::{
 ///
 /// A nom IResult containing the remaining input and the parsed u64 value
 fn parse_numeric_time(input: &str) -> IResult<&str, u64> {
-    map_res(digit1, |s: &str| s.parse::<u64>()).parse(input)
+    map_res(digit1, |s: &str| s.parse::<u64>())(input)
 }
 
 /// Validate that a time field is a valid NTP timestamp or 0
@@ -115,7 +115,7 @@ fn parse_time_with_unit_nom(input: &str) -> IResult<&str, u64> {
 
     // Get the unit (single character)
     let (input, unit) =
-        recognize(take_while1(|c: char| matches!(c, 's' | 'm' | 'h' | 'd'))).parse(input)?;
+        recognize(take_while1(|c: char| matches!(c, 's' | 'm' | 'h' | 'd')))(input)?;
 
     // Convert to seconds based on unit
     let seconds = match unit {
@@ -243,8 +243,8 @@ pub fn parse_time_with_unit(value: &str) -> Result<u64> {
 /// A nom IResult containing the remaining input and the parsed TimeDescription
 fn parse_time_description_nom(input: &str) -> IResult<&str, TimeDescription> {
     // Format: t=<start-time> <stop-time>
-    let (input, _) = opt(tag("t=")).parse(input)?;
-    let (input, (start_str, _, stop_str)) = (digit1, space1, digit1).parse(input)?;
+    let (input, _) = opt(tag("t="))(input)?;
+    let (input, (start_str, _, stop_str)) = tuple((digit1, space1, digit1))(input)?;
 
     // Validate that the times can be parsed as u64, but keep the original strings
     if start_str.parse::<u64>().is_err() || stop_str.parse::<u64>().is_err() {
@@ -369,12 +369,12 @@ pub fn parse_time_description_line(value: &str) -> Result<TimeDescription> {
 /// A nom IResult containing the remaining input and the parsed RepeatTime
 fn parse_repeat_time_nom(input: &str) -> IResult<&str, RepeatTime> {
     // Format: r=<repeat-interval> <active-duration> <list-of-offsets-from-start-time>
-    let (input, _) = opt(tag("r=")).parse(input)?;
+    let (input, _) = opt(tag("r="))(input)?;
     let (input, repeat_interval) = parse_time_with_unit_nom(input)?;
     let (input, _) = space1(input)?;
     let (input, active_duration) = parse_time_with_unit_nom(input)?;
     let (input, _) = space1(input)?;
-    let (input, offsets) = separated_list1(space1, parse_time_with_unit_nom).parse(input)?;
+    let (input, offsets) = separated_list1(space1, parse_time_with_unit_nom)(input)?;
 
     Ok((
         input,
