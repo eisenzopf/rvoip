@@ -267,7 +267,7 @@ jobs:
       # the exact candidate.
       - name: Restore hosted shard Rust cache
         if: matrix.hosted
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: release-hosted-${{ matrix.id }}
 
@@ -279,13 +279,13 @@ jobs:
 
       - name: Install cargo-fuzz
         if: matrix.needs_nightly
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-fuzz@0.13.2
 
       - name: Install cargo-deny
         if: matrix.needs_cargo_deny
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2
         with:
           tool: cargo-deny@0.20.2
 
@@ -346,7 +346,7 @@ jobs:
         with:
           toolchain: 1.95.0
       - name: Restore bench DUT build cache
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: release-bench-dut
       - name: Install DUT build dependencies
@@ -389,7 +389,7 @@ jobs:
         with:
           toolchain: 1.95.0
       - name: Restore bench DUT build cache
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: release-bench-dut
       - name: Install DUT build dependencies
@@ -445,7 +445,7 @@ jobs:
           toolchain: 1.95.0
 
       - name: Restore bench DUT build cache
-        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+        uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: release-bench-dut
 
