@@ -697,11 +697,8 @@ pub struct DialogManager {
     >,
     pub(crate) active_invite_failover_by_dialog: Arc<DashMap<DialogId, u64>>,
     /// Exact reverse index for active and retained logical INVITE plans.
-    /// Unlike `active_invite_failover_by_dialog`, entries outlive the active
-    /// operation while the dialog is still attached. Detaching the dialog
-    /// drops its terminal plans from this index (they stay reachable by exact
-    /// transaction key in `invite_failover_attempts`); only wire-unknown plans
-    /// keep their entries until exact teardown completes.
+    /// Unlike `active_invite_failover_by_dialog`, entries remain until the
+    /// corresponding late-response tombstones are removed.
     pub(crate) invite_failover_plans_by_dialog: Arc<DashMap<DialogId, Vec<u64>>>,
     pub(crate) invite_failover_attempts: Arc<
         DashMap<Arc<TransactionKey>, super::transaction_integration::InviteFailoverAttemptIndex>,
@@ -709,8 +706,6 @@ pub struct DialogManager {
     /// Exact reverse index for active and retained INVITE attempts. This is
     /// independent of `dialog_invite_transactions`, whose hot transaction
     /// routes are intentionally removed before the late-response tombstone.
-    /// Like `invite_failover_plans_by_dialog`, detaching the dialog drops the
-    /// entries of its terminal plans and keeps those of wire-unknown plans.
     pub(crate) invite_failover_attempts_by_dialog: Arc<DashMap<DialogId, Vec<Arc<TransactionKey>>>>,
     /// Exact ordered expiry index for active and retained INVITE plans. It is
     /// bounded to one current entry per retained plan and excludes the
@@ -1104,7 +1099,6 @@ impl DialogManager {
         let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
-        crate::manager::occupancy::register(&dialogs);
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
         // Create dialog event channel for subscription manager
@@ -1853,7 +1847,6 @@ impl DialogManager {
         let retained_plan_capacity = invite_failover_retained_plan_capacity(active_plan_capacity);
         let retained_attempt_capacity = invite_failover_attempt_capacity(retained_plan_capacity);
         let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
-        crate::manager::occupancy::register(&dialogs);
         let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
         let transaction_dialog_route_hash = Arc::new(DashMap::with_capacity(index_capacity));
         let weak_transaction_dialog_route_hash = Arc::downgrade(&transaction_dialog_route_hash);

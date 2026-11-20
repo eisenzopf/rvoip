@@ -620,27 +620,6 @@ impl fmt::Debug for RedisAuthProvider {
     }
 }
 
-/// Install ring as rustls's process-level `CryptoProvider` if none is installed.
-///
-/// redis builds its TLS (`rediss://`) configuration on rustls's
-/// process-level default (`rustls::ClientConfig::builder()`), so a TLS
-/// connection needs one.
-/// rustls cannot pick a process-level provider when a dependency graph
-/// compiles both of its providers (`ring` and `aws-lc-rs`), and that path
-/// would panic. Upstream limitation: redis offers no way to hand its TLS
-/// connector a `CryptoProvider`.
-///
-/// This is the only place this crate touches the process default. It never
-/// replaces an installed provider: an application that installs its own at
-/// startup always wins, and one that installs nothing still works. An `Err`
-/// from `install_default` means a concurrent caller installed one first,
-/// which is kept.
-pub(crate) fn ensure_process_crypto_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-}
-
 impl RedisAuthProvider {
     /// Create a Redis provider from a Redis URL and default configuration.
     pub fn new(redis_url: impl Into<String>) -> Result<Self, RedisAuthError> {
@@ -684,9 +663,6 @@ impl RedisAuthProvider {
     ) -> Result<Self, RedisAuthError> {
         validate_auth_config(&config)?;
         let runtime = runtime.validate()?;
-        if tls.is_some() || config.redis_url.starts_with("rediss:") {
-            ensure_process_crypto_provider();
-        }
         let client = match tls {
             Some(tls) => {
                 redis::Client::build_with_tls(config.redis_url.as_str(), tls.into_redis()?)?
@@ -798,9 +774,6 @@ impl RedisAuthProvider {
         validate_auth_config(&config)?;
         let runtime = runtime.validate()?;
         let seed_urls = seed_urls.into_iter().map(Into::into).collect::<Vec<_>>();
-        if tls.is_some() || seed_urls.iter().any(|url| url.starts_with("rediss:")) {
-            ensure_process_crypto_provider();
-        }
         let first_seed = seed_urls
             .first()
             .cloned()

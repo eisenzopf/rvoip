@@ -33,8 +33,6 @@ url.workspace = true
 zeroize.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
-webpki-roots = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true, features = ["ws"] }

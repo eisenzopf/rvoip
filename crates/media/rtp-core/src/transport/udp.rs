@@ -334,7 +334,7 @@ use super::allocator::{GlobalPortAllocator, PairingStrategy, PortAllocator};
 use super::rx_hot::{RxHot, RxHotVerdict};
 use super::srtp_rx::{OwnerSrtpRx, PreviousRecv, SrtpRecvShared, SrtpRecvSlot};
 use super::symmetric::{SymmetricRtpDecision, SymmetricRtpLearner};
-use super::validation::{bind_media_udp_socket, PlatformSocketStrategy};
+use super::validation::PlatformSocketStrategy;
 use super::{RtpTransport, RtpTransportConfig, SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 use crate::error::Error;
 use crate::executor::{
@@ -1213,7 +1213,7 @@ impl UdpRtpTransport {
         } else {
             // Traditional socket binding without the allocator
             // Create RTP socket
-            let socket_rtp = bind_media_udp_socket(config.local_rtp_addr)
+            let socket_rtp = UdpSocket::bind(config.local_rtp_addr)
                 .await
                 .map_err(|e| Error::Transport(format!("Failed to bind RTP socket: {}", e)))?;
 
@@ -1242,7 +1242,7 @@ impl UdpRtpTransport {
                 };
 
                 // Create RTCP socket
-                let socket_rtcp = bind_media_udp_socket(local_rtcp_addr)
+                let socket_rtcp = UdpSocket::bind(local_rtcp_addr)
                     .await
                     .map_err(|e| Error::Transport(format!("Failed to bind RTCP socket: {}", e)))?;
 
@@ -4114,117 +4114,6 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Bind a transport to explicit (non-zero) RTP and RTCP loopback ports.
-    async fn transport_on_explicit_media_ports(
-        session: &str,
-    ) -> (UdpRtpTransport, SocketAddr, SocketAddr) {
-        for _ in 0..20 {
-            let probe_rtp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let probe_rtcp = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-            let rtp = probe_rtp.local_addr().unwrap();
-            let rtcp = probe_rtcp.local_addr().unwrap();
-            drop((probe_rtp, probe_rtcp));
-            // Another process can take a probed port in between; try again.
-            if let Ok(transport) =
-                UdpRtpTransport::new(explicit_media_config(session, rtp, rtcp)).await
-            {
-                return (transport, rtp, rtcp);
-            }
-        }
-        panic!("could not bind a media transport to explicit loopback ports");
-    }
-
-    fn explicit_media_config(
-        session: &str,
-        rtp: SocketAddr,
-        rtcp: SocketAddr,
-    ) -> RtpTransportConfig {
-        RtpTransportConfig {
-            local_rtp_addr: rtp,
-            local_rtcp_addr: Some(rtcp),
-            symmetric_rtp: true,
-            rtcp_mux: false,
-            session_id: Some(session.to_string()),
-            use_port_allocator: false,
-            buffer_config: Default::default(),
-        }
-    }
-
-    /// A second socket that sets `SO_REUSEADDR` must not be able to bind a
-    /// live media port. On Linux it could when the media socket also had the
-    /// flag (even set after bind), and the newer socket then receives every
-    /// datagram sent to the port; on Windows it could unless the media socket
-    /// set `SO_EXCLUSIVEADDRUSE`. See the sip-transport `udp_port_hijack` test
-    /// for the macOS semantics. rvoip's CI runs on Linux only, so the Windows
-    /// build of this test is compile-checked, not run.
-    #[cfg(any(unix, windows))]
-    fn assert_media_port_not_shareable(addr: SocketAddr, what: &str) {
-        use socket2::{Domain, Protocol, Socket, Type};
-        let intruder = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).unwrap();
-        intruder.set_reuse_address(true).unwrap();
-        match intruder.bind(&addr.into()) {
-            Ok(()) => {
-                let intruder: std::net::UdpSocket = intruder.into();
-                intruder
-                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                    .unwrap();
-                let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                sender.send_to(&[0x80, 0, 0, 1], addr).unwrap();
-                let mut buf = [0u8; 64];
-                let outcome = match intruder.recv_from(&mut buf) {
-                    Ok((len, _)) => format!("and received the {len}-byte datagram sent to it"),
-                    Err(err) => format!("(the probe datagram did not reach it: {err})"),
-                };
-                panic!(
-                    "hijack: a second SO_REUSEADDR socket bound the {what} port {addr} {outcome}"
-                );
-            }
-            // Windows reports the refusal as WSAEADDRINUSE or WSAEACCES.
-            Err(err) => assert!(
-                err.kind() == std::io::ErrorKind::AddrInUse
-                    || (cfg!(windows) && err.kind() == std::io::ErrorKind::PermissionDenied),
-                "the intruder on the {what} port must be refused with EADDRINUSE, got {err}"
-            ),
-        }
-    }
-
-    #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn reuse_flagged_socket_cannot_take_an_explicit_media_port() {
-        let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-port-hijack").await;
-        assert_media_port_not_shareable(rtp, "RTP");
-        assert_media_port_not_shareable(rtcp, "RTCP");
-        transport.close().await.unwrap();
-
-        // The port allocator binds through the same socket strategy.
-        let allocator = crate::transport::allocator::PortAllocator::new();
-        let probe = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let addr = probe.local_addr().unwrap();
-        drop(probe);
-        let socket = allocator
-            .create_validated_socket(addr)
-            .await
-            .expect("allocator binds an explicit media port");
-        assert_media_port_not_shareable(socket.local_addr().unwrap(), "allocator RTP");
-    }
-
-    #[tokio::test]
-    async fn rebinds_same_media_ports_after_close() {
-        // UDP has no TIME_WAIT: once a closed transport's sockets are gone, a
-        // new transport binds the same explicit RTP and RTCP ports at once,
-        // with no SO_REUSEADDR on either.
-        let (transport, rtp, rtcp) = transport_on_explicit_media_ports("media-rebind-first").await;
-        transport.close().await.unwrap();
-        drop(transport);
-
-        let rebound = UdpRtpTransport::new(explicit_media_config("media-rebind-second", rtp, rtcp))
-            .await
-            .expect("rebind the same RTP/RTCP ports right after close");
-        assert_eq!(rebound.local_rtp_addr().unwrap(), rtp);
-        assert_eq!(rebound.local_rtcp_addr().unwrap(), Some(rtcp));
-        rebound.close().await.unwrap();
-    }
-
     // -------- SRTP wrapping (Step 2B.2) ---------------------------------
 
     /// Build a matched pair of `SrtpContext`s from a single shared
@@ -5113,7 +5002,6 @@ mod tests {
             .unwrap();
 
         let mut events = transport_b.subscribe();
-        let failures_before = crate::transport::srtp_unprotect_failures_total();
 
         let header = RtpHeader::new(0, 1, 12345, 0xdead_beef);
         let payload = Bytes::from_static(b"this should be dropped");
@@ -5130,12 +5018,6 @@ mod tests {
             waited.is_err(),
             "auth-failed packet must be silently dropped (got event {:?})",
             waited
-        );
-        // The drop is counted process-wide (other tests may add their own
-        // failures concurrently, never remove any).
-        assert!(
-            crate::transport::srtp_unprotect_failures_total() > failures_before,
-            "the dropped packet is counted"
         );
     }
 

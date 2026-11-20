@@ -46,7 +46,6 @@ rustls-pki-types = "1.12"
 # HTTP fetch of the info= cert URL
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

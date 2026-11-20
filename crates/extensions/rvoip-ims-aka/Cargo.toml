@@ -14,7 +14,7 @@ description = "IMS AKA provider adapters for RVoIP SIP authentication"
 
 [features]
 default = []
-http = ["dep:reqwest", "dep:rustls", "dep:rustls-platform-verifier"]
+http = ["dep:reqwest", "dep:rustls"]
 lab-milenage = ["dep:aes", "dep:hmac", "dep:sha2"]
 
 [dependencies]
@@ -31,7 +31,6 @@ aes = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"], optional = true }
 rustls = { workspace = true, optional = true }
-rustls-platform-verifier = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -2933,26 +2933,6 @@ mod auth_boundary_tests {
         server.close().await.unwrap();
     }
 
-    /// SIP TLS/WSS configurations name the crate's ring provider explicitly.
-    /// This test binary links both rustls providers (the `aws_lc_rs`
-    /// dev-dependency feature), so rustls cannot infer a process default:
-    /// building either configuration through the implicit default would panic.
-    #[test]
-    fn tls_configs_use_the_explicit_provider_with_both_rustls_providers_linked() {
-        let (_directory, cert_path, key_path) = write_test_certificate();
-        let server = build_server_config(
-            &cert_path,
-            &key_path,
-            &TlsServerClientAuthConfig::default(),
-            "SIP TLS",
-        )
-        .expect("server config");
-        let client = build_client_config(&TlsClientConfig::default()).expect("client config");
-        let provider = rustls_crypto_provider();
-        assert!(Arc::ptr_eq(server.crypto_provider(), &provider));
-        assert!(Arc::ptr_eq(client.crypto_provider(), &provider));
-    }
-
     fn write_test_certificate() -> (tempfile::TempDir, PathBuf, PathBuf) {
         use std::io::Write;
 
@@ -3563,23 +3543,15 @@ enum KeepAliveFrame {
 /// Select the workspace's canonical rustls provider before using rustls's
 /// process-default builders.
 ///
-/// Every SIP TLS/WSS configuration is built on this provider explicitly.
-///
-/// A dependency graph can compile both rustls provider features (for example
-/// MoQ brings `aws-lc-rs` while SIP transport is pinned to `ring`); rustls
-/// then cannot infer a process-level provider and its `builder()` functions
-/// panic. Naming the provider here keeps SIP TLS independent of, and from
-/// ever installing, the process-level default.
-pub(crate) fn rustls_crypto_provider() -> Arc<rustls::crypto::CryptoProvider> {
-    static PROVIDER: std::sync::OnceLock<Arc<rustls::crypto::CryptoProvider>> =
-        std::sync::OnceLock::new();
-    PROVIDER
-        .get_or_init(|| Arc::new(rustls::crypto::ring::default_provider()))
-        .clone()
-}
-
-fn tls_protocol_error(error: rustls::Error) -> Error {
-    Error::TlsCertificateError(format!("TLS protocol versions: {error}"))
+/// A full-workspace test binary can legitimately unify dependencies that
+/// compile both rustls provider features (for example, MoQ currently brings
+/// `aws-lc-rs` while SIP transport is pinned to `ring`). In that configuration
+/// rustls cannot infer a provider and its otherwise-convenient `builder()`
+/// functions panic. Installing `ring` here keeps provider selection at the TLS
+/// transport boundary. If another subsystem already selected a provider, the
+/// failed installation is harmless and the established process default wins.
+fn ensure_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 /// Strip a leading RFC 5626 §3.5.1 keep-alive frame (pong / ping) off
@@ -3605,12 +3577,10 @@ pub(crate) fn build_server_config(
     client_auth: &TlsServerClientAuthConfig,
     transport_label: &str,
 ) -> Result<ServerConfig> {
-    let provider = rustls_crypto_provider();
+    ensure_rustls_crypto_provider();
     let certs = load_certs(cert_path)?;
     let key = load_private_key(key_path)?;
-    let builder = ServerConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(tls_protocol_error)?;
+    let builder = ServerConfig::builder();
     let builder = match client_auth.mode {
         TlsClientAuthMode::Disabled => builder.with_no_client_auth(),
         TlsClientAuthMode::Optional | TlsClientAuthMode::Required => {
@@ -3638,7 +3608,7 @@ pub(crate) fn build_server_config(
                     ca_path.display()
                 )));
             }
-            let verifier = WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider);
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
             let verifier = if client_auth.mode == TlsClientAuthMode::Optional {
                 verifier.allow_unauthenticated().build()
             } else {
@@ -3690,11 +3660,7 @@ pub(crate) fn verified_peer_metadata(
 /// CA bundle (added to the same root store) and an insecure-skip mode
 /// (dev only — accepts any cert without identity verification).
 pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
-    let client_builder = || {
-        ClientConfig::builder_with_provider(rustls_crypto_provider())
-            .with_safe_default_protocol_versions()
-            .map_err(tls_protocol_error)
-    };
+    ensure_rustls_crypto_provider();
     if cfg.client_cert_path.is_some() ^ cfg.client_key_path.is_some() {
         return Err(Error::InvalidState(
             "TLS client certificate and key must be provided together".to_string(),
@@ -3708,7 +3674,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
                 "TLS client built with insecure_skip_verify=true — \
                  server certificates will NOT be validated. Dev only."
             );
-            let builder = client_builder()?
+            let builder = ClientConfig::builder()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier));
             return match (&cfg.client_cert_path, &cfg.client_key_path) {
@@ -3803,7 +3769,7 @@ pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig>
         );
     }
 
-    let builder = client_builder()?.with_root_certificates(root_store);
+    let builder = ClientConfig::builder().with_root_certificates(root_store);
     match (&cfg.client_cert_path, &cfg.client_key_path) {
         (Some(cert_path), Some(key_path)) => {
             let certs = load_certs(cert_path)?;

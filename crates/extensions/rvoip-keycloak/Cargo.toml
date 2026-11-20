@@ -16,7 +16,6 @@ description = "Keycloak/OIDC integration helpers for RVoIP auth"
 async-trait = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "form", "rustls-no-provider"] }
 rustls = { workspace = true }
-rustls-platform-verifier = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }

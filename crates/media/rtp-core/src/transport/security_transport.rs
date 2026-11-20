@@ -136,7 +136,6 @@ impl SecurityRtpTransport {
                                     ssrc: packet.header.ssrc,
                                 },
                                 Err(error) => {
-                                    super::record_srtp_unprotect_failure();
                                     trace!(
                                         "Dropping packet that failed SRTP authentication: {error}"
                                     );

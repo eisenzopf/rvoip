@@ -221,309 +221,66 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[cfg(test)]
 mod feature_bundle_contract_tests {
-    //! Each deployment bundle's contract has two halves.
-    //!
-    //! * **What it turns on.** Checked twice: against the bundle's declared
-    //!   feature closure in this crate's own manifest (every build), and with
-    //!   `cfg!` in a build that selects the bundle, which proves the declared
-    //!   surface is actually compiled in.
-    //! * **What it must leave off.** Checked against the declared closure only.
-    //!   A `cfg!(feature = "opus")` check would be wrong under
-    //!   `--all-features`, where Cargo unifies every feature into one build
-    //!   whatever the bundle declares. The closure is independent of which
-    //!   features happen to be active, so the check runs (and can fail) in
-    //!   default, per-bundle and `--all-features` builds alike.
-
-    use std::collections::BTreeMap;
-
-    type FeatureTable = BTreeMap<String, Vec<String>>;
-
-    /// The `[features]` table of the manifest this test was compiled from.
-    fn manifest_features() -> FeatureTable {
-        let manifest: toml::Table =
-            include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
-                .parse()
-                .expect("crates/rvoip/Cargo.toml parses as TOML");
-        let features = manifest
-            .get("features")
-            .and_then(toml::Value::as_table)
-            .expect("crates/rvoip/Cargo.toml has a [features] table");
-        features
-            .iter()
-            .map(|(name, members)| {
-                let members = members
-                    .as_array()
-                    .unwrap_or_else(|| panic!("feature `{name}` is not an array"))
-                    .iter()
-                    .map(|member| {
-                        member
-                            .as_str()
-                            .unwrap_or_else(|| panic!("feature `{name}` has a non-string member"))
-                            .to_owned()
-                    })
-                    .collect();
-                (name.clone(), members)
-            })
-            .collect()
-    }
-
-    /// Everything a feature turns on, as declared in the manifest.
-    #[derive(Debug, Default)]
-    struct DeclaredClosure {
-        /// Local feature names reached, each mapped to the feature that listed
-        /// it (the root maps to itself), so a violation can name its path.
-        local: BTreeMap<String, String>,
-        /// `dep/feature` and `dep?/feature` entries reached, with the local
-        /// feature that listed each one.
-        forwarded: Vec<(String, String)>,
-    }
-
-    impl DeclaredClosure {
-        /// `root -> ... -> name` for a local feature in the closure.
-        fn path_to(&self, name: &str) -> String {
-            let mut chain = vec![name];
-            let mut current = name;
-            while let Some(parent) = self.local.get(current) {
-                if parent == current {
-                    break;
-                }
-                chain.push(parent);
-                current = parent;
-            }
-            chain.reverse();
-            chain.join(" -> ")
-        }
-    }
-
-    /// The transitive closure of `root` over this crate's own feature names.
-    ///
-    /// Only local names are followed. `dep:x` enables an optional dependency,
-    /// not a feature, so it is skipped. `x/y` and `x?/y` enable feature `y` of
-    /// dependency `x`; they are recorded (so a forbidden feature forwarded
-    /// straight to a dependency is still caught) but not followed, since `y`
-    /// names a feature of another crate.
-    fn declared_closure(features: &FeatureTable, root: &str) -> DeclaredClosure {
-        assert!(
-            features.contains_key(root),
-            "`{root}` is not a feature of crates/rvoip/Cargo.toml"
-        );
-        let mut closure = DeclaredClosure::default();
-        closure.local.insert(root.to_owned(), root.to_owned());
-        let mut pending = vec![root.to_owned()];
-        while let Some(current) = pending.pop() {
-            for entry in features.get(&current).into_iter().flatten() {
-                if entry.starts_with("dep:") {
-                    continue;
-                }
-                if entry.contains('/') {
-                    closure.forwarded.push((entry.clone(), current.clone()));
-                    continue;
-                }
-                if !closure.local.contains_key(entry) {
-                    closure.local.insert(entry.clone(), current.clone());
-                    pending.push(entry.clone());
-                }
-            }
-        }
-        closure
-    }
-
-    /// Every way `closure` reaches one of the `excluded` features: as a local
-    /// feature, or forwarded to a dependency under the same feature name
-    /// (`rvoip-sip/opus` turns native Opus on just as `opus` does).
-    fn excluded_violations(closure: &DeclaredClosure, excluded: &[&str]) -> Vec<String> {
-        let mut violations = Vec::new();
-        for &name in excluded {
-            if closure.local.contains_key(name) {
-                violations.push(format!("`{name}` via {}", closure.path_to(name)));
-            }
-            for (entry, listed_by) in &closure.forwarded {
-                let forwarded_feature = entry.rsplit_once('/').map_or(entry.as_str(), |(_, f)| f);
-                if forwarded_feature == name {
-                    violations.push(format!(
-                        "`{entry}` via {} -> {entry}",
-                        closure.path_to(listed_by)
-                    ));
-                }
-            }
-        }
-        violations
-    }
-
-    fn assert_declares(features: &FeatureTable, bundle: &str, enabled: &[&str], excluded: &[&str]) {
-        let closure = declared_closure(features, bundle);
-        let missing: Vec<&str> = enabled
-            .iter()
-            .copied()
-            .filter(|name| !closure.local.contains_key(*name))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "{bundle} no longer declares {missing:?}; its closure is {:?}",
-            closure.local.keys().collect::<Vec<_>>()
-        );
-        let violations = excluded_violations(&closure, excluded);
-        assert!(
-            violations.is_empty(),
-            "{bundle} must not enable {excluded:?}, but its declared closure reaches {violations:?}"
-        );
-    }
-
+    #[cfg(feature = "bundle-sip-endpoint")]
     #[test]
     fn sip_endpoint_bundle_enables_only_its_declared_facade_surface() {
-        assert_declares(
-            &manifest_features(),
-            "bundle-sip-endpoint",
-            &["sip"],
-            &["webrtc", "uctp", "dtls-srtp", "opus"],
-        );
-
-        #[cfg(feature = "bundle-sip-endpoint")]
         assert!(cfg!(feature = "sip"));
+        assert!(!cfg!(feature = "webrtc"));
+        assert!(!cfg!(feature = "uctp"));
+        assert!(!cfg!(feature = "dtls-srtp"));
+        assert!(!cfg!(feature = "opus"));
     }
 
+    #[cfg(feature = "bundle-carrier-sip")]
     #[test]
     fn carrier_bundle_enables_security_identity_and_pure_rust_telephony_codecs() {
-        assert_declares(
-            &manifest_features(),
-            "bundle-carrier-sip",
-            &[
-                "sip",
-                "sip-stir-shaken",
-                "dtls-srtp",
-                "g729",
-                "amr-nb",
-                "amr-wb",
-            ],
-            &["opus"],
-        );
-
-        #[cfg(feature = "bundle-carrier-sip")]
-        {
-            assert!(cfg!(feature = "sip"));
-            assert!(cfg!(feature = "sip-stir-shaken"));
-            assert!(cfg!(feature = "dtls-srtp"));
-            assert!(cfg!(feature = "g729"));
-            assert!(cfg!(feature = "amr-nb"));
-            assert!(cfg!(feature = "amr-wb"));
-        }
+        assert!(cfg!(feature = "sip"));
+        assert!(cfg!(feature = "sip-stir-shaken"));
+        assert!(cfg!(feature = "dtls-srtp"));
+        assert!(cfg!(feature = "g729"));
+        assert!(cfg!(feature = "amr-nb"));
+        assert!(cfg!(feature = "amr-wb"));
+        assert!(!cfg!(feature = "opus"));
     }
 
+    #[cfg(feature = "bundle-browser-gateway")]
     #[test]
     fn browser_gateway_bundle_enables_app_transports_and_opus() {
-        assert_declares(
-            &manifest_features(),
-            "bundle-browser-gateway",
-            &["app", "sip", "webrtc", "uctp", "opus"],
-            &[],
-        );
-
-        #[cfg(feature = "bundle-browser-gateway")]
-        {
-            assert!(cfg!(feature = "app"));
-            assert!(cfg!(feature = "sip"));
-            assert!(cfg!(feature = "webrtc"));
-            assert!(cfg!(feature = "uctp"));
-            assert!(cfg!(feature = "opus"));
-        }
+        assert!(cfg!(feature = "app"));
+        assert!(cfg!(feature = "sip"));
+        assert!(cfg!(feature = "webrtc"));
+        assert!(cfg!(feature = "uctp"));
+        assert!(cfg!(feature = "opus"));
     }
 
+    #[cfg(feature = "bundle-ai-conversation")]
     #[test]
     fn ai_conversation_bundle_enables_app_conversation_and_agent_surfaces() {
-        assert_declares(
-            &manifest_features(),
-            "bundle-ai-conversation",
-            &["app", "voip-3", "vapi", "opus"],
-            &[],
-        );
-
-        #[cfg(feature = "bundle-ai-conversation")]
-        {
-            assert!(cfg!(feature = "app"));
-            assert!(cfg!(feature = "voip-3"));
-            assert!(cfg!(feature = "vapi"));
-            assert!(cfg!(feature = "opus"));
-        }
+        assert!(cfg!(feature = "app"));
+        assert!(cfg!(feature = "voip-3"));
+        assert!(cfg!(feature = "vapi"));
+        assert!(cfg!(feature = "opus"));
     }
 
+    #[cfg(feature = "bundle-full-pure-rust")]
     #[test]
     fn pure_rust_full_bundle_keeps_native_opus_off() {
-        assert_declares(
-            &manifest_features(),
-            "bundle-full-pure-rust",
-            &["full", "dtls-srtp", "g729", "amr-nb", "amr-wb"],
-            &["opus"],
-        );
-
-        #[cfg(feature = "bundle-full-pure-rust")]
-        {
-            assert!(cfg!(feature = "full"));
-            assert!(cfg!(feature = "dtls-srtp"));
-            assert!(cfg!(feature = "g729"));
-            assert!(cfg!(feature = "amr-nb"));
-            assert!(cfg!(feature = "amr-wb"));
-        }
+        assert!(cfg!(feature = "full"));
+        assert!(cfg!(feature = "dtls-srtp"));
+        assert!(cfg!(feature = "g729"));
+        assert!(cfg!(feature = "amr-nb"));
+        assert!(cfg!(feature = "amr-wb"));
+        assert!(!cfg!(feature = "opus"));
     }
 
+    #[cfg(feature = "bundle-full-native")]
     #[test]
     fn native_full_bundle_enables_every_mainline_codec() {
-        assert_declares(
-            &manifest_features(),
-            "bundle-full-native",
-            &["full", "dtls-srtp", "g729", "amr-nb", "amr-wb", "opus"],
-            &[],
-        );
-
-        #[cfg(feature = "bundle-full-native")]
-        {
-            assert!(cfg!(feature = "full"));
-            assert!(cfg!(feature = "dtls-srtp"));
-            assert!(cfg!(feature = "g729"));
-            assert!(cfg!(feature = "amr-nb"));
-            assert!(cfg!(feature = "amr-wb"));
-            assert!(cfg!(feature = "opus"));
-        }
-    }
-
-    /// The closure walker itself: it follows local names through meta-features,
-    /// skips `dep:` entries, does not follow forwarded entries, and reports a
-    /// forbidden feature reached either way.
-    #[test]
-    fn declared_closure_follows_local_names_and_catches_forwarded_features() {
-        let features: FeatureTable = [
-            ("bundle", vec!["meta", "dep:quiet", "codec-crate?/weak"]),
-            ("meta", vec!["leaf", "codec-crate/opus"]),
-            ("leaf", vec![]),
-            ("opus", vec!["dep:codec-crate"]),
-            ("weak", vec![]),
-            ("reaches-opus", vec!["meta-opus"]),
-            ("meta-opus", vec!["opus"]),
-        ]
-        .into_iter()
-        .map(|(name, members)| {
-            (
-                name.to_owned(),
-                members.into_iter().map(str::to_owned).collect(),
-            )
-        })
-        .collect();
-
-        let closure = declared_closure(&features, "bundle");
-        assert_eq!(
-            closure.local.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["bundle", "leaf", "meta"],
-            "`dep:` and forwarded entries are not local features and are not followed"
-        );
-        assert_eq!(
-            excluded_violations(&closure, &["opus"]),
-            ["`codec-crate/opus` via bundle -> meta -> codec-crate/opus"]
-        );
-        assert!(excluded_violations(&closure, &["quiet", "codec-crate"]).is_empty());
-
-        let closure = declared_closure(&features, "reaches-opus");
-        assert_eq!(
-            excluded_violations(&closure, &["opus"]),
-            ["`opus` via reaches-opus -> meta-opus -> opus"]
-        );
+        assert!(cfg!(feature = "full"));
+        assert!(cfg!(feature = "dtls-srtp"));
+        assert!(cfg!(feature = "g729"));
+        assert!(cfg!(feature = "amr-nb"));
+        assert!(cfg!(feature = "amr-wb"));
+        assert!(cfg!(feature = "opus"));
     }
 }

@@ -1,14 +1,5 @@
 //! DTLS-SRTP (RFC 5764) via a real, external DTLS 1.2 engine.
 //!
-//! ## rustls crypto provider
-//!
-//! If no process-level rustls CryptoProvider is installed when the first DTLS
-//! handshake starts, rtp-core installs ring; install your own at startup to
-//! choose. The `dtls` crate builds its certificate verifiers only on rustls's
-//! process-level default, so this is required when an application's
-//! dependencies compile both rustls providers (`ring` and `aws-lc-rs`). An
-//! installed default is never replaced.
-//!
 //! The in-house handshake in `crate::dtls` never completes a real handshake
 //! between two independent parties: it never sends `Certificate`/
 //! `CertificateVerify`, never activates record-layer encryption, and its
@@ -138,27 +129,6 @@ fn convert_profile(profile: SrtpProtectionProfile) -> Result<SrtpCryptoSuite> {
     }
 }
 
-/// Install ring as rustls's process-level `CryptoProvider` if none is installed.
-///
-/// The `dtls` crate (webrtc-rs 0.17.x) builds its certificate verifiers in
-/// `DTLSConn::new` on rustls's process-level default, so a handshake needs one.
-/// rustls cannot pick a process-level provider when a dependency graph
-/// compiles both of its providers (`ring` and `aws-lc-rs`), and that path
-/// would panic. Upstream limitation: `dtls` has no way to be handed a provider (its
-/// `HandshakeConfig` takes none); moving rtp-core onto `rtc-dtls`, which takes an
-/// explicit provider, removes the need for this.
-///
-/// This is the only place this crate touches the process default. It never
-/// replaces an installed provider: an application that installs its own at
-/// startup always wins, and one that installs nothing still works. An `Err`
-/// from `install_default` means a concurrent caller installed one first,
-/// which is kept.
-pub(crate) fn ensure_process_crypto_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-}
-
 fn build_config(identity: DtlsIdentity, srtp_profiles: Vec<SrtpProtectionProfile>) -> Config {
     Config {
         certificates: vec![identity.certificate],
@@ -235,7 +205,6 @@ pub async fn handshake_client(
 ) -> Result<DtlsSrtpHandshakeResult> {
     let local_fingerprint = identity.fingerprint_sha256;
     let config = build_config(identity, srtp_profiles);
-    ensure_process_crypto_provider();
     let dtls_conn = DTLSConn::new(conn, config, true, None)
         .await
         .map_err(to_dtls_error)?;
@@ -252,7 +221,6 @@ pub async fn handshake_server(
 ) -> Result<DtlsSrtpHandshakeResult> {
     let local_fingerprint = identity.fingerprint_sha256;
     let config = build_config(identity, srtp_profiles);
-    ensure_process_crypto_provider();
     let dtls_conn = DTLSConn::new(conn, config, false, None)
         .await
         .map_err(to_dtls_error)?;

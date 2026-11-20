@@ -1,12 +1,10 @@
 #![cfg(not(any(feature = "crypto-ring", feature = "crypto-aws-lc-rs")))]
 
-use std::time::Instant;
-
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 
 #[test]
 fn peer_connection_without_a_provider_returns_actionable_error() {
-    let error = match RTCPeerConnectionBuilder::new().build(Instant::now()) {
+    let error = match RTCPeerConnectionBuilder::new().build() {
         Ok(_) => panic!("a no-built-in build must require an application crypto provider"),
         Err(error) => error,
     };
