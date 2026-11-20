@@ -18,7 +18,7 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use crate::types::{AudioFrame, DialogId, MediaDirection};
@@ -26,263 +26,10 @@ use rvoip_rtp_core::RtpSession;
 
 use super::{
     audio_generation::{AudioSource, AudioTransmitter, AudioTransmitterConfig},
-    types::SecureKeyingState,
-    DialogTxGate, MediaSessionController,
+    MediaSessionController,
 };
 
-/// The G.711 law of an encoded payload.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum EncodedG711Format {
-    /// μ-law (PCMU).
-    MuLaw,
-    /// A-law (PCMA).
-    ALaw,
-}
-
-impl EncodedG711Format {
-    /// The law of a negotiated codec name, if it is G.711.
-    pub fn from_codec_name(name: &str) -> Option<Self> {
-        if ["PCMU", "G.711-MU", "G711-MU", "G711-U"]
-            .iter()
-            .any(|value| name.eq_ignore_ascii_case(value))
-        {
-            Some(Self::MuLaw)
-        } else if ["PCMA", "G.711-A", "G711-A"]
-            .iter()
-            .any(|value| name.eq_ignore_ascii_case(value))
-        {
-            Some(Self::ALaw)
-        } else {
-            None
-        }
-    }
-
-    fn canonical_table(self) -> &'static [u8; 256] {
-        use codec_core::codecs::g711::{alaw_compress, alaw_expand, ulaw_compress, ulaw_expand};
-        static MU: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
-        static A: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
-        match self {
-            Self::MuLaw => MU
-                .get_or_init(|| std::array::from_fn(|byte| ulaw_compress(ulaw_expand(byte as u8)))),
-            Self::ALaw => {
-                A.get_or_init(|| std::array::from_fn(|byte| alaw_compress(alaw_expand(byte as u8))))
-            }
-        }
-    }
-
-    /// `payload` as the PCM path puts it on the wire: decoded to PCM and
-    /// encoded again with this law. G.711 round-trips every code except the
-    /// μ-law negative zero (0x7F, which becomes 0xFF), so this is `payload`
-    /// itself unless it holds such a code, and only then a copy into
-    /// `scratch`.
-    pub fn canonical_payload<'a>(self, payload: &'a [u8], scratch: &'a mut Vec<u8>) -> &'a [u8] {
-        let table = self.canonical_table();
-        if payload
-            .iter()
-            .all(|byte| table[usize::from(*byte)] == *byte)
-        {
-            return payload;
-        }
-        scratch.clear();
-        scratch.extend(payload.iter().map(|byte| table[usize::from(*byte)]));
-        scratch
-    }
-}
-
-/// An encoded G.711 sender resolved once for a dialog (codec generation,
-/// RTP sender, mute and transmission state) and reused for every frame
-/// while its generation fences hold.
-///
-/// [`Self::is_current`] is the per-frame check: the codec generation is
-/// still live, the dialog's TX state has not changed since resolution
-/// ([`DialogTxGate`] epoch), comfort noise is still off, and the frame's law
-/// and payload type are the resolved ones. While it holds, a frame sent with
-/// [`Self::try_send_now`] leaves exactly as
-/// [`MediaSessionController::encode_and_send_audio`] would send the frame's
-/// decoded PCM: same payload (see [`EncodedG711Format::canonical_payload`]),
-/// timestamp, payload type, marker, sequence number and SRTP protection.
-pub struct PreparedG711Sender {
-    codec_generation: Arc<super::codec_runtime::DialogCodecRuntime>,
-    gate: Arc<DialogTxGate>,
-    epoch: u64,
-    comfort_noise: Arc<std::sync::atomic::AtomicBool>,
-    /// `None`: transmission is disabled and frames are dropped, as the PCM
-    /// path drops them.
-    sender: Option<rvoip_rtp_core::RtpSendHandle>,
-    format: EncodedG711Format,
-    payload_type: u8,
-}
-
-/// What [`PreparedG711Sender::try_send_now`] did. `None`: transmission is
-/// disabled and every frame was dropped, as the PCM path drops it (and
-/// returns `Ok`).
-pub type G711SendNow = Option<rvoip_rtp_core::RtpSendNowReport>;
-
-impl PreparedG711Sender {
-    /// Every fence still holds for a frame of `format` and `payload_type`.
-    #[inline]
-    pub fn is_current(&self, format: EncodedG711Format, payload_type: u8) -> bool {
-        self.gate.epoch() == self.epoch
-            && self.format == format
-            && self.payload_type == payload_type
-            && !self
-                .comfort_noise
-                .load(std::sync::atomic::Ordering::Relaxed)
-            && self
-                .codec_generation
-                .encoded_generation_live
-                .load(std::sync::atomic::Ordering::Acquire)
-    }
-
-    /// The law this sender was resolved for.
-    pub fn format(&self) -> EncodedG711Format {
-        self.format
-    }
-
-    /// The runtime of the lane that owns the dialog's RTP socket, if any.
-    pub fn media_runtime_handle(&self) -> Option<tokio::runtime::Handle> {
-        self.sender.as_ref()?.media_runtime_handle()
-    }
-
-    /// Send `frames` now (see `RtpSendHandle::try_send_now`); payloads must
-    /// be canonical ([`EncodedG711Format::canonical_payload`]). Frames the
-    /// report defers were not consumed and go through the PCM path. A retired
-    /// codec generation fails first (nothing consumed), then the RTP
-    /// sender's error before anything was consumed (closed, no
-    /// destination). An error for a frame that consumed its sequence number
-    /// is in the report.
-    pub fn try_send_now(
-        &self,
-        frames: &[rvoip_rtp_core::RtpFrameNow<'_>],
-        batch: bool,
-    ) -> Result<G711SendNow> {
-        if !self
-            .codec_generation
-            .encoded_generation_live
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Err(Error::config(
-                "encoded audio belongs to a retired codec generation",
-            ));
-        }
-        let Some(sender) = self.sender.as_ref() else {
-            return Ok(None);
-        };
-        sender
-            .try_send_now(frames, batch)
-            .map(Some)
-            .map_err(|error| Self::rtp_send_error(&error))
-    }
-
-    /// The error the PCM path returns for an RTP send error.
-    pub fn rtp_send_error(error: &rvoip_rtp_core::Error) -> Error {
-        Error::config(format!("Failed to send RTP packet: {error}"))
-    }
-}
-
 impl MediaSessionController {
-    /// Resolve an encoded G.711 sender for `dialog_id` once (see
-    /// [`PreparedG711Sender`]). `Ok(None)` where the PCM path would transform
-    /// the audio (comfort noise on, muted), while DTLS-SRTP keying is not
-    /// ready, where the negotiated codec is not
-    /// mono 8 kHz G.711 of `format` with `payload_type`, or when the session
-    /// has no send handle; the caller then takes the PCM path.
-    pub fn prepare_g711_sender(
-        &self,
-        dialog_id: &DialogId,
-        format: EncodedG711Format,
-        payload_type: u8,
-    ) -> Result<Option<PreparedG711Sender>> {
-        if self
-            .comfort_noise_enabled
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            return Ok(None);
-        }
-        // The gate epoch is read before the state it guards, so any change
-        // made after this point moves the epoch and invalidates the result.
-        let (gate, epoch) = {
-            let entry = self
-                .rtp_sessions
-                .get(dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-            let gate = Arc::clone(&entry.value().tx_gate);
-            let epoch = gate.epoch();
-            (gate, epoch)
-        };
-        if DialogTxGate::is_retired_epoch(epoch) {
-            return Err(Error::session_not_found(dialog_id.as_str()));
-        }
-        let codec = self
-            .codec_runtimes
-            .get(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        let negotiated = &codec.format;
-        if negotiated.payload_type != payload_type
-            || negotiated.clock_rate != 8000
-            || negotiated.channels != 1
-            || EncodedG711Format::from_codec_name(&negotiated.name) != Some(format)
-        {
-            return Ok(None);
-        }
-        if !codec
-            .encoded_generation_live
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            return Ok(None);
-        }
-        let codec_generation = Arc::clone(codec.value());
-        // Never nest the codec and RTP shard guards: renegotiation may take
-        // those maps in the opposite order.
-        drop(codec);
-        let entry = self
-            .rtp_sessions
-            .get(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        let session = entry.value();
-        if !Arc::ptr_eq(&session.tx_gate, &gate) {
-            // The wrapper was replaced between the two reads.
-            return Ok(None);
-        }
-        if session.is_muted {
-            return Ok(None);
-        }
-        // While DTLS-SRTP keys are pending or have failed, the PCM path's
-        // keying gate drops or rejects the frame; the encoded path has none.
-        if session.secure_keying != SecureKeyingState::Ready {
-            return Ok(None);
-        }
-        let sender = if session.transmission_enabled {
-            let Some(sender) = session.typed_send_handle.as_ref() else {
-                return Ok(None);
-            };
-            Some(sender.clone())
-        } else {
-            None
-        };
-        Ok(Some(PreparedG711Sender {
-            codec_generation,
-            gate,
-            epoch,
-            comfort_noise: Arc::clone(&self.comfort_noise_enabled),
-            sender,
-            format,
-            payload_type,
-        }))
-    }
-
-    /// The runtime of the lane that owns `dialog_id`'s RTP socket, without
-    /// awaiting the session lock. `None` for an unknown dialog or a
-    /// transport without a lane.
-    pub fn media_runtime_handle(&self, dialog_id: &DialogId) -> Option<tokio::runtime::Handle> {
-        self.rtp_sessions
-            .get(dialog_id)?
-            .typed_send_handle
-            .as_ref()?
-            .media_runtime_handle()
-    }
-
     /// Apply RTP/audio direction for SIP offer/answer changes.
     pub async fn set_media_direction(
         &self,
@@ -318,7 +65,6 @@ impl MediaSessionController {
                 direction,
                 MediaDirection::SendRecv | MediaDirection::SendOnly
             );
-            wrapper.tx_gate.bump();
 
             if !wrapper.transmission_enabled {
                 match wrapper.audio_transmitter.take() {
@@ -367,7 +113,6 @@ impl MediaSessionController {
         }
 
         self.media_directions.insert(dialog_id.clone(), direction);
-        self.resync_inline_lease(dialog_id);
         info!(
             "🎚️ Applied media direction for dialog {}: {}",
             dialog_id, direction
@@ -403,11 +148,11 @@ impl MediaSessionController {
 
     /// Send RTP packet for a dialog.
     ///
-    /// The default-payload path snapshots the session's lock-free
-    /// `RtpSendHandle` under a brief session lock, then sends through it.
-    /// Sends with an explicit payload type (every encoded audio frame) use
-    /// the handle the wrapper captured at creation and never take the
-    /// session mutex. Neither path holds a map shard across an await.
+    /// Snapshots the session's lock-free `RtpSendHandle` under a brief
+    /// lock, drops the session guard, then sends through the handle —
+    /// keeps the outer `Mutex<RtpSession>` available for other
+    /// per-dialog work (RTCP scheduler, set_remote_addr, etc.) during
+    /// the await on the mpsc enqueue.
     pub async fn send_rtp_packet(
         &self,
         dialog_id: &DialogId,
@@ -455,23 +200,16 @@ impl MediaSessionController {
         payload_type: Option<u8>,
         marker: bool,
     ) -> Result<()> {
+        let rtp_session = self
+            .get_rtp_session(dialog_id)
+            .await
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
         let payload_len = payload.len();
-        let (mut send_handle, rtp_session) = {
-            let wrapper = self
-                .rtp_sessions
-                .get(dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-            match (payload_type, wrapper.typed_send_handle.as_ref()) {
-                (Some(_), Some(handle)) => (Some(handle.clone()), None),
-                // The default payload type can change through the public RTP
-                // session API, so resolve it from the session itself rather
-                // than from the handle's construction-time snapshot.
-                _ => (None, Some(wrapper.session.clone())),
-            }
+        let send_handle = {
+            let session = rtp_session.lock().await;
+            session.send_handle()
         };
-        if let Some(rtp_session) = rtp_session.as_ref() {
-            send_handle = rtp_session.lock().await.send_handle();
-        }
 
         let payload_bytes = Bytes::from(payload);
         if let Some(handle) = send_handle {
@@ -487,9 +225,6 @@ impl MediaSessionController {
             // Fallback: session has no scheduler (shouldn't happen in
             // production; see RtpSession::new). Lock and call send_packet
             // through the legacy path.
-            let rtp_session = rtp_session
-                .as_ref()
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
             let session = rtp_session.lock().await;
             let result = if let Some(payload_type) = payload_type {
                 session
@@ -501,11 +236,9 @@ impl MediaSessionController {
             result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         }
 
-        trace!(
+        info!(
             "📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)",
-            dialog_id,
-            timestamp,
-            payload_len
+            dialog_id, timestamp, payload_len
         );
         Ok(())
     }
@@ -719,7 +452,6 @@ impl MediaSessionController {
             let wrapper = entry.value_mut();
             wrapper.audio_transmitter = Some(audio_transmitter);
             wrapper.transmission_enabled = true;
-            wrapper.tx_gate.bump();
         }
 
         info!("✅ Audio transmission started for dialog: {}", dialog_id);
@@ -740,7 +472,6 @@ impl MediaSessionController {
                 .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
             let wrapper = entry.value_mut();
             wrapper.transmission_enabled = true;
-            wrapper.tx_gate.bump();
             wrapper.audio_transmitter.take()
         };
 
@@ -769,7 +500,6 @@ impl MediaSessionController {
                 .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
             let wrapper = entry.value_mut();
             wrapper.transmission_enabled = false;
-            wrapper.tx_gate.bump();
             wrapper.audio_transmitter.take()
         };
 
@@ -821,7 +551,6 @@ impl MediaSessionController {
             .get_mut(dialog_id)
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
         entry.value_mut().is_muted = muted;
-        entry.value().tx_gate.bump();
         drop(entry);
 
         info!("✅ Audio muted={} set for dialog: {}", muted, dialog_id);
@@ -1097,7 +826,7 @@ impl MediaSessionController {
         // Check if transmission is enabled and if audio is muted.
         // DashMap shard guard is held only for the synchronous bool
         // reads + dropped via the `map` closure.
-        let (is_muted, is_enabled, keying) = self
+        let (is_muted, is_enabled) = self
             .rtp_sessions
             .get(dialog_id)
             .map(|r| {
@@ -1106,34 +835,15 @@ impl MediaSessionController {
                     "✅ Found RTP session for dialog: {}, muted={}, enabled={}",
                     dialog_id, w.is_muted, w.transmission_enabled
                 );
-                (w.is_muted, w.transmission_enabled, w.secure_keying.clone())
+                (w.is_muted, w.transmission_enabled)
             })
             .unwrap_or_else(|| {
                 warn!(
                     "⚠️ No RTP session found for dialog: {} - using defaults",
                     dialog_id
                 );
-                (false, true, SecureKeyingState::Ready)
+                (false, true)
             });
-
-        match keying {
-            SecureKeyingState::Ready => {}
-            SecureKeyingState::Pending => {
-                // DTLS-SRTP keys are still being agreed. The transport would
-                // refuse the packet; a real-time frame is worthless by the
-                // time keys exist, so drop it and keep the caller running.
-                trace!(
-                    "Dropping outbound audio for dialog {} until its DTLS-SRTP keys are installed",
-                    dialog_id
-                );
-                return Ok(());
-            }
-            SecureKeyingState::Failed(reason) => {
-                return Err(Error::config(format!(
-                    "media keying failed for dialog {dialog_id}; no audio can be sent: {reason}"
-                )));
-            }
-        }
 
         if !is_enabled {
             // Transmission is disabled, don't send anything

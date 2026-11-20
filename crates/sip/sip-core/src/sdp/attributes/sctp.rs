@@ -5,7 +5,6 @@
 //! WebRTC data channels.
 
 use crate::error::{Error, Result};
-use nom::Parser;
 use nom::{
     character::complete::{digit1, space0},
     combinator::{all_consuming, map_res, opt, recognize},
@@ -17,8 +16,7 @@ use nom::{
 fn parse_uint(input: &str) -> IResult<&str, u64> {
     map_res(recognize(preceded(opt(space0), digit1)), |s: &str| {
         s.trim().parse::<u64>()
-    })
-    .parse(input)
+    })(input)
 }
 
 /// Parses the sctp-port attribute
@@ -30,7 +28,7 @@ fn parse_uint(input: &str) -> IResult<&str, u64> {
 /// to be established.
 pub fn parse_sctp_port(value: &str) -> Result<u16> {
     // Ensure all input is consumed
-    match all_consuming(parse_uint).parse(value.trim()) {
+    match all_consuming(parse_uint)(value.trim()) {
         Ok((_, port)) => {
             if port <= u16::MAX as u64 {
                 Ok(port as u16)
@@ -57,7 +55,7 @@ pub fn parse_sctp_port(value: &str) -> Result<u16> {
 /// the implementation can handle messages of any size.
 pub fn parse_max_message_size(value: &str) -> Result<u64> {
     // Ensure all input is consumed
-    match all_consuming(parse_uint).parse(value.trim()) {
+    match all_consuming(parse_uint)(value.trim()) {
         Ok((_, size)) => Ok(size),
         Err(_) => Err(Error::SdpParsingError(format!(
             "Invalid max-message-size value: {}",

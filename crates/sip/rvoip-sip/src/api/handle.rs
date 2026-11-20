@@ -217,65 +217,6 @@ impl TryFrom<Event> for TransferOutcome {
     }
 }
 
-impl TransferOutcome {
-    /// The outcome `event` carries, if it is one of the transfer events
-    /// `TryFrom<Event>` accepts. It borrows the event, so the lifecycle index
-    /// can check every published event without cloning it or formatting a
-    /// conversion error for the ones that are not transfer outcomes.
-    pub(crate) fn from_event(event: &Event) -> Option<Self> {
-        match event {
-            Event::ReferCompleted {
-                call_id,
-                target,
-                status_code,
-                reason,
-            } => Some(Self::ReferCompleted {
-                call_id: call_id.clone(),
-                target: target.clone(),
-                status_code: *status_code,
-                reason: reason.clone(),
-            }),
-            Event::ReferProgress {
-                call_id,
-                status_code,
-                reason,
-            } => Some(Self::TargetRinging {
-                call_id: call_id.clone(),
-                status_code: *status_code,
-                reason: reason.clone(),
-            }),
-            Event::TransferTargetAnswered {
-                transfer_call_id,
-                target_uri,
-                evidence,
-            } => Some(Self::TargetAnswered {
-                call_id: transfer_call_id.clone(),
-                target_uri: target_uri.clone(),
-                evidence: evidence.clone(),
-            }),
-            Event::TransferReplacementDialogTerminated {
-                transfer_call_id,
-                dialog,
-                reason,
-            } => Some(Self::ReplacementTerminated {
-                call_id: transfer_call_id.clone(),
-                dialog: dialog.clone(),
-                reason: reason.clone(),
-            }),
-            Event::TransferFailed {
-                call_id,
-                status_code,
-                reason,
-            } => Some(Self::Failed {
-                call_id: call_id.clone(),
-                status_code: *status_code,
-                reason: reason.clone(),
-            }),
-            _ => None,
-        }
-    }
-}
-
 /// RFC 3326 Reason header value for explicit teardown causes.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SipReason {
@@ -1356,7 +1297,6 @@ impl SessionHandle {
         let send_handle = lifecycle_handle.clone();
         let mut send_cancellation = cancellation;
         let (send_tx, mut send_rx) = AudioSender::channel(AUDIO_SEND_PENDING_FRAMES);
-        let send_failure = send_tx.failure_slot();
         let mut send_generation = send_rx.generation_changes();
         tokio::spawn(async move {
             loop {
@@ -1394,19 +1334,8 @@ impl SessionHandle {
                         }
                     }
                     result = coordinator.send_audio_exact(&send_handle, frame) => {
-                        // Frames sent before DTLS-SRTP keys exist come back
-                        // Ok (the media layer drops them), so an error here
-                        // is fatal for this stream. Record it before the
-                        // queue closes so the application's next send
-                        // reports it instead of a bare "closed".
-                        if let Err(error) = result {
-                            tracing::warn!(
-                                call_id = %call_id,
-                                "audio send stream stopped; the call can no longer send audio: {error}"
-                            );
-                            send_failure.record(format!(
-                                "the call can no longer send audio: {error}"
-                            ));
+                        if let Err(e) = result {
+                            tracing::debug!("[SessionHandle] audio send error for {}: {}", call_id, e);
                             break;
                         }
                         delivery.mark_submitted();
@@ -1474,69 +1403,6 @@ impl SessionHandle {
     /// ```
     pub async fn media_security(&self) -> Result<Option<MediaSecurityState>> {
         Ok(self.lifecycle().await?.media_security)
-    }
-
-    /// The SIP-negotiated media format for this call, or `None` until SDP
-    /// negotiation has committed.
-    ///
-    /// This is the codec/payload-type/clock-rate/channel shape the answer
-    /// actually selected — the same value the media layer encodes with — read
-    /// from the session store instead of inferred from decoded packets.
-    /// Re-INVITE renegotiation replaces the value.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
-    /// if let Some(media) = call.negotiated_media().await? {
-    ///     println!("{} at {} Hz, {} ch", media.codec, media.clock_rate, media.channels);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn negotiated_media(&self) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
-        Ok(self.lifecycle().await?.media)
-    }
-
-    /// Wait for the SIP-negotiated media format to be available (or changed to
-    /// a different value) on this call.
-    ///
-    /// Returns immediately when the current session state already carries a
-    /// negotiated format. With `previous`, waits until the negotiated format
-    /// differs from `previous` (a re-INVITE committed). The timeout only
-    /// cancels this wait.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
-    /// let media = call.wait_for_negotiated_media(None).await?;
-    /// println!("negotiated {} (PT {})", media.codec, media.payload_type);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn wait_for_negotiated_media(
-        &self,
-        timeout: Option<Duration>,
-    ) -> Result<crate::api::lifecycle::NegotiatedMedia> {
-        let handle = self.exact_lifecycle_handle()?;
-        let rx = self.coordinator.lifecycle_watcher_exact(&handle);
-        wait_for_lifecycle(
-            self,
-            rx,
-            timeout,
-            "wait_for_negotiated_media timed out",
-            |snapshot| {
-                if let Some(media) = snapshot.media.clone() {
-                    return Ok(Some(media));
-                }
-                if let Some(err) = terminal_error(snapshot, "media was negotiated") {
-                    return Err(err);
-                }
-                Ok(None)
-            },
-        )
-        .await
     }
 
     /// Current media quality for this call: local receive statistics plus,
@@ -2253,59 +2119,6 @@ mod tests {
             .await
             .expect("retire generation B");
         coordinator.shutdown();
-    }
-
-    #[test]
-    fn transfer_outcome_from_event_matches_the_owned_conversion() {
-        let call_id = SessionId::new();
-        let events = [
-            Event::ReferCompleted {
-                call_id: call_id.clone(),
-                target: "sip:1003@example.com".into(),
-                status_code: 200,
-                reason: "OK".into(),
-            },
-            Event::ReferProgress {
-                call_id: call_id.clone(),
-                status_code: 180,
-                reason: "Ringing".into(),
-            },
-            Event::TransferTargetAnswered {
-                transfer_call_id: call_id.clone(),
-                target_uri: "sip:1003@example.com".into(),
-                evidence: TransferTargetEvidence::ReferProgressThenFinal {
-                    progress_status_code: 180,
-                    progress_reason: "Ringing".into(),
-                    final_status_code: 200,
-                    final_reason: "OK".into(),
-                },
-            },
-            Event::TransferFailed {
-                call_id: call_id.clone(),
-                status_code: 603,
-                reason: "Decline".into(),
-            },
-            Event::CallEstablished {
-                call_id: call_id.clone(),
-            },
-            Event::CallOnHold {
-                call_id: call_id.clone(),
-            },
-            Event::CallEnded {
-                call_id,
-                reason: "normal".into(),
-            },
-        ];
-        let mut outcomes = 0;
-        for (index, event) in events.into_iter().enumerate() {
-            let borrowed = TransferOutcome::from_event(&event);
-            outcomes += usize::from(borrowed.is_some());
-            assert!(
-                borrowed == TransferOutcome::try_from(event).ok(),
-                "event {index}"
-            );
-        }
-        assert_eq!(outcomes, 4);
     }
 
     #[test]

@@ -5,7 +5,6 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::token;
-use nom::Parser;
 use nom::{
     character::complete::{char, hex_digit1, space1},
     combinator::{map, verify},
@@ -21,8 +20,7 @@ static VALID_HASH_FUNCTIONS: [&str; 5] = ["sha-1", "sha-256", "sha-384", "sha-51
 fn hash_function_parser(input: &str) -> IResult<&str, &str> {
     verify(token, |hash: &str| {
         VALID_HASH_FUNCTIONS.contains(&hash.to_lowercase().as_str())
-    })
-    .parse(input)
+    })(input)
 }
 
 /// Parser for fingerprint value (colon-separated hex values)
@@ -30,8 +28,7 @@ fn fingerprint_value_parser(input: &str) -> IResult<&str, String> {
     map(
         separated_list1(char(':'), verify(hex_digit1, |hex: &str| hex.len() <= 2)),
         |segments| segments.join(":"),
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parser for complete fingerprint attribute
@@ -39,8 +36,7 @@ fn fingerprint_parser(input: &str) -> IResult<&str, (String, String)> {
     map(
         separated_pair(hash_function_parser, space1, fingerprint_value_parser),
         |(hash, fingerprint)| (hash.to_lowercase(), fingerprint),
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Valid setup values for DTLS
@@ -50,8 +46,7 @@ static VALID_SETUP_VALUES: [&str; 4] = ["active", "passive", "actpass", "holdcon
 fn setup_parser(input: &str) -> IResult<&str, &str> {
     verify(token, |setup: &str| {
         VALID_SETUP_VALUES.contains(&setup.to_lowercase().as_str())
-    })
-    .parse(input)
+    })(input)
 }
 
 /// Parses fingerprint attribute: `a=fingerprint:<hash-function> <fingerprint>`

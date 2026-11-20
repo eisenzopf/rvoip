@@ -677,33 +677,6 @@ impl TransactionManager {
 
     async fn handle_transport_event_inner(&self, event: TransportEvent) -> Result<()> {
         match event {
-            TransportEvent::MalformedRequest {
-                request,
-                source,
-                destination,
-                transport_type,
-                flow_id,
-            } => {
-                // A request that does not parse, but whose Via, From, To,
-                // Call-ID and CSeq do: answer it statelessly with 400 and
-                // never process it (RFC 3261 §8.2.6, RFC 4475 §3.1.2).
-                let mut ingress =
-                    SipRequestIngressContext::new(source, destination, transport_type);
-                if let Some(flow_id) = flow_id {
-                    ingress = ingress.with_flow_id(flow_id);
-                }
-                let response = crate::transaction::utils::response_builders::create_response(
-                    &request,
-                    StatusCode::BadRequest,
-                );
-                let route = ingress.response_route_for_request(&request);
-                self.transport
-                    .send_message_via(Message::Response(response), route)
-                    .await
-                    .map_err(|error| {
-                        Error::transport_error(error, "Failed to send 400 to a malformed request")
-                    })
-            }
             TransportEvent::MessageReceived {
                 message,
                 source,
@@ -856,12 +829,6 @@ impl TransactionManager {
                 flow_id,
                 ..
             } => {
-                // No response can arrive for a client transaction whose
-                // request went out on this flow, so fail those that are still
-                // waiting for one rather than leave them to Timer B/F.
-                if let Some(flow_id) = flow_id {
-                    self.fail_client_transactions_on_closed_flow(flow_id);
-                }
                 // Connection-oriented transport lost its flow. Forward
                 // so outbound-flow monitor can emit OutboundFlowFailed
                 // and trigger re-REGISTER.
@@ -908,17 +875,6 @@ impl TransactionManager {
     ) -> Result<()> {
         match message {
             Message::Request(request) => {
-                // A request without the Via, From, To, Call-ID or CSeq that
-                // every response copies cannot be answered or matched to a
-                // transaction: discard it (RFC 3261 §8.2.6.2, RFC 4475 §3.3.1).
-                if !rvoip_sip_core::validation::is_answerable(&request) {
-                    debug!(
-                        method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
-                        "Discarding request without the header fields a response copies"
-                    );
-                    return Ok(());
-                }
-
                 // Special handling for ACK to 2xx responses
                 if request.method() == Method::Ack {
                     // ACK requests matching a 2xx response are end-to-end and don't have a transaction
@@ -932,42 +888,6 @@ impl TransactionManager {
             }
             Message::Response(response) => self.handle_response(response, source).await,
         }
-    }
-
-    /// Answer an inbound request with the response a validation
-    /// [`Rejection`](rvoip_sip_core::validation::Rejection) calls for.
-    async fn reject_inbound_request(
-        &self,
-        transaction: &Arc<dyn ServerTransaction>,
-        request: &Request,
-        rejection: rvoip_sip_core::validation::Rejection,
-    ) -> Result<()> {
-        let generation = transaction
-            .data()
-            .transaction_admission_owner()
-            .map(|owner| owner.generation());
-        let mut response = match generation {
-            Some(generation) => {
-                crate::transaction::utils::response_builders::create_response_for_transaction_generation(
-                    request,
-                    rejection.status,
-                    transaction.id(),
-                    generation,
-                )
-            }
-            None => crate::transaction::utils::response_builders::create_response(
-                request,
-                rejection.status,
-            ),
-        };
-        response.headers.extend(rejection.headers);
-        debug!(
-            method=%crate::transaction::safe_diagnostics::SafeMethod::new(&request.method()),
-            status = rejection.status.as_u16(),
-            reason = rejection.reason,
-            "inbound request rejected before processing"
-        );
-        self.send_response(transaction.id(), response).await
     }
 
     async fn enforce_ingress_authorization(
@@ -1059,54 +979,6 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<()>` - Success or error depending on request processing outcome
-    /// Decide whether a new dialog-forming INVITE is refused before any
-    /// state exists. Returns the 503's `Retry-After` when it is.
-    fn new_dialog_invite_rejection(
-        &self,
-        request: &Request,
-        ingress_context: &SipRequestIngressContext,
-    ) -> Option<Option<u32>> {
-        use crate::transaction::overload::AdmissionDecision;
-
-        // A TLS request has already passed the gate on its connection reader
-        // when the gate's ingress hook is attached; deciding again would
-        // charge the rate limit twice.
-        let gate = &self.new_call_admission;
-        let decided_at_tls_ingress =
-            ingress_context.transport_type == TransportType::Tls && gate.tls_ingress_attached();
-        if !decided_at_tls_ingress {
-            match gate.decide(crate::transaction::overload::call_id_of(request)) {
-                AdmissionDecision::Admit => {}
-                AdmissionDecision::Reject { retry_after_secs } => return Some(retry_after_secs),
-            }
-        }
-        // At the TU's session-slot cap the INVITE is refused whatever the
-        // gate's mode. In-dialog requests never consult the guard.
-        if self.new_dialog_capacity_exhausted() {
-            self.slot_cleanup.record_new_invite_capacity_rejection();
-            return Some(Some(self.stateless_overload_retry_after()));
-        }
-        None
-    }
-
-    async fn send_new_dialog_invite_rejection(
-        &self,
-        request: &Request,
-        ingress_context: &SipRequestIngressContext,
-        retry_after_secs: Option<u32>,
-    ) {
-        let sent = crate::transaction::overload::send_overload_reject(
-            request,
-            ingress_context.response_route_for_request(request),
-            &self.transport,
-            retry_after_secs,
-        )
-        .await;
-        if !sent {
-            self.new_call_admission.record_reject_send_dropped();
-        }
-    }
-
     async fn handle_request(
         &self,
         request: Request,
@@ -1115,7 +987,9 @@ impl TransactionManager {
         raw_bytes: Option<bytes::Bytes>,
         timing: Option<TransportReceiveTiming>,
     ) -> Result<()> {
-        let wire_key = crate::transaction::utils::transaction_key_from_request(&request);
+        let wire_key = crate::transaction::utils::transaction_key_from_message(&Message::Request(
+            request.clone(),
+        ));
         let match_key = super::ServerTransactionMatchKey::from_request(&request, ingress_context);
 
         // An independently completed CANCEL transaction owns its retransmits.
@@ -1216,43 +1090,13 @@ impl TransactionManager {
             return Ok(());
         }
 
-        // A new dialog-forming INVITE that matched no transaction above may be
-        // refused here with a stateless 503, before any transaction, dialog,
-        // session or media state is allocated. Retransmissions of admitted
-        // INVITEs matched their transaction above.
-        let new_dialog_invite = crate::transaction::overload::is_new_dialog_invite(&request);
-        if new_dialog_invite {
-            if let Some(retry_after_secs) =
-                self.new_dialog_invite_rejection(&request, ingress_context)
-            {
-                self.send_new_dialog_invite_rejection(&request, ingress_context, retry_after_secs)
-                    .await;
-                return Ok(());
-            }
-        }
-
         // Keep shutdown's in-flight fence continuously held across creation,
         // authorization/rejection and primary TU handoff. The nested create
         // guard protects its own map publication; this outer guard prevents a
         // slow authorizer from resuming after shutdown has force-cleared maps.
-        let Some(_staged_operation) = self.admission_lifecycle.try_enter() else {
-            if new_dialog_invite {
-                // A draining manager can no longer admit the call. Tell the
-                // caller to back off and retry instead of letting it
-                // retransmit into silence until its Timer B fires.
-                self.slot_cleanup.record_draining_invite_rejection();
-                self.send_new_dialog_invite_rejection(
-                    &request,
-                    ingress_context,
-                    Some(self.stateless_overload_retry_after()),
-                )
-                .await;
-                return Ok(());
-            }
-            return Err(Error::Other(
-                "transaction manager is draining; inbound request rejected".into(),
-            ));
-        };
+        let _staged_operation = self.admission_lifecycle.try_enter().ok_or_else(|| {
+            Error::Other("transaction manager is draining; inbound request rejected".into())
+        })?;
 
         let wire_key = wire_key.ok_or_else(|| {
             Error::Other("Missing RFC 3261 transaction key in inbound request".into())
@@ -1416,24 +1260,6 @@ impl TransactionManager {
             return Ok(());
         }
 
-        // Requests every element answers with an error instead of processing
-        // them (RFC 3261 §8.2, §16.3; RFC 4475): unsupported SIP-Version,
-        // repeated single-valued header fields, a CSeq method that
-        // differs from the request method, an empty RFC 3261 branch. The
-        // response goes out on the server transaction, which absorbs
-        // retransmissions. An ACK is never answered (RFC 3261 §17).
-        let validation = if request.method() == Method::Ack {
-            Ok(())
-        } else {
-            rvoip_sip_core::validation::validate_request(&request)
-        };
-        if let Err(rejection) = validation {
-            self.reject_inbound_request(&transaction, &request, rejection)
-                .await?;
-            publication.commit();
-            return Ok(());
-        }
-
         // Notify the transaction user about the new transaction
         let publication_result = match transaction.kind() {
             TransactionKind::InviteServer => {
@@ -1529,7 +1355,9 @@ impl TransactionManager {
         );
 
         // Try to find a matching client transaction
-        if let Some(key) = crate::transaction::utils::transaction_key_from_response(&response) {
+        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
+            &Message::Response(response.clone()),
+        ) {
             debug!(id=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(&key), "🔍 RESPONSE HANDLER: Generated transaction key from response");
 
             // Debug the current client transactions (gated on debug level)
@@ -1759,42 +1587,19 @@ impl TransactionManager {
     ) -> Result<()> {
         debug!("Processing ACK request with dialog-based matching");
 
-        // The ACK for a stateless overload 503 belongs to no transaction and
-        // must not reach the TU; its To tag identifies it.
-        if crate::transaction::overload::is_overload_reject_ack(&request) {
-            self.new_call_admission.record_ack_absorbed();
-            return Ok(());
-        }
-
         // First try direct branch-based matching for non-2xx ACKs. Only a
         // server INVITE in Completed/Confirmed owns such an ACK. Treating an
         // arbitrary same-branch ACK as transaction-owned can consume a 2xx
         // ACK before the retained dialog index gets a chance to classify it.
-        if let Some(key) = crate::transaction::utils::transaction_key_from_request(&request) {
-            let mut invite_key = key.with_method(Method::Invite);
+        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
+            &Message::Request(request.clone()),
+        ) {
+            let invite_key = key.with_method(Method::Invite);
 
-            let mut invite_tx = self
+            let invite_tx = self
                 .server_transactions
                 .get(&invite_key)
                 .map(|r| r.value().clone());
-            if invite_tx.is_none() {
-                // An RFC 2543 ACK of a non-2xx response carries that
-                // response's To tag; the INVITE it acknowledges had none
-                // (RFC 3261 §17.2.3).
-                if let Some(branch) =
-                    crate::transaction::key::rfc2543_ack_invite_branch_without_to_tag(&request)
-                {
-                    let alternative = TransactionKey::new(branch, Method::Invite, true);
-                    if let Some(transaction) = self
-                        .server_transactions
-                        .get(&alternative)
-                        .map(|r| r.value().clone())
-                    {
-                        invite_key = alternative;
-                        invite_tx = Some(transaction);
-                    }
-                }
-            }
             if let Some(transaction) = invite_tx {
                 let state = transaction.state();
                 let response_crossed_wire_before_state_transition = state

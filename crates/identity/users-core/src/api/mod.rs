@@ -353,15 +353,15 @@ pub fn create_router_with_state(state: ApiState) -> Router {
         // User management endpoints (protected)
         .route("/users", post(create_user))
         .route("/users", get(list_users))
-        .route("/users/{id}", get(get_user))
-        .route("/users/{id}", put(update_user))
-        .route("/users/{id}", delete(delete_user))
-        .route("/users/{id}/password", post(change_password))
-        .route("/users/{id}/roles", post(update_roles))
+        .route("/users/:id", get(get_user))
+        .route("/users/:id", put(update_user))
+        .route("/users/:id", delete(delete_user))
+        .route("/users/:id/password", post(change_password))
+        .route("/users/:id/roles", post(update_roles))
         // API key management (protected)
-        .route("/users/{id}/api-keys", post(create_api_key))
-        .route("/users/{id}/api-keys", get(list_api_keys))
-        .route("/api-keys/{id}", delete(revoke_api_key))
+        .route("/users/:id/api-keys", post(create_api_key))
+        .route("/users/:id/api-keys", get(list_api_keys))
+        .route("/api-keys/:id", delete(revoke_api_key))
         // Health and metrics
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
@@ -427,29 +427,6 @@ impl std::fmt::Debug for TlsConfig {
     }
 }
 
-/// The HTTPS listener's rustls configuration, built on the ring provider
-/// explicitly. axum-server's own PEM loaders (with `tls-rustls-no-provider`)
-/// would use rustls's process-level default, which rustls cannot infer when a
-/// dependency graph compiles both of its providers.
-fn load_tls_server_config(
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-) -> anyhow::Result<rustls::ServerConfig> {
-    use rustls::pki_types::pem::PemObject;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let certs = CertificateDer::pem_file_iter(cert_path)?.collect::<Result<Vec<_>, _>>()?;
-    let key = PrivateKeyDer::from_pem_file(key_path)?;
-    let mut config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)?;
-    // HTTP/2 or HTTP/1.1, as axum-server's own loaders negotiate.
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    Ok(config)
-}
-
 /// Create and start the API server with optional TLS
 pub async fn create_server_with_tls(
     app: Router,
@@ -461,10 +438,9 @@ pub async fn create_server_with_tls(
             // Use HTTPS with axum-server
             use axum_server::tls_rustls::RustlsConfig;
 
-            let config = RustlsConfig::from_config(std::sync::Arc::new(
-                load_tls_server_config(&tls.cert_path, &tls.key_path)
-                    .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {}", e))?,
-            ));
+            let config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {}", e))?;
 
             tracing::info!(
                 stage = "tls-server-start",
@@ -1103,6 +1079,7 @@ impl From<anyhow::Error> for AppError {
 
 // Authentication middleware
 
+#[axum::async_trait]
 impl<S> axum::extract::FromRequestParts<S> for AuthContext
 where
     S: Send + Sync,
@@ -1118,6 +1095,7 @@ where
     }
 }
 
+#[axum::async_trait]
 impl<S> axum::extract::FromRequestParts<S> for LogoutAuthentication
 where
     S: Send + Sync,

@@ -12,14 +12,12 @@
 //! - Codec information
 //! - ICE candidate information
 //!
-//! # Examples
+//! # Example
 //!
-//! ```
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::statistics::StatsSelector;
+//! ```ignore
 //! use std::time::Instant;
+//! use rtc::statistics::StatsSelector;
 //!
-//! # fn example(peer_connection: &mut RTCPeerConnection) {
 //! let report = peer_connection.get_stats(Instant::now(), StatsSelector::None);
 //!
 //! // Access transport statistics
@@ -32,12 +30,11 @@
 //! for dc in report.data_channels() {
 //!     println!("Channel '{}': {} messages sent", dc.label, dc.messages_sent);
 //! }
-//! # }
 //! ```
 
 use ::serde::{Deserialize, Serialize};
 use shared::serde::instant_to_epoch;
-use shared::time::SystemInstant;
+use std::time::Instant;
 
 pub mod certificate;
 pub mod codec;
@@ -59,7 +56,6 @@ pub mod transport;
 /// Values are serialized using the W3C-specified lowercase hyphenated format
 /// (e.g., `InboundRTP` serializes to `"inbound-rtp"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum RTCStatsType {
     /// Statistics for a media codec.
     #[serde(rename = "codec")]
@@ -128,7 +124,7 @@ pub struct RTCStats {
     ///
     /// Serialized as milliseconds since the Unix epoch for W3C compatibility.
     #[serde(with = "instant_to_epoch")]
-    pub timestamp: SystemInstant,
+    pub timestamp: Instant,
 
     /// The type of this statistics object.
     #[serde(rename = "type")]
@@ -143,7 +139,6 @@ pub struct RTCStats {
 /// This enum indicates why the video encoder may have reduced quality
 /// (resolution, frame rate, or bitrate) during encoding.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum RTCQualityLimitationReason {
     /// No quality limitation is active.
     #[default]

@@ -22,7 +22,7 @@ use crate::errors::{DialogError, DialogResult};
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::types::header::{HeaderName, TypedHeader};
 use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_sip_core::{Request, Response, StatusCode};
+use rvoip_sip_core::{Method, Request, Response, StatusCode};
 
 // Import all the specialized protocol handlers
 use crate::protocol::{
@@ -693,7 +693,9 @@ fn extract_notify_fields(
     // SIP_API_DESIGN_2 §7.5: prefer the transport-cached wire bytes so
     // STIR/SHAKEN consumers verify against the upstream form. Mock /
     // synthetic paths fall back to re-serialising the parsed Request.
-    let transaction_key = crate::transaction::utils::transaction_key_from_request(request);
+    let transaction_key = crate::transaction::utils::transaction_key_from_message(
+        &rvoip_sip_core::Message::Request(request.clone()),
+    );
     let raw_request = transaction_key
         .as_ref()
         .and_then(|key| transaction_manager.peek_inbound_bytes(key))
@@ -879,16 +881,22 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         request: &Request,
     ) -> DialogResult<()> {
-        // The capabilities a UAS lists in a 200 to OPTIONS (RFC 3261 §11.2):
-        // the same ones its requests are checked against.
-        let capabilities = self.uas_capabilities();
-        let mut response = crate::transaction::utils::response_builders::create_response(
+        // Use transaction-core helper for OPTIONS response with Allow header
+        let allowed_methods = vec![
+            Method::Invite,
+            Method::Bye,
+            Method::Cancel,
+            Method::Ack,
+            Method::Options,
+            Method::Update,
+            Method::Info,
+            Method::Refer,
+        ];
+
+        let response = crate::transaction::utils::response_builders::create_ok_response_for_options(
             request,
-            rvoip_sip_core::StatusCode::Ok,
+            &allowed_methods,
         );
-        response.headers.push(capabilities.allow_header());
-        response.headers.push(capabilities.accept_header());
-        response.headers.push(capabilities.supported_header());
 
         self.transaction_manager
             .send_response(transaction_id, response)

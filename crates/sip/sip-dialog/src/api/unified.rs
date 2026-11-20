@@ -400,7 +400,7 @@ pub struct InviteRequestOptions {
     pub sdp: Option<String>,
     /// Pre-set Call-ID (session-core pre-registers the session↔dialog map).
     pub call_id: Option<String>,
-    /// `From:` display name. `None` sends no display name (`From: <uri>`).
+    /// `From:` display name. `None` keeps the legacy `"User"` default.
     pub from_display: Option<String>,
     /// `Contact:` URI override (else the socket-derived default).
     pub contact_uri: Option<String>,
@@ -521,11 +521,11 @@ pub fn validate_initial_invite_options(opts: &InviteRequestOptions) -> ApiResult
 
     let mut builder = InviteBuilder::new()
         .from_detailed(
-            opts.from_display.as_deref(),
+            opts.from_display.as_deref().or(Some("User")),
             from_uri.to_string(),
             Some("preflight"),
         )
-        .to_detailed(None, to_uri.to_string(), None)
+        .to_detailed(Some("User"), to_uri.to_string(), None)
         .call_id(opts.call_id.as_deref().unwrap_or("preflight@invalid"))
         .cseq(1)
         .request_uri(to_uri.to_string())
@@ -2764,10 +2764,7 @@ impl UnifiedDialogApi {
             .build()
             .map_err(|_error| ApiError::protocol("Failed to build REGISTER request"))?;
 
-        let destination = self
-            .manager
-            .inner_manager()
-            .resolve_uri_to_socketaddr(destination_uri)
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(destination_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve REGISTER destination URI"))?;
 
@@ -2828,10 +2825,7 @@ impl UnifiedDialogApi {
         )
         .map_err(|_error| ApiError::protocol("Failed to build SUBSCRIBE request"))?;
 
-        let destination = self
-            .manager
-            .inner_manager()
-            .resolve_uri_to_socketaddr(&dest_uri)
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve SUBSCRIBE target URI"))?;
 
@@ -2878,10 +2872,7 @@ impl UnifiedDialogApi {
         )
         .map_err(|_error| ApiError::protocol("Failed to build MESSAGE request"))?;
 
-        let destination = self
-            .manager
-            .inner_manager()
-            .resolve_uri_to_socketaddr(&dest_uri)
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve MESSAGE target URI"))?;
 
@@ -3234,10 +3225,7 @@ impl UnifiedDialogApi {
         )
         .map_err(|_error| ApiError::protocol("Failed to build OPTIONS request"))?;
 
-        let destination = self
-            .manager
-            .inner_manager()
-            .resolve_uri_to_socketaddr(&dest_uri)
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| ApiError::protocol("Failed to resolve OPTIONS target URI"))?;
 

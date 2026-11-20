@@ -242,32 +242,6 @@ impl EventReceiver {
         }
     }
 
-    /// The control owner without a public observation subscription. A
-    /// control owner suppresses every observational copy (see
-    /// `next_with_lifecycle`), so subscribing would only add a bus delivery
-    /// and a wakeup per published event. The stream ends when the control
-    /// channel closes.
-    pub(crate) fn control_only(
-        control_rx: mpsc::UnboundedReceiver<SessionControlEvent>,
-        coordinator: Arc<UnifiedCoordinator>,
-    ) -> Self {
-        let (_, rx) = mpsc::channel(1);
-        Self {
-            rx,
-            control_rx: Some(control_rx),
-            control_coordinator: Some(coordinator),
-            owns_control: true,
-            observations_open: false,
-            filter: None,
-            exact_filter: None,
-            exact_store: None,
-            exact_lifecycle: None,
-            exact_watcher: None,
-            exact_terminal_delivered: false,
-            primed: std::collections::VecDeque::new(),
-        }
-    }
-
     pub(crate) async fn ensure_control(
         &mut self,
         coordinator: &Arc<UnifiedCoordinator>,
@@ -1062,8 +1036,7 @@ impl StreamPeer {
     /// ```
     pub async fn new(name: &str) -> Result<Self> {
         let mut config = Config::default();
-        config.local_uri =
-            crate::api::unified::local_sip_uri(name, config.local_ip, config.sip_port);
+        config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
         Self::with_config(config).await
     }
 
@@ -1227,14 +1200,33 @@ impl StreamPeer {
                 // `Arc<Request>` view when the bus enriched the
                 // inbound INVITE; falls back to the legacy empty
                 // headers shape when synthesized in tests.
-                Ok(IncomingCall::from_event_captured(
-                    call_id,
-                    from,
-                    to,
-                    sdp,
-                    self.control.coordinator.clone(),
-                    lifecycle_handle,
-                ))
+                let coord = self.control.coordinator.clone();
+                let pending = lifecycle_handle
+                    .as_ref()
+                    .and_then(|handle| coord.pending_incoming_bundle_for_handle_exact(handle));
+                let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+                let transport = pending.and_then(|bundle| bundle.transport);
+                let incoming = match parsed {
+                    Some(req) => IncomingCall::with_request_captured(
+                        call_id,
+                        from,
+                        to,
+                        sdp,
+                        coord,
+                        req,
+                        lifecycle_handle,
+                    ),
+                    None => {
+                        IncomingCall::new_captured(call_id, from, to, sdp, coord, lifecycle_handle)
+                    }
+                }
+                .with_transport_context(
+                    transport
+                        .as_deref()
+                        .cloned()
+                        .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+                );
+                Ok(incoming)
             }
             None => Err(SessionError::Other("Event channel closed".to_string())),
         }
@@ -1957,10 +1949,9 @@ impl StreamPeerBuilder {
     /// ```
     pub async fn build(mut self) -> Result<StreamPeer> {
         if let Some(name) = self.name {
-            self.config.local_uri = crate::api::unified::local_sip_uri(
-                &name,
-                self.config.local_ip,
-                self.config.sip_port,
+            self.config.local_uri = format!(
+                "sip:{}@{}:{}",
+                name, self.config.local_ip, self.config.sip_port
             );
         }
         let runtime = SipRuntimeConfig::default()

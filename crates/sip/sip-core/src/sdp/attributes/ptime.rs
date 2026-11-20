@@ -6,7 +6,6 @@
 
 use crate::error::{Error, Result};
 use crate::sdp::attributes::common::{positive_integer, to_result};
-use nom::Parser;
 use nom::{
     combinator::{all_consuming, verify},
     IResult,
@@ -23,7 +22,7 @@ fn ptime_parser(input: &str) -> IResult<&str, u32> {
     }
 
     // Validate that the entire input is a valid integer
-    all_consuming(positive_integer).parse(input)
+    all_consuming(positive_integer)(input)
 }
 
 /// Parser for maxptime value (positive integer with reasonable constraints)
@@ -40,8 +39,7 @@ fn maxptime_parser(input: &str) -> IResult<&str, u32> {
     all_consuming(verify(
         positive_integer,
         |&v| (10..=5000).contains(&v), // Reasonable range for packet time
-    ))
-    .parse(input)
+    ))(input)
 }
 
 /// Parses ptime attribute: `a=ptime:<packet time>`

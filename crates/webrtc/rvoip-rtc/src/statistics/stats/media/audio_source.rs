@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// W3C WebRTC Statistics API. It provides information about the audio
 /// capture source, including audio levels and echo cancellation metrics.
 ///
-/// # Specification
+/// # W3C Reference
 ///
 /// See [RTCAudioSourceStats](https://www.w3.org/TR/webrtc-stats/#audiosourcestats-dict*)
 #[derive(Debug, Serialize, Deserialize)]

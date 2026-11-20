@@ -59,9 +59,6 @@
 //! ```
 
 use crate::error::CodecError;
-use crate::utils::tables::{
-    decode_alaw_table, decode_mulaw_table, encode_alaw_table, encode_mulaw_table,
-};
 
 use super::g711_reference as reference;
 
@@ -183,11 +180,11 @@ impl G711Codec {
         match self.variant {
             G711Variant::ALaw => Ok(samples
                 .iter()
-                .map(|&sample| encode_alaw_table(sample))
+                .map(|&sample| alaw_compress(sample))
                 .collect()),
             G711Variant::MuLaw => Ok(samples
                 .iter()
-                .map(|&sample| encode_mulaw_table(sample))
+                .map(|&sample| ulaw_compress(sample))
                 .collect()),
         }
     }
@@ -202,11 +199,11 @@ impl G711Codec {
         match self.variant {
             G711Variant::ALaw => Ok(compressed
                 .iter()
-                .map(|&sample| decode_alaw_table(sample))
+                .map(|&sample| alaw_expand(sample))
                 .collect()),
             G711Variant::MuLaw => Ok(compressed
                 .iter()
-                .map(|&sample| decode_mulaw_table(sample))
+                .map(|&sample| ulaw_expand(sample))
                 .collect()),
         }
     }
@@ -220,7 +217,7 @@ impl G711Codec {
     pub fn compress_alaw(&self, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
         Ok(samples
             .iter()
-            .map(|&sample| encode_alaw_table(sample))
+            .map(|&sample| alaw_compress(sample))
             .collect())
     }
 
@@ -233,7 +230,7 @@ impl G711Codec {
     pub fn expand_alaw(&self, compressed: &[u8]) -> Result<Vec<i16>, CodecError> {
         Ok(compressed
             .iter()
-            .map(|&sample| decode_alaw_table(sample))
+            .map(|&sample| alaw_expand(sample))
             .collect())
     }
 
@@ -246,7 +243,7 @@ impl G711Codec {
     pub fn compress_ulaw(&self, samples: &[i16]) -> Result<Vec<u8>, CodecError> {
         Ok(samples
             .iter()
-            .map(|&sample| encode_mulaw_table(sample))
+            .map(|&sample| ulaw_compress(sample))
             .collect())
     }
 
@@ -259,7 +256,7 @@ impl G711Codec {
     pub fn expand_ulaw(&self, compressed: &[u8]) -> Result<Vec<i16>, CodecError> {
         Ok(compressed
             .iter()
-            .map(|&sample| decode_mulaw_table(sample))
+            .map(|&sample| ulaw_expand(sample))
             .collect())
     }
 }
@@ -320,13 +317,13 @@ impl crate::types::AudioCodecExt for G711Codec {
 
         match self.variant {
             G711Variant::ALaw => {
-                for (byte, &sample) in output.iter_mut().zip(samples) {
-                    *byte = encode_alaw_table(sample);
+                for (i, &sample) in samples.iter().enumerate() {
+                    output[i] = alaw_compress(sample);
                 }
             }
             G711Variant::MuLaw => {
-                for (byte, &sample) in output.iter_mut().zip(samples) {
-                    *byte = encode_mulaw_table(sample);
+                for (i, &sample) in samples.iter().enumerate() {
+                    output[i] = ulaw_compress(sample);
                 }
             }
         }
@@ -344,13 +341,13 @@ impl crate::types::AudioCodecExt for G711Codec {
 
         match self.variant {
             G711Variant::ALaw => {
-                for (sample, &encoded) in output.iter_mut().zip(data) {
-                    *sample = decode_alaw_table(encoded);
+                for (i, &encoded) in data.iter().enumerate() {
+                    output[i] = alaw_expand(encoded);
                 }
             }
             G711Variant::MuLaw => {
-                for (sample, &encoded) in output.iter_mut().zip(data) {
-                    *sample = decode_mulaw_table(encoded);
+                for (i, &encoded) in data.iter().enumerate() {
+                    output[i] = ulaw_expand(encoded);
                 }
             }
         }

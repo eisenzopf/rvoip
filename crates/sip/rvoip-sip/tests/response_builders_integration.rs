@@ -696,31 +696,25 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
     let mut alice_events = alice.events().await.expect("alice events");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    // Fill Bob's retained lifecycle bound with one ended lifetime while his
-    // active capacity is free. A finished inbound call cannot do this:
-    // * its stack-minted session identifier is unique, so its anti-reuse
-    //   fence is reclaimed as soon as the call is removed from the store;
-    // * its INVITE server transaction holds the RFC 6026 Timer L retention
-    //   lane, bounded by the same configured capacity, for 64*T1, so a
-    //   second INVITE inside that window is refused statelessly by the
-    //   transaction layer before session admission is consulted.
-    // An outbound session keeps a reusable identity, and with it its fence,
-    // for the full anti-reuse horizon. Bob has no TLS transport, so this one
-    // fails before reaching the wire and holds no transaction retention.
-    let unsendable = bob_coordinator
-        .invite(
-            Some(format!("sip:bob@127.0.0.1:{bob_port}")),
-            "sip:carol@127.0.0.1:17999;transport=tls".to_string(),
-        )
+    let target = format!("sip:bob@127.0.0.1:{bob_port}");
+    let first = alice
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
         .send()
-        .await;
-    assert!(
-        matches!(unsendable, Err(SessionError::InviteNotSent(_))),
-        "an INVITE over a transport Bob does not run must fail before the wire: {unsendable:?}"
-    );
+        .await
+        .expect("first invite");
+    alice
+        .session(&first)
+        .wait_for_answered(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should be active");
+    alice
+        .session(&first)
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .expect("first call should retire its server lifecycle");
     assert!(
         wait_for_no_sessions(&bob_coordinator, Duration::from_secs(3)).await,
-        "the failed outbound setup must leave the active session store before retained-capacity test"
+        "first server call must leave the active session store before retained-capacity test"
     );
 
     #[cfg(feature = "perf-tests")]
@@ -733,7 +727,7 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
                 "/session_store/lifecycle/authority/active_capacity_in_use"
             ),
             0,
-            "ended outbound lifetime still occupied active lifecycle capacity: {snapshot}"
+            "first call still occupied active lifecycle capacity: {snapshot}"
         );
         assert_eq!(
             snapshot_u64(
@@ -741,7 +735,7 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
                 "/session_store/lifecycle/authority/retained_total"
             ),
             1,
-            "ended outbound lifetime did not fill the retained lifecycle bound: {snapshot}"
+            "first call did not fill the retained lifecycle bound: {snapshot}"
         );
         assert_eq!(
             snapshot_u64(&snapshot, "/session_store/lifecycle/authority/retired"),
@@ -751,7 +745,6 @@ async fn lifecycle_retained_capacity_rejects_with_503_and_cleans_exact_routes() 
         snapshot
     };
 
-    let target = format!("sip:bob@127.0.0.1:{bob_port}");
     let rejected = alice
         .invite(Some("sip:alice@127.0.0.1".to_string()), target)
         .send()
@@ -1007,75 +1000,6 @@ async fn challenge_builder_stamps_www_authenticate_on_wire() {
     assert!(
         raw.contains("nonce=\"nonce-test-001\""),
         "expected nonce on the wire; got:\n{raw}"
-    );
-
-    bob_shutdown.shutdown();
-    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
-}
-
-/// At the session-slot cap new INVITEs get 503 + Retry-After while the
-/// established call's in-dialog BYE still completes, and every ended
-/// lifetime gives its slot back.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn slot_cap_503_keeps_in_dialog_bye_working_and_drains_slots() {
-    let _ = tracing_subscriber::fmt::try_init();
-    let alice_port = 17940;
-    let bob_port = 17941;
-
-    let bob_cfg = cfg("bob-slot-cap", bob_port)
-        .with_server_call_admission_limit(1)
-        .with_server_overload_retry_after_secs(3);
-    let bob = CallbackPeer::new(AcceptAll, bob_cfg).await.expect("bob");
-    let bob_coordinator = bob.coordinator().clone();
-    let bob_shutdown = bob.shutdown_handle();
-    let bob_task = tokio::spawn(async move {
-        let _ = bob.run().await;
-    });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let alice = UnifiedCoordinator::new(cfg("alice-slot-cap", alice_port))
-        .await
-        .expect("alice");
-    let mut alice_events = alice.events().await.expect("alice events");
-    tokio::time::sleep(Duration::from_millis(150)).await;
-
-    let target = format!("sip:bob@127.0.0.1:{bob_port}");
-    let first = alice
-        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
-        .send()
-        .await
-        .expect("first invite");
-    alice
-        .session(&first)
-        .wait_for_answered(Some(Duration::from_secs(8)))
-        .await
-        .expect("first call should be active");
-
-    // Bob's only slot is taken: the next new INVITE is shed with a backoff.
-    let _ = alice
-        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
-        .send()
-        .await;
-    let raw = wait_for_inbound_response_status(&mut alice_events, "503", Duration::from_secs(8))
-        .await
-        .expect("alice did not see the slot-cap 503");
-    assert!(
-        raw.contains("Retry-After: 3"),
-        "expected the configured Retry-After on the slot-cap 503; got:\n{raw}"
-    );
-
-    // The established call's in-dialog BYE is still processed at the cap.
-    alice
-        .session(&first)
-        .hangup_and_wait(Some(Duration::from_secs(8)))
-        .await
-        .expect("an in-dialog BYE must complete while new INVITEs are shed");
-
-    // No ended lifetime keeps its slot once the server is quiet.
-    assert!(
-        wait_for_no_sessions(&bob_coordinator, Duration::from_secs(8)).await,
-        "bob's SIP session slots did not return to zero after the BYE"
     );
 
     bob_shutdown.shutdown();

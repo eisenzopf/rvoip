@@ -11,13 +11,11 @@ use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use rtc::rtp_transceiver::rtp_sender::{
     RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters,
 };
-use rvoip_core::capability::CodecInfo;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::TrackRemote;
-use webrtc::media_stream::Track;
 use webrtc::peer_connection::PeerConnection;
 use webrtc::peer_connection::{RTCIceCandidate, RTCIceCandidateInit, RTCSdpType};
 use webrtc::rtp_transceiver::RTCRtpTransceiverDirection;
@@ -39,49 +37,6 @@ use crate::sdp::inspect::{
     preferred_telephone_event_codec_in_sdp, sdp_has_media_line, NegotiatedAudioMid,
 };
 use crate::sdp::session::{parse_sdp, sdp_to_string};
-
-fn audio_encoding_codec(codec: &CodecInfo) -> Result<RTCRtpCodec> {
-    let name = match codec.name.to_ascii_lowercase().as_str() {
-        "pcmu" => "g.711-mu".to_owned(),
-        "pcma" => "g.711-a".to_owned(),
-        name => name.to_owned(),
-    };
-    let mime = crate::sdp::codec_to_mime(&name).ok_or(WebRtcError::IncompatibleCapabilities)?;
-    let (clock_rate, channels) = if mime == MIME_TYPE_OPUS {
-        (48_000, 2)
-    } else {
-        (8_000, 1)
-    };
-    if codec.clock_rate_hz != clock_rate || (mime != MIME_TYPE_OPUS && codec.channels != channels) {
-        return Err(WebRtcError::IncompatibleCapabilities);
-    }
-    Ok(RTCRtpCodec {
-        mime_type: mime.to_owned(),
-        clock_rate,
-        channels: u16::from(channels),
-        sdp_fmtp_line: codec.fmtp.clone().unwrap_or_default(),
-        rtcp_feedback: audio_track_rtcp_feedback(),
-    })
-}
-
-fn encoding_matches(encoding: &RTCRtpCodec, codec: &CodecInfo) -> bool {
-    audio_encoding_codec(codec).is_ok_and(|expected| {
-        encoding.mime_type.eq_ignore_ascii_case(&expected.mime_type)
-            && encoding.clock_rate == expected.clock_rate
-            && encoding.channels == expected.channels
-    })
-}
-
-fn same_audio_codec(local: &CodecInfo, remote: &CodecInfo) -> bool {
-    match (audio_encoding_codec(local), audio_encoding_codec(remote)) {
-        (Ok(a), Ok(b)) => {
-            a.mime_type.eq_ignore_ascii_case(&b.mime_type)
-                && a.clock_rate == b.clock_rate
-                && a.channels == b.channels
-        }
-        _ => false,
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PeerRole {
@@ -130,10 +85,6 @@ pub struct RvoipPeerConnection {
     gather_timeout: Duration,
     trickle_ice: bool,
     drops: Arc<HandlerDropCounters>,
-    audio_capabilities: Vec<CodecInfo>,
-    local_audio_codec: SyncMutex<Option<CodecInfo>>,
-    audio_media_started: AtomicBool,
-    audio_send_enabled: AtomicBool,
 }
 
 impl RvoipPeerConnection {
@@ -198,10 +149,6 @@ impl RvoipPeerConnection {
             gather_timeout,
             trickle_ice: config.trickle_ice,
             drops,
-            audio_capabilities: config.capabilities.audio_codecs.clone(),
-            local_audio_codec: SyncMutex::new(None),
-            audio_media_started: AtomicBool::new(false),
-            audio_send_enabled: AtomicBool::new(true),
         }))
     }
 
@@ -253,26 +200,7 @@ impl RvoipPeerConnection {
     ) -> Result<()> {
         let offered_dtmf = preferred_telephone_event_codec_in_sdp(remote_sdp);
         if sdp_has_media_line(remote_sdp, "audio") {
-            // The local track's encoding must be a codec the offer carries.
-            // A re-offer that still carries the existing track's codec keeps
-            // it; otherwise the first local capability the offer carries is
-            // used (and an existing track with another codec is refused).
-            let offered = crate::sdp::session::primary_audio_codecs(remote_sdp)?;
-            let existing = self.local_audio_codec.lock().clone();
-            let selected = existing
-                .filter(|current| {
-                    offered
-                        .iter()
-                        .any(|remote| same_audio_codec(current, remote))
-                })
-                .or_else(|| {
-                    self.audio_capabilities
-                        .iter()
-                        .find(|local| offered.iter().any(|remote| same_audio_codec(local, remote)))
-                        .cloned()
-                })
-                .ok_or(WebRtcError::IncompatibleCapabilities)?;
-            self.add_local_audio_track_for_codec(selected, offered_dtmf.into_iter().collect())
+            self.add_local_audio_track_with_dtmf(offered_dtmf.into_iter().collect())
                 .await?;
         }
         if sdp_has_media_line(remote_sdp, "video") {
@@ -417,7 +345,7 @@ impl RvoipPeerConnection {
         self.trickle_ice
     }
 
-    /// Add one local audio sender with configured audio and RFC 4733 capability when
+    /// Add one local audio sender with Opus and RFC 4733 capability when
     /// outbound DTMF is allowed.
     ///
     /// RFC 4733 is an alternate payload on the regular audio source. It must
@@ -436,46 +364,26 @@ impl RvoipPeerConnection {
         self: &Arc<Self>,
         dtmf_codecs: Vec<TelephoneEventCodec>,
     ) -> Result<()> {
-        let codec = self
-            .audio_capabilities
-            .first()
-            .cloned()
-            .ok_or(WebRtcError::IncompatibleCapabilities)?;
-        self.add_local_audio_track_for_codec(codec, dtmf_codecs)
-            .await
-    }
-
-    async fn add_local_audio_track_for_codec(
-        self: &Arc<Self>,
-        codec: CodecInfo,
-        dtmf_codecs: Vec<TelephoneEventCodec>,
-    ) -> Result<()> {
-        if self.local_audio_track().is_some() {
-            let existing = self
-                .local_audio_codec
-                .lock()
-                .as_ref()
-                .map(audio_encoding_codec)
-                .transpose()?
-                .ok_or_else(|| WebRtcError::Adapter("missing audio encoding codec".into()))?;
-            if !encoding_matches(&existing, &codec) {
-                return Err(WebRtcError::Sdp(
-                    "renegotiation changed the local audio encoding codec".into(),
-                ));
-            }
+        if self.local_audio.lock().is_some() {
             return dtmf_codecs
                 .into_iter()
                 .try_for_each(|codec| self.validate_existing_dtmf_clock(codec));
         }
-        let encoding_codec = audio_encoding_codec(&codec)?;
-        let clock_rate = encoding_codec.clock_rate;
+
+        let opus = RTCRtpCodec {
+            mime_type: MIME_TYPE_OPUS.to_owned(),
+            clock_rate: 48000,
+            channels: 2,
+            sdp_fmtp_line: "minptime=10;useinbandfec=1".into(),
+            rtcp_feedback: audio_track_rtcp_feedback(),
+        };
         let ssrc = rand_ssrc();
         let encodings = vec![RTCRtpEncodingParameters {
             rtp_coding_parameters: RTCRtpCodingParameters {
                 ssrc: Some(ssrc),
                 ..Default::default()
             },
-            codec: encoding_codec,
+            codec: opus,
             ..Default::default()
         }];
         let mut dtmf_ssrcs_by_clock = HashMap::new();
@@ -502,13 +410,12 @@ impl RvoipPeerConnection {
             .add_track(track.clone() as Arc<dyn TrackLocal>)
             .await?;
 
-        *self.local_audio_codec.lock() = Some(codec);
         *self.local_audio.lock() = Some(Arc::clone(&track));
         *self.local_audio_ssrc.lock() = Some(ssrc);
         *self.outbound_audio_writer.lock() = Some(OutboundAudioRtpWriter::new(
             Arc::clone(&track),
             ssrc,
-            clock_rate,
+            48_000,
         ));
         if let Some(codec) = dtmf_codecs.first().copied() {
             // Both handles deliberately point at the same TrackLocal and SSRC.
@@ -517,178 +424,6 @@ impl RvoipPeerConnection {
             *self.local_dtmf_codec.lock() = Some(codec);
         }
         Ok(())
-    }
-
-    pub(crate) fn selected_audio_payload(
-        &self,
-        offer: &str,
-        answer: &str,
-    ) -> Result<crate::sdp::session::NegotiatedAudioPayload> {
-        crate::sdp::session::selected_audio_payload(offer, answer, &self.audio_capabilities)
-    }
-
-    /// Bind the local audio sender and RTP writer to the codec/PT the
-    /// completed offer/answer selected.
-    ///
-    /// Before media starts, the sender's encoding is switched to the selected
-    /// codec and the writer is rebuilt with its RTP clock. Afterwards, a
-    /// renegotiation that would change the codec is refused. A transceiver
-    /// without a send direction has no usable sender in the RTC core, so it
-    /// is skipped rather than required.
-    async fn bind_negotiated_audio(&self, offer: &str, answer: &str) -> Result<()> {
-        if self.local_audio_track().is_none() {
-            return Ok(());
-        }
-        let audio =
-            crate::sdp::session::selected_audio_payload(offer, answer, &self.audio_capabilities)?;
-        if self.audio_media_started.load(Ordering::Acquire)
-            && self
-                .local_audio_codec
-                .lock()
-                .as_ref()
-                .is_none_or(|old| !same_audio_codec(old, &audio.codec))
-        {
-            return Err(WebRtcError::Sdp(
-                "live renegotiation changed the audio encoding codec".into(),
-            ));
-        }
-        let ssrc = self
-            .local_audio_ssrc()
-            .ok_or_else(|| WebRtcError::Adapter("no local audio SSRC".into()))?;
-        let mut found = false;
-        let mut send_enabled = false;
-        for transceiver in self.pc.get_transceivers().await {
-            let Some(sender) = transceiver.sender().await? else {
-                continue;
-            };
-            if sender.track().kind().await != RtpCodecKind::Audio {
-                continue;
-            }
-            // The locked RTC core deliberately makes rtp_sender inaccessible
-            // when the desired direction has no send component. The async
-            // wrapper can retain its old handle, so inspect direction first.
-            let direction = transceiver.direction().await?;
-            let current = transceiver.current_direction().await?;
-            if !matches!(
-                direction,
-                RTCRtpTransceiverDirection::Sendrecv | RTCRtpTransceiverDirection::Sendonly
-            ) || !matches!(
-                current,
-                RTCRtpTransceiverDirection::Sendrecv | RTCRtpTransceiverDirection::Sendonly
-            ) {
-                continue;
-            }
-            send_enabled = true;
-            {
-                let mut params = sender.get_parameters().await?;
-                if let Some(encoding) = params
-                    .encodings
-                    .iter_mut()
-                    .find(|entry| entry.rtp_coding_parameters.ssrc == Some(ssrc))
-                {
-                    let selected = audio_encoding_codec(&audio.codec)?;
-                    if self.audio_media_started.load(Ordering::Acquire)
-                        && !encoding_matches(&encoding.codec, &audio.codec)
-                    {
-                        return Err(WebRtcError::Sdp(
-                            "live renegotiation changed the audio encoding codec".into(),
-                        ));
-                    }
-                    if !params.rtp_parameters.codecs.iter().any(|entry| {
-                        entry.payload_type == audio.payload_type
-                            && encoding_matches(&entry.rtp_codec, &audio.codec)
-                    }) {
-                        return Err(WebRtcError::Sdp(
-                            "selected audio codec has no negotiated sender binding".into(),
-                        ));
-                    }
-                    encoding.codec = selected;
-                    sender.set_parameters(params, None).await?;
-                    found = true;
-                    break;
-                }
-            }
-        }
-        if send_enabled && !found {
-            return Err(WebRtcError::Sdp(
-                "no audio sender for the negotiated SSRC".into(),
-            ));
-        }
-        if !self.audio_media_started.load(Ordering::Acquire) {
-            let track = self
-                .local_audio_track()
-                .ok_or_else(|| WebRtcError::Adapter("no local audio track".into()))?;
-            // No stream may own the old writer before first media activation.
-            drop(self.outbound_audio_writer.lock().take());
-            let writer = OutboundAudioRtpWriter::new(track, ssrc, audio.codec.clock_rate_hz);
-            if writer.clock_rate_hz() != audio.codec.clock_rate_hz {
-                return Err(WebRtcError::Sdp(
-                    "audio writer clock was already retained by another owner".into(),
-                ));
-            }
-            // A route negotiated without a send direction (a WHEP player)
-            // refuses outgoing frames at the writer instead of handing them
-            // to a sender that does not exist. Once media is flowing, a
-            // direction change (hold/resume renegotiation) leaves the writer
-            // alone, so the outbound pump survives a hold.
-            writer.set_send_enabled(send_enabled);
-            *self.outbound_audio_writer.lock() = Some(writer);
-            self.audio_send_enabled
-                .store(send_enabled, Ordering::Release);
-        }
-        *self.local_audio_codec.lock() = Some(audio.codec);
-        Ok(())
-    }
-
-    /// Check, before a media stream is created, that the bound audio sender's
-    /// encoding, negotiated payload type and RTP writer clock all match the
-    /// route's codec, and mark audio media as started. A route negotiated
-    /// without a send direction has nothing to check.
-    pub(crate) async fn validate_outbound_audio_codec(
-        &self,
-        codec: &CodecInfo,
-        payload_type: u8,
-    ) -> Result<()> {
-        if !self.audio_send_enabled.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let ssrc = self
-            .local_audio_ssrc()
-            .ok_or_else(|| WebRtcError::Adapter("no local audio SSRC".into()))?;
-        for sender in self.pc.get_senders().await {
-            // A sender whose transceiver has no send direction has no
-            // parameters; it cannot be the bound audio sender.
-            let Ok(params) = sender.get_parameters().await else {
-                continue;
-            };
-            if let Some(encoding) = params
-                .encodings
-                .iter()
-                .find(|entry| entry.rtp_coding_parameters.ssrc == Some(ssrc))
-            {
-                if !encoding_matches(&encoding.codec, codec)
-                    || !params.rtp_parameters.codecs.iter().any(|entry| {
-                        entry.payload_type == payload_type
-                            && encoding_matches(&entry.rtp_codec, codec)
-                    })
-                {
-                    return Err(WebRtcError::Sdp(
-                        "audio sender does not match negotiated media codec or payload".into(),
-                    ));
-                }
-                if self
-                    .outbound_audio_writer()
-                    .is_none_or(|writer| writer.clock_rate_hz() != codec.clock_rate_hz)
-                {
-                    return Err(WebRtcError::Sdp(
-                        "audio writer clock does not match negotiated codec".into(),
-                    ));
-                }
-                self.audio_media_started.store(true, Ordering::Release);
-                return Ok(());
-            }
-        }
-        Err(WebRtcError::Sdp("audio sender is not bound".into()))
     }
 
     /// Attach one RFC 4733 encoding per unique clock that an offer may
@@ -1233,7 +968,6 @@ impl RvoipPeerConnection {
         let answer_sdp = sdp_to_string(&desc)?;
         let final_dtmf = self.final_outbound_dtmf_state(&offer_sdp, &answer_sdp)?;
         let audio_mid = negotiated_sdes_mid_for_outbound_audio(&offer_sdp, &answer_sdp, false);
-        self.bind_negotiated_audio(&offer_sdp, &answer_sdp).await?;
         self.commit_outbound_dtmf_state(final_dtmf, audio_mid);
         Ok(answer_sdp)
     }
@@ -1285,7 +1019,6 @@ impl RvoipPeerConnection {
         let audio_mid = negotiated_sdes_mid_for_outbound_audio(&offer_sdp, remote_sdp, true);
         let remote = parse_sdp(remote_sdp, RTCSdpType::Answer)?;
         self.pc.set_remote_description(remote).await?;
-        self.bind_negotiated_audio(&offer_sdp, remote_sdp).await?;
         self.commit_outbound_dtmf_state(final_dtmf, audio_mid);
         Ok(())
     }
@@ -1318,7 +1051,6 @@ impl RvoipPeerConnection {
         let answer_sdp = sdp_to_string(&description)?;
         let final_dtmf = self.final_outbound_dtmf_state(remote_sdp, &answer_sdp)?;
         let audio_mid = negotiated_sdes_mid_for_outbound_audio(remote_sdp, &answer_sdp, false);
-        self.bind_negotiated_audio(remote_sdp, &answer_sdp).await?;
         self.commit_outbound_dtmf_state(final_dtmf, audio_mid);
         Ok(answer_sdp)
     }
@@ -1603,6 +1335,8 @@ impl RvoipPeerConnection {
 
     /// Hold: mute local track; best-effort recvonly on audio transceivers.
     pub async fn hold_audio(&self) -> Result<()> {
+        use webrtc::media_stream::Track;
+
         if let Some(track) = self.local_audio_track() {
             let _ = tokio::time::timeout(Duration::from_millis(500), track.set_muted(true)).await;
         }
@@ -1616,6 +1350,8 @@ impl RvoipPeerConnection {
 
     /// Resume: unmute local track; best-effort sendrecv on audio transceivers.
     pub async fn resume_audio(&self) -> Result<()> {
+        use webrtc::media_stream::Track;
+
         if let Some(track) = self.local_audio_track() {
             let _ = tokio::time::timeout(Duration::from_millis(500), track.set_muted(false)).await;
         }
@@ -1695,96 +1431,4 @@ pub async fn connect_loopback(
     )?;
 
     Ok((offerer, answerer))
-}
-
-#[cfg(test)]
-mod negotiated_encoding_tests {
-    use super::*;
-
-    fn codec(name: &str, clock: u32, channels: u8) -> CodecInfo {
-        CodecInfo {
-            name: name.into(),
-            clock_rate_hz: clock,
-            channels,
-            fmtp: None,
-            payload_type: None,
-        }
-    }
-
-    #[test]
-    fn primary_encoding_uses_negotiated_pcmu_or_opus_clock() {
-        let pcmu = audio_encoding_codec(&codec("g.711-mu", 8_000, 1)).unwrap();
-        assert_eq!(
-            (pcmu.mime_type.as_str(), pcmu.clock_rate, pcmu.channels),
-            ("audio/PCMU", 8_000, 1)
-        );
-        let opus = audio_encoding_codec(&codec("opus", 48_000, 2)).unwrap();
-        assert_eq!(
-            (opus.mime_type.as_str(), opus.clock_rate, opus.channels),
-            ("audio/opus", 48_000, 2)
-        );
-        assert!(!encoding_matches(&opus, &codec("g.711-mu", 8_000, 1)));
-        assert!(audio_encoding_codec(&codec("g.711-mu", 48_000, 1)).is_err());
-    }
-
-    #[tokio::test]
-    async fn answerer_pcmu_static_offer_builds_pcmu_encoding_and_rejects_changed_codec() {
-        let mut config = WebRtcConfig::loopback();
-        config.capabilities.audio_codecs = vec![codec("g.711-mu", 8_000, 1)];
-        let peer = RvoipPeerConnection::new(&config, PeerRole::Answerer)
-            .await
-            .unwrap();
-        let offer = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 0\r\nc=IN IP4 127.0.0.1\r\n";
-        peer.prepare_answerer_media_for_offer(offer).await.unwrap();
-        let track = peer.local_audio_track().unwrap();
-        let actual = track.codec(peer.local_audio_ssrc().unwrap()).await.unwrap();
-        assert!(encoding_matches(&actual, &codec("g.711-mu", 8_000, 1)));
-        assert!(peer
-            .validate_outbound_audio_codec(&codec("opus", 48_000, 2), 111)
-            .await
-            .is_err());
-        assert!(peer
-            .add_local_audio_track_for_codec(codec("opus", 48_000, 2), Vec::new())
-            .await
-            .is_err());
-        peer.close().await.unwrap();
-    }
-
-    /// `hold_renegotiate` (on by default) renegotiates the audio transceiver
-    /// to recvonly while a stream's outbound pump is running. That must not
-    /// disable the writer, or the pump stops on its next frame and audio
-    /// never comes back after resume.
-    #[tokio::test]
-    async fn hold_renegotiation_after_media_start_keeps_the_writer_enabled() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let (offerer, answerer) = connect_loopback(&WebRtcConfig::loopback())
-            .await
-            .expect("loopback");
-        let codec = offerer
-            .local_audio_codec
-            .lock()
-            .clone()
-            .expect("negotiated audio codec");
-        let payload_type = codec.payload_type.expect("negotiated payload type");
-        offerer
-            .validate_outbound_audio_codec(&codec, payload_type)
-            .await
-            .expect("bound sender matches the negotiated codec");
-
-        offerer.hold_audio().await.expect("hold");
-        let offer = offerer.renegotiate_as_offerer().await.expect("hold offer");
-        let answer = answerer
-            .renegotiate_as_answerer(&offer)
-            .await
-            .expect("hold answer");
-        offerer
-            .set_remote_answer(&answer)
-            .await
-            .expect("hold renegotiation");
-
-        let writer = offerer.outbound_audio_writer().expect("writer");
-        assert!(writer.ensure_send_enabled().is_ok());
-        offerer.close().await.unwrap();
-        answerer.close().await.unwrap();
-    }
 }

@@ -1181,13 +1181,6 @@ const CLIENT_TRANSACTION_COMPLETION_TTL: Duration = Duration::from_secs(90);
 // returning and the caller registering its exact waiter.
 const RELIABLE_CLIENT_COMPLETION_RACE_GRACE: Duration = Duration::from_secs(1);
 const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
-/// How long a client transaction whose stream flow closed waits before it is
-/// failed (#311). A response the peer wrote just before closing is read ahead
-/// of the close, but it travels the message lane while the close takes the
-/// prioritised control lane, so the close can be observed first. This window
-/// lets such a response reach its transaction, which then ignores the stale
-/// transport error.
-const CLOSED_FLOW_RESPONSE_SETTLE: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
 const BYE_FINAL_RESPONSE_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(test)]
@@ -1694,35 +1687,6 @@ fn new_server_transaction_registries() -> (
     (admissions, matches)
 }
 
-/// The transaction user's answer to "are my session slots full?" for a new
-/// dialog-forming INVITE. See
-/// [`TransactionManager::set_new_dialog_capacity_guard`].
-///
-/// It runs on the transaction dispatch path for every new INVITE, so it must
-/// be cheap and must not block.
-#[derive(Clone)]
-pub struct NewDialogCapacityGuard(Arc<dyn Fn() -> bool + Send + Sync>);
-
-impl NewDialogCapacityGuard {
-    /// Wrap a probe that returns `true` while the session slots are full.
-    pub fn new<F>(exhausted: F) -> Self
-    where
-        F: Fn() -> bool + Send + Sync + 'static,
-    {
-        Self(Arc::new(exhausted))
-    }
-
-    fn exhausted(&self) -> bool {
-        (self.0)()
-    }
-}
-
-impl std::fmt::Debug for NewDialogCapacityGuard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("NewDialogCapacityGuard(..)")
-    }
-}
-
 const MANAGER_ADMISSION_RUNNING: u8 = 0;
 const MANAGER_ADMISSION_DRAINING: u8 = 1;
 const MANAGER_ADMISSION_STOPPING: u8 = 2;
@@ -2215,15 +2179,6 @@ pub struct TransactionManager {
     transaction_dispatch_queue_capacity: usize,
     transaction_command_channel_capacity: usize,
     stateless_overload_retry_after_secs: Arc<AtomicU32>,
-    /// Stateless admission for new dialog-forming INVITEs. Shared with the
-    /// `TransportManager` this manager was built from, whose TLS readers may
-    /// apply it before a request is queued.
-    new_call_admission: Arc<crate::transaction::overload::NewCallAdmission>,
-    /// The TU's session-slot probe for new dialog-forming INVITEs. Unset
-    /// keeps the historical behaviour: every new INVITE reaches the TU.
-    new_dialog_capacity_guard: Arc<OnceLock<NewDialogCapacityGuard>>,
-    /// Slot-cleanup decisions, reported by [`Self::slot_cleanup_stats`].
-    slot_cleanup: Arc<crate::transaction::slot_cleanup::SlotCleanupCounters>,
     transaction_dispatch_priority_burst_max: Arc<AtomicUsize>,
     invite_2xx_retransmit_max_due_per_tick: Arc<AtomicUsize>,
 }
@@ -2818,66 +2773,10 @@ impl TransactionManager {
 
     fn install_terminal_delivery_failure_hook(&self) {
         let lifecycle = Arc::clone(&self.admission_lifecycle);
-        let slot_cleanup = Arc::clone(&self.slot_cleanup);
         self.events_tx
             .install_terminal_delivery_failure_hook(Arc::new(move || {
-                // This latch is permanent and refuses every later new
-                // transaction, inbound requests and local BYEs alike, so it
-                // must never be silent.
-                if lifecycle.begin_draining() {
-                    slot_cleanup.record_admission_fail_closed();
-                    error!(
-                        "Transaction manager closed new-transaction admission: a terminal event \
-                         could not reach the transaction user"
-                    );
-                }
+                lifecycle.begin_draining();
             }));
-    }
-
-    /// Snapshot of this manager's slot-cleanup counters: terminal
-    /// publications continued in the background instead of closing
-    /// admission, real fail-closed latches, and new INVITEs answered with a
-    /// stateless 503 at the session-slot cap or while draining.
-    pub fn slot_cleanup_stats(&self) -> crate::transaction::SlotCleanupStats {
-        self.slot_cleanup.snapshot()
-    }
-
-    /// This manager's new-call admission gate.
-    ///
-    /// The gate is [`AdmissionMode::Off`](crate::transaction::AdmissionMode::Off)
-    /// unless configured, either through
-    /// [`TransportManagerConfig::new_call_admission`](crate::transaction::transport::TransportManagerConfig::new_call_admission)
-    /// or at run time through the returned handle. While it is enforcing, a
-    /// new dialog-forming INVITE it rejects is answered with a stateless 503
-    /// before any transaction, dialog or session state exists, and the ACK
-    /// for that 503 is absorbed. Requests inside a dialog, retransmissions,
-    /// ACK and CANCEL are never decided.
-    pub fn new_call_admission(&self) -> &Arc<crate::transaction::overload::NewCallAdmission> {
-        &self.new_call_admission
-    }
-
-    /// Install the TU's session-slot probe.
-    ///
-    /// While the probe returns `true`, a new dialog-forming INVITE is
-    /// answered with a stateless 503 carrying the stateless-overload
-    /// `Retry-After` (see [`Self::set_stateless_overload_retry_after_secs`])
-    /// before any transaction state exists, whatever the admission gate's
-    /// mode. Every other request is unaffected. One probe per manager: a
-    /// second install is ignored and returns `false`.
-    pub fn set_new_dialog_capacity_guard(&self, guard: NewDialogCapacityGuard) -> bool {
-        self.new_dialog_capacity_guard.set(guard).is_ok()
-    }
-
-    pub(crate) fn new_dialog_capacity_exhausted(&self) -> bool {
-        self.new_dialog_capacity_guard
-            .get()
-            .is_some_and(NewDialogCapacityGuard::exhausted)
-    }
-
-    pub(crate) fn stateless_overload_retry_after(&self) -> u32 {
-        self.stateless_overload_retry_after_secs
-            .load(Ordering::Acquire)
-            .max(1)
     }
 
     fn retained_client_deadline_context(&self) -> RetainedClientDeadlineContext {
@@ -4208,9 +4107,6 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
-            slot_cleanup: Arc::default(),
-            new_call_admission: Arc::default(),
-            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4412,9 +4308,6 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: events_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
-            slot_cleanup: Arc::default(),
-            new_call_admission: Arc::default(),
-            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -4698,7 +4591,6 @@ impl TransactionManager {
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
         // manager only has a single flavour registered (typical
         // UDP-only setup) the multiplexer transparently delegates to it.
-        let new_call_admission = transport_manager.new_call_admission();
         let sip_trace = transport_manager.sip_trace_runtime();
         let default_transport = transport_manager
             .build_multiplexed_transport()
@@ -4870,9 +4762,6 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
-            slot_cleanup: Arc::default(),
-            new_call_admission,
-            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -5054,9 +4943,6 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: 100,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
-            slot_cleanup: Arc::default(),
-            new_call_admission: Arc::default(),
-            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -5201,9 +5087,6 @@ impl TransactionManager {
             transaction_dispatch_queue_capacity: 10,
             transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             stateless_overload_retry_after_secs: Arc::new(AtomicU32::new(1)),
-            slot_cleanup: Arc::default(),
-            new_call_admission: Arc::default(),
-            new_dialog_capacity_guard: Arc::default(),
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 DEFAULT_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -5504,7 +5387,9 @@ impl TransactionManager {
         use crate::transaction::server::TransactionExt;
         if let Some(server_tx) = tx.as_server_transaction() {
             let original_method = if is_200_ok {
-                Some(server_tx.data().request.method().clone())
+                server_tx
+                    .original_request_sync()
+                    .map(|request| request.method().clone())
             } else {
                 None
             };
@@ -5858,23 +5743,6 @@ impl TransactionManager {
         self.transport.clone()
     }
 
-    /// Return the request held by an active server transaction.
-    ///
-    /// This is the transaction's own shared copy of the request the
-    /// transport parsed, so transaction users can read it without the deep
-    /// copy [`Self::original_request`] makes. Returns `None` once the
-    /// transaction has left the active transaction map (for example after it
-    /// terminated or compacted); callers that must also cover retired
-    /// transactions fall back to [`Self::original_request`].
-    pub fn server_transaction_request(
-        &self,
-        transaction_id: &TransactionKey,
-    ) -> Option<Arc<Request>> {
-        self.server_transactions
-            .get(transaction_id)
-            .map(|transaction| Arc::clone(&transaction.value().data().request))
-    }
-
     /// Return the exact ingress route retained by an active server
     /// transaction for responses. Transaction users that must forward
     /// additional end-to-end responses after the server transaction
@@ -5947,120 +5815,6 @@ impl TransactionManager {
                 .resolve_flow_id_for_route(&route)
                 .await
                 .is_none()
-    }
-
-    /// True when this live client transaction's first write completed. Its
-    /// later transport error or timeout is then the request's outcome, not a
-    /// failed send that the sender has already reported.
-    pub(crate) fn client_initial_send_succeeded(&self, transaction_id: &TransactionKey) -> bool {
-        self.client_transactions
-            .get(transaction_id)
-            .is_some_and(|transaction| transaction.value().data().initial_send_succeeded())
-    }
-
-    /// Fail every client transaction still waiting for a response on a stream
-    /// flow that has closed (#311).
-    ///
-    /// A stream response must come back on the connection that carried the
-    /// request (RFC 3261 §18.2.2), and the transaction layer accepts one only
-    /// on that exact flow (`bind_client_response_route`). A peer may open a
-    /// new connection to the Via sent-by when the original is gone, but that
-    /// is a different flow, and its response is rejected. So once the flow
-    /// closes, no final response can ever reach the transaction, and RFC 3261
-    /// §8.1.3.1 and §17.1.4 treat that as a transport error, reported to the
-    /// TU as a 503 equivalent, instead of waiting for Timer B or F (32 s) or,
-    /// for an INVITE in Proceeding, for no timer at all.
-    ///
-    /// The runner reports `TransportError` and terminates, as it does on
-    /// Timer B, and the dialog layer fails the call with a 503. The request
-    /// may have reached the peer, but its route is bound to the dead flow, so
-    /// no CANCEL or response can follow (`client_transaction_is_unreachable`);
-    /// the peer clears its own state when it cannot deliver a response.
-    ///
-    /// The candidates are collected now and failed after
-    /// [`CLOSED_FLOW_RESPONSE_SETTLE`], so a response read before the close
-    /// still wins. A transaction that has meanwhile left its pre-final states
-    /// ignores the error (see the runner's `TransportError` handling).
-    pub(crate) fn fail_client_transactions_on_closed_flow(
-        &self,
-        flow_id: rvoip_sip_transport::TransportFlowId,
-    ) {
-        let candidates: Vec<TransactionKey> = self
-            .transaction_destinations
-            .iter()
-            .filter(|entry| {
-                !entry.key().is_server()
-                    && matches!(
-                        entry.value(),
-                        ClientResponseRouteState::Active { route, .. }
-                            if route.flow_id == Some(flow_id)
-                    )
-            })
-            .map(|entry| TransactionKey::clone(entry.key()))
-            .collect();
-        if candidates.is_empty() {
-            return;
-        }
-        debug!(
-            flow = flow_id.as_u64(),
-            transactions = candidates.len(),
-            "Stream flow closed under pending client transactions"
-        );
-        let manager = self.clone();
-        tokio::spawn(async move {
-            let Some(_operation) = manager.admission_lifecycle.try_enter_existing() else {
-                return;
-            };
-            tokio::select! {
-                _ = manager.operation_cancellation.cancelled() => {}
-                _ = async {
-                    tokio::time::sleep(CLOSED_FLOW_RESPONSE_SETTLE).await;
-                    for transaction_id in candidates {
-                        manager
-                            .fail_client_transaction_on_closed_flow(&transaction_id, flow_id)
-                            .await;
-                    }
-                } => {}
-            }
-        });
-    }
-
-    async fn fail_client_transaction_on_closed_flow(
-        &self,
-        transaction_id: &TransactionKey,
-        flow_id: rvoip_sip_transport::TransportFlowId,
-    ) {
-        let Some(transaction) = self
-            .client_transactions
-            .get(transaction_id)
-            .map(|entry| entry.value().clone())
-        else {
-            return;
-        };
-        let Some(route) = self.transaction_route(transaction_id).await else {
-            return;
-        };
-        // The exact flow must still be the one carrying the request and must
-        // really be gone from the transport.
-        if route.flow_id != Some(flow_id)
-            || self
-                .transport
-                .resolve_flow_id_for_route(&route)
-                .await
-                .is_some()
-        {
-            return;
-        }
-        debug!(
-            transaction=%crate::transaction::safe_diagnostics::SafeTransactionKey::new(transaction_id),
-            flow = flow_id.as_u64(),
-            "Failing client transaction whose stream flow closed"
-        );
-        let _ = transaction
-            .data()
-            .cmd_tx
-            .send(InternalTransactionCommand::TransportError)
-            .await;
     }
 
     /// Read one active/retired response-route record without cloning the
@@ -8112,9 +7866,7 @@ impl TransactionManager {
             ));
         }
 
-        let (mut ack_request, same_proxy_route) = self
-            .create_ack_for_2xx_with_route_continuity(invite_tx_id, response)
-            .await?;
+        let mut ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
         if let Some(sdp_answer) = sdp_answer {
             ack_request.headers.retain(|header| {
                 !matches!(
@@ -8167,11 +7919,7 @@ impl TransactionManager {
         };
 
         let mut ack_route = original_route;
-        if ack_route.destination != destination
-            && !(same_proxy_route
-                && ack_route.transport_type == Some(TransportType::Tls)
-                && ack_route.flow_id.is_some())
-        {
+        if ack_route.destination != destination {
             ack_route.destination = destination;
             // An opaque stream flow is valid only for the peer it was bound
             // to. A Contact-selected destination must establish/select its
@@ -8333,16 +8081,6 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
         response: &Response,
     ) -> Result<Request> {
-        self.create_ack_for_2xx_with_route_continuity(invite_tx_id, response)
-            .await
-            .map(|(request, _)| request)
-    }
-
-    async fn create_ack_for_2xx_with_route_continuity(
-        &self,
-        invite_tx_id: &TransactionKey,
-        response: &Response,
-    ) -> Result<(Request, bool)> {
         // Verify this is an INVITE client transaction
         if *invite_tx_id.method() != Method::Invite || invite_tx_id.is_server {
             return Err(Error::Other(
@@ -8394,12 +8132,7 @@ impl TransactionManager {
             &local_addr,
         )?;
 
-        let same_proxy_route =
-            crate::transaction::method::ack::ack_preserves_established_proxy_route(
-                &invite_request,
-                &ack_request,
-            );
-        Ok((ack_request, same_proxy_route))
+        Ok(ack_request)
     }
 
     /// Create a server transaction from an incoming request.
@@ -8495,40 +8228,6 @@ impl TransactionManager {
         .await
     }
 
-    /// The server transaction that `request` from `remote_addr` created when
-    /// it arrived, found by its RFC 3261 §17.2.3 identity (branch, sent-by
-    /// and method) rather than the branch alone: two requests may share a
-    /// branch and differ in sent-by (RFC 4475 reuses one branch in several
-    /// messages). `None` when no such transaction, or more than one, exists.
-    fn arrived_server_transaction(
-        &self,
-        request: &Request,
-        remote_addr: SocketAddr,
-    ) -> Option<Arc<dyn ServerTransaction>> {
-        let identity = ServerTransactionWireIdentity {
-            branch: TransactionKey::from_request(request)?.branch,
-            method: request.method().clone(),
-            sent_by: NormalizedViaSentBy::from_request(request)?,
-        };
-        let match_keys = self
-            .server_transaction_matches
-            .by_wire_identity
-            .get(&identity)?
-            .clone();
-        let mut transaction_ids = match_keys
-            .iter()
-            .filter(|match_key| match_key.peer.source == remote_addr)
-            .filter_map(|match_key| self.server_transaction_matches.registration(match_key))
-            .map(|registration| registration.transaction_id.clone());
-        let transaction_id = transaction_ids.next()?;
-        if transaction_ids.next().is_some() {
-            return None;
-        }
-        self.server_transactions
-            .get(&transaction_id)
-            .map(|entry| Arc::clone(entry.value()))
-    }
-
     async fn create_server_transaction_inner(
         &self,
         request: Request,
@@ -8537,19 +8236,18 @@ impl TransactionManager {
         publish_cancel_event: bool,
         transaction_id: Option<TransactionKey>,
     ) -> Result<Arc<dyn ServerTransaction>> {
-        // The RFC 3261 branch, or the RFC 2543 transaction identifier
-        // (RFC 3261 §17.2.3).
-        let branch = crate::transaction::key::server_transaction_branch(&request)
-            .ok_or_else(|| Error::Other("Missing Via header in request".to_string()))?;
-
-        // A handler re-creating the transaction of a request it was handed
-        // gets the transaction that request created.
-        if transaction_id.is_none() {
-            if let Some(transaction) = self.arrived_server_transaction(&request, remote_addr) {
-                transaction.process_request(request.clone()).await?;
-                return Ok(transaction);
-            }
-        }
+        // Extract branch parameter from the top Via header
+        let branch = match request.first_via() {
+            Some(via) => match via.branch() {
+                Some(b) => b.to_string(),
+                None => {
+                    return Err(Error::Other(
+                        "Missing branch parameter in Via header".to_string(),
+                    ));
+                }
+            },
+            None => return Err(Error::Other("Missing Via header in request".to_string())),
+        };
 
         // Create the transaction key directly with is_server: true
         let wire_key = TransactionKey::new(branch, request.method().clone(), true);

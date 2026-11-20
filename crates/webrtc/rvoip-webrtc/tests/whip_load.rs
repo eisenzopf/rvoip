@@ -54,7 +54,7 @@ async fn fifty_concurrent_whip_posts_succeed() {
         offers.push(fresh_offer().await);
     }
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .expect("http");
@@ -136,7 +136,7 @@ async fn cap_truncates_concurrent_inbound_to_max_sessions() {
         offers.push(fresh_offer().await);
     }
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .expect("http");
@@ -181,11 +181,4 @@ async fn cap_truncates_concurrent_inbound_to_max_sessions() {
     );
 
     serve.abort();
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

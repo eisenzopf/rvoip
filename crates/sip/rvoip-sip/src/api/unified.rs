@@ -90,15 +90,11 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 pub use rvoip_media_core::relay::controller::{
-    AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaSessionControllerConfig,
+    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
 };
-pub use rvoip_rtp_core::executor::{MediaExecutorConfig, MediaExecutorMode};
-pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
-pub use rvoip_sip_core::validation::UasCapabilities;
 pub use rvoip_sip_dialog::api::RelUsage;
-pub use rvoip_sip_dialog::api::SipTlsProxyFlowPolicy;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
 const OUTBOUND_DISPATCH_JOIN_FAILURE: &str = "SIP outbound dispatch task failed (class=join)";
@@ -288,9 +284,6 @@ impl Drop for AbortOutboundDispatchTaskOnDrop {
 #[derive(Clone)]
 pub(crate) struct InboundInviteObservation {
     pub(crate) session_id: SessionId,
-    /// Source IP of the transport flow or datagram that carried the INVITE,
-    /// taken from the transport event, never from a SIP header.
-    pub(crate) observed_peer_address: Option<std::net::IpAddr>,
     pub(crate) request: Option<Arc<Request>>,
     pub(crate) principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
 }
@@ -342,18 +335,6 @@ pub enum SrtpKeyingMode {
     #[default]
     Sdes,
     /// DTLS-SRTP with SDP fingerprint binding (RFC 5763/5764).
-    ///
-    /// Keys come from a DTLS handshake on the media port after the
-    /// offer/answer commits. If that handshake fails (it times out after
-    /// 10 s, the peer presents a certificate its `a=fingerprint` does not
-    /// name, or it fails otherwise), the call cannot carry secure media and
-    /// rvoip ends it: [`Event::MediaSecurityFailed`](crate::Event::MediaSecurityFailed)
-    /// first, then BYE once answered, CANCEL before an outbound call is
-    /// answered, or `488 Not Acceptable Here` before an inbound call is
-    /// answered, each with `Reason: SIP;cause=488;text="DTLS-SRTP handshake
-    /// failed"` (RFC 3326), then the usual terminal event. A failed handshake
-    /// on a separate RTCP port ([`Config::rtcp_non_mux`]) only leaves the
-    /// call without RTCP.
     DtlsSrtp,
 }
 
@@ -383,28 +364,6 @@ impl DtlsSetupRole {
             Self::Passive => "passive",
         }
     }
-}
-
-/// DTLS role this stack takes when it answers an SDP offer of
-/// `a=setup:actpass`, which leaves the choice to the answerer.
-///
-/// [`DtlsActpassAnswerRole::Active`] is the default: RFC 5763 §5 and JSEP
-/// (RFC 8829 §5.3.1) recommend it, because the answerer can send its
-/// ClientHello as soon as it answers, and because an answerer behind NAT
-/// opens its own media path by sending first.
-/// [`DtlsActpassAnswerRole::Passive`] makes this stack wait for the offerer's
-/// ClientHello instead; use it only for a peer that cannot act as the DTLS
-/// server. A passive answerer whose media address the offerer cannot reach
-/// first (NAT without ICE) waits for a ClientHello that never arrives, and
-/// the call fails its DTLS handshake.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DtlsActpassAnswerRole {
-    /// Answer `a=setup:active` and initiate DTLS as the client.
-    #[default]
-    Active,
-    /// Answer `a=setup:passive` and wait for the offerer to initiate DTLS.
-    Passive,
 }
 
 /// Named SRTP suite offer policies for common PBX/carrier interop.
@@ -490,154 +449,6 @@ impl SipNatConfig {
     }
 }
 
-/// Bounds on the SIP session cleanup the [`SipAdapter`](crate::adapter::SipAdapter)
-/// owns.
-///
-/// The defaults bound every wait an inbound `ConnectionAdapter::end` makes, so
-/// an ended call always hands its terminal to the orchestrator and leaves the
-/// session store even when its hangup cannot make progress. `None` restores
-/// the unbounded wait.
-///
-/// Only the adapter's waiter stops at a bound: the coordinator's retained
-/// hangup keeps running, and a call whose hangup failed is reclaimed by a
-/// bounded retained task that ends in a counted session-slot release (see
-/// [`crate::cleanup_diag::session_cleanup_counters`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SessionCleanupConfig {
-    /// Deadline on an inbound end's hangup join while no BYE transaction
-    /// exists yet. When it passes, the end delivers its terminal, returns an
-    /// error and hands the call to the retained reclaim. Once a BYE
-    /// transaction exists its own Timer F bounds the join, so this deadline
-    /// is waived. A deadline at or past [`Self::inbound_end_backstop`] never
-    /// applies. Default: `Some(5 s)`. Must be nonzero when set.
-    pub inline_hangup_deadline: Option<Duration>,
-
-    /// Absolute bound on an inbound end's hangup join, whether or not a BYE
-    /// transaction exists. When it passes, the end delivers its terminal,
-    /// returns an error and hands the call to the retained reclaim.
-    /// Default: `Some(10 s)`. Valid values are 1 s to 600 s.
-    pub inbound_end_backstop: Option<Duration>,
-
-    /// Arm the accepted-call watchdog for a local hangup that has to wait
-    /// for the ACK. A UAS that hangs up after its 200 OK and before the ACK
-    /// waits in `AnsweringHangupPending` before it may send BYE; with the ACK
-    /// lost, only this watchdog
-    /// ([`Config::setup_teardown_timeout_secs`]) ends the call and releases
-    /// its session and media port. `false` keeps the cancellation watchdog,
-    /// which does not watch that state. Default: `true`.
-    pub pending_hangup_watchdog: bool,
-
-    /// How long a call session may go without an owner, and without
-    /// receiving RTP, before the [`SipAdapter`](crate::adapter::SipAdapter)
-    /// reclaims it.
-    ///
-    /// A session's owner is the adapter route that maps it to an
-    /// orchestrator connection, an in-flight inbound rejection, or a
-    /// retained reclaim. A setup abandoned on a path that loses all of them
-    /// would otherwise keep its session slot and media port for good. The
-    /// adapter checks every sixth of the TTL (1 s to 10 s). An ownerless
-    /// session past the TTL gets a bounded reclaim: a BYE first when the call
-    /// is established, then the forced local cleanup (dialog, media port,
-    /// session slot). Registration, subscription, messaging and `Idle`
-    /// sessions are never reclaimed, and neither is a session whose RTP is
-    /// still arriving.
-    ///
-    /// Only coordinators with a `SipAdapter` run the sweeper, and it treats
-    /// every call session the adapter does not route as ownerless. Calls
-    /// placed directly on a coordinator that also has a `SipAdapter` are
-    /// reclaimed once they have been silent for the TTL; turn the sweeper off
-    /// for such mixed use.
-    ///
-    /// The TTL should exceed every owner that ends a session on its own: the
-    /// setup/teardown watchdog ([`Config::setup_teardown_timeout_secs`]),
-    /// [`Self::inbound_end_backstop`] and INVITE Timer B/H (32 s).
-    /// Default: `Some(60 s)`. Valid values are 5 s to 1 h; `None` turns the
-    /// sweeper off.
-    pub orphan_session_ttl: Option<Duration>,
-}
-
-impl Default for SessionCleanupConfig {
-    fn default() -> Self {
-        Self {
-            inline_hangup_deadline: Some(Self::DEFAULT_INLINE_HANGUP_DEADLINE),
-            inbound_end_backstop: Some(Self::DEFAULT_INBOUND_END_BACKSTOP),
-            pending_hangup_watchdog: true,
-            orphan_session_ttl: Some(Self::DEFAULT_ORPHAN_SESSION_TTL),
-        }
-    }
-}
-
-impl SessionCleanupConfig {
-    /// Default [`Self::inline_hangup_deadline`].
-    pub const DEFAULT_INLINE_HANGUP_DEADLINE: Duration = Duration::from_secs(5);
-    /// Default [`Self::inbound_end_backstop`].
-    pub const DEFAULT_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(10);
-    /// Smallest accepted [`Self::inbound_end_backstop`].
-    pub const MIN_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(1);
-    /// Largest accepted [`Self::inbound_end_backstop`].
-    pub const MAX_INBOUND_END_BACKSTOP: Duration = Duration::from_secs(600);
-    /// Default [`Self::orphan_session_ttl`].
-    pub const DEFAULT_ORPHAN_SESSION_TTL: Duration = Duration::from_secs(60);
-    /// Smallest accepted [`Self::orphan_session_ttl`].
-    pub const MIN_ORPHAN_SESSION_TTL: Duration = Duration::from_secs(5);
-    /// Largest accepted [`Self::orphan_session_ttl`].
-    pub const MAX_ORPHAN_SESSION_TTL: Duration = Duration::from_secs(3_600);
-
-    /// Set or clear [`Self::inline_hangup_deadline`].
-    pub const fn with_inline_hangup_deadline(mut self, deadline: Option<Duration>) -> Self {
-        self.inline_hangup_deadline = deadline;
-        self
-    }
-
-    /// Set or clear [`Self::inbound_end_backstop`].
-    pub const fn with_inbound_end_backstop(mut self, backstop: Option<Duration>) -> Self {
-        self.inbound_end_backstop = backstop;
-        self
-    }
-
-    /// Set [`Self::pending_hangup_watchdog`].
-    pub const fn with_pending_hangup_watchdog(mut self, enabled: bool) -> Self {
-        self.pending_hangup_watchdog = enabled;
-        self
-    }
-
-    /// Set or clear [`Self::orphan_session_ttl`].
-    pub const fn with_orphan_session_ttl(mut self, ttl: Option<Duration>) -> Self {
-        self.orphan_session_ttl = ttl;
-        self
-    }
-
-    fn validate(&self) -> Result<()> {
-        if self.inline_hangup_deadline == Some(Duration::ZERO) {
-            return Err(SessionError::ConfigError(
-                "session_cleanup.inline_hangup_deadline must be nonzero when set".to_string(),
-            ));
-        }
-        if let Some(backstop) = self.inbound_end_backstop {
-            if !(Self::MIN_INBOUND_END_BACKSTOP..=Self::MAX_INBOUND_END_BACKSTOP)
-                .contains(&backstop)
-            {
-                return Err(SessionError::ConfigError(format!(
-                    "session_cleanup.inbound_end_backstop must be between {:?} and {:?} when set",
-                    Self::MIN_INBOUND_END_BACKSTOP,
-                    Self::MAX_INBOUND_END_BACKSTOP
-                )));
-            }
-        }
-        if let Some(ttl) = self.orphan_session_ttl {
-            if !(Self::MIN_ORPHAN_SESSION_TTL..=Self::MAX_ORPHAN_SESSION_TTL).contains(&ttl) {
-                return Err(SessionError::ConfigError(format!(
-                    "session_cleanup.orphan_session_ttl must be between {:?} and {:?} when set",
-                    Self::MIN_ORPHAN_SESSION_TTL,
-                    Self::MAX_ORPHAN_SESSION_TTL
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Construction-time options kept outside [`Config`].
 ///
 /// They were split out while `Config` could still be built with a struct
@@ -683,41 +494,6 @@ impl SipRuntimeConfig {
 enum SetupTeardownTimeoutTerminal {
     Cancelled,
     Failed,
-}
-
-/// Established-dialog states whose `HangupCall` row sends BYE (RFC 3261
-/// §15.1). A hangup from any of them joins the exact BYE transaction before
-/// it reports success, exactly as from `Active`.
-fn local_hangup_sends_bye(state: CallState) -> bool {
-    matches!(
-        state,
-        CallState::Active
-            | CallState::HoldPending
-            | CallState::OnHold
-            | CallState::Resuming
-            | CallState::Muted
-            | CallState::Bridged
-    )
-}
-
-/// The watchdog a local hangup arms once its transition has committed.
-///
-/// A UAS hangup after 200 OK waits in `AnsweringHangupPending` for the ACK
-/// before it may send BYE. That state needs the accepted-call watchdog (its
-/// `DialogTimeout` row ends the call and cleans dialog and media); every other
-/// non-terminal hangup outcome keeps the cancellation watchdog. With
-/// `pending_hangup_watchdog` off the cancellation watchdog is armed in every
-/// case, and it watches nothing in `AnsweringHangupPending`.
-fn local_hangup_watchdog_kind(
-    state_after_hangup: Option<CallState>,
-    pending_hangup_watchdog: bool,
-) -> SetupTeardownWatchdogKind {
-    match state_after_hangup {
-        Some(CallState::AnsweringHangupPending) if pending_hangup_watchdog => {
-            SetupTeardownWatchdogKind::AcceptedCall
-        }
-        _ => SetupTeardownWatchdogKind::Cancellation,
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -806,10 +582,6 @@ impl Ord for SetupTeardownDeadline {
 struct SetupTeardownDeadlineQueue {
     deadlines: BinaryHeap<SetupTeardownDeadline>,
     live_sequences_by_lifetime: HashMap<SessionRegistryHandle, Vec<u64>>,
-    /// The number of live sequences across `live_sequences_by_lifetime`.
-    /// Every lifetime close consults it under the scheduler mutex, so it is
-    /// kept in step with the map instead of summed over every live call.
-    live_count: usize,
     cancelled_sequences: HashSet<u64>,
     closing_lifetimes: HashSet<SessionRegistryHandle>,
     next_sequence: u64,
@@ -821,7 +593,6 @@ impl Default for SetupTeardownDeadlineQueue {
         Self {
             deadlines: BinaryHeap::new(),
             live_sequences_by_lifetime: HashMap::new(),
-            live_count: 0,
             cancelled_sequences: HashSet::new(),
             closing_lifetimes: HashSet::new(),
             next_sequence: 0,
@@ -846,7 +617,6 @@ impl SetupTeardownDeadlineQueue {
             .entry(handle.clone())
             .or_default()
             .push(sequence);
-        self.live_count += 1;
         self.deadlines.push(SetupTeardownDeadline {
             deadline,
             sequence,
@@ -869,7 +639,6 @@ impl SetupTeardownDeadlineQueue {
             .remove(handle)
             .unwrap_or_default();
         let cancelled = sequences.len();
-        self.live_count -= cancelled;
         self.cancelled_sequences.extend(sequences);
         self.prune_cancelled_records();
         cancelled
@@ -899,21 +668,11 @@ impl SetupTeardownDeadlineQueue {
         if remove_lifetime {
             self.live_sequences_by_lifetime.remove(handle);
         }
-        if found {
-            self.live_count -= 1;
-        }
         found
     }
 
     fn live_deadline_count(&self) -> usize {
-        debug_assert_eq!(
-            self.live_count,
-            self.live_sequences_by_lifetime
-                .values()
-                .map(Vec::len)
-                .sum::<usize>()
-        );
-        self.live_count
+        self.live_sequences_by_lifetime.values().map(Vec::len).sum()
     }
 
     fn prune_cancelled_head(&mut self) {
@@ -979,7 +738,6 @@ impl SetupTeardownDeadlineQueue {
             }
         }
         self.live_sequences_by_lifetime.clear();
-        self.live_count = 0;
         self.cancelled_sequences.clear();
         self.closing_lifetimes.clear();
         live
@@ -1341,14 +1099,6 @@ impl SetupTeardownDeadlineCancellation {
 }
 
 const SETUP_TEARDOWN_DEADLINE_BATCH: usize = 2_048;
-/// Bound on the BYE an ownerless established call is given before its forced
-/// reclaim. Only the waiter stops; the retained hangup keeps running.
-const ORPHAN_GRACEFUL_HANGUP_TIMEOUT: Duration = Duration::from_secs(5);
-/// Bound on an orphan's forced local reclaim. Like the inbound end reclaim,
-/// it covers two exact release attempts and the final slot release.
-const ORPHAN_RECLAIM_FINISH_TIMEOUT: Duration = Duration::from_secs(30);
-/// Bound on the direct slot release after an orphan reclaim timed out.
-const ORPHAN_SLOT_RELEASE_TIMEOUT: Duration = Duration::from_secs(12);
 const SETUP_TEARDOWN_TIMEOUT_CONCURRENCY: usize = 64;
 const SETUP_TEARDOWN_SCHEDULER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bound for answered inbound BYEs to reach the session layer during shutdown.
@@ -1414,24 +1164,12 @@ impl Default for ExactResponseDeadlineQueue {
 
 /// Single-writer owners for generation-scoped INFO and standalone REGISTER
 /// final responses.
-///
-/// `by_lifetime` indexes the transactions of session-scoped `entries` by
-/// session lifetime. Exact call teardown reads its lifetime's pending
-/// obligations one to three times; the index makes each read one shard lookup
-/// instead of a walk over every pending obligation of every call. An
-/// obligation's lifetime is fixed before it can register, so the index is
-/// maintained by `register` and `remove_owner` alone. Lock order: a
-/// `by_lifetime` guard may be held while reading `entries`, never the reverse.
 pub(crate) struct PendingExactResponseRegistry {
     entries: dashmap::DashMap<
         rvoip_sip_dialog::transaction::TransactionKey,
         Arc<crate::api::incoming::ExactResponseObligation>,
     >,
     retry_attempts: dashmap::DashMap<rvoip_sip_dialog::transaction::TransactionKey, u8>,
-    by_lifetime: dashmap::DashMap<
-        SessionRegistryHandle,
-        HashSet<rvoip_sip_dialog::transaction::TransactionKey>,
-    >,
     deadlines: StdMutex<ExactResponseDeadlineQueue>,
     changed: tokio::sync::Notify,
     fire_in_flight: Arc<AtomicUsize>,
@@ -1477,7 +1215,6 @@ impl Default for PendingExactResponseRegistry {
         Self {
             entries: dashmap::DashMap::new(),
             retry_attempts: dashmap::DashMap::new(),
-            by_lifetime: dashmap::DashMap::new(),
             deadlines: StdMutex::new(ExactResponseDeadlineQueue::default()),
             changed: tokio::sync::Notify::new(),
             fire_in_flight: Arc::new(AtomicUsize::new(0)),
@@ -1534,18 +1271,7 @@ impl PendingExactResponseRegistry {
                 ExactResponseRegistration::Collision
             };
         }
-        let lifetime = obligation.lifecycle_handle().cloned();
-        // Insert into `entries` before indexing: a concurrent `remove_owner`
-        // of an earlier obligation for the same transaction then finds this
-        // one registered and keeps the index entry. `deadlines` is held, so a
-        // lifetime close cannot observe the gap between the two inserts.
         self.entries.insert(transaction.clone(), obligation);
-        if let Some(lifetime) = lifetime {
-            self.by_lifetime
-                .entry(lifetime)
-                .or_default()
-                .insert(transaction.clone());
-        }
         let previous = deadlines.deadlines.peek().map(|entry| entry.deadline);
         let deadline = Instant::now() + EXACT_RESPONSE_OWNER_DEADLINE;
         let sequence = deadlines.next_sequence;
@@ -1572,32 +1298,6 @@ impl PendingExactResponseRegistry {
             .is_some()
         {
             self.retry_attempts.remove(transaction);
-            if let Some(lifetime) = obligation.lifecycle_handle() {
-                self.unindex_lifetime(lifetime, transaction);
-            }
-        }
-    }
-
-    /// Drop `transaction` from `lifetime`'s index entry unless an obligation
-    /// of that lifetime has registered the transaction again.
-    fn unindex_lifetime(
-        &self,
-        lifetime: &SessionRegistryHandle,
-        transaction: &rvoip_sip_dialog::transaction::TransactionKey,
-    ) {
-        if let dashmap::mapref::entry::Entry::Occupied(mut transactions) =
-            self.by_lifetime.entry(lifetime.clone())
-        {
-            let registered_again = self
-                .entries
-                .get(transaction)
-                .is_some_and(|current| current.lifecycle_handle() == Some(lifetime));
-            if !registered_again {
-                transactions.get_mut().remove(transaction);
-            }
-            if transactions.get().is_empty() {
-                transactions.remove();
-            }
         }
     }
 
@@ -1731,12 +1431,8 @@ impl PendingExactResponseRegistry {
         &self,
         handle: &SessionRegistryHandle,
     ) -> Vec<Arc<crate::api::incoming::ExactResponseObligation>> {
-        let Some(transactions) = self.by_lifetime.get(handle) else {
-            return Vec::new();
-        };
-        transactions
+        self.entries
             .iter()
-            .filter_map(|transaction| self.entries.get(transaction))
             .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
             .map(|entry| Arc::clone(entry.value()))
             .collect()
@@ -1830,7 +1526,6 @@ impl PendingExactResponseRegistry {
     fn clear(&self) {
         self.entries.clear();
         self.retry_attempts.clear();
-        self.by_lifetime.clear();
         let mut deadlines = self
             .deadlines
             .lock()
@@ -1847,7 +1542,6 @@ impl PendingExactResponseRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         serde_json::json!({
             "pending_obligations": self.entries.len(),
-            "indexed_lifetimes": self.by_lifetime.len(),
             "retry_attempts": self.retry_attempts.len(),
             "pending_deadlines": deadlines.deadlines.len(),
             "closing_lifetimes": deadlines.closing_lifetimes.len(),
@@ -2380,14 +2074,6 @@ pub struct Config {
     #[doc(hidden)]
     pub session_timer_allow_short_intervals_for_testing: bool,
 
-    /// Test-only: present a certificate other than the advertised one on
-    /// the RTP component's DTLS-SRTP handshake, so the peer's
-    /// `a=fingerprint` check fails. Exists only with the `test-hooks`
-    /// feature. Default: `false`.
-    #[cfg(feature = "test-hooks")]
-    #[doc(hidden)]
-    pub dtls_present_unadvertised_rtp_certificate_for_testing: bool,
-
     /// Default Digest credentials for UAC 401/407 retry.
     ///
     /// This is the Digest shorthand. When a supported outbound request is
@@ -2553,46 +2239,10 @@ pub struct Config {
     pub sip_contact_mode: SipContactMode,
 
     /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
-    /// Requires an observed TLS transaction. The peer's `sip:...;transport=tls`
-    /// Contact (exactly one transport parameter, `tls`) is kept unchanged as
-    /// the remote target, so in-dialog requests stay on TLS.
+    /// Requires an observed TLS transaction and preserves SIPS remote routing.
     /// Defaults to `false`. This field is the only switch: the library reads no
     /// environment variable for it, so embedders map deployment settings here.
     pub sip_allow_tls_contact_on_sips: bool,
-
-    /// Trusted record-routing TLS proxies whose accepted connection carries
-    /// the in-dialog requests (BYE, re-INVITE, UPDATE, ...) of the calls they
-    /// deliver, instead of a new connection dialled to the Record-Route.
-    ///
-    /// Empty by default, which leaves routing unchanged. A policy applies to
-    /// an inbound call only when its INVITE was admitted by the listener
-    /// auth policy (for example [`crate::SipListenerAuthPolicy::with_trusted_cidr`])
-    /// with a principal whose issuer, tenant and subject equal the policy's,
-    /// arrived over TLS from the policy's proxy address, and record-routes
-    /// through exactly the policy's loose-routing TLS proxy URI. At most
-    /// 64 entries; [`Config::validate`] checks each with
-    /// [`SipTlsProxyFlowPolicy::validate`]. See [`SipTlsProxyFlowPolicy`].
-    pub sip_tls_proxy_flow_policies: Vec<SipTlsProxyFlowPolicy>,
-
-    /// Keep the in-dialog requests of a call this endpoint placed over SIP
-    /// TLS on the certificate-verified connection its INVITE used, while
-    /// their next hop is the same route (or Contact) at the same address.
-    /// This covers peers that are dialled by DNS name but record-route with
-    /// an IP address their certificate does not name. A closed connection
-    /// then makes the request fail instead of being redialled. Defaults to
-    /// `false` (normal routing).
-    pub sip_retain_outbound_tls_flow: bool,
-
-    /// What this endpoint implements as a UAS. Inbound requests are checked
-    /// against it before they are processed (RFC 3261 §8.2: 405/501 with
-    /// Allow, 416, 420 with Unsupported, 415 with Accept, 406), and the
-    /// automatic OPTIONS response advertises it in Allow, Supported and
-    /// Accept (RFC 3261 §11.2). The default lists what rvoip implements.
-    /// Add an option tag only when the application implements that
-    /// extension, for example `replaces` (RFC 3891) for an application that
-    /// performs call replacement itself. `100rel` is withdrawn automatically
-    /// when [`Config::use_100rel`] is [`RelUsage::NotSupported`].
-    pub uas_capabilities: UasCapabilities,
 
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
@@ -2645,37 +2295,6 @@ pub struct Config {
     /// connections. The default is disabled. Tenant-bound mTLS listener
     /// mappings require `Optional` or `Required` with an explicit client CA.
     pub tls_server_client_auth: rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig,
-
-    /// Per-flow behaviour of the SIP TLS transport: what a reader does while
-    /// the transaction layer's event queue is full, `TCP_NODELAY`, and an
-    /// optional ingress admission hook that can answer or drop messages
-    /// before they are queued.
-    ///
-    /// The default pauses reads (TCP backpressure to the peer) for at most
-    /// 600 s instead of closing a shared flow, sets `TCP_NODELAY`, and
-    /// installs no hook. Keep a clone to read
-    /// [`TlsFlowConfig::stats`](rvoip_sip_transport::TlsFlowConfig::stats).
-    ///
-    /// Set
-    /// [`bind_outbound_to_local_ip`](rvoip_sip_transport::TlsFlowConfig::bind_outbound_to_local_ip)
-    /// to make dialed TLS connections leave from the TLS listener's IP
-    /// address; [`Config::with_sip_bind_outbound_to_local_ip`] sets it
-    /// together with the TCP equivalent in [`Config::sip_tcp_flow`].
-    pub sip_tls_flow: rvoip_sip_transport::TlsFlowConfig,
-
-    /// Outbound behaviour of the SIP TCP transport.
-    ///
-    /// With
-    /// [`bind_outbound_to_local_ip`](rvoip_sip_transport::TcpFlowConfig::bind_outbound_to_local_ip)
-    /// set, every TCP connection this endpoint dials is bound to the IP
-    /// address of [`Config::bind_addr`] before it connects, so the flow
-    /// leaves from that address rather than the one the kernel's routing
-    /// table picks. Use it when one host runs several endpoints, each bound
-    /// to its own address (for example a multi-source load generator). It
-    /// has no effect when the bind address is unspecified (`0.0.0.0` /
-    /// `::`). Default: [`TcpFlowConfig::default`](rvoip_sip_transport::TcpFlowConfig),
-    /// the kernel picks the source address.
-    pub sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig,
 
     /// **Dev only.** When `true`, server certs are accepted without
     /// identity verification. Required for self-signed test certs. The
@@ -2850,21 +2469,9 @@ pub struct Config {
     ///   close-time BYE go from our RTCP port to the peer's `a=rtcp:`
     ///   address, or its RTP port + 1 when it names none. Reports arriving
     ///   on our RTCP port are accepted only from the call's peer, and
-    ///   SRTCP protects them whenever SRTP is in use.
+    ///   SRTCP protects them whenever SDES-SRTP is in use.
     /// - When the peer accepts mux, RTCP shares the RTP port as usual and
     ///   the RTCP port is released as soon as the negotiation commits.
-    ///
-    /// # With SRTP
-    ///
-    /// SDES-SRTP (`a=crypto`) keys both ports from the one negotiated key.
-    /// DTLS-SRTP ([`SrtpKeyingMode::DtlsSrtp`]) runs a second DTLS handshake
-    /// on the RTCP port, as RFC 5764 §4.1 requires when RTP and RTCP are not
-    /// multiplexed: same `a=setup` role, same certificate and
-    /// `a=fingerprint`, its own SRTCP keys. The two handshakes run at the
-    /// same time once the answer commits. Until the RTCP handshake finishes
-    /// the RTCP port sends nothing and drops everything it receives. If it
-    /// fails (timeout, or a certificate the SDP did not name), the call
-    /// keeps its SRTP media and simply has no RTCP; a warning is logged.
     ///
     /// Behind NAT, a peer's RTCP is learned from the source it actually
     /// arrives from (symmetric RTCP, following the symmetric-RTP policy in
@@ -2878,9 +2485,10 @@ pub struct Config {
     /// range filled with such calls holds half as many calls (size
     /// [`Config::media_port_start`]..=[`Config::media_port_end`]
     /// accordingly). Ignored, and no port reserved, when ICE is enabled
-    /// (ICE here negotiates RTP's component only), in strict
-    /// [`Config::rtcp_mux_required`] mode, and in signalling-only media
-    /// mode.
+    /// (ICE here negotiates RTP's component only), with DTLS-SRTP keying
+    /// (RFC 5764 §4.1 would need a second DTLS handshake on the RTCP port),
+    /// in strict [`Config::rtcp_mux_required`] mode, and in signalling-only
+    /// media mode.
     ///
     /// Default: `false` — RTCP flows only to peers that multiplex.
     pub rtcp_non_mux: bool,
@@ -2914,8 +2522,7 @@ pub struct Config {
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
     /// the `dtls-srtp` Cargo feature and full media mode; configuration fails
-    /// closed when either requirement is missing. A call whose DTLS-SRTP
-    /// handshake fails is ended; see [`SrtpKeyingMode::DtlsSrtp`].
+    /// closed when either requirement is missing.
     pub srtp_keying: SrtpKeyingMode,
 
     /// DTLS role to advertise on outgoing offers when
@@ -2925,16 +2532,6 @@ pub struct Config {
     /// [`DtlsSetupRole::Active`] for a client behind NAT that must open the
     /// media path by sending the first DTLS packet.
     pub dtls_setup_role: DtlsSetupRole,
-
-    /// DTLS role to answer with when an incoming offer says
-    /// `a=setup:actpass`, when [`Config::srtp_keying`] is
-    /// [`SrtpKeyingMode::DtlsSrtp`].
-    ///
-    /// The default is [`DtlsActpassAnswerRole::Active`] (RFC 5763 §5,
-    /// RFC 8829 §5.3.1). See [`DtlsActpassAnswerRole`] for the NAT trade-off
-    /// of [`DtlsActpassAnswerRole::Passive`]. Offers of `active` or `passive`
-    /// always get the complementary answer.
-    pub dtls_actpass_answer_role: DtlsActpassAnswerRole,
 
     /// Inbound jitter buffer: playout smoothing and packet-loss concealment
     /// for received audio.
@@ -3170,29 +2767,6 @@ pub struct Config {
 
     /// Media-core controller pool and capacity tuning for SIP media calls.
     pub media_session_controller_config: MediaSessionControllerConfig,
-
-    /// Layout of the process-wide media executor (shared lanes and their
-    /// worker threads, or dedicated single-threaded lanes, optionally pinned
-    /// to CPUs); `None` leaves it at the default single shared lane.
-    ///
-    /// The media executor is shared by every coordinator in the process and
-    /// starts on first use, so the layout is installed when the coordinator
-    /// is created: before the first call. A coordinator whose layout differs
-    /// from the one already in effect fails to start with a configuration
-    /// error. See [`MediaRuntimeConfig`].
-    pub media_runtime: Option<MediaRuntimeConfig>,
-
-    /// The process-wide media executor: [`MediaExecutorConfig::v1`], the
-    /// per-call task graph, or [`MediaExecutorConfig::v2`], inline receive on
-    /// the socket owner with lane pollers, a lane clock and synchronous
-    /// sends, with per-feature switches. `None` leaves the default (v1).
-    ///
-    /// Like [`Self::media_runtime`] it is shared by every coordinator in the
-    /// process and captured when media objects are built, so it is installed
-    /// when the coordinator is created, before the first call. A coordinator
-    /// whose executor differs from the one already in effect fails to start
-    /// with a configuration error.
-    pub media_executor: Option<MediaExecutorConfig>,
 
     /// STUN server (RFC 8489 §14) used to discover each RTP socket's exact
     /// public mapping before its SDP is rendered. Format: `"host:port"` or `"host"`
@@ -3449,23 +3023,6 @@ pub struct Config {
     /// tying that memory reservation to the larger event-queue capacities.
     pub server_call_capacity: Option<usize>,
 
-    /// Concurrent calls the `SipAdapter` event handoff is sized for.
-    ///
-    /// While an inbound call is answered and awaits its ACK, the adapter
-    /// reserves one event slot for its `Connected` handoff; a call that
-    /// finds no free slot is rejected with `503` before it is answered.
-    /// `None` keeps the default queue of 256 events and 4096 pending inbound
-    /// observations. When set, the queue holds two events per call and the
-    /// pending observations one per call, never fewer than those defaults.
-    /// Servers that answer more than about 128 calls at once should set this
-    /// to their expected concurrent call count. Valid values are 1 to
-    /// [`Config::MAX_SIP_ADAPTER_CALL_CAPACITY`].
-    pub sip_adapter_call_capacity: Option<usize>,
-
-    /// Bounds on the SIP session cleanup the `SipAdapter` owns. See
-    /// [`SessionCleanupConfig`]; every bound is on by default.
-    pub session_cleanup: SessionCleanupConfig,
-
     /// Maximum active, quarantined, and retired SIP lifecycle records retained
     /// by the session authority.
     ///
@@ -3513,72 +3070,6 @@ pub struct Config {
     /// `Retry-After: n` to the default `503 Service Unavailable` response;
     /// `None` omits the header. Default is `Some(1)`.
     pub server_overload_retry_after_secs: Option<u32>,
-
-    /// Stateless admission for new inbound INVITEs in the SIP transaction
-    /// layer.
-    ///
-    /// While the mode is not
-    /// [`AdmissionMode::Off`](rvoip_sip_dialog::transaction::AdmissionMode::Off),
-    /// a new dialog-forming INVITE that the gate rejects is answered with a
-    /// stateless `503 Service Unavailable` before any transaction, dialog,
-    /// session or media state exists, and the ACK for that 503 is absorbed.
-    /// Over TLS the gate runs on the connection reader, unless
-    /// [`Config::sip_tls_flow`] carries an ingress hook of its own; over UDP
-    /// and TCP it runs on the transaction dispatch path. The level and rate
-    /// limit can be changed at run time through
-    /// [`UnifiedCoordinator::new_call_admission`].
-    ///
-    /// Default: `Off` with no rate limit, so applications that do not opt in
-    /// never see these 503s.
-    pub sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig,
-
-    /// Answer new inbound INVITEs at [`Config::server_call_admission_limit`]
-    /// with a stateless 503 in the transaction layer.
-    ///
-    /// When `true` and the admission limit is set, a new INVITE that arrives
-    /// while the session store is at the limit is refused before any
-    /// transaction, dialog or session state exists, with `Retry-After` from
-    /// [`Config::server_overload_retry_after_secs`] (1 s when that is
-    /// `None`). Rejecting there costs far less than admitting. The session
-    /// layer's own check, with its soft-limit pacing, stays authoritative
-    /// below the limit, and in-dialog requests are never affected.
-    /// Default: `false`.
-    pub server_call_admission_early_reject: bool,
-    /// Decide server call admission without the admission mutex.
-    ///
-    /// Applies only when [`Config::server_call_admission_limit`] is set. By
-    /// default every inbound INVITE takes one mutex to read the current
-    /// session count, apply the overload hysteresis and reserve a pending
-    /// slot, so concurrent INVITEs on different dialog workers queue on it.
-    /// When `true`, the slot is reserved first with one atomic add and
-    /// returned when the attempt does not admit. The hard limit still holds
-    /// and sequential decisions are identical, but when concurrent INVITEs
-    /// race exactly at the hard limit one of them may be rejected with `503`
-    /// where the serialized path would have admitted it. It never admits
-    /// more. Default `false`.
-    pub server_call_admission_lock_free: bool,
-
-    /// Record per-transition history for inbound (UAS) sessions.
-    ///
-    /// The history is a diagnostic ring that only shows in a session's
-    /// `Debug` output; outbound sessions never record it. Keeping it copies
-    /// the ring on every state transition and commits an extra session-store
-    /// revision for every rejected internal event. `false` creates inbound
-    /// sessions without history, as outbound ones are. Default `true`.
-    pub inbound_session_history: bool,
-
-    /// Process each inbound initial INVITE (`IncomingCall`) on the SIP dialog
-    /// worker that delivered it instead of a session event shard.
-    ///
-    /// The dialog worker waits for the shard to finish an initial INVITE
-    /// before it continues, so the hand-off costs a queue round trip and a
-    /// task wakeup without adding parallelism. When `true` the INVITE is
-    /// processed in place with the same result. What changes is placement:
-    /// the work runs inside the dialog worker's task (sharing its stack and
-    /// its cancellation) and is not bounded by the shard queue capacity.
-    /// Every other dialog event still goes through the shards. Default
-    /// `false`.
-    pub session_inline_incoming_call_dispatch: bool,
 
     /// Enable SIP UDP transport and duplicate-recovery diagnostics.
     ///
@@ -3711,15 +3202,6 @@ impl std::fmt::Debug for Config {
             )
             .field("sip_tls_mode", &self.sip_tls_mode)
             .field("sip_contact_mode", &self.sip_contact_mode)
-            .field(
-                "sip_tls_proxy_flow_policy_count",
-                &self.sip_tls_proxy_flow_policies.len(),
-            )
-            .field(
-                "sip_retain_outbound_tls_flow",
-                &self.sip_retain_outbound_tls_flow,
-            )
-            .field("uas_capabilities", &self.uas_capabilities)
             .field("tls_bind_configured", &self.tls_bind_addr.is_some())
             .field(
                 "tls_advertised_configured",
@@ -3741,15 +3223,12 @@ impl std::fmt::Debug for Config {
                 "tls_server_client_auth_mode",
                 &self.tls_server_client_auth.mode,
             )
-            .field("sip_tls_flow", &self.sip_tls_flow)
-            .field("sip_tcp_flow", &self.sip_tcp_flow)
             .field("offer_srtp", &self.offer_srtp)
             .field("offer_rtcp_mux", &self.offer_rtcp_mux)
             .field("rtcp_mux_required", &self.rtcp_mux_required)
             .field("rtcp_non_mux", &self.rtcp_non_mux)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
-            .field("dtls_actpass_answer_role", &self.dtls_actpass_answer_role)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -3787,8 +3266,6 @@ impl std::fmt::Debug for Config {
                 &self.global_event_channel_capacity,
             )
             .field("server_call_capacity", &self.server_call_capacity)
-            .field("sip_adapter_call_capacity", &self.sip_adapter_call_capacity)
-            .field("session_cleanup", &self.session_cleanup)
             .field(
                 "server_retained_lifecycle_capacity",
                 &self.server_retained_lifecycle_capacity,
@@ -3796,22 +3273,6 @@ impl std::fmt::Debug for Config {
             .field(
                 "server_call_admission_limit",
                 &self.server_call_admission_limit,
-            )
-            .field("media_runtime", &self.media_runtime)
-            .field("sip_new_call_admission", &self.sip_new_call_admission)
-            .field(
-                "server_call_admission_early_reject",
-                &self.server_call_admission_early_reject,
-            )
-            .field("media_executor", &self.media_executor)
-            .field(
-                "server_call_admission_lock_free",
-                &self.server_call_admission_lock_free,
-            )
-            .field("inbound_session_history", &self.inbound_session_history)
-            .field(
-                "session_inline_incoming_call_dispatch",
-                &self.session_inline_incoming_call_dispatch,
             )
             .field("sip_udp_diagnostics", &self.sip_udp_diagnostics)
             .field(
@@ -3832,15 +3293,6 @@ impl std::fmt::Debug for Config {
     }
 }
 
-/// The `sip:<name>@<hostport>` address of record for a local endpoint.
-///
-/// `SocketAddr` displays the RFC 3261 §25.1 `hostport`, so an IPv6 address
-/// is written as an `IPv6reference` (`sip:alice@[::1]:5060`, RFC 5118 §4.1)
-/// rather than as bare colons that would read as a port.
-pub(crate) fn local_sip_uri(name: &str, ip: IpAddr, port: u16) -> String {
-    format!("sip:{}@{}", name, SocketAddr::new(ip, port))
-}
-
 impl Config {
     /// Default RTP media port range start.
     pub const DEFAULT_MEDIA_PORT_START: u16 = DEFAULT_RTP_PORT_RANGE_START;
@@ -3857,9 +3309,6 @@ impl Config {
     /// transaction defaults so ordinary client/server apps do not reserve a
     /// large broadcast ring unless they opt into a high-CPS profile.
     pub const DEFAULT_APP_EVENT_CHANNEL_CAPACITY: usize = 256;
-
-    /// Largest accepted [`Config::sip_adapter_call_capacity`].
-    pub const MAX_SIP_ADAPTER_CALL_CAPACITY: usize = 131_072;
 
     /// Default per-transaction command channel capacity.
     pub const DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize =
@@ -3919,7 +3368,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
-            local_uri: local_sip_uri(name, ip, port),
+            local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
             auto_100_trying: true,
@@ -3932,8 +3381,6 @@ impl Config {
             session_timer_min_se: 90,
             #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
-            #[cfg(feature = "test-hooks")]
-            dtls_present_unadvertised_rtp_certificate_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -3951,9 +3398,6 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
-            sip_tls_proxy_flow_policies: Vec::new(),
-            sip_retain_outbound_tls_flow: false,
-            uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3964,8 +3408,6 @@ impl Config {
             tls_extra_ca_path: None,
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
-            sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
-            sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -3977,7 +3419,6 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
-            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -3989,8 +3430,6 @@ impl Config {
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
-            media_runtime: None,
-            media_executor: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -4018,19 +3457,11 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
-            sip_adapter_call_capacity: None,
-            session_cleanup: SessionCleanupConfig::default(),
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
             server_call_admission_pacing_delay_ms: None,
             server_overload_retry_after_secs: Some(1),
-            sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig::default(
-            ),
-            server_call_admission_early_reject: false,
-            server_call_admission_lock_free: false,
-            inbound_session_history: true,
-            session_inline_incoming_call_dispatch: false,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -4070,7 +3501,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
-            local_uri: local_sip_uri(name, ip, port),
+            local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
             auto_100_trying: true,
@@ -4083,8 +3514,6 @@ impl Config {
             session_timer_min_se: 90,
             #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
-            #[cfg(feature = "test-hooks")]
-            dtls_present_unadvertised_rtp_certificate_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -4102,9 +3531,6 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
-            sip_tls_proxy_flow_policies: Vec::new(),
-            sip_retain_outbound_tls_flow: false,
-            uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -4115,8 +3541,6 @@ impl Config {
             tls_extra_ca_path: None,
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
-            sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
-            sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -4128,7 +3552,6 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
-            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4140,8 +3563,6 @@ impl Config {
             rtp_session_buffer_config: RtpSessionBufferConfig::default(),
             rtp_transport_buffer_config: RtpTransportBufferConfig::default(),
             media_session_controller_config: MediaSessionControllerConfig::default(),
-            media_runtime: None,
-            media_executor: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -4169,19 +3590,11 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
-            sip_adapter_call_capacity: None,
-            session_cleanup: SessionCleanupConfig::default(),
             server_retained_lifecycle_capacity: None,
             server_call_admission_limit: None,
             server_call_admission_soft_limit: None,
             server_call_admission_pacing_delay_ms: None,
             server_overload_retry_after_secs: Some(1),
-            sip_new_call_admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig::default(
-            ),
-            server_call_admission_early_reject: false,
-            server_call_admission_lock_free: false,
-            inbound_session_history: true,
-            session_inline_incoming_call_dispatch: false,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
             sip_dialog_timing_diagnostics: false,
@@ -4801,13 +4214,6 @@ impl Config {
         self
     }
 
-    /// Select the DTLS role answered to an incoming `a=setup:actpass` offer.
-    /// See [`Config::dtls_actpass_answer_role`].
-    pub fn with_dtls_actpass_answer_role(mut self, role: DtlsActpassAnswerRole) -> Self {
-        self.dtls_actpass_answer_role = role;
-        self
-    }
-
     /// Set the G.729 Annex B SDP preference used when PT 18 is advertised.
     ///
     /// `true` emits `a=fmtp:18 annexb=yes` for G.729A plus Annex B
@@ -4906,20 +4312,6 @@ impl Config {
         self
     }
 
-    /// Size the `SipAdapter` event handoff for `calls` concurrent calls.
-    /// See [`Config::sip_adapter_call_capacity`].
-    pub fn with_sip_adapter_call_capacity(mut self, calls: usize) -> Self {
-        self.sip_adapter_call_capacity = Some(calls);
-        self
-    }
-
-    /// Replace the SIP session cleanup bounds. See
-    /// [`Config::session_cleanup`].
-    pub fn with_session_cleanup(mut self, cleanup: SessionCleanupConfig) -> Self {
-        self.session_cleanup = cleanup;
-        self
-    }
-
     /// Set the bound for active and retained SIP lifecycle records.
     ///
     /// Configure [`Config::server_call_capacity`] as well. The retained bound
@@ -4970,45 +4362,6 @@ impl Config {
     /// Omit `Retry-After` from server overload rejections.
     pub fn without_server_overload_retry_after(mut self) -> Self {
         self.server_overload_retry_after_secs = None;
-        self
-    }
-
-    /// Configure stateless admission for new inbound INVITEs. See
-    /// [`Config::sip_new_call_admission`].
-    pub fn with_sip_new_call_admission(
-        mut self,
-        admission: rvoip_sip_dialog::transaction::NewCallAdmissionConfig,
-    ) -> Self {
-        self.sip_new_call_admission = admission;
-        self
-    }
-
-    /// Answer new inbound INVITEs at the admission limit with a stateless 503
-    /// in the transaction layer. See
-    /// [`Config::server_call_admission_early_reject`].
-    pub fn with_server_call_admission_early_reject(mut self, enabled: bool) -> Self {
-        self.server_call_admission_early_reject = enabled;
-        self
-    }
-
-    /// Decide server call admission without the admission mutex. See
-    /// [`Config::server_call_admission_lock_free`].
-    pub fn with_server_call_admission_lock_free(mut self, enabled: bool) -> Self {
-        self.server_call_admission_lock_free = enabled;
-        self
-    }
-
-    /// Record (or skip) per-transition history for inbound sessions. See
-    /// [`Config::inbound_session_history`].
-    pub fn with_inbound_session_history(mut self, enabled: bool) -> Self {
-        self.inbound_session_history = enabled;
-        self
-    }
-
-    /// Process inbound initial INVITEs on the dialog worker that delivered
-    /// them. See [`Config::session_inline_incoming_call_dispatch`].
-    pub fn with_inline_incoming_call_dispatch(mut self, enabled: bool) -> Self {
-        self.session_inline_incoming_call_dispatch = enabled;
         self
     }
 
@@ -5294,56 +4647,6 @@ impl Config {
         self.rtp_session_buffer_config = config.rtp_session_buffer_config;
         self.rtp_transport_buffer_config = config.rtp_transport_buffer_config;
         self.media_session_controller_config = config;
-        self
-    }
-
-    /// Lay out the process-wide media executor, for example to split its
-    /// worker threads into several independent lanes on a large host, or to
-    /// run one single-threaded lane per core.
-    ///
-    /// ```
-    /// use rvoip_sip::{Config, MediaLanes, MediaRuntimeConfig};
-    ///
-    /// let config = Config::local("alice", 5060).with_media_runtime(MediaRuntimeConfig::new(
-    ///     MediaLanes::Shared {
-    ///         worker_threads: Some(16),
-    ///         lanes: 4,
-    ///     },
-    /// ));
-    /// config.validate().unwrap();
-    ///
-    /// // One dedicated lane on each of CPUs 1 to 7.
-    /// let config = Config::local("alice", 5060)
-    ///     .with_media_runtime(MediaRuntimeConfig::new(MediaLanes::pinned(1..8)));
-    /// config.validate().unwrap();
-    /// ```
-    ///
-    /// `rvoip_rtp_core::host_plan::ExecutorPlan::media_runtime_config` derives
-    /// a dedicated layout from the cores of the host.
-    pub fn with_media_runtime(mut self, config: MediaRuntimeConfig) -> Self {
-        self.media_runtime = Some(config);
-        self
-    }
-
-    /// Select the process-wide media executor.
-    ///
-    /// ```
-    /// use rvoip_sip::{Config, MediaExecutorConfig, MediaLanes, MediaRuntimeConfig};
-    ///
-    /// // Inline receive, lane pollers, the lane clock and synchronous sends,
-    /// // on one dedicated lane per core.
-    /// let config = Config::local("alice", 5060)
-    ///     .with_media_runtime(MediaRuntimeConfig::new(MediaLanes::pinned(1..8)))
-    ///     .with_media_executor(MediaExecutorConfig::v2());
-    /// config.validate().unwrap();
-    ///
-    /// // The same with receive loops on their own tasks.
-    /// let config = Config::local("alice", 5060)
-    ///     .with_media_executor(MediaExecutorConfig::v2().with_lane_poller(false));
-    /// config.validate().unwrap();
-    /// ```
-    pub fn with_media_executor(mut self, config: MediaExecutorConfig) -> Self {
-        self.media_executor = Some(config);
         self
     }
 
@@ -5740,52 +5043,6 @@ impl Config {
         self
     }
 
-    /// Configure SIP TLS flow behaviour: receive backpressure, `TCP_NODELAY`
-    /// and an optional ingress admission hook. See [`Config::sip_tls_flow`].
-    pub fn with_sip_tls_flow(mut self, flow: rvoip_sip_transport::TlsFlowConfig) -> Self {
-        self.sip_tls_flow = flow;
-        self
-    }
-
-    /// Configure the SIP TCP transport's outbound behaviour. See
-    /// [`Config::sip_tcp_flow`].
-    pub fn with_sip_tcp_flow(mut self, flow: rvoip_sip_transport::TcpFlowConfig) -> Self {
-        self.sip_tcp_flow = flow;
-        self
-    }
-
-    /// Bind every SIP TCP and TLS connection this endpoint dials to the
-    /// local IP address of the transport that dials it, instead of letting
-    /// the kernel pick the source address. TCP uses the IP of
-    /// [`Config::bind_addr`]; TLS uses the IP of the TLS listener
-    /// ([`Config::tls_bind_addr`], or `bind_addr` when it is unset). Has no
-    /// effect for an unspecified address (`0.0.0.0` / `::`). Sets
-    /// `bind_outbound_to_local_ip` on both [`Config::sip_tcp_flow`] and
-    /// [`Config::sip_tls_flow`], keeping their other settings. Default:
-    /// off.
-    pub fn with_sip_bind_outbound_to_local_ip(mut self, enabled: bool) -> Self {
-        self.sip_tcp_flow = self.sip_tcp_flow.with_bind_outbound_to_local_ip(enabled);
-        self.sip_tls_flow = self.sip_tls_flow.with_bind_outbound_to_local_ip(enabled);
-        self
-    }
-
-    /// Set the trusted record-routing TLS proxies whose accepted connection
-    /// carries in-dialog requests. See [`Config::sip_tls_proxy_flow_policies`].
-    pub fn with_sip_tls_proxy_flow_policies(
-        mut self,
-        policies: impl IntoIterator<Item = SipTlsProxyFlowPolicy>,
-    ) -> Self {
-        self.sip_tls_proxy_flow_policies = policies.into_iter().collect();
-        self
-    }
-
-    /// Keep in-dialog requests of calls placed over SIP TLS on the INVITE's
-    /// verified connection. See [`Config::sip_retain_outbound_tls_flow`].
-    pub fn with_sip_retain_outbound_tls_flow(mut self, retain: bool) -> Self {
-        self.sip_retain_outbound_tls_flow = retain;
-        self
-    }
-
     /// Require every inbound SIP TLS peer to present a certificate chaining
     /// to `client_ca_path`.
     pub fn require_tls_client_certificate(
@@ -5855,63 +5112,6 @@ impl Config {
         self
     }
 
-    /// Reject address settings this release cannot honour: mixed address
-    /// families and IPv6 zone identifiers.
-    ///
-    /// Every SIP and media address of one endpoint must belong to one
-    /// family. The SIP and RTP sockets are bound to one address each, and a
-    /// socket of one family cannot reach the other, so a Via sent-by, a
-    /// Contact, or an SDP `c=` of the other family would advertise an
-    /// address the endpoint does not listen on. Dual-stack operation
-    /// (separate IPv4 and IPv6 listeners) is not supported yet.
-    ///
-    /// A `SocketAddrV6` with a nonzero scope id (a link-local zone such as
-    /// `fe80::1%eth0`) is rejected: the SIP `host` grammar (RFC 3261 §25.1,
-    /// RFC 5118) has no zone-identifier syntax — RFC 6874 extends only the
-    /// generic URI grammar — so the zone could not be advertised in a Via,
-    /// Contact or SIP URI, and SDP (RFC 8866 §5.7) cannot carry it either.
-    fn validate_address_family(&self) -> Result<()> {
-        let addresses = [
-            ("bind_addr", Some(self.bind_addr)),
-            ("sip_advertised_addr", self.sip_advertised_addr),
-            ("tls_bind_addr", self.tls_bind_addr),
-            ("tls_advertised_addr", self.tls_advertised_addr),
-            ("media_public_addr", self.media_public_addr),
-        ];
-        let family_name = |ip: IpAddr| if ip.is_ipv4() { "IPv4" } else { "IPv6" };
-        let local_family = family_name(self.local_ip);
-        for (name, address) in addresses {
-            let Some(address) = address else {
-                continue;
-            };
-            if matches!(address, SocketAddr::V6(v6) if v6.scope_id() != 0) {
-                return Err(SessionError::ConfigError(format!(
-                    "{name} must not carry an IPv6 zone identifier: SIP hosts (RFC 3261 §25.1, RFC 5118) and SDP addresses (RFC 8866 §5.7) have no zone syntax"
-                )));
-            }
-            let family = family_name(address.ip());
-            if family != local_family {
-                return Err(SessionError::ConfigError(format!(
-                    "{name} is {family} but local_ip is {local_family}: every SIP and media address of an endpoint must use one address family (dual-stack is not supported)"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// [`Config::uas_capabilities`] as the dialog layer applies it: without
-    /// `100rel` when [`Config::use_100rel`] is [`RelUsage::NotSupported`], so
-    /// a request that requires it gets 420 (RFC 3262 §4).
-    pub(crate) fn effective_uas_capabilities(&self) -> UasCapabilities {
-        let mut capabilities = self.uas_capabilities.clone();
-        if matches!(self.use_100rel, RelUsage::NotSupported) {
-            capabilities
-                .supported_extensions
-                .retain(|tag| !tag.eq_ignore_ascii_case("100rel"));
-        }
-        capabilities
-    }
-
     /// Validate the SIP TLS/contact-mode configuration.
     ///
     /// # Examples
@@ -5923,20 +5123,6 @@ impl Config {
     /// ```
     pub fn validate(&self) -> Result<()> {
         let effective_tls_mode = self.effective_tls_mode();
-
-        self.validate_address_family()?;
-
-        if self.sip_tls_proxy_flow_policies.len()
-            > rvoip_sip_dialog::api::config::MAX_TLS_PROXY_FLOW_POLICIES
-        {
-            return Err(SessionError::ConfigError(format!(
-                "sip_tls_proxy_flow_policies accepts at most {} entries",
-                rvoip_sip_dialog::api::config::MAX_TLS_PROXY_FLOW_POLICIES
-            )));
-        }
-        for policy in &self.sip_tls_proxy_flow_policies {
-            policy.validate().map_err(SessionError::ConfigError)?;
-        }
 
         if let Some(address) = self.sip_advertised_addr {
             if address.ip().is_unspecified() || address.port() == 0 {
@@ -6188,15 +5374,6 @@ impl Config {
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
-        self.session_cleanup.validate()?;
-        if let Some(calls) = self.sip_adapter_call_capacity {
-            if calls == 0 || calls > Self::MAX_SIP_ADAPTER_CALL_CAPACITY {
-                return Err(SessionError::ConfigError(format!(
-                    "sip_adapter_call_capacity must be between 1 and {} when set",
-                    Self::MAX_SIP_ADAPTER_CALL_CAPACITY
-                )));
-            }
-        }
         if matches!(self.server_retained_lifecycle_capacity, Some(0)) {
             return Err(SessionError::ConfigError(
                 "server_retained_lifecycle_capacity must be at least 1 when set".to_string(),
@@ -6273,16 +5450,6 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "rtp_session_buffer_config.event_channel_capacity must be at least 1".to_string(),
             ));
-        }
-        if let Some(media_runtime) = &self.media_runtime {
-            media_runtime
-                .validate()
-                .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
-        }
-        if let Some(media_executor) = &self.media_executor {
-            media_executor
-                .validate()
-                .map_err(|error| SessionError::ConfigError(format!("media_executor: {error}")))?;
         }
         if self.rtp_transport_buffer_config.event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
@@ -7175,7 +6342,6 @@ mod config_tests {
         assert_eq!(drained_scheduler["accepting"], false);
         let drained_responses = coordinator.pending_exact_responses.perf_diagnostic_counts();
         assert_eq!(drained_responses["pending_obligations"], 0);
-        assert_eq!(drained_responses["indexed_lifetimes"], 0);
         assert_eq!(drained_responses["pending_deadlines"], 0);
         assert_eq!(drained_responses["fire_in_flight"], 0);
         assert_eq!(drained_responses["accepting"], false);
@@ -7404,565 +6570,6 @@ mod config_tests {
         ));
     }
 
-    fn exact_response_transaction(label: &str) -> rvoip_sip_dialog::transaction::TransactionKey {
-        rvoip_sip_dialog::transaction::TransactionKey::new(
-            label.to_string(),
-            rvoip_sip_core::Method::Info,
-            true,
-        )
-    }
-
-    /// Reference answer: the full scan of `entries` the index replaces.
-    fn scanned_lifetime(
-        registry: &PendingExactResponseRegistry,
-        handle: &crate::session_registry::SessionRegistryHandle,
-    ) -> Vec<usize> {
-        let mut owners = registry
-            .entries
-            .iter()
-            .filter(|entry| entry.value().lifecycle_handle() == Some(handle))
-            .map(|entry| Arc::as_ptr(entry.value()) as usize)
-            .collect::<Vec<_>>();
-        owners.sort_unstable();
-        owners
-    }
-
-    fn indexed_lifetime(
-        registry: &PendingExactResponseRegistry,
-        handle: &crate::session_registry::SessionRegistryHandle,
-    ) -> Vec<usize> {
-        let mut owners = registry
-            .snapshot_lifetime(handle)
-            .iter()
-            .map(|owner| Arc::as_ptr(owner) as usize)
-            .collect::<Vec<_>>();
-        owners.sort_unstable();
-        owners
-    }
-
-    /// `snapshot_lifetime` equals the scan for every lifetime, and
-    /// `by_lifetime` holds exactly the session-scoped transactions of
-    /// `entries`, each under its own lifetime, with no empty sets.
-    fn assert_lifetime_index_matches_scan(
-        registry: &PendingExactResponseRegistry,
-        handles: &[crate::session_registry::SessionRegistryHandle],
-    ) {
-        for handle in handles {
-            assert_eq!(
-                indexed_lifetime(registry, handle),
-                scanned_lifetime(registry, handle)
-            );
-        }
-        let mut indexed = std::collections::HashSet::new();
-        for entry in registry.by_lifetime.iter() {
-            assert!(!entry.value().is_empty(), "empty lifetime sets are removed");
-            for transaction in entry.value() {
-                let owner = registry.entries.get(transaction).expect("indexed entry");
-                assert_eq!(owner.lifecycle_handle(), Some(entry.key()));
-                assert!(indexed.insert(transaction.clone()));
-            }
-        }
-        let session_scoped = registry
-            .entries
-            .iter()
-            .filter(|entry| entry.value().lifecycle_handle().is_some())
-            .map(|entry| entry.key().clone())
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(indexed, session_scoped);
-    }
-
-    #[tokio::test]
-    async fn exact_response_by_lifetime_index_follows_register_remove_rekey_and_clear() {
-        let store = Arc::new(SessionStore::new());
-        let registry = PendingExactResponseRegistry::default();
-        registry.attach_session_store(&store);
-        let mut handles = Vec::new();
-        for name in ["by-lifetime-a", "by-lifetime-b"] {
-            let session_id = SessionId(name.to_string());
-            store
-                .create_session(session_id.clone(), Role::UAS, false)
-                .await
-                .expect("create exact response owner");
-            handles.push(
-                store
-                    .lifecycle_handle(&session_id)
-                    .expect("capture exact response owner"),
-            );
-        }
-        let register = |handle: &crate::session_registry::SessionRegistryHandle, label: &str| {
-            let owner = Arc::new(ExactResponseObligation::new(
-                handle.session_id().clone(),
-                exact_response_transaction(label),
-            ));
-            assert!(owner.bind_lifecycle_handle(handle));
-            assert!(matches!(
-                registry.register(Arc::clone(&owner)),
-                ExactResponseRegistration::Registered
-            ));
-            owner
-        };
-
-        let a1 = register(&handles[0], "z9hG4bK-by-lifetime-a1");
-        let a2 = register(&handles[0], "z9hG4bK-by-lifetime-a2");
-        let b1 = register(&handles[1], "z9hG4bK-by-lifetime-b1");
-        let standalone = Arc::new(ExactResponseObligation::new_standalone(
-            exact_response_transaction("z9hG4bK-by-lifetime-standalone"),
-            503,
-        ));
-        assert!(matches!(
-            registry.register(Arc::clone(&standalone)),
-            ExactResponseRegistration::Registered
-        ));
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
-        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 1);
-        assert_eq!(
-            registry.by_lifetime.len(),
-            2,
-            "standalone owners are not indexed"
-        );
-
-        // Re-registering the same owner is idempotent; a different owner for
-        // a registered transaction collides and leaves the index alone.
-        assert!(matches!(
-            registry.register(Arc::clone(&a1)),
-            ExactResponseRegistration::Registered
-        ));
-        let impostor = Arc::new(ExactResponseObligation::new(
-            handles[0].session_id().clone(),
-            a1.transaction().clone(),
-        ));
-        assert!(impostor.bind_lifecycle_handle(&handles[0]));
-        assert!(matches!(
-            registry.register(Arc::clone(&impostor)),
-            ExactResponseRegistration::Collision
-        ));
-        registry.remove_owner(impostor.as_ref());
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
-
-        // Removing one owner leaves its lifetime's others indexed.
-        registry.remove_owner(a1.as_ref());
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 1);
-
-        // Re-key: a new owner for a removed transaction is indexed again.
-        let a1_again = register(&handles[0], "z9hG4bK-by-lifetime-a1");
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert_eq!(registry.snapshot_lifetime(&handles[0]).len(), 2);
-
-        // The same transaction re-registered under another lifetime moves
-        // to that lifetime's index entry.
-        registry.remove_owner(a1_again.as_ref());
-        registry.remove_owner(a2.as_ref());
-        assert!(registry.by_lifetime.get(&handles[0]).is_none());
-        let moved = register(&handles[1], "z9hG4bK-by-lifetime-a1");
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert!(registry.snapshot_lifetime(&handles[0]).is_empty());
-        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 2);
-
-        registry.remove_owner(moved.as_ref());
-        registry.remove_owner(b1.as_ref());
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert!(
-            registry.by_lifetime.is_empty(),
-            "the index empties with its entries"
-        );
-        assert_eq!(registry.len(), 1, "only the standalone owner remains");
-
-        // Teardown clears the index with the entries.
-        let b2 = register(&handles[1], "z9hG4bK-by-lifetime-b2");
-        assert_eq!(registry.snapshot_lifetime(&handles[1]).len(), 1);
-        registry.clear();
-        assert!(registry.by_lifetime.is_empty());
-        assert!(registry.snapshot_lifetime(&handles[1]).is_empty());
-        registry.remove_owner(b2.as_ref());
-        registry.remove_owner(standalone.as_ref());
-        assert!(registry.by_lifetime.is_empty());
-    }
-
-    #[tokio::test]
-    async fn exact_response_lifetime_snapshot_visits_only_that_lifetimes_obligations() {
-        let store = Arc::new(SessionStore::new());
-        let registry = PendingExactResponseRegistry::default();
-        registry.attach_session_store(&store);
-        let mut handles = Vec::new();
-        for index in 0..256 {
-            let session_id = SessionId(format!("by-lifetime-scale-{index}"));
-            store
-                .create_session(session_id.clone(), Role::UAS, false)
-                .await
-                .expect("create exact response owner");
-            let handle = store
-                .lifecycle_handle(&session_id)
-                .expect("capture exact response owner");
-            let owner = Arc::new(ExactResponseObligation::new(
-                session_id,
-                exact_response_transaction(&format!("z9hG4bK-by-lifetime-scale-{index}")),
-            ));
-            assert!(owner.bind_lifecycle_handle(&handle));
-            assert!(matches!(
-                registry.register(owner),
-                ExactResponseRegistration::Registered
-            ));
-            handles.push(handle);
-        }
-
-        // One lifetime's snapshot walks its own index entry (one transaction)
-        // regardless of the 256 pending obligations.
-        assert_eq!(registry.len(), 256);
-        for handle in [&handles[0], &handles[255]] {
-            assert_eq!(registry.by_lifetime.get(handle).expect("indexed").len(), 1);
-            assert_eq!(registry.snapshot_lifetime(handle).len(), 1);
-        }
-        assert_lifetime_index_matches_scan(&registry, &handles);
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn exact_response_lifetime_index_survives_concurrent_register_and_remove() {
-        let store = Arc::new(SessionStore::new());
-        let registry = Arc::new(PendingExactResponseRegistry::default());
-        registry.attach_session_store(&store);
-        let mut handles = Vec::new();
-        for name in ["by-lifetime-race-a", "by-lifetime-race-b"] {
-            let session_id = SessionId(name.to_string());
-            store
-                .create_session(session_id.clone(), Role::UAS, false)
-                .await
-                .expect("create exact response owner");
-            handles.push(
-                store
-                    .lifecycle_handle(&session_id)
-                    .expect("capture exact response owner"),
-            );
-        }
-        // Workers share two transactions across both lifetimes, so a removal
-        // races re-registration of its transaction by the same and by the
-        // other lifetime.
-        let mut workers = Vec::new();
-        for worker in 0..8usize {
-            let registry = Arc::clone(&registry);
-            let handle = handles[(worker / 2) % 2].clone();
-            workers.push(tokio::spawn(async move {
-                let transaction =
-                    exact_response_transaction(&format!("z9hG4bK-by-lifetime-race-{}", worker % 2));
-                for _ in 0..500 {
-                    let owner = Arc::new(ExactResponseObligation::new(
-                        handle.session_id().clone(),
-                        transaction.clone(),
-                    ));
-                    assert!(owner.bind_lifecycle_handle(&handle));
-                    if matches!(
-                        registry.register(Arc::clone(&owner)),
-                        ExactResponseRegistration::Registered
-                    ) {
-                        tokio::task::yield_now().await;
-                        registry.remove_owner(owner.as_ref());
-                    }
-                    tokio::task::yield_now().await;
-                }
-            }));
-        }
-        for worker in workers {
-            worker.await.expect("worker");
-        }
-        assert_lifetime_index_matches_scan(&registry, &handles);
-        assert_eq!(registry.len(), 0);
-        assert!(registry.by_lifetime.is_empty());
-    }
-
-    /// Only `AnsweringHangupPending` needs the accepted-call watchdog after a
-    /// local hangup, and turning the watchdog off restores the cancellation
-    /// watchdog.
-    #[test]
-    fn local_hangup_watchdog_kind_covers_pending_hangup() {
-        use super::local_hangup_watchdog_kind;
-        assert_eq!(
-            local_hangup_watchdog_kind(Some(CallState::AnsweringHangupPending), true),
-            SetupTeardownWatchdogKind::AcceptedCall
-        );
-        assert!(SetupTeardownWatchdogKind::AcceptedCall
-            .watched_states()
-            .contains(&CallState::AnsweringHangupPending));
-        assert!(!SetupTeardownWatchdogKind::Cancellation
-            .watched_states()
-            .contains(&CallState::AnsweringHangupPending));
-        assert_eq!(
-            local_hangup_watchdog_kind(Some(CallState::AnsweringHangupPending), false),
-            SetupTeardownWatchdogKind::Cancellation
-        );
-        for state in [
-            Some(CallState::CancelPending),
-            Some(CallState::Ringing),
-            Some(CallState::Terminating),
-            None,
-        ] {
-            assert_eq!(
-                local_hangup_watchdog_kind(state, true),
-                SetupTeardownWatchdogKind::Cancellation,
-                "{state:?}"
-            );
-        }
-    }
-
-    /// A setup abandoned after 200 OK: the local hangup moves the session to
-    /// `AnsweringHangupPending` and the ACK never comes. The accept watchdog
-    /// armed for `Answering` is stale after that transition, so the hangup's
-    /// own watchdog must end the call and return the session slot and its
-    /// media port.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pending_hangup_after_answer_is_released_with_its_media_port() {
-        let coordinator = UnifiedCoordinator::new(
-            Config::local("pending-hangup-watchdog", 0)
-                .with_setup_teardown_timeout_secs(1)
-                .with_media_ports(31_000, 31_400),
-        )
-        .await
-        .expect("start pending-hangup coordinator");
-        let store = Arc::clone(&coordinator.helpers.state_machine.store);
-        let ports_before = coordinator.allocated_media_port_count().await;
-        let session_id = SessionId("pending-hangup-watchdog".into());
-        store
-            .create_session(session_id.clone(), Role::UAS, false)
-            .await
-            .expect("admit inbound lifetime");
-        coordinator
-            .allocate_media_for_test(&session_id)
-            .await
-            .expect("allocate inbound media");
-        let handle = store
-            .lifecycle_handle(&session_id)
-            .expect("exact inbound lifetime");
-        store
-            .update_session_exact_with(&handle, None, |session| {
-                session.call_state = CallState::Answering;
-                session.entered_state_at = Instant::now();
-            })
-            .expect("place the lifetime in Answering");
-        assert!(coordinator.allocated_media_port_count().await > ports_before);
-        // What accepting the call arms after sending 200 OK.
-        coordinator
-            .schedule_setup_teardown_timeout_exact_if_current(
-                &handle,
-                SetupTeardownWatchdogKind::AcceptedCall,
-            )
-            .await;
-        let armed_before =
-            crate::cleanup_diag::session_cleanup_counters().pending_hangup_watchdogs_armed;
-
-        coordinator
-            .hangup_exact(&handle)
-            .await
-            .expect("local hangup before ACK is accepted");
-        assert_eq!(
-            store
-                .get_session_snapshot_exact(&handle)
-                .expect("lifetime waits for ACK")
-                .call_state,
-            CallState::AnsweringHangupPending
-        );
-        assert!(
-            crate::cleanup_diag::session_cleanup_counters().pending_hangup_watchdogs_armed
-                > armed_before
-        );
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while store.get_session_retained_snapshot_exact(&handle).is_ok() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("the abandoned setup was not released");
-        assert_eq!(
-            coordinator.allocated_media_port_count().await,
-            ports_before,
-            "the abandoned setup's media port is returned"
-        );
-        assert!(coordinator.list_sessions().await.is_empty());
-        coordinator
-            .shutdown_gracefully(Some(Duration::ZERO))
-            .await
-            .expect("pending-hangup coordinator shut down");
-    }
-
-    /// Every state a failed or abandoned setup can be left in is reclaimed
-    /// with its media port by the orphan reclaim, and a repeat is a no-op.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn orphan_reclaim_releases_failed_setups_with_their_media_ports() {
-        use crate::cleanup_diag::OrphanSessionReclaimOutcome;
-        let coordinator = UnifiedCoordinator::new(
-            Config::local("orphan-reclaim", 0)
-                .with_setup_teardown_timeout_secs(1)
-                .with_media_ports(32_000, 32_400),
-        )
-        .await
-        .expect("start orphan-reclaim coordinator");
-        let store = Arc::clone(&coordinator.helpers.state_machine.store);
-        let ports_before = coordinator.allocated_media_port_count().await;
-        let states = [
-            CallState::Ringing,
-            CallState::Answering,
-            CallState::AnsweringHangupPending,
-            CallState::EarlyMedia,
-            CallState::Terminating,
-            CallState::Terminated,
-        ];
-        let mut handles = Vec::new();
-        for (index, state) in states.into_iter().enumerate() {
-            let session_id = SessionId(format!("orphan-reclaim-{index}"));
-            store
-                .create_session(session_id.clone(), Role::UAS, false)
-                .await
-                .expect("admit inbound lifetime");
-            coordinator
-                .allocate_media_for_test(&session_id)
-                .await
-                .expect("allocate inbound media");
-            let handle = store
-                .lifecycle_handle(&session_id)
-                .expect("exact inbound lifetime");
-            store
-                .update_session_exact_with(&handle, None, |session| {
-                    session.call_state = state;
-                    session.entered_state_at = Instant::now();
-                })
-                .expect("move inbound lifetime");
-            handles.push(handle);
-        }
-        assert_eq!(coordinator.list_sessions().await.len(), states.len());
-        assert!(coordinator.allocated_media_port_count().await > ports_before);
-
-        for (index, handle) in handles.iter().enumerate() {
-            let outcome = coordinator.reclaim_orphan_session_exact(handle).await;
-            assert!(
-                matches!(
-                    outcome,
-                    OrphanSessionReclaimOutcome::Forced
-                        | OrphanSessionReclaimOutcome::AlreadyReleased
-                ),
-                "session {index}: {outcome:?}"
-            );
-        }
-        assert!(coordinator.list_sessions().await.is_empty());
-        assert_eq!(coordinator.allocated_media_port_count().await, ports_before);
-        assert_eq!(
-            coordinator.reclaim_orphan_session_exact(&handles[0]).await,
-            OrphanSessionReclaimOutcome::AlreadyReleased
-        );
-        coordinator
-            .shutdown_gracefully(Some(Duration::ZERO))
-            .await
-            .expect("orphan-reclaim coordinator shut down");
-    }
-
-    #[test]
-    fn session_cleanup_bounds_default_on_and_are_validated() {
-        use super::SessionCleanupConfig;
-        let defaults = Config::local("session-cleanup-defaults", 0).session_cleanup;
-        assert_eq!(defaults, SessionCleanupConfig::default());
-        assert_eq!(
-            defaults.inline_hangup_deadline,
-            Some(Duration::from_secs(5))
-        );
-        assert_eq!(defaults.inbound_end_backstop, Some(Duration::from_secs(10)));
-        assert!(defaults.pending_hangup_watchdog);
-        assert!(
-            !defaults
-                .with_pending_hangup_watchdog(false)
-                .pending_hangup_watchdog
-        );
-        assert_eq!(defaults.orphan_session_ttl, Some(Duration::from_secs(60)));
-        assert_eq!(Config::default().session_cleanup, defaults);
-
-        let validate = |cleanup: SessionCleanupConfig| {
-            Config::local("session-cleanup-validation", 0)
-                .with_session_cleanup(cleanup)
-                .validate()
-        };
-        assert!(validate(defaults).is_ok());
-        assert!(validate(
-            defaults
-                .with_inline_hangup_deadline(None)
-                .with_inbound_end_backstop(None)
-        )
-        .is_ok());
-        for backstop in [Duration::from_secs(1), Duration::from_secs(600)] {
-            assert!(validate(defaults.with_inbound_end_backstop(Some(backstop))).is_ok());
-        }
-        for backstop in [
-            Duration::ZERO,
-            Duration::from_millis(999),
-            Duration::from_millis(600_001),
-        ] {
-            assert!(
-                validate(defaults.with_inbound_end_backstop(Some(backstop))).is_err(),
-                "{backstop:?}"
-            );
-        }
-        assert!(validate(defaults.with_inline_hangup_deadline(Some(Duration::ZERO))).is_err());
-        assert!(validate(defaults.with_orphan_session_ttl(None)).is_ok());
-        for ttl in [Duration::from_secs(5), Duration::from_secs(3_600)] {
-            assert!(validate(defaults.with_orphan_session_ttl(Some(ttl))).is_ok());
-        }
-        for ttl in [
-            Duration::ZERO,
-            Duration::from_millis(4_999),
-            Duration::from_millis(3_600_001),
-        ] {
-            assert!(
-                validate(defaults.with_orphan_session_ttl(Some(ttl))).is_err(),
-                "{ttl:?}"
-            );
-        }
-        assert!(
-            validate(defaults.with_inline_hangup_deadline(Some(Duration::from_millis(1)))).is_ok()
-        );
-    }
-
-    /// Ended lifetimes whose lower dialog/media cleanup never succeeded still
-    /// give their session-store slots back through the counted forced
-    /// release, and a repeat on an already-released lifetime is a no-op.
-    #[tokio::test]
-    async fn forced_slot_release_returns_store_to_zero_after_failed_cleanups() {
-        const BURST: usize = 32;
-        let store = Arc::new(SessionStore::new());
-        let mut handles = Vec::with_capacity(BURST);
-        for index in 0..BURST {
-            let session_id = SessionId(format!("forced-release-{index}"));
-            store
-                .create_session(session_id.clone(), Role::UAS, false)
-                .await
-                .expect("create ended lifetime");
-            handles.push(
-                store
-                    .lifecycle_handle(&session_id)
-                    .expect("capture exact lifetime"),
-            );
-        }
-        assert_eq!(store.sessions.len(), BURST);
-        let forced_before = crate::cleanup_diag::session_cleanup_counters().forced_session_releases;
-
-        for handle in &handles {
-            super::force_release_exact_session_slot(&store, None, None, handle, "test")
-                .await
-                .expect("an ended lifetime's slot must be released");
-        }
-        assert_eq!(
-            store.sessions.len(),
-            0,
-            "every slot returns after failed cleanups"
-        );
-        assert!(
-            crate::cleanup_diag::session_cleanup_counters().forced_session_releases
-                >= forced_before + BURST as u64
-        );
-
-        super::force_release_exact_session_slot(&store, None, None, &handles[0], "test")
-            .await
-            .expect("an already-released lifetime is idempotent success");
-        assert_eq!(store.sessions.len(), 0);
-    }
-
     #[test]
     fn exact_terminal_release_drains_generation_before_dialog_cleanup() {
         let source = include_str!("unified.rs");
@@ -8189,69 +6796,6 @@ mod config_tests {
             scheduler.fire_slots.available_permits(),
             SETUP_TEARDOWN_TIMEOUT_CONCURRENCY
         );
-    }
-
-    #[tokio::test]
-    async fn live_deadline_count_follows_push_close_fire_and_drain() {
-        let store = SessionStore::with_capacity(8);
-        let mut handles = Vec::new();
-        for _ in 0..4 {
-            let session_id = SessionId::new();
-            store
-                .create_session(session_id.clone(), Role::UAS, false)
-                .await
-                .expect("create exact timeout fixture");
-            handles.push(
-                store
-                    .lifecycle_handle(&session_id)
-                    .expect("fixture lifecycle handle"),
-            );
-        }
-        let now = Instant::now();
-        let mut queue = SetupTeardownDeadlineQueue::default();
-        let sum = |queue: &SetupTeardownDeadlineQueue| {
-            queue
-                .live_sequences_by_lifetime
-                .values()
-                .map(Vec::len)
-                .sum::<usize>()
-        };
-        // Two deadlines on the first lifetime, one on each of the others.
-        for (index, handle) in handles.iter().enumerate() {
-            queue.push(
-                now + Duration::from_secs(1 + index as u64),
-                handle.clone(),
-                now,
-                SetupTeardownWatchdogKind::InboundSetup,
-            );
-        }
-        queue.push(
-            now + Duration::from_secs(10),
-            handles[0].clone(),
-            now,
-            SetupTeardownWatchdogKind::AcceptedCall,
-        );
-        assert_eq!(queue.live_count, 5);
-        assert_eq!(queue.live_count, sum(&queue));
-
-        // Closing a lifetime cancels both of its deadlines at once.
-        assert_eq!(queue.begin_lifetime_close(&handles[0]), 2);
-        assert_eq!(queue.live_count, 3);
-        assert_eq!(queue.live_count, sum(&queue));
-        // Closing it again, or closing a lifetime with none, cancels nothing.
-        assert_eq!(queue.begin_lifetime_close(&handles[0]), 0);
-        assert_eq!(queue.live_count, 3);
-
-        // A fired deadline leaves the live count; a cancelled one is skipped.
-        let due = queue.take_due(now + Duration::from_secs(2), 8);
-        assert_eq!(due.len(), 1);
-        assert_eq!(queue.live_count, 2);
-        assert_eq!(queue.live_count, sum(&queue));
-
-        let drained = queue.drain();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(queue.live_count, 0);
-        assert_eq!(queue.live_deadline_count(), 0);
     }
 
     #[tokio::test]
@@ -8764,15 +7308,6 @@ mod config_tests {
         };
         exact_terminal_completion_result(completion)
             .expect("firing watchdog exact release must complete");
-        // The changed-state deadline falls due together with the firing
-        // one. The runner disarms it on its own pass, which can trail the
-        // firing lifetime's release on a starved runtime.
-        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-        while coordinator.setup_teardown_scheduler.len() != 0
-            && tokio::time::Instant::now() < drain_deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
         assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
         assert!(
             store.lifecycle_handle(&firing).is_none(),
@@ -8934,81 +7469,6 @@ mod config_tests {
             SetupTeardownWatchdogKind::OutboundSetup,
         ));
         assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
-    }
-
-    /// A peer BYE holds the session lane while its CleanupMedia action stops
-    /// media; the media pump fails and its owner asks for a local hangup,
-    /// which reads the still-Active snapshot and queues on the lane. When the
-    /// lane is released the session is Terminated, HangupCall has no
-    /// transition and no BYE is sent. The hangup must finish at once instead
-    /// of waiting the non-INVITE timeout for a confirmation of that never-sent
-    /// BYE (which delays the call's terminal and keeps the setup/teardown
-    /// scheduler from draining at shutdown).
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn hangup_that_loses_the_lane_to_a_peer_bye_does_not_join_a_bye_it_never_sent() {
-        let coordinator = UnifiedCoordinator::new(Config::local("hangup-lost-lane", 0))
-            .await
-            .expect("start lost-lane hangup coordinator");
-        let store = Arc::clone(&coordinator.helpers.state_machine.store);
-        let session_id = SessionId::from("hangup-lost-lane-session");
-        let created = store
-            .create_session(session_id.clone(), Role::UAS, false)
-            .await
-            .expect("create lost-lane session");
-        let handle = created
-            .lifecycle_handle
-            .expect("capture lost-lane exact lifetime");
-        store
-            .update_session_exact_with(&handle, None, |session| {
-                session.call_state = CallState::Active;
-            })
-            .expect("place lost-lane session in Active");
-
-        // The peer BYE transition owns the lane.
-        let lane = store
-            .state_machine_lane_exact(&handle)
-            .expect("lost-lane exact state-machine lane");
-        let peer_bye = Arc::clone(&lane).lock_owned().await;
-        let idle_lane_refs = Arc::strong_count(&lane);
-
-        let hangup = tokio::spawn({
-            let coordinator = Arc::clone(&coordinator);
-            let handle = handle.clone();
-            async move { coordinator.hangup_exact(&handle).await }
-        });
-        // The hangup snapshots Active before it dispatches; a dispatch waiting
-        // for the lane holds its own reference to it. Forced ordering, no sleep.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while Arc::strong_count(&lane) == idle_lane_refs {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("hangup queued behind the peer BYE lane");
-
-        // The peer BYE commits Terminated, then releases the lane.
-        store
-            .update_session_exact_with(&handle, None, |session| {
-                session.call_state = CallState::Terminated;
-            })
-            .expect("commit the peer BYE terminal state");
-        drop(peer_bye);
-
-        let joined = tokio::time::timeout(Duration::from_secs(2), hangup).await;
-        assert!(
-            matches!(joined, Ok(Ok(Ok(())))),
-            "a no-op hangup joined a BYE it never sent: {joined:?}"
-        );
-        assert!(
-            !coordinator
-                .dialog_adapter
-                .has_outgoing_bye_after_exact(&handle, 0),
-            "the lost-lane hangup must not have dispatched a BYE"
-        );
-        coordinator
-            .shutdown_gracefully(Some(Duration::ZERO))
-            .await
-            .expect("no retained hangup task is left to drain");
     }
 
     #[tokio::test]
@@ -10284,106 +8744,16 @@ pub(crate) async fn release_exact_local_resources_with_retry(
         "exact terminal release failed; retrying the same retained lifetime"
     );
     tokio::task::yield_now().await;
-    let second = release_exact_local_resources(
-        Arc::clone(&session_store),
+    release_exact_local_resources(
+        session_store,
         helpers,
         dialog_adapter,
         media_adapter,
-        pending_exact_responses.as_ref().map(Arc::clone),
-        setup_teardown_deadlines.clone(),
-        handle.clone(),
-    )
-    .await;
-    let Err(error) = second else {
-        return Ok(());
-    };
-    // Both bounded attempts failed. Without a later owner the ended lifetime
-    // would keep its session-store slot for good, and enough of them fill
-    // the admission limit.
-    force_release_exact_session_slot(
-        &session_store,
-        pending_exact_responses.as_deref(),
-        setup_teardown_deadlines.as_ref(),
-        &handle,
-        "terminal-release-retries-exhausted",
+        pending_exact_responses,
+        setup_teardown_deadlines,
+        handle,
     )
     .await
-    .map_err(|_| error)
-}
-
-/// Release one ended lifetime's session-store slot after its bounded exact
-/// release attempts failed.
-///
-/// Teardown is idempotent (it joins or reports the finished one), so this
-/// quiesces once more and removes the retired lifetime without requiring the
-/// lower dialog/media cleanup to have succeeded; that cleanup was already
-/// attempted and its own timers bound what is left. A lifetime the authority
-/// will not retire stays put and is counted as a failed forced release. Every
-/// outcome is counted; logging is limited to one line per second.
-pub(crate) async fn force_release_exact_session_slot(
-    session_store: &SessionStore,
-    pending_exact_responses: Option<&PendingExactResponseRegistry>,
-    setup_teardown_deadlines: Option<&SetupTeardownDeadlineCancellation>,
-    handle: &SessionRegistryHandle,
-    reason: &'static str,
-) -> Result<()> {
-    // `Ok(true)`: this call removed the slot; `Ok(false)`: a racing exact
-    // owner already had, so nothing is counted.
-    let released = if session_store
-        .get_session_retained_snapshot_exact(handle)
-        .is_err()
-    {
-        Ok(false)
-    } else {
-        let quiesce = session_store.quiesce_session_exact(handle).await;
-        match session_store.remove_quiesced_session_exact(handle) {
-            Ok(()) => Ok(true),
-            Err(_)
-                if session_store
-                    .get_session_retained_snapshot_exact(handle)
-                    .is_err() =>
-            {
-                Ok(false)
-            }
-            Err(error) => Err(SessionError::InternalError(format!(
-                "forced session slot release failed (class=lifecycle, quiesced={}): {error}",
-                quiesce.is_ok()
-            ))),
-        }
-    };
-    match released {
-        Ok(removed) => {
-            if let Some(pending) = pending_exact_responses {
-                pending.finish_lifetime_close(handle);
-            }
-            if let Some(deadlines) = setup_teardown_deadlines {
-                deadlines.finish_lifetime_close(handle);
-            }
-            if removed {
-                if let Some(occurrences) = crate::cleanup_diag::record_forced_session_release() {
-                    tracing::warn!(
-                        session = %handle.session_id(),
-                        reason,
-                        occurrences,
-                        "ended SIP session slot force-released after bounded cleanup retries"
-                    );
-                }
-            }
-            Ok(())
-        }
-        Err(error) => {
-            if let Some(occurrences) = crate::cleanup_diag::record_forced_session_release_failed() {
-                tracing::error!(
-                    session = %handle.session_id(),
-                    reason,
-                    occurrences,
-                    %error,
-                    "ended SIP session slot could not be force-released"
-                );
-            }
-            Err(error)
-        }
-    }
 }
 
 /// Best-effort lower-resource cleanup remaining after authoritative session
@@ -10400,14 +8770,12 @@ pub(crate) struct ForcedLocalSessionCleanup {
 
 impl ForcedLocalSessionCleanup {
     /// Finish helper, dialog, and media cleanup without relaying lower errors.
-    /// The retrying release ends in a counted session-slot release, so a
-    /// failing lower cleanup cannot keep the reclaimed lifetime's slot.
     pub(crate) async fn finish(self) {
         let Some(handle) = self.handle else {
             tracing::debug!("forced local reclaim had no exact session owner");
             return;
         };
-        if release_exact_local_resources_with_retry(
+        if release_exact_local_resources(
             self.session_store,
             self.helpers,
             self.dialog_adapter,
@@ -11310,16 +9678,6 @@ impl UnifiedCoordinator {
                     .to_string(),
             ));
         }
-        if let Some(media_runtime) = config.media_runtime.clone() {
-            // Before any media task or transport starts the shared executor.
-            rvoip_rtp_core::task_runtime::install_media_runtime_config(media_runtime)
-                .map_err(|error| SessionError::ConfigError(format!("media_runtime: {error}")))?;
-        }
-        if let Some(media_executor) = config.media_executor.clone() {
-            // Before any media transport or session captures the executor.
-            rvoip_rtp_core::executor::install_media_executor_config(media_executor)
-                .map_err(|error| SessionError::ConfigError(format!("media_executor: {error}")))?;
-        }
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_transaction_timing_enabled(
@@ -11491,29 +9849,6 @@ impl UnifiedCoordinator {
                 )));
         }
 
-        // At the session-slot cap, answer a new INVITE with a stateless 503 in
-        // the transaction layer, before any transaction, dialog or session
-        // state exists. The session layer's own check, with its soft-limit
-        // pacing, stays authoritative below the cap; in-dialog requests never
-        // consult the guard. Weak: the transaction manager must not keep the
-        // session store alive.
-        if config.server_call_admission_early_reject {
-            if let Some(hard_limit) = config.server_call_admission_limit {
-                let sessions = Arc::downgrade(&store);
-                dialog_api
-                    .dialog_manager()
-                    .core()
-                    .transaction_manager()
-                    .set_new_dialog_capacity_guard(
-                        rvoip_sip_dialog::transaction::NewDialogCapacityGuard::new(move || {
-                            sessions
-                                .upgrade()
-                                .is_some_and(|store| store.sessions.len() >= hard_limit)
-                        }),
-                    );
-            }
-        }
-
         let dialog_adapter = Arc::new(DialogAdapter::new(
             dialog_api,
             store.clone(),
@@ -11541,10 +9876,6 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_rtcp_non_mux(config.rtcp_non_mux);
-        #[cfg(all(feature = "test-hooks", feature = "dtls-srtp"))]
-        media_adapter_inner.set_dtls_wrong_rtp_certificate_for_testing(
-            config.dtls_present_unadvertised_rtp_certificate_for_testing,
-        );
         media_adapter_inner.set_rtcp_reporting_policy(
             config.rtcp_xr_voip_metrics,
             config.rtcp_reduced_minimum_interval,
@@ -11560,7 +9891,6 @@ impl UnifiedCoordinator {
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         media_adapter_inner.set_dtls_setup_role(config.dtls_setup_role);
-        media_adapter_inner.set_dtls_actpass_answer_role(config.dtls_actpass_answer_role);
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
@@ -11591,24 +9921,6 @@ impl UnifiedCoordinator {
             media_adapter_inner.set_stun_server(config.stun_server.clone());
         }
         let media_adapter = Arc::new(media_adapter_inner);
-        // Inbound admission also sheds with 503 when the RTP range has no free
-        // slot, so a session limit above the range's slot count is never
-        // reached. Make that visible at startup.
-        if let (Some(admission_limit), Some(port_slots)) = (
-            config.server_call_admission_limit,
-            media_adapter.configured_media_port_slots(),
-        ) {
-            if port_slots < admission_limit {
-                tracing::warn!(
-                    admission_limit,
-                    port_slots,
-                    media_port_start = config.media_port_start,
-                    media_port_end = config.media_port_end,
-                    "RTP range holds fewer calls than the server admission limit; \
-                     media port admission will shed new INVITEs with 503 first"
-                );
-            }
-        }
         // RFC 4733 DTMF bridge: adapter publishes `Event::DtmfReceived`
         // onto the API bus whenever media-core signals a DTMF event.
         media_adapter
@@ -11669,9 +9981,6 @@ impl UnifiedCoordinator {
         let server_call_admission_soft_limit = config.server_call_admission_soft_limit;
         let server_call_admission_pacing_delay_ms = config.server_call_admission_pacing_delay_ms;
         let server_overload_retry_after_secs = config.server_overload_retry_after_secs;
-        let server_call_admission_lock_free = config.server_call_admission_lock_free;
-        let inbound_session_history = config.inbound_session_history;
-        let inline_incoming_call_dispatch = config.session_inline_incoming_call_dispatch;
         let pending_exact_responses = Arc::new(PendingExactResponseRegistry::default());
         pending_exact_responses.attach_session_store(&store);
 
@@ -11700,29 +10009,6 @@ impl UnifiedCoordinator {
             .setup_teardown_scheduler
             .attach_session_store(&store);
         let _ = coordinator.self_weak.set(Arc::downgrade(&coordinator));
-        {
-            // A failed RTP-component DTLS handshake ends its call. The handler
-            // holds only a weak reference so it cannot keep a shut-down
-            // coordinator alive.
-            let weak = Arc::downgrade(&coordinator);
-            coordinator
-                .media_adapter
-                .set_media_security_failure_handler(Arc::new(move |handle, failure| {
-                    let Some(coordinator) = weak.upgrade() else {
-                        return;
-                    };
-                    let task_coordinator = Arc::downgrade(&coordinator);
-                    let _ = coordinator
-                        .setup_teardown_scheduler
-                        .spawn_lifecycle_task(async move {
-                            if let Some(coordinator) = task_coordinator.upgrade() {
-                                coordinator
-                                    .end_call_after_media_security_failure(handle, failure)
-                                    .await;
-                            }
-                        });
-                }));
-        }
         let mut construction_guard = CoordinatorConstructionGuard::new(Arc::clone(&coordinator));
         let setup_teardown_scheduler = Arc::clone(&coordinator.setup_teardown_scheduler);
         let setup_teardown_tasks = Arc::clone(&setup_teardown_scheduler.tasks);
@@ -11786,9 +10072,6 @@ impl UnifiedCoordinator {
                 server_call_admission_pacing_delay_ms,
                 server_overload_retry_after_secs,
             )
-            .with_server_call_admission_lock_free(server_call_admission_lock_free)
-            .with_inbound_session_history(inbound_session_history)
-            .with_inline_incoming_call_dispatch(inline_incoming_call_dispatch)
             .with_causal_dialog_ingress(causal_dialog_ingress);
 
         // SIP_API_DESIGN_2 Phase D — give the handler a weak handle
@@ -11835,20 +10118,6 @@ impl UnifiedCoordinator {
 
     pub(crate) fn fast_auto_accept_incoming_calls(&self) -> bool {
         self.config.fast_auto_accept_incoming_calls
-    }
-
-    pub(crate) fn sip_adapter_call_capacity(&self) -> Option<usize> {
-        self.config.sip_adapter_call_capacity
-    }
-
-    pub(crate) fn session_cleanup_config(&self) -> SessionCleanupConfig {
-        self.config.session_cleanup
-    }
-
-    /// The configured overload backoff, also stamped on application 503s so
-    /// every capacity rejection tells the caller when to retry.
-    pub(crate) fn server_overload_retry_after_secs(&self) -> Option<u32> {
-        self.config.server_overload_retry_after_secs
     }
 
     pub(crate) async fn claim_session_control_events(
@@ -12264,20 +10533,21 @@ impl UnifiedCoordinator {
         Ok(crate::api::stream_peer::EventReceiver::new(rx))
     }
 
-    /// Claim the coordinator's single response-capable control stream.
+    /// Claim the coordinator's single response-capable control stream and
+    /// merge it with the ordinary public observations.
     ///
-    /// Only one control owner may exist. It receives every application event
-    /// once, through the private stream; response-bearing inbound requests
-    /// such as SIP INFO carry their exact session handles there. The owner
-    /// never yields the sanitized public observational copies, so it does not
-    /// subscribe to them, and its stream ends when the control stream closes.
-    /// Further calls return an error. Libraries that only monitor calls
-    /// should continue to use [`events`](Self::events).
+    /// Only one control owner may exist. Response-bearing inbound requests
+    /// such as SIP INFO and exact session handles are yielded once through the
+    /// private stream. All public observational copies are sanitized and
+    /// suppressed by this owner. Further calls return an error. Libraries
+    /// that only monitor calls should continue to use [`events`](Self::events).
     pub async fn events_with_control(
         self: &Arc<Self>,
     ) -> Result<crate::api::stream_peer::EventReceiver> {
+        let observations = self.subscribe_events().await?;
         let control = self.claim_session_control_events().await?;
-        Ok(crate::api::stream_peer::EventReceiver::control_only(
+        Ok(crate::api::stream_peer::EventReceiver::with_control(
+            observations,
             control,
             Arc::clone(self),
         ))
@@ -12373,24 +10643,17 @@ impl UnifiedCoordinator {
     }
 
     pub(crate) async fn lifecycle_snapshot(&self, id: &SessionId) -> CallLifecycleSnapshot {
-        let (state, media_security, media) = self
+        let (state, media_security) = self
             .helpers
             .state_machine
             .store
             .with_session(id, |session| {
-                (
-                    Some(session.call_state),
-                    session.media_security.clone(),
-                    Self::negotiated_media_from_session(session),
-                )
+                (Some(session.call_state), session.media_security.clone())
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None));
         let mut snapshot = self.lifecycle.snapshot(id, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
-        }
-        if snapshot.media.is_none() {
-            snapshot.media = media;
         }
         snapshot
     }
@@ -12413,21 +10676,14 @@ impl UnifiedCoordinator {
         let media_security = current
             .as_ref()
             .and_then(|session| session.media_security.clone());
-        let media = current
-            .as_ref()
-            .and_then(|snapshot| Self::negotiated_media_from_session(snapshot.state()));
         let mut snapshot = self.lifecycle.snapshot_exact(handle, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
-        }
-        if snapshot.media.is_none() {
-            snapshot.media = media;
         }
         let has_exact_evidence = current.is_some()
             || !snapshot.progress.is_empty()
             || snapshot.answered.is_some()
             || snapshot.media_security.is_some()
-            || snapshot.media.is_some()
             || snapshot.terminal.is_some()
             || snapshot.latest_transfer_outcome.is_some();
         has_exact_evidence.then_some(snapshot).ok_or_else(|| {
@@ -12629,115 +10885,6 @@ impl UnifiedCoordinator {
         self.hangup_exact_with_reason(handle, "Local hangup").await
     }
 
-    /// Publish [`Event::MediaSecurityFailed`] for a call whose RTP-component
-    /// key agreement failed, then end the call with an RFC 3326 `Reason`
-    /// naming the failure.
-    ///
-    /// The teardown follows the call's state, through the same exact
-    /// authorities as an application hangup or rejection: BYE for an
-    /// answered call (an inbound call still waiting for its ACK sends BYE
-    /// once the ACK arrives), CANCEL for an outbound call that is not
-    /// answered yet, and `488 Not Acceptable Here` for an inbound call that
-    /// is not answered yet. A call that is already being torn down is left
-    /// alone, so this never races a second teardown.
-    async fn end_call_after_media_security_failure(
-        &self,
-        handle: SessionRegistryHandle,
-        failure: crate::api::events::MediaSecurityFailure,
-    ) {
-        const REASON_TEXT: &str = "DTLS-SRTP handshake failed";
-        let store = &self.helpers.state_machine.store;
-        let Ok(snapshot) = store.get_session_snapshot_exact(&handle) else {
-            return;
-        };
-        let (role, call_state) = {
-            let state = snapshot.state();
-            (state.role, state.call_state)
-        };
-        if matches!(
-            call_state,
-            CallState::Idle
-                | CallState::CancelPending
-                | CallState::Cancelling
-                | CallState::AnsweringHangupPending
-                | CallState::Terminating
-                | CallState::Terminated
-                | CallState::Cancelled
-                | CallState::Failed(_)
-        ) {
-            return;
-        }
-
-        self.app_event_publisher.publish_exact(
-            &handle,
-            crate::api::events::Event::MediaSecurityFailed {
-                call_id: handle.session_id().clone(),
-                keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
-                reason: failure,
-            },
-        );
-        let reason_header = || {
-            rvoip_sip_core::types::TypedHeader::Reason(rvoip_sip_core::types::reason::Reason::new(
-                "SIP",
-                488,
-                Some(REASON_TEXT.to_string()),
-            ))
-        };
-
-        let unanswered_inbound =
-            role == Role::UAS && matches!(call_state, CallState::Ringing | CallState::EarlyMedia);
-        let result = if unanswered_inbound {
-            self.reject_incoming_with_extras_exact(
-                &handle,
-                488,
-                "Not Acceptable Here",
-                vec![reason_header()],
-            )
-            .await
-        } else {
-            // Stage the Reason for whichever request the hangup sends: BYE
-            // (also after a 2xx that races a CANCEL) and CANCEL.
-            let unanswered_outbound = role == Role::UAC
-                && matches!(
-                    call_state,
-                    CallState::Initiating | CallState::Ringing | CallState::EarlyMedia
-                );
-            let mut cancel_headers = self.dialog_adapter.auto_emit_extra_headers.clone();
-            cancel_headers.push(reason_header());
-            let staged = match store.state_machine_lane_exact(&handle) {
-                Some(lane) => {
-                    let _guard = lane.lock_owned().await;
-                    store
-                        .update_session_exact_now(&handle, |session| {
-                            session.pending_bye_reason =
-                                Some(("SIP".to_string(), 488, Some(REASON_TEXT.to_string())));
-                            session.local_end_reason = Some(REASON_TEXT.to_string());
-                            if unanswered_outbound && session.pending_cancel_options.is_none() {
-                                session.pending_cancel_options = Some(Arc::new(
-                                    rvoip_sip_dialog::api::unified::CancelRequestOptions {
-                                        reason: None,
-                                        extra_headers: cancel_headers,
-                                    },
-                                ));
-                            }
-                        })
-                        .is_ok()
-                }
-                None => false,
-            };
-            if !staged {
-                return;
-            }
-            self.hangup_exact_with_reason(&handle, REASON_TEXT).await
-        };
-        if let Err(error) = result {
-            tracing::warn!(
-                session = %handle.session_id().0,
-                "ending the call after a DTLS-SRTP failure did not complete: {error}"
-            );
-        }
-    }
-
     /// Join the one exact hangup authority while supplying the terminal reason
     /// used by its eventual committed release. Automatic lifecycle owners use
     /// this same path as public hangup so BYE dispatch, final-response
@@ -12747,37 +10894,7 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        self.hangup_exact_with_reason_reporting(handle, reason.into(), None)
-            .await
-    }
-
-    /// Exact local hangup that also reports, as soon as the session lane has
-    /// decided it, whether `HangupCall` took a transition. `false` means the
-    /// state it met under the lane had no hangup row (a peer BYE, CANCEL or
-    /// other terminal won the lane first) and this call sent nothing. The
-    /// sender is dropped without a value when this call joins another
-    /// retained hangup or dispatch fails, because then this call has no lane
-    /// outcome of its own. The returned future still joins the whole
-    /// operation (dispatch, wire confirmation, finalization).
-    pub(crate) async fn hangup_exact_reporting_dispatch(
-        &self,
-        handle: &SessionRegistryHandle,
-        dispatched: tokio::sync::oneshot::Sender<bool>,
-    ) -> Result<()> {
-        self.hangup_exact_with_reason_reporting(
-            handle,
-            "Local hangup".to_string(),
-            Some(dispatched),
-        )
-        .await
-    }
-
-    async fn hangup_exact_with_reason_reporting(
-        &self,
-        handle: &SessionRegistryHandle,
-        reason: String,
-        dispatched: Option<tokio::sync::oneshot::Sender<bool>>,
-    ) -> Result<()> {
+        let reason = reason.into();
         // One exact SessionStateCell owns one retained hangup operation. The
         // public caller is only a waiter: dropping it cannot cancel dispatch,
         // wire confirmation, or finalization, and another caller joins the
@@ -12802,9 +10919,6 @@ impl UnifiedCoordinator {
             })?;
         if !control.try_start() {
             drop(coordinator);
-            // Joining another owner's operation: this call has no lane
-            // outcome of its own, so release the reporter before waiting.
-            drop(dispatched);
             return shared_hangup_completion_result(control.wait_for_completion().await);
         }
 
@@ -12813,23 +10927,22 @@ impl UnifiedCoordinator {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let completion_guard = RetainedHangupTaskCompletion::new(retained_control);
         let hangup_scheduler = Arc::clone(&self.setup_teardown_scheduler);
-        let spawned =
-            hangup_scheduler.spawn_lifecycle_task(async move {
-                let mut completion_guard = completion_guard;
-                let result = match std::panic::AssertUnwindSafe(
-                    coordinator.hangup_serialized_exact(&retained_handle, reason, dispatched),
-                )
-                .catch_unwind()
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => Err(SessionError::InternalError(
-                        "exact hangup operation stopped unexpectedly".to_string(),
-                    )),
-                };
-                completion_guard.finish(result.is_ok());
-                let _ = result_tx.send(result);
-            });
+        let spawned = hangup_scheduler.spawn_lifecycle_task(async move {
+            let mut completion_guard = completion_guard;
+            let result = match std::panic::AssertUnwindSafe(
+                coordinator.hangup_serialized_exact(&retained_handle, reason),
+            )
+            .catch_unwind()
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(SessionError::InternalError(
+                    "exact hangup operation stopped unexpectedly".to_string(),
+                )),
+            };
+            completion_guard.finish(result.is_ok());
+            let _ = result_tx.send(result);
+        });
         if !spawned {
             return shared_hangup_completion_result(control.wait_for_completion().await);
         }
@@ -12844,7 +10957,6 @@ impl UnifiedCoordinator {
         &self,
         handle: &SessionRegistryHandle,
         reason: String,
-        dispatched: Option<tokio::sync::oneshot::Sender<bool>>,
     ) -> Result<()> {
         let _bye_wait_owner = self.dialog_adapter.begin_outgoing_bye_wait_exact(handle)?;
         let initial_state = self
@@ -12863,21 +10975,8 @@ impl UnifiedCoordinator {
             .dialog_adapter
             .outgoing_bye_generation_exact(handle)
             .unwrap_or(0);
-        let dispatch = self.helpers.hangup_exact_transitioned(handle).await;
-        // `initial_state` is read before the session lane. A peer BYE that
-        // holds the lane can commit Terminated in between (its CleanupMedia
-        // action is what fails a media pump that then asks for this hangup);
-        // the queued HangupCall finds no transition and sends nothing.
-        // Joining a confirmation for that never-sent BYE would hold this
-        // retained operation, and every waiter's terminal publication, until
-        // the non-INVITE transaction timeout. The lane's own outcome decides.
-        let hangup_was_noop = matches!(dispatch, Ok(false));
-        if let (Some(dispatched), Ok(transitioned)) = (dispatched, dispatch.as_ref()) {
-            let _ = dispatched.send(*transitioned);
-        }
-        let dispatch = dispatch.map(|_| ());
-        let established_dialog = initial_state.is_some_and(local_hangup_sends_bye);
-        let retained_new_bye = established_dialog
+        let dispatch = self.helpers.hangup_exact(handle).await;
+        let retained_new_bye = matches!(initial_state, Some(CallState::Active))
             && self
                 .dialog_adapter
                 .has_outgoing_bye_after_exact(handle, bye_generation_before_dispatch);
@@ -12901,7 +11000,7 @@ impl UnifiedCoordinator {
         // the dialog (the ordinary simultaneous-BYE race). The confirmation
         // helper always performs exact local reclamation on any other
         // timeout/non-2xx while preserving that wire failure for the caller.
-        if established_dialog && !hangup_was_noop {
+        if matches!(initial_state, Some(CallState::Active)) {
             return complete_established_bye_dispatch(
                 dispatch,
                 retained_new_bye,
@@ -12918,100 +11017,12 @@ impl UnifiedCoordinator {
             self.release_after_observed_terminal_exact(handle).await;
             return Ok(());
         }
-        // A hangup after 200 OK and before ACK moves the session to
-        // `AnsweringHangupPending`, which re-stamps `entered_state_at`. The
-        // accept watchdog armed for `Answering` then finds itself stale and
-        // disarms, and a cancellation watchdog does not watch this state, so
-        // with the ACK lost nothing would ever end the call or release its
-        // session and media port.
-        let state_after_hangup = self
-            .helpers
-            .state_machine
-            .store
-            .get_session_snapshot_exact(handle)
-            .ok()
-            .map(|session| session.call_state);
-        let watchdog = local_hangup_watchdog_kind(
-            state_after_hangup,
-            self.config.session_cleanup.pending_hangup_watchdog,
-        );
-        if watchdog == SetupTeardownWatchdogKind::AcceptedCall {
-            crate::cleanup_diag::record_pending_hangup_watchdog_armed();
-        }
-        self.schedule_setup_teardown_timeout_exact_if_current(handle, watchdog)
-            .await;
-        Ok(())
-    }
-
-    /// RTP packets received for an ownerless session, so the orphan sweeper
-    /// never reclaims a call whose media still flows.
-    pub(crate) async fn orphan_rtp_packets_received(&self, session_id: &SessionId) -> Option<u64> {
-        self.media_adapter
-            .media_activity_count(session_id, false)
-            .await
-    }
-
-    /// Identity and state of every current session-store lifetime.
-    pub(crate) fn orphan_sweep_entries(&self) -> Vec<crate::orphan_sweep::SweepEntry> {
-        self.helpers.state_machine.store.sweep_entries()
-    }
-
-    /// Release one session that has had no owner (no adapter route, no
-    /// in-flight rejection or reclaim) and no new RTP for the orphan TTL.
-    ///
-    /// An established call is first given a bounded BYE so the peer does not
-    /// keep it. Every lifetime then goes through the forced local reclaim:
-    /// dialog and media cleanup (which returns its media port) and slot
-    /// removal, ending in the counted slot force-release if lower cleanup
-    /// fails. Each step is bounded and only waiters stop, so a retained
-    /// hangup keeps running. Raw identifiers are never re-resolved.
-    pub(crate) async fn reclaim_orphan_session_exact(
-        &self,
-        handle: &SessionRegistryHandle,
-    ) -> crate::cleanup_diag::OrphanSessionReclaimOutcome {
-        use crate::cleanup_diag::OrphanSessionReclaimOutcome as Outcome;
-        let store = Arc::clone(&self.helpers.state_machine.store);
-        let Ok(state) = store
-            .get_session_snapshot_exact(handle)
-            .map(|session| session.call_state)
-        else {
-            return Outcome::AlreadyReleased;
-        };
-        if crate::orphan_sweep::established_state(state) {
-            let _ = tokio::time::timeout(
-                ORPHAN_GRACEFUL_HANGUP_TIMEOUT,
-                self.hangup_exact_with_reason(handle, "SIP session had no owner"),
-            )
-            .await;
-            if store.get_session_retained_snapshot_exact(handle).is_err() {
-                return Outcome::Graceful;
-            }
-        }
-        let reclaimed = tokio::time::timeout(ORPHAN_RECLAIM_FINISH_TIMEOUT, async {
-            self.begin_force_reclaim_local_session_exact(handle)
-                .await
-                .finish()
-                .await;
-        })
-        .await;
-        if reclaimed.is_ok() {
-            return Outcome::Forced;
-        }
-        let _ = tokio::time::timeout(
-            ORPHAN_SLOT_RELEASE_TIMEOUT,
-            self.force_release_session_slot_exact(handle, "orphan-session-reclaim-timed-out"),
+        self.schedule_setup_teardown_timeout_exact_if_current(
+            handle,
+            SetupTeardownWatchdogKind::Cancellation,
         )
         .await;
-        Outcome::TimedOut
-    }
-
-    /// Allocate real media (and so a media port) for a test lifetime.
-    #[cfg(test)]
-    pub(crate) async fn allocate_media_for_test(&self, session_id: &SessionId) -> Result<()> {
-        self.media_adapter
-            .create_session(session_id)
-            .await
-            .map(|_| ())
+        Ok(())
     }
 
     async fn release_after_observed_terminal(&self, session_id: &SessionId) {
@@ -13713,42 +11724,11 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        use crate::adapters::dialog_adapter::{
-            outgoing_bye_cleanup_interrupted_error, OutgoingByeWait,
-        };
         let reason = reason.into();
-        let confirmation = match self
+        let confirmation = self
             .dialog_adapter
-            .wait_for_outgoing_bye_outcome_exact(handle)
-            .await
-        {
-            Ok(OutgoingByeWait::Confirmed) => Ok(()),
-            // The lifetime's terminal release removed this BYE's receipt
-            // before its final response was recorded. That release publishes
-            // its terminal fact first, and this hangup has not recorded one
-            // yet, so a normal end here was committed by another path: the
-            // peer's own BYE crossing ours (the simultaneous-BYE race of RFC
-            // 3261 §15.1.1). The call ended as the hangup asked; only the
-            // confirmation of the redundant BYE was lost. Any other terminal,
-            // or none, keeps the interrupted confirmation as a failure.
-            Ok(OutgoingByeWait::CleanupInterrupted) => {
-                let peer_ended =
-                    self.lifecycle_snapshot_exact(handle)
-                        .await
-                        .is_ok_and(|snapshot| {
-                            matches!(
-                                snapshot.terminal,
-                                Some(crate::api::lifecycle::CallTerminalInfo::Ended { .. })
-                            )
-                        });
-                if peer_ended {
-                    Ok(())
-                } else {
-                    Err(outgoing_bye_cleanup_interrupted_error())
-                }
-            }
-            Err(error) => Err(error),
-        };
+            .wait_for_outgoing_bye_final_response_exact(handle)
+            .await;
         let lifecycle_commit =
             commit_local_bye_lifecycle_exact(Arc::clone(&self.helpers.state_machine), handle).await;
         let finalization = match lifecycle_commit {
@@ -13851,25 +11831,6 @@ impl UnifiedCoordinator {
     /// Retained adapter cleanup must use this entry point: resolving a raw
     /// identifier after a timeout could otherwise select a replacement
     /// lifetime admitted while the old cleanup was delayed.
-    /// Release one ended lifetime's session-store slot directly, for a
-    /// retained reclaim whose forced cleanup exceeded its bound. Counted and
-    /// rate-limited by [`force_release_exact_session_slot`].
-    pub(crate) async fn force_release_session_slot_exact(
-        &self,
-        handle: &SessionRegistryHandle,
-        reason: &'static str,
-    ) -> Result<()> {
-        let deadlines = self.setup_teardown_deadline_cancellation();
-        force_release_exact_session_slot(
-            &self.helpers.state_machine.store,
-            Some(self.pending_exact_responses.as_ref()),
-            Some(&deadlines),
-            handle,
-            reason,
-        )
-        .await
-    }
-
     pub(crate) async fn begin_force_reclaim_local_session_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -13926,26 +11887,8 @@ impl UnifiedCoordinator {
         session_a: &SessionId,
         session_b: &SessionId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
-        self.bridge_with_mode(session_a, session_b, BridgeMode::Relay)
-            .await
-    }
-
-    /// Bridge two calls, choosing relay vs per-direction transcoding.
-    ///
-    /// [`BridgeMode::Relay`] is the historical [`Self::bridge`] behaviour and
-    /// requires both legs to share an interchangeable payload type.
-    /// [`BridgeMode::Transcode`] decodes and re-encodes per direction with each
-    /// leg's SIP-negotiated codec, so calls whose legs negotiated different
-    /// codecs still exchange audio. Both codecs must be compiled into the
-    /// media layer (feature-gated codecs such as Opus need their feature).
-    pub async fn bridge_with_mode(
-        &self,
-        session_a: &SessionId,
-        session_b: &SessionId,
-        mode: BridgeMode,
-    ) -> std::result::Result<BridgeHandle, BridgeError> {
         self.media_adapter
-            .bridge_rtp_sessions_with_mode(session_a, session_b, mode)
+            .bridge_rtp_sessions(session_a, session_b)
             .await
     }
 
@@ -14574,32 +12517,6 @@ impl UnifiedCoordinator {
         self.helpers.get_state(session_id).await
     }
 
-    /// Committed call-state changes of one exact session lifetime.
-    pub(crate) fn subscribe_call_state_exact(
-        &self,
-        handle: &SessionRegistryHandle,
-    ) -> Option<tokio::sync::watch::Receiver<Option<CallState>>> {
-        self.helpers
-            .state_machine
-            .store
-            .subscribe_call_state_exact(handle)
-    }
-
-    /// The current exact lifetime of `session_id` and its committed
-    /// media-readiness changes.
-    pub(crate) fn subscribe_media_readiness(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<(
-        SessionRegistryHandle,
-        tokio::sync::watch::Receiver<Option<crate::session_store::state::MediaReadinessSignal>>,
-    )> {
-        let store = &self.helpers.state_machine.store;
-        let handle = store.lifecycle_handle(session_id)?;
-        let updates = store.subscribe_media_readiness_exact(&handle)?;
-        Some((handle, updates))
-    }
-
     pub(crate) async fn get_state_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -14649,62 +12566,6 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// The current exact lifecycle handle of `session_id`.
-    pub(crate) fn media_lifecycle_handle(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<SessionRegistryHandle> {
-        self.media_adapter.lifecycle_handle(session_id)
-    }
-
-    /// The runtime of the lane that owns `session_id`'s RTP socket (media
-    /// executor v2), if its transport has one.
-    pub(crate) fn media_runtime_handle(
-        &self,
-        session_id: &SessionId,
-    ) -> Option<tokio::runtime::Handle> {
-        self.media_adapter.media_runtime_handle(session_id)
-    }
-
-    /// The cached encoded G.711 TX path of `session_id`'s current media
-    /// lifetime (media executor v2; see `MediaAdapter::resolve_exact_g711_tx`).
-    pub(crate) fn resolve_current_g711_tx(
-        &self,
-        session_id: &SessionId,
-        format: rvoip_media_core::relay::controller::EncodedG711Format,
-        payload_type: u8,
-    ) -> Option<crate::adapters::media_adapter::ExactG711Tx> {
-        self.media_adapter
-            .resolve_current_g711_tx(session_id, format, payload_type)
-    }
-
-    /// The cached encoded G.711 TX path of one exact media lifetime.
-    pub(crate) fn resolve_exact_g711_tx(
-        &self,
-        handle: &SessionRegistryHandle,
-        format: rvoip_media_core::relay::controller::EncodedG711Format,
-        payload_type: u8,
-    ) -> Option<crate::adapters::media_adapter::ExactG711Tx> {
-        self.media_adapter
-            .resolve_exact_g711_tx(handle, format, payload_type)
-    }
-
-    /// Fuse the reader of `session_id`'s decoded-audio channel onto the RTP
-    /// socket owner (media executor v2; see
-    /// `MediaAdapter::install_inline_audio_consumer`).
-    pub(crate) fn install_inline_audio_consumer(
-        &self,
-        session_id: &SessionId,
-        consumer: Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
-        backlog: &mut dyn FnMut() -> Option<AudioFrame>,
-    ) -> std::result::Result<
-        rvoip_media_core::relay::controller::InlineAudioConsumerGuard,
-        Box<dyn rvoip_media_core::relay::controller::InlineAudioConsumer>,
-    > {
-        self.media_adapter
-            .install_inline_audio_consumer(session_id, consumer, backlog)
-    }
-
     pub(crate) async fn subscribe_to_audio_exact(
         &self,
         handle: &SessionRegistryHandle,
@@ -14749,60 +12610,22 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// The SIP-negotiated media format recorded on one session, or `None`
-    /// until SDP negotiation has produced a codec and payload type.
-    fn negotiated_media_from_session(
-        session: &crate::session_store::state::SessionState,
-    ) -> Option<crate::api::lifecycle::NegotiatedMedia> {
-        let config = session.negotiated_config.as_ref()?;
-        let payload_type = session.negotiated_payload_type()?;
-        Some(crate::api::lifecycle::NegotiatedMedia {
-            codec: config.codec.clone(),
-            payload_type,
-            clock_rate: config.sample_rate,
-            channels: config.channels,
-            fmtp: config.fmtp.clone(),
-        })
-    }
-
-    /// Resolve the exact SDP-negotiated media format for one exact live
-    /// session lifetime.
+    /// Resolve the exact SDP-negotiated media format for a live session.
     ///
     /// This is crate-private because transport-neutral callers consume the
     /// resulting [`crate::media_stream::SipMediaStream`] codec descriptor.
+    pub(crate) async fn negotiated_media_config(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
+        self.helpers.negotiated_media_config(session_id).await
+    }
+
     pub(crate) async fn negotiated_media_config_exact(
         &self,
         handle: &SessionRegistryHandle,
     ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
         self.helpers.negotiated_media_config_exact(handle).await
-    }
-
-    /// The SIP-negotiated media format for one call, or `None` until SDP
-    /// negotiation has committed.
-    ///
-    /// This is the codec/rate/channel shape the answer actually selected, read
-    /// from the session store — the same value the media layer encodes with.
-    /// Re-INVITE renegotiation replaces it.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// if let Some(media) = coordinator.negotiated_media(&call).await? {
-    ///     println!("{} at {} Hz, {} ch (PT {})", media.codec, media.clock_rate, media.channels, media.payload_type);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn negotiated_media(
-        &self,
-        session: &SessionId,
-    ) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
-        Ok(self
-            .helpers
-            .state_machine
-            .store
-            .with_session(session, Self::negotiated_media_from_session)?)
     }
 
     /// Exact number of range-backed RTP/RTCP ports currently leased by SIP
@@ -14916,8 +12739,22 @@ impl UnifiedCoordinator {
             return Ok(None);
         };
 
-        Ok(Some(
-            crate::api::incoming::IncomingCall::from_event_captured(
+        let pending = lifecycle_handle
+            .as_ref()
+            .and_then(|handle| self.pending_incoming_bundle_for_handle_exact(handle));
+        let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+        let transport = pending.and_then(|bundle| bundle.transport);
+        let incoming = match parsed {
+            Some(req) => crate::api::incoming::IncomingCall::with_request_captured(
+                call_id,
+                from,
+                to,
+                sdp,
+                self.clone(),
+                req,
+                lifecycle_handle,
+            ),
+            None => crate::api::incoming::IncomingCall::new_captured(
                 call_id,
                 from,
                 to,
@@ -14925,7 +12762,14 @@ impl UnifiedCoordinator {
                 self.clone(),
                 lifecycle_handle,
             ),
-        ))
+        }
+        .with_transport_context(
+            transport
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+        );
+        Ok(Some(incoming))
     }
 
     pub(crate) fn pending_incoming_bundle_for_handle_exact(
@@ -15158,9 +13002,6 @@ impl UnifiedCoordinator {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_server_client_auth: config.tls_server_client_auth.clone(),
-            tls_flow: config.sip_tls_flow.clone(),
-            tcp_flow: config.sip_tcp_flow.clone(),
-            new_call_admission: config.sip_new_call_admission,
             tls_extra_ca_path: config
                 .tls_extra_ca_path
                 .as_ref()
@@ -15278,9 +13119,6 @@ impl UnifiedCoordinator {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
-                dialog.tls_proxy_flow_policies = config.sip_tls_proxy_flow_policies.clone();
-                dialog.retain_outbound_tls_flow = config.sip_retain_outbound_tls_flow;
-                dialog.uas_capabilities = config.effective_uas_capabilities();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
@@ -15606,9 +13444,9 @@ impl UnifiedCoordinator {
             .map_err(map_state_machine_dispatch_error)
     }
 
-    /// Test accessor: read the current `SessionState` snapshot for the
-    /// given session id.
-    #[cfg(test)]
+    /// Crate-internal accessor: read the current `SessionState` snapshot for
+    /// the given session id. Used by refresh-style builders that need to
+    /// reuse registration / dialog identifiers from the original send.
     pub(crate) async fn session_state(
         &self,
         session_id: &SessionId,
@@ -15659,39 +13497,6 @@ impl UnifiedCoordinator {
         self.invite(Some(from.to_string()), to.to_string())
             .send()
             .await
-    }
-}
-
-/// SIP transaction-layer admission and slot cleanup
-impl UnifiedCoordinator {
-    /// The new-call admission gate of this coordinator's SIP transaction
-    /// layer, configured from [`Config::sip_new_call_admission`].
-    ///
-    /// An application overload controller changes the mode, level and rate
-    /// limit through it at run time, and reads its counters with
-    /// [`NewCallAdmission::stats`](rvoip_sip_dialog::transaction::NewCallAdmission::stats).
-    pub fn new_call_admission(&self) -> Arc<rvoip_sip_dialog::transaction::NewCallAdmission> {
-        Arc::clone(
-            self.dialog_adapter
-                .dialog_api
-                .dialog_manager()
-                .core()
-                .transaction_manager()
-                .new_call_admission(),
-        )
-    }
-
-    /// Slot-cleanup counters of this coordinator's SIP transaction layer:
-    /// terminal publications continued in the background instead of closing
-    /// admission, fail-closed latches, and new INVITEs answered with a
-    /// stateless 503 at the admission limit or while draining.
-    pub fn sip_slot_cleanup_stats(&self) -> rvoip_sip_dialog::transaction::SlotCleanupStats {
-        self.dialog_adapter
-            .dialog_api
-            .dialog_manager()
-            .core()
-            .transaction_manager()
-            .slot_cleanup_stats()
     }
 }
 

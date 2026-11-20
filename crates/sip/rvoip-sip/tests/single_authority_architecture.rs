@@ -749,19 +749,10 @@ fn lifecycle_timeout_fire_paths_use_exact_dispatch() {
 
     let media_hangup = compact(function_source(
         &source,
-        "async fn hangup_exact_with_reason(",
+        "async fn hangup_exact_with_reason",
     ));
     assert!(
-        media_hangup.contains(".hangup_exact_with_reason_reporting(handle,reason.into(),None)"),
-        "automatic hangup must join the same reporting hangup operation as public hangup"
-    );
-    let reporting_hangup = compact(function_source(
-        &source,
-        "async fn hangup_exact_with_reason_reporting(",
-    ));
-    assert!(
-        reporting_hangup
-            .contains("coordinator.hangup_serialized_exact(&retained_handle,reason,dispatched)"),
+        media_hangup.contains("coordinator.hangup_serialized_exact(&retained_handle,reason)"),
         "automatic and public hangup must share the retained exact serialized operation"
     );
     assert!(
@@ -1467,7 +1458,7 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         &strip_cfg_test_items(&lifecycle),
         "pub(crate) fn publish_exact",
     ));
-    assert!(publish_exact.contains("offer_to_control_owner(event,Some(lifecycle_handle))"));
+    assert!(publish_exact.contains("offer_to_control_owner(&event,Some(lifecycle_handle))"));
     assert!(publish_exact.contains("sanitize_session_api_observation(&event)"));
     assert!(publish_exact.contains("record_event_exact(lifecycle_handle,&event)"));
     assert!(lifecycle.contains("pub(crate) fn watcher_exact("));
@@ -1477,7 +1468,9 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
         "pub(crate) fn publish_terminal_best_effort_exact",
     ));
     assert!(publish_terminal_exact.contains("record_event_exact(lifecycle_handle,&event)"));
-    assert!(publish_terminal_exact.contains("offer_to_control_owner(event,Some(lifecycle_handle))"));
+    assert!(
+        publish_terminal_exact.contains("offer_to_control_owner(&event,Some(lifecycle_handle))")
+    );
 
     let stream_path = manifest.join("src/api/stream_peer.rs");
     let stream = fs::read_to_string(&stream_path)
@@ -1492,19 +1485,10 @@ fn incoming_call_control_capability_is_causal_and_generation_qualified() {
     assert!(filtered_exact.contains("exact_filter:Some(lifecycle_handle)"));
     let wait = compact(function_source(&stream, "pub async fn wait_for_incoming"));
     assert!(wait.contains("next_incoming_exact().await"));
-    assert!(wait.contains("IncomingCall::from_event_captured("));
+    assert!(wait.contains("pending_incoming_bundle_for_handle_exact(handle)"));
+    assert!(wait.contains("IncomingCall::with_request_captured("));
+    assert!(wait.contains("IncomingCall::new_captured("));
     assert!(!wait.contains("pending_incoming_bundle_exact(&call_id)"));
-    let incoming_path = manifest.join("src/api/incoming.rs");
-    let incoming = fs::read_to_string(&incoming_path)
-        .unwrap_or_else(|error| panic!("read {}: {error}", incoming_path.display()));
-    let from_event = compact(function_source(
-        &incoming,
-        "pub(crate) fn from_event_captured",
-    ));
-    assert!(from_event.contains("pending_incoming_bundle_for_handle_exact(handle)"));
-    assert!(from_event.contains("Self::with_request_captured("));
-    assert!(from_event.contains("Self::new_captured("));
-    assert!(!from_event.contains("pending_incoming_bundle_exact(&call_id)"));
     let wait_answered = compact(function_source(&stream, "pub async fn wait_for_answered"));
     assert!(wait_answered.contains("next_with_lifecycle().await"));
     assert!(wait_answered.contains("SessionHandle::new_captured("));

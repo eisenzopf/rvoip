@@ -275,35 +275,24 @@ async fn closed_cached_channel_is_replaced_by_exact_live_duplicate() {
         .await
         .expect("second open");
 
-    // `DataChannel::id` is a connection-local handle, so the two peers are
-    // matched by the SCTP stream id they share.
-    let cached_stream_id = tokio::time::timeout(Duration::from_secs(5), async {
+    let cached_id = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let cached = adapter.routes().get(&connection_id).and_then(|route| {
                 route
                     .data_channel
                     .iter()
                     .next()
-                    .map(|entry| entry.value().clone())
+                    .map(|entry| entry.value().id())
             });
-            if let Some(channel) = cached {
-                if let Ok(Some(stream_id)) = channel.stream_id().await {
-                    return stream_id;
-                }
+            if let Some(id) = cached {
+                return id;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .expect("initial cache");
-    let first_is_cached =
-        first.stream_id().await.expect("first stream id") == Some(cached_stream_id);
-    let survivor_stream_id = if first_is_cached {
-        second.stream_id().await.expect("second stream id")
-    } else {
-        first.stream_id().await.expect("first stream id")
-    };
-    let (closed, survivor) = if first_is_cached {
+    let (closed, survivor) = if first.id() == cached_id {
         (&first, &second)
     } else {
         (&second, &first)
@@ -317,12 +306,10 @@ async fn closed_cached_channel_is_replaced_by_exact_live_duplicate() {
                     .data_channel
                     .iter()
                     .next()
-                    .map(|entry| entry.value().clone())
+                    .map(|entry| entry.value().id())
             });
-            if let Some(channel) = replacement {
-                if channel.stream_id().await.ok().flatten() == survivor_stream_id {
-                    break;
-                }
+            if replacement == Some(survivor.id()) {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

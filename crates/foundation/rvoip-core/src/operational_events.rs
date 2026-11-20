@@ -147,57 +147,8 @@ impl From<&EndReason> for OperationalEndReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum OperationalFailureReason {
-    /// The adapter reported a failure that has no stable classification.
     AdapterReported,
-    /// Core failed the connection (for example a rejected accept).
     CoreReported,
-    /// A SIP call failed with a final non-2xx response (300-699).
-    ///
-    /// Only the numeric status code and a fixed analytics-block flag are
-    /// carried; the reason phrase, headers and any other peer-controlled
-    /// text are dropped. `network_blocked` is `true` only for
-    /// `603 Network Blocked`, the response carriers send when call
-    /// analytics blocked the call; every other phrase on a 603 (for
-    /// example `603 Decline`) reads as `false`.
-    ///
-    /// Produced for [`Transport::Sip`] connections whose adapter reports
-    /// [`AdapterEvent::Failed`](crate::adapter::AdapterEvent::Failed) with
-    /// a `detail` of the form `"<status> <reason phrase>"`, which is how
-    /// `rvoip-sip` reports a final failure response. Any other detail, and
-    /// every non-SIP transport, stays [`Self::AdapterReported`].
-    SipResponse {
-        /// Final SIP status code, always in `300..=699`.
-        status_code: u16,
-        /// `true` for `603 Network Blocked` only.
-        network_blocked: bool,
-    },
-}
-
-impl OperationalFailureReason {
-    /// Classify an adapter failure without retaining any of its text.
-    pub(crate) fn from_adapter(transport: Transport, detail: &str) -> Self {
-        if transport != Transport::Sip {
-            return Self::AdapterReported;
-        }
-        let detail = detail.trim();
-        let (status, phrase) = detail
-            .split_once(' ')
-            .map_or((detail, ""), |(status, phrase)| (status, phrase.trim()));
-        if status.len() != 3 || !status.bytes().all(|b| b.is_ascii_digit()) {
-            return Self::AdapterReported;
-        }
-        let Some(status_code) = status
-            .parse::<u16>()
-            .ok()
-            .filter(|status| (300..700).contains(status))
-        else {
-            return Self::AdapterReported;
-        };
-        Self::SipResponse {
-            status_code,
-            network_blocked: status_code == 603 && phrase.eq_ignore_ascii_case("network blocked"),
-        }
-    }
 }
 
 /// Redacted transfer destination shape. URI contents remain with the caller
@@ -253,13 +204,6 @@ pub enum OperationalEventKind {
     /// backpressure.
     MediaActivity {
         generation: u64,
-    },
-    /// The connection's committed audio format: codec, payload type, clock
-    /// rate, channels and security posture, never SDP, addresses or keys.
-    /// Published when offer/answer first commits and again when it changes;
-    /// keep the highest [`CommittedAudioMedia::revision`](crate::adapter::CommittedAudioMedia::revision).
-    MediaCommitted {
-        media: crate::adapter::CommittedAudioMedia,
     },
     /// Per-connection media quality, distilled from RTCP receiver reports
     /// and XR by the media layer.
@@ -327,15 +271,6 @@ impl fmt::Debug for OperationalEventKind {
             Self::MediaActivity { generation } => formatter
                 .debug_struct("MediaActivity")
                 .field("generation", generation)
-                .finish(),
-            Self::MediaCommitted { media } => formatter
-                .debug_struct("MediaCommitted")
-                .field("revision", &media.revision)
-                .field("codec", &media.codec)
-                .field("payload_type", &media.payload_type)
-                .field("clock_rate", &media.clock_rate)
-                .field("channels", &media.channels)
-                .field("secured", &media.keying.is_some())
                 .finish(),
             Self::Quality {
                 jitter_centi_ms,
@@ -437,24 +372,21 @@ struct OperationalEventStreamHealthState {
     updates: watch::Sender<OperationalEventStreamHealth>,
 }
 
-/// Owns the stream health rather than borrowing the stream, so an armed guard
-/// can move into a supervised task that completes a publication on behalf of
-/// a caller that may be cancelled.
-pub(crate) struct OperationalSendGuard {
-    health: Arc<OperationalEventStreamHealthState>,
+pub(crate) struct OperationalSendGuard<'a> {
+    stream: &'a OperationalEventStream,
     armed: bool,
 }
 
-impl OperationalSendGuard {
+impl OperationalSendGuard<'_> {
     pub(crate) fn disarm(&mut self) {
         self.armed = false;
     }
 }
 
-impl Drop for OperationalSendGuard {
+impl Drop for OperationalSendGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.health
+            self.stream
                 .mark_degraded(OperationalEventStreamFailure::DeliveryCancelled);
         }
     }
@@ -530,9 +462,9 @@ impl OperationalEventStream {
     /// authoritative event was owed). Dropping an armed guard permanently
     /// degrades the stream so cancellation cannot erase a lifecycle outcome
     /// while leaving the process apparently healthy.
-    pub(crate) fn delivery_guard(&self) -> OperationalSendGuard {
+    pub(crate) fn delivery_guard(&self) -> OperationalSendGuard<'_> {
         OperationalSendGuard {
-            health: Arc::clone(&self.health),
+            stream: self,
             armed: true,
         }
     }
@@ -554,22 +486,9 @@ impl OperationalEventStream {
         let mut cancellation_guard = self.delivery_guard();
         // Reserve bounded capacity before assigning the global sequence. A
         // cancelled waiter therefore cannot create a visible sequence gap.
-        //
-        // Callers usually hold the global publication-order lock. Even with
-        // free capacity, `reserve().await` can return `Pending` once the task
-        // has spent its cooperative budget, which would park every other
-        // connection's publication behind this one. Take available capacity
-        // without suspending; only a full stream waits, under the same guard.
-        let permit = match self.sender.try_reserve() {
+        let permit = match self.sender.reserve().await {
             Ok(permit) => permit,
-            Err(mpsc::error::TrySendError::Full(())) => match self.sender.reserve().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    self.mark_degraded(OperationalEventStreamFailure::SendFailed);
-                    return false;
-                }
-            },
-            Err(mpsc::error::TrySendError::Closed(())) => {
+            Err(_) => {
                 self.mark_degraded(OperationalEventStreamFailure::SendFailed);
                 return false;
             }
@@ -607,54 +526,6 @@ mod tests {
     use rvoip_core_traits::data::DataReliability;
 
     #[test]
-    fn sip_failure_keeps_only_final_status_and_fixed_block_flag() {
-        for (detail, status_code, network_blocked) in [
-            ("603 Decline", 603, false),
-            ("603 Network Blocked", 603, true),
-            ("603 network blocked", 603, true),
-            ("603 Network Blocked by policy", 603, false),
-            ("486 Busy Here", 486, false),
-            ("404 Not Found", 404, false),
-            ("302", 302, false),
-            ("  503 credential-like-secret  ", 503, false),
-        ] {
-            let reason = OperationalFailureReason::from_adapter(Transport::Sip, detail);
-            assert_eq!(
-                reason,
-                OperationalFailureReason::SipResponse {
-                    status_code,
-                    network_blocked
-                },
-                "{detail:?}"
-            );
-            assert!(!format!("{reason:?}").contains("credential-like-secret"));
-        }
-        for detail in [
-            "200 OK",
-            "180 Ringing",
-            "700 private",
-            "0486 Busy Here",
-            "+486 Busy Here",
-            "603Network Blocked",
-            "SIP media driver failed",
-            "session rejected locally: Busy",
-            "",
-        ] {
-            assert_eq!(
-                OperationalFailureReason::from_adapter(Transport::Sip, detail),
-                OperationalFailureReason::AdapterReported,
-                "{detail:?}"
-            );
-        }
-        for transport in [Transport::WebRtc, Transport::Quic, Transport::WebSocket] {
-            assert_eq!(
-                OperationalFailureReason::from_adapter(transport, "603 Network Blocked"),
-                OperationalFailureReason::AdapterReported
-            );
-        }
-    }
-
-    #[test]
     fn debug_redacts_operational_payloads() {
         let secret = "credential-like-secret";
         let message = DataMessage {
@@ -688,41 +559,6 @@ mod tests {
             assert!(!debug.contains(secret));
             assert!(debug.contains("[redacted]"));
         }
-    }
-
-    #[tokio::test]
-    async fn available_publication_does_not_yield_with_exhausted_cooperative_budget() {
-        use std::future::Future;
-        use std::task::Poll;
-
-        let (stream, mut receiver) = OperationalEventStream::new(2);
-        std::future::poll_fn(|cx| {
-            // Model a busy adapter task that enters publication, holding the
-            // global order lock, after consuming its scheduling budget.
-            let mut exhausted = false;
-            for _ in 0..1024 {
-                let mut consume = std::pin::pin!(tokio::task::consume_budget());
-                if consume.as_mut().poll(cx).is_pending() {
-                    exhausted = true;
-                    break;
-                }
-            }
-            assert!(exhausted, "test must reach the cooperative yield boundary");
-            let mut send = std::pin::pin!(stream.send(
-                ConnectionId::new(),
-                Transport::Sip,
-                Utc::now(),
-                OperationalEventKind::Connected,
-            ));
-            assert!(
-                matches!(send.as_mut().poll(cx), Poll::Ready(true)),
-                "available publication must not suspend the order-lock holder"
-            );
-            Poll::Ready(())
-        })
-        .await;
-        assert_eq!(receiver.try_recv().unwrap().sequence, 1);
-        assert_eq!(stream.health(), OperationalEventStreamHealth::Healthy);
     }
 
     #[tokio::test]

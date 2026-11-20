@@ -23,19 +23,17 @@ workspace = true
 rvoip-infra-common.workspace = true
 
 bytes = "1.5.0"
-thiserror = "2.0.19"
+thiserror = "1.0.56"
 anyhow.workspace = true
-# 1.41: `RuntimeMetrics::global_queue_depth` (the lane tick's check for
-# cross-thread work).
-tokio = { version = "1.41", features = ["rt", "rt-multi-thread", "sync", "net", "time", "macros", "full"] }
+tokio = { version = "1.35.1", features = ["rt", "rt-multi-thread", "sync", "net", "time", "macros", "full"] }
 tracing = "0.1.40"
 tracing-subscriber = "0.3"
-rand = "0.10"
+rand = "0.8.5"
 async-trait = "0.1"
-base64 = "0.23"
+base64 = "0.22"
 futures = "0.3.30"
 once_cell = "1.10"
-parking_lot = "0.13"
+parking_lot = "0.12.1"
 # RFC 4733 §2.5.1.3 retransmit dedup keyed on (peer_addr, ssrc, ts);
 # sharded for the receive hot path.
 dashmap = { workspace = true }
@@ -48,16 +46,14 @@ arc-swap = "1.7"
 # `RtpPacket::payload` is a refcounted slice with zero-copy parse.
 # When all Bytes clones drop, the owner returns the Vec to the pool.
 crossbeam-queue = "0.3"
-# Projection for the media clock's sleep enum (`media_clock::MediaSleep`).
-pin-project-lite = "0.2"
 # Cryptographic dependencies for DTLS
-hmac = "0.13"
-sha1 = "0.11"
-sha2 = "0.11"
-aes = "0.9"
-ctr = "0.10"
-aes-gcm = "0.11"
-p256 = { version = "0.14", features = ["ecdh"] }
+hmac = "0.12.1"
+sha1 = "0.10"
+sha2 = "0.10.8"
+aes = "0.8"
+ctr = "0.9"
+aes-gcm = "0.10.3"
+p256 = { version = "0.13.2", features = ["ecdh"] }
 x509-parser = "0.18"
 rcgen = "0.14"
 uuid = { version = "1.6.1", features = ["v4"] }
@@ -73,35 +69,24 @@ time = { version = "0.3.47", features = ["std"] }
 # Renamed to `dtls_ext` to avoid any confusion with this crate's own
 # `crate::dtls` module.
 dtls_ext = { package = "dtls", version = "0.17", optional = true }
-# Process-level provider fallback for `dtls` (see `dtls_srtp::ensure_process_crypto_provider`).
-rustls = { workspace = true, optional = true }
 # Only the `Conn` transport trait and the `KeyingMaterialExporter` trait
 # (RFC 5705 keying-material export, used for RFC 5764 SRTP key derivation)
 # are used from this.
 webrtc-util = { version = "0.17", optional = true, default-features = false, features = ["conn"] }
 
-# Windows media binds go through socket2 so SO_EXCLUSIVEADDRUSE can be set
-# before bind (see transport/validation.rs, `bind_media_udp_socket`).
-[target.'cfg(windows)'.dependencies]
-socket2 = { workspace = true }
-
 [features]
 default = []
 memory-diagnostics = ["rvoip-infra-common/memory-diagnostics"]
-dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util", "dep:rustls"]
+dtls-webrtc = ["dep:dtls_ext", "dep:webrtc-util"]
 
 [dev-dependencies]
-socket2 = { workspace = true }
 criterion = { workspace = true }
 # Paused-clock tests for the RFC 3550 RTCP report interval.
-tokio = { version = "1.41", features = ["full", "test-util"] }
+tokio = { version = "1.35.1", features = ["full", "test-util"] }
 # Independent SRTP implementation (same webrtc-rs 0.17.x lineage already
 # used for `dtls`/`webrtc-util` this session), used purely to prove real
 # RFC 3711 interoperability instead of just self-consistent round-tripping.
 webrtc-srtp = "0.17"
-# Link rustls's aws-lc-rs provider next to ring in tests, so rustls cannot
-# infer a process-level provider: the DTLS tests prove rtp-core copes.
-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
 [[example]]
 name = "dtls_test"

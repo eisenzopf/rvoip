@@ -53,7 +53,6 @@ use crate::types::header::Header;
 use crate::types::method::Method;
 use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -355,14 +354,13 @@ impl FromStr for CSeq {
         let trimmed_s = s.trim();
 
         // Try parsing as a full header first (with "CSeq:" prefix)
-        let full_result = all_consuming(full_parse_cseq).parse(trimmed_s.as_bytes());
+        let full_result = all_consuming(full_parse_cseq)(trimmed_s.as_bytes());
         if let Ok((_, cseq)) = full_result {
             return Ok(cseq);
         }
 
         // If that fails, try parsing just the value part
-        all_consuming(parse_cseq)
-            .parse(trimmed_s.as_bytes())
+        all_consuming(parse_cseq)(trimmed_s.as_bytes())
             .map(|(_, cseq)| cseq)
             .map_err(Error::from)
     }

@@ -882,9 +882,6 @@ pub(crate) struct OutboundSessionStateInput {
     credentials: Option<crate::types::Credentials>,
     auth: Option<crate::auth::SipClientAuth>,
     pai_uri: Option<String>,
-    /// Offer plain RTP (`RTP/AVP`) for this call (carrier trunks, legacy
-    /// peers) instead of the endpoint's secure/WebRTC profile.
-    plain_rtp: bool,
     transferor_session_id: Option<SessionId>,
     transferor_lifecycle_handle: Option<SessionRegistryHandle>,
     extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
@@ -903,7 +900,6 @@ impl OutboundSessionStateInput {
             credentials,
             auth,
             pai_uri,
-            plain_rtp: false,
             transferor_session_id,
             transferor_lifecycle_handle,
             extra_headers,
@@ -919,7 +915,6 @@ impl OutboundSessionStateInput {
             credentials: snapshot.credentials.clone(),
             auth: snapshot.auth.clone(),
             pai_uri,
-            plain_rtp: snapshot.plain_rtp,
             transferor_session_id: snapshot.transfer_leg.clone(),
             transferor_lifecycle_handle,
             extra_headers: snapshot.extra_headers.clone(),
@@ -1086,7 +1081,6 @@ impl EventStateInput {
             session.credentials = input.credentials;
             session.auth = input.auth;
             session.pai_uri = input.pai_uri;
-            session.plain_rtp_offer = input.plain_rtp;
             session.is_transfer_call = input.transferor_session_id.is_some();
             session.transferor_session_id = input.transferor_session_id;
             session.transferor_lifecycle_handle = input.transferor_lifecycle_handle;
@@ -3455,46 +3449,11 @@ impl StateMachine {
             _ => {}
         }
 
-        // CancelAfterTrying is derived below from a user hangup or cancel; it
-        // is never a command of its own.
-        if matches!(event, EventType::CancelAfterTrying) {
-            return Err(crate::errors::SessionError::InvalidTransition(
-                "CancelAfterTrying is derived from a user hangup or cancel".into(),
-            )
-            .into());
-        }
-        // Record 100 as transaction progress, never as ringing. Like every
-        // other staged mutation, it commits only if a table row matches.
-        if matches!(event, EventType::Dialog100Trying) {
-            session.initial_invite_trying_received = true;
-        }
-        // RFC 3261 section 9.1: after a provisional response a user hangup or
-        // cancel of the initial INVITE sends CANCEL now instead of waiting in
-        // CancelPending for a 180/183 that may never come. A table without a
-        // CancelAfterTrying row keeps its own HangupCall/CancelCall rows.
-        let lookup_event = if session.role == crate::state_table::Role::UAC
-            && session.call_state == CallState::Initiating
-            && session.initial_invite_trying_received
-            && matches!(event, EventType::HangupCall | EventType::CancelCall)
-            && self
-                .table
-                .get(&StateKey {
-                    role: session.role,
-                    state: CallState::Initiating,
-                    event: EventType::CancelAfterTrying,
-                })
-                .is_some()
-        {
-            EventType::CancelAfterTrying
-        } else {
-            event.clone()
-        };
-
         // 2. Build state key for lookup
         let key = StateKey {
             role: session.role,
             state: session.call_state,
-            event: lookup_event,
+            event: event.clone(),
         };
 
         // 3. Look up transition in table
@@ -3753,23 +3712,6 @@ impl StateMachine {
                     // identity while retaining the exact transaction, timing,
                     // status override, and response headers that the action
                     // deliberately left untouched.
-                    session.call_state = old_state;
-                    session.entered_state_at = pre_event_snapshot.state().entered_state_at;
-                }
-                // A local hold/resume is committed only by the peer's 2xx
-                // (RFC 3261 §14.1). When its re-INVITE could not be sent,
-                // SendReINVITE has already rolled back the offer and pending
-                // re-INVITE; leaving the call in HoldPending/Resuming would
-                // strand it there with no transaction to complete it, and
-                // every later hold, resume or hangup would find no row.
-                // Return to the pre-event state and keep the original error.
-                if matches!(action, Action::SendReINVITE)
-                    && matches!(
-                        (old_state, &event),
-                        (CallState::Active, EventType::HoldCall)
-                            | (CallState::OnHold, EventType::ResumeCall)
-                    )
-                {
                     session.call_state = old_state;
                     session.entered_state_at = pre_event_snapshot.state().entered_state_at;
                 }

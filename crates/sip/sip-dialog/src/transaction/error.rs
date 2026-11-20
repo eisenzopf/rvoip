@@ -82,13 +82,6 @@ pub enum Error {
     #[error("Transport management error: {0}")]
     Transport(String),
 
-    /// A client transaction's initial request failed before any of it was
-    /// offered to the transport: route preparation (connection setup, TLS
-    /// handshake, flow lookup) failed first. The peer cannot have received
-    /// the request, so no CANCEL is owed and a retry cannot duplicate it.
-    #[error("Initial request not sent: transport failed before the write")]
-    InitialRequestNotSent,
-
     /// Other miscellaneous errors.
     #[error("Other error: {0}")]
     Other(String),

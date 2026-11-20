@@ -8,7 +8,6 @@
 // 2. Add more comprehensive parameter validation for semantic constraints beyond syntax
 //    (e.g., validate tag values format constraints if any exist in the RFC)
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
@@ -41,28 +40,23 @@ fn to_spec(input: &[u8]) -> ParseResult<'_, Address> {
             addr.params = params_vec; // Assign parsed params
             addr // Return the modified Address
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // To = "To" / "t" HCOLON to-spec
 // Note: HCOLON handled elsewhere
 // Make this function public
 pub fn parse_to(input: &[u8]) -> ParseResult<'_, ToHeader> {
-    map(to_spec, ToHeader).parse(input)
+    map(to_spec, ToHeader)(input)
 }
 
 /// Parse a complete To header, including the header name and colon
 /// To = ( "To" / "t" ) HCOLON to-spec
 pub fn to_header(input: &[u8]) -> ParseResult<'_, ToHeader> {
     preceded(
-        terminated(
-            alt((tag_no_case(&b"To"[..]), tag_no_case(&b"t"[..]))),
-            hcolon,
-        ),
+        terminated(alt((tag_no_case(b"To"), tag_no_case(b"t"))), hcolon),
         parse_to,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]
@@ -75,9 +69,7 @@ mod tests {
 
     // Helper function to test with full input consumption
     fn test_parse_to(input: &[u8]) -> Result<ToHeader, nom::Err<nom::error::Error<&[u8]>>> {
-        all_consuming(parse_to)
-            .parse(input)
-            .map(|(_, output)| output)
+        all_consuming(parse_to)(input).map(|(_, output)| output)
     }
 
     #[test]
@@ -297,7 +289,7 @@ mod tests {
     fn test_parse_to_missing_uri() {
         // Test with missing URI
         let input = b"\"Display Name\"";
-        let result = all_consuming(parse_to).parse(input);
+        let result = all_consuming(parse_to)(input);
         assert!(result.is_err());
     }
 
@@ -305,7 +297,7 @@ mod tests {
     fn test_parse_to_malformed_uri() {
         // Test with malformed URI
         let input = b"<sip:@>";
-        let result = all_consuming(parse_to).parse(input);
+        let result = all_consuming(parse_to)(input);
         assert!(result.is_err());
     }
 
@@ -313,7 +305,7 @@ mod tests {
     fn test_parse_to_malformed_param() {
         // Test with malformed parameter
         let input = b"<sip:user@example.com>;=value";
-        let result = all_consuming(parse_to).parse(input);
+        let result = all_consuming(parse_to)(input);
         assert!(result.is_err());
     }
 

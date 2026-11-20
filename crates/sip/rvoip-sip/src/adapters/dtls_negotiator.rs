@@ -64,37 +64,16 @@ impl SetupRole {
     ///
     /// | Offer role | Answer role |
     /// |---|---|
-    /// | `actpass` | `active` (we initiate; RFC 5763 §5 recommends it) |
+    /// | `actpass` | `active` (we initiate) |
     /// | `active`  | `passive` (peer initiates) |
     /// | `passive` | `active`  (we initiate) |
     /// | `holdconn`| `holdconn` (re-use existing) |
-    ///
-    /// The answer to `actpass` is configurable; see [`Self::answer_to`].
     pub fn complementary(self) -> Self {
         match self {
             SetupRole::Actpass => SetupRole::Active,
             SetupRole::Active => SetupRole::Passive,
             SetupRole::Passive => SetupRole::Active,
             SetupRole::Holdconn => SetupRole::Holdconn,
-        }
-    }
-
-    /// The role this stack answers with, given the peer's offered role and
-    /// the configured answer to an `actpass` offer
-    /// (`Config::dtls_actpass_answer_role`).
-    ///
-    /// An `actpass` offer leaves the choice to the answerer. RFC 5763 §5 and
-    /// JSEP (RFC 8829 §5.3.1) recommend `active`, so the answerer sends the
-    /// ClientHello as soon as it answers; `passive` makes it wait for the
-    /// offerer's ClientHello, which never arrives when the offerer cannot
-    /// reach the answerer's media address first. Every other offered role
-    /// has exactly one legal answer, [`Self::complementary`].
-    pub fn answer_to(self, actpass_answer: crate::api::unified::DtlsActpassAnswerRole) -> Self {
-        use crate::api::unified::DtlsActpassAnswerRole;
-        match (self, actpass_answer) {
-            (SetupRole::Actpass, DtlsActpassAnswerRole::Passive) => SetupRole::Passive,
-            (SetupRole::Actpass, DtlsActpassAnswerRole::Active) => SetupRole::Active,
-            (offered, _) => offered.complementary(),
         }
     }
 }
@@ -247,26 +226,6 @@ mod tests {
         assert_eq!(SetupRole::Active.complementary(), SetupRole::Passive);
         assert_eq!(SetupRole::Passive.complementary(), SetupRole::Active);
         assert_eq!(SetupRole::Holdconn.complementary(), SetupRole::Holdconn);
-    }
-
-    #[test]
-    fn answer_role_matrix_for_each_actpass_answer_setting() {
-        use crate::api::unified::DtlsActpassAnswerRole;
-        assert_eq!(
-            DtlsActpassAnswerRole::default(),
-            DtlsActpassAnswerRole::Active,
-            "RFC 5763 §5 / RFC 8829 §5.3.1: answer actpass with active by default"
-        );
-        for (setting, actpass_answer) in [
-            (DtlsActpassAnswerRole::Active, SetupRole::Active),
-            (DtlsActpassAnswerRole::Passive, SetupRole::Passive),
-        ] {
-            assert_eq!(SetupRole::Actpass.answer_to(setting), actpass_answer);
-            // The setting only decides the answer to actpass.
-            assert_eq!(SetupRole::Active.answer_to(setting), SetupRole::Passive);
-            assert_eq!(SetupRole::Passive.answer_to(setting), SetupRole::Active);
-            assert_eq!(SetupRole::Holdconn.answer_to(setting), SetupRole::Holdconn);
-        }
     }
 
     #[test]

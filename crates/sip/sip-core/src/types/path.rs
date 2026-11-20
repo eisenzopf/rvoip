@@ -53,7 +53,6 @@ use crate::types::uri::Uri;
 use crate::types::Address;
 use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::ops::Deref;
@@ -478,7 +477,7 @@ impl FromStr for Path {
 
         // Use the Route parser for Path since they have the same format
         let input_bytes = s.as_bytes();
-        let parse_result = all_consuming(crate::parser::headers::parse_route).parse(input_bytes);
+        let parse_result = all_consuming(crate::parser::headers::parse_route)(input_bytes);
 
         match parse_result {
             Ok((_, route)) => Ok(Path(route.0)),

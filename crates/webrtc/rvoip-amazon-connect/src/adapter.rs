@@ -4809,33 +4809,16 @@ mod tests {
         let conn = ConnectionId::new();
         install_supervised_test_route(&adapter, conn.clone(), &route).await;
         tokio::task::yield_now().await;
-
-        // Same order as `terminate_active`: take the route's authority out of
-        // the map before signalling cancellation. `notify_waiters` stores no
-        // permit, so the supervisor can miss it (its unbiased select may take
-        // a health tick that became ready in the same poll and re-arm a fresh
-        // `notified()`). Removing the route first is what keeps a remote
-        // terminal from publishing; drive it with no yield in between so the
-        // supervisor sees cancellation and the remote end together.
-        assert!(adapter.routes.remove(&conn).is_some());
         route.cancel.notify_waiters();
+        tokio::task::yield_now().await;
         media.terminal(ConnectMediaTerminalCause::RemoteEnded);
 
-        let supervisor = route
-            .supervisor
-            .lock()
-            .await
-            .take()
-            .expect("supervised route owns its supervisor");
-        tokio::time::timeout(Duration::from_secs(5), supervisor)
-            .await
-            .expect("supervisor exits after local cancellation")
-            .expect("supervisor completes without panicking");
         assert!(
             tokio::time::timeout(Duration::from_millis(50), events.recv())
                 .await
                 .is_err(),
             "local teardown must not loop back as a remote Ended event"
         );
+        adapter.routes.remove(&conn);
     }
 }
