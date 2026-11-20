@@ -32,8 +32,34 @@ python3 scripts/bench/run_lane.py \
   [--run-id <id>]              # default: bench-<profile>-<sha12>-<utc stamp>
   [--resume]                   # see below
   [--max-wall <minutes>]       # from process start; see below
-  [--dry-run]
+  [--capacity-wait <minutes>]  # retry an EC2 capacity miss, within --max-wall
+  [--lane-config <json>]        # default: infra/aws/bench/lanes/<env-id>.json, else `terraform output`
+  [--dry-run]                  # walk every pre-launch step; launch, reserve and write nothing
 ```
+
+- **Lane config**: the `infra/aws/bench` Terraform outputs (launch templates,
+  subnets, security group, placement group, bucket, AMI). A hosted runner has
+  no Terraform state, so the env-id's config is committed as
+  `infra/aws/bench/lanes/<env-id>.json`. It names its env-id and the sha256 of
+  that env-id's `env.json`. run_lane refuses a config for another env-id, for
+  an `env.json` that has changed since (a re-pin), or with another AMI. It
+  also checks, before launching, that the launch templates boot that AMI on
+  the configured subnet (exit 2 on drift). `scripts/bench/lane_config.py
+  write` regenerates the config and `check` detects drift; run them where the
+  bench Terraform state is, after any apply or re-pin. bench_gate needs no
+  flag: run_lane finds the config by env-id.
+- **`--dry-run`**: every
+  step a lane takes before its first launch, against the real account. It
+  covers:
+  - the pinned environment and its tester builds (fetched from S3, sha-checked);
+  - the lane config and its match with EC2;
+  - the AZ, callers and media layout;
+  - the recorded rates the profile needs;
+  - the vCPU quota, the lane lock, orphaned reservations and the placement group;
+  - an EC2 DryRun of every reservation and launch;
+  - openssl TLS material and the binaries.
+
+  Each check is logged. It exits 0 when every check passes, otherwise 2 or 3.
 
 - **Credentials**: the standard AWS CLI chain (EC2 launch/terminate from the
   bench launch templates, SSM SendCommand, S3). Needs `aws` v2, `openssl`

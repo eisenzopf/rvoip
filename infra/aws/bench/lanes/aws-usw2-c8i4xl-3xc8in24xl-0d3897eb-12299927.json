@@ -1,0 +1,29 @@
+{
+ "ami_id": "ami-0d3897eb748e4b60e",
+ "availability_zone": "us-west-2b",
+ "caller_instance_type": "c8in.24xlarge",
+ "caller_launch_template": "rvoip-bench-caller",
+ "caller_launch_template_id": "lt-0fa536c10f17da913",
+ "caller_sources": 2,
+ "dut_instance_type": "c8i.4xlarge",
+ "dut_launch_template": "rvoip-bench-dut",
+ "dut_launch_template_id": "lt-0011ec7029eb7dc74",
+ "env_id": "aws-usw2-c8i4xl-3xc8in24xl-0d3897eb-12299927",
+ "env_json_sha256": "f2174459f7786c89a8961c4f77eadfa27f37866d6aa116cb1f922298897e57b2",
+ "evidence_bucket": "rvoip-release-evidence-225478700523",
+ "generated_at": "2026-11-20T19:50:09Z",
+ "host_instance_profile": "rvoip-bench-host",
+ "lane_vcpus": 208,
+ "orchestrator_policy_arn": "arn:aws:iam::225478700523:policy/rvoip-bench-orchestrator",
+ "placement_group": "rvoip-bench-lane",
+ "region": "us-west-2",
+ "release_public_subnet_ids": [
+  "subnet-03a48a3555ba97a4d",
+  "subnet-0ca24d64e05556bae",
+  "subnet-0f3625e6df6bd86d8",
+  "subnet-0f6ed21a11b0fe9f5"
+ ],
+ "schema": "rvoip-bench-lane-v1",
+ "security_group_id": "sg-0329cbb75d7abc686",
+ "subnet_id": "subnet-0f6ed21a11b0fe9f5"
+}

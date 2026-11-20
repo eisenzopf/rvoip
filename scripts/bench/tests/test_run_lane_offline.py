@@ -34,6 +34,7 @@ sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(HERE))
 import aws as aws_mod  # noqa: E402
 import bench_fixtures as fx  # noqa: E402
+import lane_config  # noqa: E402
 import profiles  # noqa: E402
 import record_baseline  # noqa: E402
 import rfc_report  # noqa: E402
@@ -86,6 +87,7 @@ class World:
         self.reserve_misses = 0        # create-capacity-reservation calls that fail on capacity first
         self.launch_misses = 0         # run-instances calls that fail on capacity first
         self.reserve_error = None      # a non-capacity create-capacity-reservation error
+        self.template_ami = AMI        # the AMI the launch templates' default version boots
         self.__dict__.update(kw)
 
 
@@ -200,6 +202,9 @@ class Cloud:
     # ---- EC2
     def ec2_run_instances(self, args):
         template = re.match(r'LaunchTemplateName=([^,]+)', opt(args, '--launch-template')).group(1)
+        if '--dry-run' in args:
+            raise aws_mod.AwsError('An error occurred (DryRunOperation) when calling the operation: '
+                                   'Request would have succeeded, but DryRun flag is set.')
         if self.world.launch_misses:
             self.world.launch_misses -= 1
             raise aws_mod.AwsError('aws ec2 run-instances: An error occurred (InsufficientInstanceCapacity) when '
@@ -237,6 +242,7 @@ class Cloud:
         if opt(args, '--launch-template-name') == 'rvoip-bench-caller':
             eni['SecondaryPrivateIpAddressCount'] = 1
         return {'LaunchTemplateVersions': [{'LaunchTemplateData': {
+            'ImageId': self.world.template_ami,
             'NetworkInterfaces': [eni], 'Placement': {'AvailabilityZone': 'us-west-2b', 'GroupName': 'rvoip-bench'}}}]}
 
     def ec2_describe_subnets(self, args):
@@ -293,6 +299,9 @@ class Cloud:
 
     def ec2_create_capacity_reservation(self, args):
         itype = opt(args, '--instance-type')
+        if '--dry-run' in args:
+            raise aws_mod.AwsError('An error occurred (DryRunOperation) when calling the operation: '
+                                   'Request would have succeeded, but DryRun flag is set.')
         if self.world.reserve_error:
             raise aws_mod.AwsError('aws ec2 create-capacity-reservation: An error occurred (%s)' % self.world.reserve_error)
         if self.world.reserve_misses:
@@ -681,8 +690,10 @@ class SmokeAndCliTests(LaneCase):
     def test_dry_run_launches_nothing(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            code = run_lane.main(self.bed.argv('release', 'dry-1', '--dry-run'))
+            code = run_lane.main(self.bed.argv('smoke', 'dry-1', '--dry-run'))
         self.assertEqual(code, 0, out.getvalue())
+        self.assertIn('dry-run check launch 2 x c8in.24xlarge: ok DryRunOperation', out.getvalue())
+        self.assertIn('dry-run check TLS material (openssl): ok', out.getvalue())
         self.assertEqual(self.bed.cloud.launched, [])
         self.assertFalse(self.bed.receipt_path('dry-1').exists())
         self.assertEqual(self.bed.cloud.keys(BUCKET), [], 'a dry run writes nothing to the bucket')
@@ -1647,6 +1658,122 @@ class CapacityWaitTests(LaneCase):
         self.assertEqual(self.bed.cloud.launched, [])
         state = json.loads((self.bed.local('cw-wall') / 'state.json').read_text())
         self.assertGreaterEqual(len(state['capacity_misses']), 1)
+
+
+
+class CiLaneConfigTests(LaneCase):
+    """A hosted runner has no Terraform state: run_lane reads the env-id's pinned lane.json, and --dry-run walks every
+    pre-launch step against AWS without launching. (Day 0's bench-minor stopped at once: terraform not installed.)"""
+
+    def setUp(self):
+        self.bed = Bed()
+        self.env_id = self.bed.env_id()
+        env_dir = self.bed.baselines / self.env_id
+        env_dir.mkdir(parents=True)
+        (env_dir / 'env.json').write_text(json.dumps({
+            'schema': 'rvoip-rfc7502-env-v1', 'env_id': self.env_id, 'ami_id': AMI}))
+        (self.bed.baselines / 'ENVIRONMENT').write_text(self.env_id + '\n')
+        self.lanes = self.bed.tmp / 'lanes'
+        self.lanes.mkdir()
+        lanes = mock.patch.object(run_lane, 'LANES', self.lanes)
+        lanes.start()
+        self.addCleanup(lanes.stop)
+        self.lane_path = self.lanes / ('%s.json' % self.env_id)
+        self.lane_path.write_text(json.dumps(dict(LANE_CONFIG, schema=lane_config.SCHEMA, env_id=self.env_id,
+                                                  ami_id=AMI, env_json_sha256=sha256(env_dir / 'env.json'))))
+        # A hosted runner: git and openssl on PATH, no terraform.
+        ci_bin = self.bed.tmp / 'ci-bin'
+        ci_bin.mkdir()
+        for tool in ('git', 'openssl'):
+            (ci_bin / tool).symlink_to(shutil.which(tool))
+        self.no_terraform = mock.patch.dict('os.environ', {'PATH': str(ci_bin)})
+        with self.no_terraform:
+            self.assertIsNone(shutil.which('terraform'))
+
+    def tearDown(self):
+        self.bed.close()
+
+    def ci_argv(self, profile, run_id, *extra):
+        argv = self.bed.argv(profile, run_id, *extra)
+        i = argv.index('--lane-config')
+        del argv[i:i + 2]
+        return argv
+
+    def ci_run(self, profile, run_id, *extra, world=None):
+        if world is not None:
+            self.bed.cloud.world = world
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.no_terraform:
+            code = run_lane.main(self.ci_argv(profile, run_id, *extra))
+        receipt = self.bed.receipt_path(run_id)
+        return code, (json.loads(receipt.read_text()) if receipt.exists() else None), out.getvalue()
+
+    def test_a_lane_runs_without_terraform_from_the_pinned_lane_config(self):
+        code, receipt, log = self.ci_run('smoke', 'ci-smoke', '--rows', 'R1', world=World())
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertNotIn('terraform is not installed', log)
+
+    def test_dry_run_walks_every_pre_launch_step_without_terraform(self):
+        code, receipt, log = self.ci_run('minor', 'ci-dry', '--rows', 'R1', '--r0', 'R1=3000', '--dry-run',
+                                         world=world_for(tester_capacity=TESTER))
+        self.assertEqual(code, 0, log)
+        for name in ('environment', 'lane config', 'lane config read', 'lane config matches EC2', 'tester caps',
+                     'vCPU quota', 'placement group', 'lane lock', 'orphan reservations',
+                     'reserve 1 x c8i.4xlarge in us-west-2b', 'reserve 2 x c8in.24xlarge in us-west-2b',
+                     'launch 1 x c8i.4xlarge', 'launch 2 x c8in.24xlarge', 'TLS material (openssl)', 'binaries'):
+            self.assertIn('dry-run check %s: ok' % name, log)
+        self.assertIn(str(self.lane_path), log)
+        dry_calls = [c for c in self.bed.cloud.calls if c[:2] in (('ec2', 'run-instances'),
+                                                                   ('ec2', 'create-capacity-reservation'))]
+        self.assertEqual(len(dry_calls), 4)
+        self.assertTrue(all('--dry-run' in c for c in dry_calls), 'every EC2 create is a DryRun')
+        self.assertEqual(self.bed.cloud.launched, [])
+        self.assertEqual(self.bed.cloud.held_reservations(), [])
+        self.assertEqual(self.bed.cloud.keys(BUCKET), [], 'a dry run writes nothing to the bucket')
+        self.assertIsNone(receipt)
+
+    def test_dry_run_reports_what_a_release_lacks(self):
+        code, receipt, log = self.ci_run('release', 'ci-dry-rel', '--dry-run', world=World())
+        self.assertEqual(code, 2, log)
+        self.assertIn('dry-run check recorded rates: FAIL no recorded rates', log)
+        self.assertEqual(self.bed.cloud.launched, [])
+
+    def test_a_lane_config_for_another_env_json_is_refused(self):
+        env_json = self.bed.baselines / self.env_id / 'env.json'
+        env_json.write_text(env_json.read_text().replace('}', ', "pinned_at": "later"}'))    # a re-pin
+        code, receipt, log = self.ci_run('smoke', 'ci-sha', '--rows', 'R1', world=World())
+        self.assertEqual(code, 2, log)
+        self.assertIn('was written for another', ' '.join(receipt['reasons']))
+        self.assertEqual(self.bed.cloud.launched, [])
+
+    def test_a_lane_config_naming_another_env_id_is_refused(self):
+        self.lane_path.write_text(self.lane_path.read_text().replace(self.env_id, 'aws-other'))
+        code, receipt, log = self.ci_run('smoke', 'ci-env', '--rows', 'R1', world=World())
+        self.assertEqual(code, 2, log)
+        self.assertIn("names env-id 'aws-other'", ' '.join(receipt['reasons']))
+
+    def test_templates_booting_another_ami_are_refused_before_launch(self):
+        code, receipt, log = self.ci_run('smoke', 'ci-ami', '--rows', 'R1', world=World(template_ami='ami-0ther'))
+        self.assertEqual(code, 2, log)
+        self.assertIn('boots ami-0ther', ' '.join(receipt['reasons']))
+        self.assertEqual(self.bed.cloud.launched, [])
+
+    def test_lane_config_build_from_terraform(self):
+        outputs = {'ami_id': {'value': 'ami-1'}, 'dut_launch_template': {'value': 'rvoip-bench-dut'},
+                   'subnet_id': {'value': 'subnet-b'}}
+        state = {'values': {'root_module': {'resources': [
+            {'type': 'aws_launch_template', 'name': 'dut', 'address': 'aws_launch_template.dut',
+             'values': {'id': 'lt-1'}},
+            {'type': 'aws_launch_template', 'name': 'caller', 'address': 'aws_launch_template.caller',
+             'values': {'id': 'lt-2'}},
+            {'type': 'aws_subnets', 'name': 'release_public', 'address': 'data.aws_subnets.release_public',
+             'values': {'ids': ['subnet-c', 'subnet-a']}}]}}}
+        config = lane_config.build(outputs, state, 'env-x', 'f' * 64)
+        self.assertEqual(config, {'schema': lane_config.SCHEMA, 'env_id': 'env-x', 'env_json_sha256': 'f' * 64,
+                                  'ami_id': 'ami-1',
+                                  'dut_launch_template': 'rvoip-bench-dut', 'subnet_id': 'subnet-b',
+                                  'dut_launch_template_id': 'lt-1', 'caller_launch_template_id': 'lt-2',
+                                  'release_public_subnet_ids': ['subnet-a', 'subnet-c']})
 
 
 if __name__ == '__main__':
