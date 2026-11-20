@@ -36,7 +36,7 @@ use crate::inbound_admission::{
     InboundAdmissionTermination, ProvisionalMediaRoute, StagedInboundDataPolicy,
 };
 use crate::media_graph::{
-    start_media_graph_on, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
+    start_media_graph, validate_media_graph_codec, ManagedMediaRoute, MediaGraphHandle,
     MediaGraphPolicy, MediaGraphRouteStatus, MediaGraphSourceState,
 };
 use crate::message::{ContentType, Message, MessageOrigin, MessageRecipients};
@@ -351,11 +351,6 @@ enum AtomicPublishedDuplicateDecision {
     Reject(ClaimedInboundRejection),
 }
 
-#[path = "outbound_peer.rs"]
-mod outbound_peer;
-pub use outbound_peer::OutboundPeerLease;
-use outbound_peer::OutboundPeerLeaseState;
-
 #[derive(Debug)]
 struct ConnectionLifecycleState {
     generation: u64,
@@ -363,9 +358,6 @@ struct ConnectionLifecycleState {
     retired: bool,
     admission_outcomes_notified: HashSet<(u64, Transport)>,
     operational_connected_emitted: bool,
-    /// The live outbound lease that depends on this connection, revoked when
-    /// the connection retires.
-    outbound_peer_dependency: Option<Weak<OutboundPeerLeaseState>>,
 }
 
 #[derive(Clone)]
@@ -1444,64 +1436,6 @@ struct DirectionalGraphSource {
     stream: Arc<dyn crate::stream::MediaStream>,
     codec: crate::capability::CodecInfo,
     policy: MediaGraphPolicy,
-    /// The media lane this source's graph runs on, if any (see
-    /// [`media_graph_placement`]).
-    placement: Option<tokio::runtime::Handle>,
-    /// Whether a placed graph delivers inline (see
-    /// [`bridge_lane_inline_delivery`]).
-    lane_inline: bool,
-}
-
-/// Whether a bridge between streams with these lanes delivers inline on the
-/// lane its graphs run on: only with
-/// [`crate::Config::lane_inline_graph_delivery`], and only when exactly one
-/// side publishes a lane (a SIP leg bridged to an in-process AI, WebRTC or
-/// WebSocket leg). Bridges between two laned legs keep the queued path.
-fn bridge_lane_inline_delivery(
-    enabled: bool,
-    a_lane: Option<&crate::stream::MediaLanePlacement>,
-    b_lane: Option<&crate::stream::MediaLanePlacement>,
-) -> bool {
-    enabled && a_lane.is_some() != b_lane.is_some()
-}
-
-/// Start a directional bridge graph where [`media_graph_placement`] put it.
-fn start_directional_media_graph(
-    receiver: tokio::sync::mpsc::Receiver<crate::stream::MediaFrame>,
-    codec: crate::capability::CodecInfo,
-    policy: MediaGraphPolicy,
-    placement: Option<tokio::runtime::Handle>,
-    lane_inline: bool,
-) -> Result<MediaGraphHandle> {
-    match placement {
-        Some(lane) if lane_inline => {
-            crate::media_graph::start_media_graph_lane_inline(receiver, codec, policy, &lane)
-        }
-        placement => start_media_graph_on(receiver, codec, policy, placement.as_ref()),
-    }
-}
-
-/// Where the media graph that reads from a stream with `source_lane` and
-/// writes into a stream with `target_lane` runs.
-///
-/// - A source with a media lane (a SIP leg) keeps its graph on that lane,
-///   next to the inbound pump that feeds it, if it hosts reader graphs.
-/// - A source without one (an in-process AI, for example) gets its graph on
-///   the target's lane, next to the outbound pump it feeds, if the target
-///   hosts writer graphs.
-/// - Otherwise (and whenever the source has a lane but does not host reader
-///   graphs) the graph runs on the caller's runtime, as before.
-///
-/// Streams that publish no lane (the default) never place a graph.
-fn media_graph_placement(
-    source_lane: Option<crate::stream::MediaLanePlacement>,
-    target_lane: Option<crate::stream::MediaLanePlacement>,
-) -> Option<tokio::runtime::Handle> {
-    match (source_lane, target_lane) {
-        (Some(source), _) => source.host_reader_graphs.then_some(source.handle),
-        (None, Some(target)) => target.host_writer_graphs.then_some(target.handle),
-        (None, None) => None,
-    }
 }
 
 struct ReservedDirectionalGraphSource {
@@ -4166,7 +4100,6 @@ impl Orchestrator {
                     retired: false,
                     admission_outcomes_notified: HashSet::new(),
                     operational_connected_emitted: false,
-                    outbound_peer_dependency: None,
                 }))
             })
             .clone();
@@ -4203,7 +4136,6 @@ impl Orchestrator {
                 retired: true,
                 admission_outcomes_notified: HashSet::new(),
                 operational_connected_emitted: false,
-                outbound_peer_dependency: None,
             })),
         );
     }
@@ -4302,7 +4234,6 @@ impl Orchestrator {
                 retired: true,
                 admission_outcomes_notified: HashSet::new(),
                 operational_connected_emitted: false,
-                outbound_peer_dependency: None,
             }));
             self.connection_lifecycles
                 .insert(connection_id.clone(), Arc::clone(&lifecycle));
@@ -4384,7 +4315,6 @@ impl Orchestrator {
             retired: false,
             admission_outcomes_notified: HashSet::new(),
             operational_connected_emitted: false,
-            outbound_peer_dependency: None,
         }));
         self.connection_lifecycles
             .insert(connection_id.clone(), Arc::clone(&state));
@@ -4653,7 +4583,6 @@ impl Orchestrator {
             if self.bounded_connection_lifecycles_enabled() {
                 current.key().retire_lifecycle();
             }
-            lifecycle.revoke_outbound_peer_dependency();
             lifecycle.active = false;
             lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
@@ -5456,7 +5385,6 @@ impl Orchestrator {
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 let lifecycle_generation = state.generation;
-                state.revoke_outbound_peer_dependency();
                 state.active = false;
                 state.retired = true;
                 if let Some(entry) = self.connections.get(conn) {
@@ -5485,7 +5413,6 @@ impl Orchestrator {
                         retired: true,
                         admission_outcomes_notified: HashSet::new(),
                         operational_connected_emitted: false,
-                        outbound_peer_dependency: None,
                     })),
                 );
             } else {
@@ -5555,7 +5482,6 @@ impl Orchestrator {
             if self.bounded_connection_lifecycles_enabled() {
                 current.key().retire_lifecycle();
             }
-            lifecycle.revoke_outbound_peer_dependency();
             lifecycle.active = false;
             lifecycle.retired = true;
             lifecycle.generation = lifecycle.generation.saturating_add(1);
@@ -8121,10 +8047,6 @@ impl Orchestrator {
             OrchestratorAdapterEvent::Public(event) => {
                 self.handle_adapter_event(transport, event).await;
             }
-            OrchestratorAdapterEvent::TerminalReceipt { event, consumed } => {
-                self.handle_adapter_event(transport, event).await;
-                consumed.send_replace(true);
-            }
             OrchestratorAdapterEvent::AuthenticatedInboundConnection {
                 connection,
                 participant_id,
@@ -8493,7 +8415,7 @@ impl Orchestrator {
                         transport,
                         at,
                         OperationalEventKind::Failed {
-                            reason: OperationalFailureReason::from_adapter(transport, &detail),
+                            reason: OperationalFailureReason::AdapterReported,
                         },
                     )
                     .await;
@@ -8515,7 +8437,6 @@ impl Orchestrator {
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
-            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -8546,7 +8467,6 @@ impl Orchestrator {
         let needs_authoritative_order = matches!(
             &event,
             AdapterEvent::Connected { .. }
-                | AdapterEvent::MediaCommitted { .. }
                 | AdapterEvent::Progress { .. }
                 | AdapterEvent::Ended { .. }
                 | AdapterEvent::Failed { .. }
@@ -8568,7 +8488,6 @@ impl Orchestrator {
             | AdapterEvent::PrincipalAuthenticated { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
-            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -8706,7 +8625,6 @@ impl Orchestrator {
                 | AdapterEvent::Progress { .. }
                 | AdapterEvent::Dtmf { .. }
                 | AdapterEvent::Quality { .. }
-                | AdapterEvent::MediaCommitted { .. }
                 | AdapterEvent::Message { .. }
                 | AdapterEvent::DataMessage { .. }
                 | AdapterEvent::TransferStatus { .. }
@@ -9016,24 +8934,6 @@ impl Orchestrator {
                         }
                     }
                 }
-            }
-            AdapterEvent::MediaCommitted {
-                connection_id,
-                media,
-            } => {
-                // Only the bounded vocabulary reaches the authoritative
-                // stream; an adapter bug cannot smuggle free text through.
-                if !media.valid() {
-                    warn!(?transport, "adapter reported invalid committed media");
-                    return;
-                }
-                self.emit_operational(
-                    connection_id,
-                    transport,
-                    Utc::now(),
-                    OperationalEventKind::MediaCommitted { media },
-                )
-                .await;
             }
             AdapterEvent::Quality {
                 connection_id,
@@ -12829,26 +12729,9 @@ impl Orchestrator {
         media_plan: DirectionalMediaBridgePlan,
         replacement_context: Option<&ReplacementPreparationContext>,
     ) -> Result<(Option<MediaGraphHandle>, Option<MediaGraphHandle>)> {
-        let mut bridge_policy = directional_bridge_media_graph_policy(
+        let bridge_policy = directional_bridge_media_graph_policy(
             self.connection_transport(&a)?,
             self.connection_transport(&b)?,
-        );
-        // An unpaced application stream (for example Webex BYOVA or Vapi in
-        // ordered mode) needs every frame in order: hold the source instead
-        // of dropping. The shorter declared stall budget wins.
-        bridge_policy.backpressure_stall_timeout = [
-            a_stream.lossless_delivery_stall_timeout(),
-            b_stream.lossless_delivery_stall_timeout(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-        let a_lane = a_stream.media_lane();
-        let b_lane = b_stream.media_lane();
-        let lane_inline = bridge_lane_inline_delivery(
-            self.config.lane_inline_graph_delivery,
-            a_lane.as_ref(),
-            b_lane.as_ref(),
         );
         let mut sources = Vec::with_capacity(2);
         if media_plan.a_to_b() {
@@ -12858,8 +12741,6 @@ impl Orchestrator {
                 codec: a_stream.codec(),
                 stream: a_stream,
                 policy: bridge_policy.clone(),
-                placement: media_graph_placement(a_lane.clone(), b_lane.clone()),
-                lane_inline,
             });
         }
         if media_plan.b_to_a() {
@@ -12869,8 +12750,6 @@ impl Orchestrator {
                 codec: b_stream.codec(),
                 stream: b_stream,
                 policy: bridge_policy,
-                placement: media_graph_placement(b_lane, a_lane),
-                lane_inline,
             });
         }
         sources.sort_by(|left, right| left.connection_id.cmp(&right.connection_id));
@@ -12969,12 +12848,9 @@ impl Orchestrator {
             let connection_id = reserved_source.source.connection_id.clone();
             let codec = reserved_source.source.codec;
             let policy = reserved_source.source.policy;
-            let placement = reserved_source.source.placement;
-            let lane_inline = reserved_source.source.lane_inline;
             let receiver = reserved_source.receiver.commit();
-            let graph =
-                start_directional_media_graph(receiver, codec, policy, placement, lane_inline)
-                    .expect("directional graph codec was validated before receiver commit");
+            let graph = start_media_graph(receiver, codec, policy)
+                .expect("directional graph codec was validated before receiver commit");
             self.media_graphs
                 .insert(connection_id.clone(), graph.clone());
             if let Err(error) = self.supervise_media_activity(
@@ -13054,16 +12930,8 @@ impl Orchestrator {
         let lifecycle = lifecycles
             .pop()
             .expect("one connection lifecycle was captured");
-        // A listener, broadcast or recording graph has no single target: it
-        // runs on the source's lane if the source hosts reader graphs.
-        let placement = media_graph_placement(stream.media_lane(), None);
         let source = stream.try_frames_in()?;
-        let graph = start_media_graph_on(
-            source,
-            codec,
-            MediaGraphPolicy::default(),
-            placement.as_ref(),
-        )?;
+        let graph = start_media_graph(source, codec, MediaGraphPolicy::default())?;
         self.media_graphs
             .insert(connection_id.clone(), graph.clone());
         if let Err(error) = self.supervise_media_activity(
@@ -13868,7 +13736,6 @@ mod cross_crate_publisher_tests {
                 retired: false,
                 admission_outcomes_notified: HashSet::new(),
                 operational_connected_emitted: false,
-                outbound_peer_dependency: None,
             })),
         );
 
@@ -15057,95 +14924,5 @@ mod adapter_event_consumer_tests {
             !draining,
             "rejection cleanup must leave the admission path only while the supervisor accepts work"
         );
-    }
-}
-
-#[cfg(test)]
-mod media_graph_placement_tests {
-    use super::*;
-    use crate::stream::MediaLanePlacement;
-
-    fn placed_on(placement: Option<tokio::runtime::Handle>) -> Option<tokio::runtime::Id> {
-        placement.map(|handle| handle.id())
-    }
-
-    #[test]
-    fn lane_inline_delivery_needs_the_switch_and_exactly_one_laned_side() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("lane");
-        let lane = MediaLanePlacement::new(runtime.handle().clone())
-            .with_reader_graphs(true)
-            .with_writer_graphs(true);
-        assert!(bridge_lane_inline_delivery(true, Some(&lane), None));
-        assert!(bridge_lane_inline_delivery(true, None, Some(&lane)));
-        assert!(!bridge_lane_inline_delivery(true, Some(&lane), Some(&lane)));
-        assert!(!bridge_lane_inline_delivery(true, None, None));
-        assert!(!bridge_lane_inline_delivery(false, Some(&lane), None));
-        assert!(!bridge_lane_inline_delivery(false, None, Some(&lane)));
-        assert!(!crate::Config::default().lane_inline_graph_delivery);
-        assert!(
-            crate::Config::default()
-                .with_lane_inline_graph_delivery(true)
-                .lane_inline_graph_delivery
-        );
-    }
-
-    #[test]
-    fn a_graph_runs_on_its_sources_lane_then_its_targets_lane_then_nowhere() {
-        let source_runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("source lane");
-        let target_runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .expect("target lane");
-        let source = source_runtime.handle().clone();
-        let target = target_runtime.handle().clone();
-        let lane = |handle: &tokio::runtime::Handle, reader: bool, writer: bool| {
-            Some(
-                MediaLanePlacement::new(handle.clone())
-                    .with_reader_graphs(reader)
-                    .with_writer_graphs(writer),
-            )
-        };
-
-        // No stream publishes a lane: the caller's runtime, as before.
-        assert_eq!(placed_on(media_graph_placement(None, None)), None);
-        // A source that hosts reader graphs keeps its graph, whatever the
-        // target publishes.
-        for target_lane in [None, lane(&target, true, true)] {
-            assert_eq!(
-                placed_on(media_graph_placement(
-                    lane(&source, true, false),
-                    target_lane
-                )),
-                Some(source.id())
-            );
-        }
-        // A source with a lane that does not host reader graphs is never
-        // moved to its target's lane.
-        assert_eq!(
-            placed_on(media_graph_placement(
-                lane(&source, false, true),
-                lane(&target, true, true)
-            )),
-            None
-        );
-        // A source without a lane goes to a target that hosts writer graphs.
-        assert_eq!(
-            placed_on(media_graph_placement(None, lane(&target, false, true))),
-            Some(target.id())
-        );
-        assert_eq!(
-            placed_on(media_graph_placement(None, lane(&target, true, false))),
-            None
-        );
-        // A published lane that hosts nothing places nothing.
-        assert_eq!(
-            placed_on(media_graph_placement(lane(&source, false, false), None)),
-            None
-        );
-        drop(source_runtime);
-        drop(target_runtime);
     }
 }

@@ -10,7 +10,7 @@ use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
+use rand::{rngs::OsRng, RngCore};
 
 /// SDES crypto attribute representation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,11 +293,11 @@ impl Sdes {
 
         // Generate random key
         let mut key = vec![0u8; suite.key_length];
-        UnwrapErr(SysRng).fill_bytes(&mut key);
+        OsRng.fill_bytes(&mut key);
 
         // Generate random salt
         let mut salt = vec![0u8; 14]; // 112-bit salt
-        UnwrapErr(SysRng).fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut salt);
 
         // Combine key and salt
         let mut keysalt = Vec::with_capacity(key.len() + salt.len());

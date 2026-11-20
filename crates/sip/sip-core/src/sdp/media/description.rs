@@ -7,8 +7,9 @@ use crate::sdp::media::format::{parse_formats, parse_port_and_count};
 use crate::sdp::media::transport::parse_transport_protocol;
 use crate::sdp::media::types::{is_valid_media_type, parse_media_type};
 use crate::types::sdp::MediaDescription;
-use nom::Parser;
-use nom::{bytes::complete::tag, character::complete::space1, combinator::opt, IResult};
+use nom::{
+    bytes::complete::tag, character::complete::space1, combinator::opt, sequence::tuple, IResult,
+};
 
 /// Parse a media description line using nom
 /// Format: `m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]`*
@@ -28,8 +29,8 @@ pub fn parse_media_description_nom(input: &str) -> IResult<&str, MediaDescriptio
 
 fn parse_media_description_nom_inner(input: &str) -> IResult<&str, MediaDescription> {
     // m=<media> <port>[/<port-count>] <proto> <fmt> [<fmt>]*
-    let (input, _) = opt(tag("m=")).parse(input)?;
-    let (input, (media_type, _, port_info, _, protocol, _, formats)) = (
+    let (input, _) = opt(tag("m="))(input)?;
+    let (input, (media_type, _, port_info, _, protocol, _, formats)) = tuple((
         parse_media_type,
         space1,
         parse_port_and_count,
@@ -37,8 +38,7 @@ fn parse_media_description_nom_inner(input: &str) -> IResult<&str, MediaDescript
         parse_transport_protocol,
         space1,
         parse_formats,
-    )
-        .parse(input)?;
+    ))(input)?;
 
     let (port, _port_count) = port_info;
 

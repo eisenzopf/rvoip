@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?release=0.4.0)](https://crates.io/crates/rvoip-sip/0.4.0)
 [![docs.rs](https://img.shields.io/docsrs/rvoip-sip/0.4.0?label=docs)](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)
-[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.91+](https://img.shields.io/badge/rust-1.91%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
 [![GitHub issues](https://img.shields.io/github/issues/eisenzopf/rvoip.svg)](https://github.com/eisenzopf/rvoip/issues)
@@ -13,15 +13,16 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The published `0.4.0` release came from a strict, exact-source qualification.
-Its generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
-ledger](docs/BETA_GATE_REPORT.md), and [performance
-report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
+Publication of `0.4.0` requires strict, exact-source qualification. The
+signed artifacts attached to its GitHub release identify the tested PBX,
 proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
-[immutable qualification history](docs/releases/qualification/README.md)
-retains prior releases and the detailed 0.4.0 performance evaluation.
+repository's generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
+ledger](docs/BETA_GATE_REPORT.md), and [performance
+report](docs/BETA_PERFORMANCE_REPORT.md) identify the source commit they cover;
+the [immutable qualification history](docs/releases/qualification/README.md)
+retains prior releases.
 
-What changed in this release: the [release notes](../../../docs/release/RELEASE_NOTES_NEXT.md)
+What changed in this release: the [release notes](docs/RELEASE_NOTES_NEXT.md)
 and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
 [0.4 migration guide](../../../docs/MIGRATING_0.4.md) covers the breaking
 changes, including `#[non_exhaustive]` `Config`, the new `Event` variant and
@@ -47,7 +48,7 @@ level without switching protocol stacks.
 ## Install
 
 `rvoip-sip` uses the workspace minimum supported Rust version. The current MSRV
-is **Rust 1.95**.
+is **Rust 1.91**.
 
 ```toml
 [dependencies]
@@ -60,7 +61,7 @@ For repository development:
 ```sh
 git clone https://github.com/eisenzopf/rvoip.git
 cd rvoip
-RUSTUP_TOOLCHAIN=1.95 cargo check -p rvoip-sip --all-targets
+RUSTUP_TOOLCHAIN=1.91 cargo check -p rvoip-sip --all-targets
 ```
 
 ## Quick start
@@ -191,11 +192,8 @@ Periodic RTCP sender/receiver reports reach a peer in one of two ways:
   (`a=rtcp:` per RFC 3605, otherwise its RTP port + 1). Use it for PBXes and
   carriers without mux, such as Asterisk on default pjsip settings. It
   reserves a port pair per offered call, so a port range holds half as many
-  calls, and it is ignored with ICE, strict mode and signalling-only media.
-  SRTCP protects the RTCP port under SRTP; with DTLS-SRTP keying the RTCP
-  port runs its own DTLS handshake (RFC 5764 §4.1) and stays closed until it
-  completes. A failed RTCP handshake leaves the call's media running without
-  RTCP.
+  calls, and it is ignored with ICE, DTLS-SRTP, strict mode and
+  signalling-only media.
 
 With neither, a peer that declines mux gets a working call but **no RTCP
 from rvoip**: no RTCP quality statistics on either side, and an SBC or PBX
@@ -290,7 +288,7 @@ publication of `0.4.0` requires a new complete matrix PASS.
 | --- | --- | --- |
 | **Asterisk** | **Release-gated; matrix passed** (`interop.asterisk-matrix`) | `Endpoint`, `StreamPeer`, and `CallbackPeer` across registration, basic call, G.729A/G.729AB, hold/resume, ring-cancel, RFC 4733 DTMF, rejection, and blind transfer over UDP and TLS |
 | **FreeSWITCH** | **Release-gated; matrix passed** (`interop.freeswitch-matrix`) | The same API, scenario, codec, and UDP/TLS matrix as Asterisk |
-| **Jambonz OSS 0.9.15** | **Release-gated; prior matrix passed on 0.9.14** (`interop.jambonz-matrix`) | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
+| **Jambonz OSS 0.9.14** | **Release-gated; prior matrix passed** (`interop.jambonz-matrix`) | The same registered-user `Endpoint`, `StreamPeer`, and `CallbackPeer` scenario runner used for Asterisk and FreeSWITCH, across the applicable UDP SIP/SDP/RTP B2BUA matrix |
 | **SIPp** | **Release-gated; standalone matrix passed** (`interop.sipp-matrix`) | 30, 100, 300, 1,000, and 2,000 CPS with 100% configured call completion |
 | **baresip** | **Release-gated; strict-UA check passed** (`interop.strict-ua`) | External user-agent call against the rvoip SIP listener |
 | **Kamailio** | **Release-gated; proxy matrix passed** | Proxy interoperability in both adjacency orders over UDP, TCP, and TLS (`interop.remote-proxies.kamailio.*`), plus the `Endpoint` all-scenario matrix through an rtpengine media relay with AMR passthrough required (`interop.proxy-pbx.kamailio.matrix`) |
@@ -342,41 +340,26 @@ do not imply carrier certification or untested peer-version/topology coverage.
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## Current 0.4.0 release evidence
+## Release evidence for the prior qualified version
 
-Protected run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080)
-qualified the exact published commit
-`f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, tagged
-[`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0) and
-published by run
-[`38204650077`](https://github.com/eisenzopf/rvoip/actions/runs/38204650077):
-**214/214 gates passed** and all 108 legacy release requirements were covered.
-122 gates ran fresh on that commit. The other 92 were reused from the
-qualification of candidate `d89c1bc34aadb7184e38792db5da1e91f5a1c8c1` (run
-[`38181512663`](https://github.com/eisenzopf/rvoip/actions/runs/38181512663))
-because their definition, inputs, and environment digests were unchanged; the
-only source change between the two candidates was the release notes. The gate
-ledger marks every gate `fresh` or `reused`. The Asterisk, FreeSWITCH,
-Jambonz, SIPp, and strict-UA matrices, every performance, resiliency, and soak
-gate, the rvoip-sip unit, integration, and doctest gates, rustdoc, and the
-local fuzz and advisory scans ran fresh. The reused gates are the Kamailio and
-OpenSIPS proxy matrices, the AMR rate sweep, browser DTMF, remote libsrtp, the
-remote fuzz and advisory scans, the AMR fuzz targets, the 13 standalone
-examples, the generated and RFC 4475 parser suites, the rtp-core and
-supporting-SIP-crate tests, the per-crate gates of 30 lower crates, and the
-format, public-API, facade-bundle, and lower-crate build checks.
+The following repository reports describe the prior protected qualification.
+For `0.4.0`, use the signed artifacts attached to its GitHub release once
+available. The prior `0.3.10` protected run
+[`34074372543`](https://github.com/eisenzopf/rvoip/actions/runs/34074372543)
+qualified its exact published commit
+`77a99cd38a07641294cf7dc547146b115b135dc7`: **213/213 gates passed**, all
+213 were fresh, and all 108 legacy release requirements were covered.
 
-| Evidence | Current record |
+| Evidence | Prior qualified record |
 | --- | --- |
 | Release disposition and provenance | [`docs/BETA_RELEASE_REPORT.md`](docs/BETA_RELEASE_REPORT.md) |
 | Complete accepted-gate ledger | [`docs/BETA_GATE_REPORT.md`](docs/BETA_GATE_REPORT.md) |
 | Performance observations | [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md) |
-| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-evaluation.md) |
-| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-evaluation.json) |
-| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-artifact-index.json) |
+| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.md) |
+| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-evaluation.json) |
+| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20260907T042726Z-34074372543/current-performance-artifact-index.json) |
 | Signed report manifest | [`QUALIFICATION_REPORT_ATTESTATION.json`](docs/QUALIFICATION_REPORT_ATTESTATION.json) |
-| Immutable release archive | [`20261012T042041Z-38195041080`](docs/releases/qualification/20261012T042041Z-38195041080) |
+| Immutable release archive | [`20260907T042726Z-34074372543`](docs/releases/qualification/20260907T042726Z-34074372543) |
 
 The detailed evaluation records three clean 65,000-call canonical runs, a
 high-density media burst with full audio delivery, a 60-minute monolithic
@@ -455,7 +438,7 @@ narrower qualification.
 Local development checks:
 
 ```sh
-RUSTUP_TOOLCHAIN=1.95 cargo check -p rvoip-sip --all-targets
+RUSTUP_TOOLCHAIN=1.91 cargo check -p rvoip-sip --all-targets
 crates/sip/rvoip-sip/scripts/beta_gate.sh --local
 crates/sip/rvoip-sip/scripts/beta_gate.sh --security
 ```
@@ -483,7 +466,7 @@ Operational references:
   tuning guidance.
 - [`docs/INTEROP_CI_PLAN.md`](docs/INTEROP_CI_PLAN.md) for PBX, SIPp, and
   strict-UA runner expectations.
-- [`docs/release/RELEASE_NOTES_NEXT.md`](../../../docs/release/RELEASE_NOTES_NEXT.md) and the
+- [`docs/RELEASE_NOTES_NEXT.md`](docs/RELEASE_NOTES_NEXT.md) and the
   [0.4 migration guide](../../../docs/MIGRATING_0.4.md) for what changed in
   this release and how to upgrade.
 

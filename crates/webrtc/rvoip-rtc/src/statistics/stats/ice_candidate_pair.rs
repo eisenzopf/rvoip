@@ -7,14 +7,13 @@ use super::RTCStats;
 use ::serde::{Deserialize, Serialize};
 use ice::candidate::candidate_pair::CandidatePairState;
 use shared::serde::instant_to_epoch;
-use shared::time::SystemInstant;
+use std::time::Instant;
 
 /// The state of an ICE candidate pair.
 ///
 /// This enum represents the current state of a candidate pair
 /// in the ICE connectivity check process.
 #[derive(Default, PartialEq, Eq, Debug, Copy, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
 pub enum RTCStatsIceCandidatePairState {
     /// State has not been set.
     #[default]
@@ -49,7 +48,6 @@ impl From<CandidatePairState> for RTCStatsIceCandidatePairState {
             CandidatePairState::InProgress => RTCStatsIceCandidatePairState::InProgress,
             CandidatePairState::Failed => RTCStatsIceCandidatePairState::Failed,
             CandidatePairState::Succeeded => RTCStatsIceCandidatePairState::Succeeded,
-            _ => RTCStatsIceCandidatePairState::Unspecified,
         }
     }
 }
@@ -60,7 +58,7 @@ impl From<CandidatePairState> for RTCStatsIceCandidatePairState {
 /// W3C WebRTC Statistics API. It provides detailed information about
 /// connectivity checks and data transfer for a specific candidate pair.
 ///
-/// # Specification
+/// # W3C Reference
 ///
 /// See [RTCIceCandidatePairStats](https://www.w3.org/TR/webrtc-stats/#candidatepair-dict*)
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,11 +91,11 @@ pub struct RTCIceCandidatePairStats {
 
     /// Timestamp of the last packet sent using this candidate pair.
     #[serde(with = "instant_to_epoch")]
-    pub last_packet_sent_timestamp: SystemInstant,
+    pub last_packet_sent_timestamp: Instant,
 
     /// Timestamp of the last packet received using this candidate pair.
     #[serde(with = "instant_to_epoch")]
-    pub last_packet_received_timestamp: SystemInstant,
+    pub last_packet_received_timestamp: Instant,
 
     /// Total round trip time in seconds for all STUN requests.
     ///

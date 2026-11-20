@@ -112,7 +112,7 @@ impl Writer {
 
     /// Wait until the peer sends STOP_SENDING, or until a locally-finished
     /// stream is fully acknowledged.
-    pub async fn stopped(&mut self) -> Result<Option<u32>, SessionError> {
+    pub async fn stopped(&mut self) -> Result<Option<u8>, SessionError> {
         Ok(self.stream.closed().await?)
     }
 }

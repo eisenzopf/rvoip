@@ -138,26 +138,19 @@ impl JwtValidator {
 
     /// HMAC validator — `secret` is the shared HMAC key bytes. Defaults
     /// to HS256; use [`Self::with_algorithm`] to change.
-    ///
-    /// # Errors
-    ///
-    /// [`BearerAuthError::Unavailable`] when `secret` is empty: jsonwebtoken
-    /// refuses empty HMAC keys.
-    pub fn from_hmac_secret(secret: &[u8]) -> Result<Self, BearerAuthError> {
-        let decoding_key = DecodingKey::from_secret(secret)
-            .map_err(|e| BearerAuthError::Unavailable(format!("invalid HMAC secret: {e}")))?;
+    pub fn from_hmac_secret(secret: &[u8]) -> Self {
         let mut validation = Validation::new(Algorithm::HS256);
         // jsonwebtoken's default Validation has `validate_exp = true`
         // and a 60s leeway; we keep that. Disable aud/iss by default —
         // callers opt in via with_audience / with_issuer.
         validation.set_audience::<&str>(&[]);
         validation.validate_aud = false;
-        Ok(Self {
-            decoding_key,
+        Self {
+            decoding_key: DecodingKey::from_secret(secret),
             validation,
             revocation_checker: None,
             require_jti: false,
-        })
+        }
     }
 
     /// RSA validator from a PEM-encoded public key (`-----BEGIN PUBLIC KEY-----`).

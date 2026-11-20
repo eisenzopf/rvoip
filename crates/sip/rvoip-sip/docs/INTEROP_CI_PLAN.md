@@ -27,7 +27,7 @@ failure rather than a skip.
 | SIPp | Deterministic UAC/UAS and load generator | Required release gate. |
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
-| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.4.0 release gate; currently component line 0.9.15. |
+| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.4.0 release gate; currently component line 0.9.14. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
 | Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |
 | OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |
@@ -111,10 +111,7 @@ Run the same functional suite through `Endpoint`, `StreamPeer`, and
 | Hold/resume | Yes |
 | Blind transfer | Yes |
 | REFER/NOTIFY progress | Yes |
-| PRACK | Yes if peer profile enables it |
-| RFC 4028 session timers | Yes after 0.4.0: `session_timer` on dedicated `timers = yes` endpoints (2301/2302, 90 s); rvoip refreshes its UAC leg, Asterisk refreshes the leg toward rvoip |
-| RTCP over mux (RFC 5761) | Yes after 0.4.0: `rtcp_mux` on dedicated `rtcp_mux = yes` endpoints (x101/x102), UDP and SDES-SRTP |
-| RTCP on a separate port (RFC 3605) | Yes after 0.4.0: `rtcp_non_mux` on dedicated `rtcp_mux = no` endpoints (x201/x202), UDP and SDES-SRTP; `rtcp_mux_declined` proves nothing is sent without `Config::rtcp_non_mux` |
+| PRACK/session timers | Yes if peer profile enables them |
 | DTMF | Yes |
 | SDES-SRTP | Yes where claimed |
 
@@ -128,20 +125,6 @@ the beta gate attests G.729A (`annexb=no`) and G.729AB (`annexb=yes`) against
 both Asterisk and FreeSWITCH. The G.711 baseline remains the analyzer-enforced
 `basic_call` scenario. Override `BETA_PBX_G729_PROFILES` only for targeted
 reruns.
-
-After 0.4.0 the FreeSWITCH gate also runs `rtcp_mux` and `session_timer`
-(UDP) against the dedicated `rvoip_udp_rtcp_timer` profile on port 5069:
-`rtcp-audio-interval-msec=5000`, so FreeSWITCH answers rvoip's mux offer and
-reports, and `session-timeout`/`minimum-session-expires` 120, so rvoip's 90 s
-offer meets `422` and must retry. The non-mux and declined-mux RTCP rows are
-Asterisk's; FreeSWITCH TLS RTCP is not a row.
-
-The RTCP and session-timer cells (issue #318) record a third matrix row per
-cell, role `pbx`, which is the PBX's own verdict from its RTCP/RTP/SIP debug
-output, CLI snapshot and (FreeSWITCH) `RECV_RTCP_MESSAGE` events, checked by
-`examples/pbx/pbx_evidence.sh`. These rows are release-gated after 0.4.0; no
-protected qualification has recorded them yet. They add about four minutes
-to the Asterisk gate and two to the FreeSWITCH gate.
 
 ## Jambonz Matrix
 

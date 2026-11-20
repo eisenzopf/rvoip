@@ -156,9 +156,6 @@ mod allocator;
 #[cfg(feature = "dtls-webrtc")]
 pub mod dtls_bridge;
 pub mod security_transport;
-mod srtp_rx;
-// Hot call state: the receive loop's lane-slab control entry.
-mod rx_hot;
 mod symmetric;
 mod tcp;
 mod udp;
@@ -167,35 +164,14 @@ mod validation;
 // Re-export transport implementations
 pub use allocator::{
     AllocationStrategy, GlobalPortAllocator, PairingStrategy, PortAllocator, PortAllocatorConfig,
-    PortAllocatorDiagnostics, SessionPortReservation, DEFAULT_RTP_PORT_RANGE_END,
-    DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
+    PortAllocatorDiagnostics, DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
 pub use security_transport::SecurityRtpTransport;
 pub use symmetric::{SymmetricRtpDiagnostics, SymmetricRtpPolicy};
 pub use tcp::TcpRtpTransport;
 pub use udp::{set_diagnostics as set_udp_diagnostics, SrtpContextRollback, UdpRtpTransport};
-pub(crate) use udp::{RemotePeerAddrs, TxDestCache, TxPayload, MAX_TX_BATCH};
-pub(crate) use validation::bind_media_udp_socket;
+pub(crate) use udp::{TxPayload, MAX_TX_BATCH};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};
-
-/// Inbound SRTP packets dropped by this process's RTP transports because they
-/// failed authentication or the replay check (RFC 3711 §3.3), summed over
-/// every transport since the process started.
-///
-/// A nonzero rate on a call that should be keyed means mismatched SDES keys,
-/// a peer that did not switch keys after a re-INVITE, or a forged or replayed
-/// stream. The counter is written only on that drop path, so keyed traffic
-/// that authenticates pays nothing for it.
-pub fn srtp_unprotect_failures_total() -> u64 {
-    SRTP_UNPROTECT_FAILURES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-static SRTP_UNPROTECT_FAILURES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Count one inbound SRTP packet dropped for failing authentication.
-pub(crate) fn record_srtp_unprotect_failure() {
-    SRTP_UNPROTECT_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-}
 
 #[cfg(test)]
 mod tests {

@@ -53,16 +53,6 @@
 //! clock once and serves that reading to the futures it polls (see
 //! `crate::lane_clock`). A later timer round of the same pass and the tick's
 //! due check before it sleeps read the clock afresh.
-//!
-//! Lane table ([`crate::executor::MediaExecutorConfig::callback_send`]): a
-//! poller on a dedicated current-thread lane keeps a [`crate::lane_table`]
-//! and lends it to each pass, so supervisors install and retire per-call TX
-//! sources while they are polled. In every timer round the table's due
-//! entries fire after the woken futures were polled (a supervisor that saw a
-//! cancellation in that round has already retired its entry), from the same
-//! reading the lane clock was served by. The table's entries count as hosted
-//! work for the tick, a budget carry keeps the lane going, and without the
-//! tick the table arms its own runtime timer at its earliest key.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -276,26 +266,6 @@ impl LanePoller {
         Self { jobs, tick_wake }
     }
 
-    /// Lane table test seam: start a ticking poller with explicit lane-clock
-    /// settings, on any runtime.
-    #[cfg(test)]
-    pub(crate) fn start_with_tick_and_timers(
-        runtime: &Handle,
-        tick: crate::lane_tick::TickScheduler,
-        timers: PollerTimers,
-    ) -> Self {
-        let (jobs, receiver) = mpsc::unbounded_channel();
-        let tick_wake = Arc::new(OnceLock::new());
-        let published = Arc::clone(&tick_wake);
-        drop(runtime.spawn(async move {
-            let wake = TickWake::new();
-            wake.bind_to_current_thread();
-            let _ = published.set(Arc::clone(&wake));
-            run_poller_with(receiver, Some((tick, wake)), timers).await;
-        }));
-        Self { jobs, tick_wake }
-    }
-
     /// Timing wheel / pass clock test seam: start a poller (without the
     /// tick) with explicit lane-clock settings.
     #[cfg(test)]
@@ -395,22 +365,17 @@ pub(crate) struct PollerTimers {
     pub(crate) wheel: bool,
     /// Each pass serves one clock reading to the futures it polls.
     pub(crate) pass_clock: bool,
-    /// The poller keeps a lane table (needs the lane clock's wheel; only on
-    /// a dedicated current-thread lane).
-    pub(crate) callback_table: bool,
 }
 
 impl PollerTimers {
     /// The configuration in effect, filing on `grid`.
-    pub(crate) fn configured(grid: Option<crate::lane_tick::TickGrid>) -> Self {
+    fn configured(grid: Option<crate::lane_tick::TickGrid>) -> Self {
         let lane_timer = crate::executor::lane_timer_enabled();
-        let wheel = lane_timer && crate::executor::lane_timer_wheel_enabled();
         Self {
             lane_timer,
             grid,
-            wheel,
+            wheel: lane_timer && crate::executor::lane_timer_wheel_enabled(),
             pass_clock: crate::executor::lane_pass_clock_enabled(),
-            callback_table: crate::lane_table::table_for_current_lane(lane_timer, wheel),
         }
     }
 }
@@ -441,11 +406,6 @@ async fn run_poller_with(
     let ticking = tick.is_some();
     let mut loops: FuturesUnordered<Budgeted> = FuturesUnordered::new();
     let mut counters = LanePollerCounters::new();
-    // Counter and PCM pool cleanup: on a current-thread runtime (the poller
-    // never moves) the per-event counters the hosted futures add during a
-    // pass (PCM pool misses, owner RTCP) are held on this thread and
-    // published every 64 passes, on idle passes and when the poller stops.
-    let mut deferred = crate::executor::LaneDeferredBatch::for_this_poller();
     // The lane clock. Futures polled below file their deadlines in it
     // (through `media_clock::sleep_until`) instead of the runtime's timer
     // wheel when the lane timer is enabled; the poller arms one runtime timer
@@ -459,14 +419,8 @@ async fn run_poller_with(
         grid,
         wheel,
         pass_clock,
-        callback_table,
     } = timers;
     let mut clock = crate::lane_clock::LaneClockDriver::with_timers(grid, wheel);
-    // The lane table (per-call TX entries fired from its own wheel, on the
-    // lane clock's grid). `None` with the switch off: nothing below changes
-    // then.
-    let mut table = (callback_table && lane_timer && wheel)
-        .then(|| Box::new(crate::lane_table::LaneTable::new(grid)));
     let mut timer_counters = crate::executor::LaneTimerCounters::new();
     let mut wheel_counters =
         (wheel || pass_clock).then(crate::executor::LaneWheelCounterBatch::new);
@@ -488,9 +442,6 @@ async fn run_poller_with(
             }
             LANE_DATAGRAMS.with(|count| count.set(0));
             LANE_POLL_BUDGET.with(|budget| budget.set(Some(LANE_SOCKET_POLLS_PER_WAKEUP)));
-            let _deferring = deferred
-                .as_ref()
-                .map(crate::executor::LaneDeferredBatch::enter_pass);
             let _current_clock = lane_timer.then(|| crate::lane_clock::enter(clock.clock()));
             // Pass clock: the pass's one clock reading (the tick's start when
             // ticking), served to everything this pass polls.
@@ -499,16 +450,6 @@ async fn run_poller_with(
                     started.map_or_else(tokio::time::Instant::now, tokio::time::Instant::from_std),
                 )
             });
-            // Lane table: lent to this pass (supervisors install and retire
-            // through it while they are polled). A post from another thread
-            // wakes the poller's parent waker.
-            let table_guard =
-                crate::lane_table::enter(&mut table, tick_waker.as_ref().unwrap_or(cx.waker()));
-            let has_table = table_guard.is_some();
-            let mut table_fires = 0u64;
-            // Receive entries' handler calls in this pass (work for the tick
-            // and the idle check).
-            let mut table_rx = 0u64;
             // The tick's due-check reading, the last of the pass.
             let mut last_reading: Option<tokio::time::Instant> = None;
             while accepting {
@@ -525,7 +466,6 @@ async fn run_poller_with(
                 // Wake every lane-clock entry that is due, so its future is
                 // polled in this same pass.
                 let mut fired = false;
-                let mut round_now = None;
                 if lane_timer {
                     // Pass clock: the first round is served from the pass
                     // reading; a later round exists because something fell
@@ -541,7 +481,6 @@ async fn run_poller_with(
                     let (wakes, arms) = clock.wake_due_at(now);
                     timer_wakes += wakes;
                     timer_counters.poll(false, wakes, arms);
-                    round_now = Some(now);
                 }
                 // Each `Ready(Some(()))` is one loop that ended; keep serving
                 // the others. `Pending` means every ready loop was polled (or
@@ -557,28 +496,6 @@ async fn run_poller_with(
                     }
                     None => while let Poll::Ready(Some(())) = loops.poll_next_unpin(cx) {},
                 }
-                // Lane table: fire the due entries with the reading this
-                // round woke the lane clock by (the entries a hosted paced
-                // future would have been woken for). After the woken futures:
-                // a supervisor that saw a cancellation in this round has
-                // already retired its entry. Before the fires, the receive
-                // entries whose wakers fired (I/O before timers, as hosted
-                // futures woken by readiness are polled before those the
-                // clock woke).
-                let mut table_returned = false;
-                if let (true, Some(now)) = (has_table, round_now) {
-                    if let Some(report) = crate::lane_table::with_current(|table| {
-                        let ready = table.serve_ready();
-                        let mut report = table.fire_due(now);
-                        report.returned += ready.returned;
-                        report.rx_calls += ready.rx_calls;
-                        report
-                    }) {
-                        table_fires += report.fires;
-                        table_rx += report.rx_calls;
-                        table_returned = report.returned > 0;
-                    }
-                }
                 if lane_timer {
                     if ticking {
                         // No runtime timer while ticking. A deadline that
@@ -592,21 +509,10 @@ async fn run_poller_with(
                             tokio::time::Instant::now()
                         };
                         last_reading = Some(now);
-                        fired = clock.has_due(now) || (has_table && table_has_due(now));
-                    } else {
-                        // Both runtime timers are registered (no
-                        // short-circuit); without a table this is the lane
-                        // clock's alone.
-                        let clock_ready = clock.poll_timer(cx).is_ready();
-                        let table_ready = has_table && table_timer_ready(cx);
-                        fired = clock_ready || table_ready;
+                        fired = clock.has_due(now);
+                    } else if clock.poll_timer(cx).is_ready() {
+                        fired = true;
                     }
-                }
-                // Lane table: a source that came back woke its supervisor;
-                // serve it in another round of this pass (escalated frames
-                // leave now, as a paced loop sends them in the same poll).
-                if table_returned {
-                    fired = true;
                 }
                 if !fired {
                     break;
@@ -631,31 +537,6 @@ async fn run_poller_with(
             let exhausted = left == Some(0);
             let datagrams = LANE_DATAGRAMS.with(|count| count.replace(0));
             counters.wakeup(datagrams, exhausted);
-            if let Some(batch) = deferred.as_mut() {
-                // Idle: no hosted future was polled, or none is hosted, and
-                // the lane table fired nothing.
-                batch.pass_end(
-                    table_fires == 0
-                        && table_rx == 0
-                        && (loops.is_empty() || left == Some(LANE_SOCKET_POLLS_PER_WAKEUP)),
-                );
-            }
-            // Lane table: entries a fire budget left due keep the lane going,
-            // and the table's entries count as hosted work for the tick. So
-            // do receive entries still marked ready (a service budget left
-            // them, or a wake marked them during the pass).
-            let (table_carried, table_entries) = if has_table {
-                crate::lane_table::with_current(|table| {
-                    table.end_pass();
-                    (table.carried() > 0 || table.rx_pending(), table.len())
-                })
-                .unwrap_or((false, 0))
-            } else {
-                (false, 0)
-            };
-            if table_carried && !ticking {
-                cx.waker().wake_by_ref();
-            }
             tick_counters.timers(clock.take_resets(), clock.clock().take_coalesced());
             if let Some(batch) = wheel_counters.as_mut() {
                 let reads = crate::lane_clock::take_pass_clock_stats();
@@ -674,9 +555,7 @@ async fn run_poller_with(
             };
             let polled =
                 LANE_SOCKET_POLLS_PER_WAKEUP - left.unwrap_or(LANE_SOCKET_POLLS_PER_WAKEUP);
-            tick_counters.pass(
-                polled > 0 || datagrams > 0 || timer_wakes > 0 || table_fires > 0 || table_rx > 0,
-            );
+            tick_counters.pass(polled > 0 || datagrams > 0 || timer_wakes > 0);
             // With the pass clock the tick's due-check reading, taken after
             // the last poll of the pass, also ends it.
             let ended = match (pass_clock, last_reading) {
@@ -686,21 +565,14 @@ async fn run_poller_with(
             match scheduler.end_pass(PassReport {
                 started,
                 ended,
-                hosting: !loops.is_empty() || table_entries > 0,
-                must_continue: exhausted || deadlines_left || table_carried,
+                hosting: !loops.is_empty(),
+                must_continue: exhausted || deadlines_left,
             }) {
                 TickDecision::Park => {
                     // Nothing hosted: park as without the tick. A lane clock
-                    // (or table) that still holds a deadline needs its
-                    // runtime timer.
-                    if lane_timer {
-                        let clock_ready = clock.poll_timer(cx).is_ready();
-                        let table_ready = has_table && table_timer_ready(cx);
-                        // A receive entry still marked ready is work the
-                        // lane must not park on.
-                        if clock_ready || table_ready || table_carried {
-                            cx.waker().wake_by_ref();
-                        }
+                    // that still holds a deadline needs its runtime timer.
+                    if lane_timer && clock.poll_timer(cx).is_ready() {
+                        cx.waker().wake_by_ref();
                     }
                     Poll::Pending
                 }
@@ -745,17 +617,6 @@ async fn run_poller_with(
             }
         }
     }
-}
-
-/// Lane table: whether the table lent to this pass has an entry due at `now`
-/// (or an off-lane retirement waiting).
-fn table_has_due(now: tokio::time::Instant) -> bool {
-    crate::lane_table::with_current(|table| table.has_due(now)) == Some(true)
-}
-
-/// Lane table: poll the runtime timer of the table lent to this pass.
-fn table_timer_ready(cx: &mut Context<'_>) -> bool {
-    crate::lane_table::with_current(|table| table.poll_timer(cx).is_ready()) == Some(true)
 }
 
 struct LaneShards {
@@ -1069,7 +930,6 @@ mod tests {
             grid: None,
             wheel: true,
             pass_clock,
-            callback_table: false,
         }
     }
 
@@ -1726,259 +1586,4 @@ mod tests {
             "outside a poller poll it always runs"
         );
     }
-
-    /// Counter and PCM pool cleanup: on a current-thread runtime a poller
-    /// with the switch holds the per-event counts its hosted futures add in
-    /// a pass and publishes them in batches (every value once); without the
-    /// switch each is added at once.
-    #[tokio::test]
-    async fn a_poller_with_counter_pool_cleanup_batches_the_counts_of_its_passes() {
-        static ON: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        static OFF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        const LOOPS: usize = 8;
-        const EVENTS_PER_LOOP: u64 = 10;
-        for (config, total) in [
-            (crate::executor::MediaExecutorConfig::v2(), &ON),
-            (
-                crate::executor::MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
-                &OFF,
-            ),
-        ] {
-            let cleanup = config.counter_pool_cleanup_active();
-            let _config = crate::executor::override_media_executor_config_on_this_thread(config);
-            let poller = LanePoller::start(&Handle::current());
-            let (release, gate) = tokio::sync::watch::channel(false);
-            let most_held = Arc::new(AtomicUsize::new(0));
-            let mut handles = Vec::new();
-            for _ in 0..LOOPS {
-                let mut gate = gate.clone();
-                let held = most_held.clone();
-                handles.push(
-                    poller
-                        .host(async move {
-                            let _ = gate.wait_for(|open| *open).await;
-                            for _ in 0..EVENTS_PER_LOOP {
-                                crate::executor::add_lane_deferred(total, 1);
-                                let pending =
-                                    crate::executor::pending_lane_deferred_on_this_thread(total);
-                                held.fetch_max(pending as usize, Ordering::AcqRel);
-                                tokio::task::yield_now().await;
-                            }
-                        })
-                        .ok()
-                        .expect("poller is running"),
-                );
-            }
-            // Let every loop park on the gate, then release them together:
-            // one pass serves all of them.
-            for _ in 0..4 {
-                tokio::task::yield_now().await;
-            }
-            release.send_replace(true);
-            for handle in handles {
-                tokio::time::timeout(Duration::from_secs(2), handle.join())
-                    .await
-                    .expect("every loop finishes");
-            }
-            drop(poller);
-            // The poller stops once its channel closed and it hosts nothing.
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            assert_eq!(
-                total.load(Ordering::Relaxed),
-                LOOPS as u64 * EVENTS_PER_LOOP,
-                "every event counted once (cleanup {cleanup})"
-            );
-            assert_eq!(
-                crate::executor::pending_lane_deferred_on_this_thread(total),
-                0
-            );
-            let most = most_held.load(Ordering::Acquire);
-            if cleanup {
-                assert!(
-                    most >= LOOPS,
-                    "the pass's counts were held for one publication ({most})"
-                );
-            } else {
-                assert_eq!(most, 0, "without the switch every count is added at once");
-            }
-        }
-    }
-
-    // ---- Lane table ----
-
-    /// Fires every `period` from `next` until `left` fires, recording each
-    /// deadline and the clock at the fire.
-    struct Every {
-        period: Duration,
-        next: tokio::time::Instant,
-        left: u32,
-        fires: Arc<parking_lot::Mutex<Vec<(tokio::time::Instant, tokio::time::Instant)>>>,
-    }
-
-    impl crate::lane_table::LaneTxSource for Every {
-        fn on_due(&mut self, now: tokio::time::Instant) -> crate::lane_table::LaneNext {
-            assert!(now >= self.next, "fired before its deadline");
-            self.fires
-                .lock()
-                .push((self.next, tokio::time::Instant::now()));
-            self.left -= 1;
-            if self.left == 0 {
-                return crate::lane_table::LaneNext::Done;
-            }
-            self.next += self.period;
-            crate::lane_table::LaneNext::At(self.next)
-        }
-    }
-
-    fn table_timers() -> PollerTimers {
-        PollerTimers {
-            lane_timer: true,
-            grid: None,
-            wheel: true,
-            pass_clock: true,
-            callback_table: true,
-        }
-    }
-
-    /// On a real lane (real time, loose bounds): installed entries fire
-    /// from the poller's table never early and every one finishes (no lost
-    /// wakeup), with or without the tick.
-    #[tokio::test]
-    async fn a_poller_fires_its_table_entries_never_early_and_to_completion() {
-        for tick in [None, Some(Duration::from_millis(2))] {
-            let poller = match tick {
-                None => LanePoller::start_with_timers(&Handle::current(), table_timers()),
-                Some(quantum) => LanePoller::start_with_tick_and_timers(
-                    &Handle::current(),
-                    crate::lane_tick::TickScheduler::new(crate::lane_tick::TickGrid::new(
-                        std::time::Instant::now(),
-                        quantum,
-                    )),
-                    table_timers(),
-                ),
-            };
-            let fires = Arc::new(parking_lot::Mutex::new(Vec::new()));
-            let mut results = Vec::new();
-            for index in 0..20u64 {
-                let fires = Arc::clone(&fires);
-                let (tx, rx) = oneshot::channel();
-                results.push(rx);
-                poller
-                    .host(async move {
-                        let first =
-                            tokio::time::Instant::now() + Duration::from_micros(300 * index);
-                        let source = Box::new(Every {
-                            period: Duration::from_millis(5),
-                            next: first,
-                            left: 8,
-                            fires,
-                        });
-                        let mut handle = crate::lane_table::install_tx(source, first)
-                            .ok()
-                            .expect("a table on this poller");
-                        let back = handle.finished().await;
-                        let _ = tx.send(matches!(
-                            back,
-                            Some(crate::lane_table::LaneTxReturn::Done(_))
-                        ));
-                    })
-                    .ok()
-                    .expect("poller is running");
-            }
-            for rx in results {
-                let done = tokio::time::timeout(Duration::from_secs(5), rx)
-                    .await
-                    .expect("every entry finishes (no lost wakeup)");
-                assert_eq!(done, Ok(true), "{tick:?}");
-            }
-            let fires = fires.lock();
-            assert_eq!(fires.len(), 20 * 8);
-            let worst = fires
-                .iter()
-                .map(|(deadline, at)| at.saturating_duration_since(*deadline))
-                .max()
-                .unwrap();
-            assert!(
-                fires.iter().all(|(deadline, at)| at >= deadline),
-                "never early"
-            );
-            assert!(
-                worst < Duration::from_millis(30),
-                "worst lateness {worst:?} ({tick:?})"
-            );
-        }
-    }
-
-    /// With real threads: a retirement posted from another thread wakes a
-    /// ticking lane mid-sleep (a long 50 ms quantum) and is applied within a
-    /// pass; the entry fires no more.
-    #[test]
-    fn an_off_lane_retirement_wakes_a_ticking_lane_and_stops_its_entry() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let fires = Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let (handle_tx, handle_rx) = std::sync::mpsc::channel();
-        let poller = runtime.block_on(async {
-            let poller = LanePoller::start_with_tick_and_timers(
-                &Handle::current(),
-                crate::lane_tick::TickScheduler::new(crate::lane_tick::TickGrid::new(
-                    std::time::Instant::now(),
-                    Duration::from_millis(50),
-                )),
-                table_timers(),
-            );
-            let recorded = Arc::clone(&fires);
-            let _keep = poller
-                .host(async move {
-                    let first = tokio::time::Instant::now();
-                    let source = Box::new(Every {
-                        period: Duration::from_millis(50),
-                        next: first,
-                        left: 1_000,
-                        fires: recorded,
-                    });
-                    let handle = crate::lane_table::install_tx(source, first)
-                        .ok()
-                        .expect("a table");
-                    let _ = handle_tx.send(handle);
-                    std::future::pending::<()>().await;
-                })
-                .ok()
-                .expect("poller is running");
-            poller
-        });
-        let lane = std::thread::spawn(move || {
-            // The sleep is built inside the runtime (it needs its timer).
-            runtime.block_on(async { tokio::time::sleep(Duration::from_millis(400)).await });
-            drop(poller);
-        });
-        let mut handle = handle_rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("installed");
-        // Just after the 50 ms fire: the lane sleeps toward 100 ms.
-        std::thread::sleep(Duration::from_millis(55));
-        let posted_at = std::time::Instant::now();
-        assert!(matches!(
-            handle.retire(crate::lane_table::RetireReason::Control),
-            crate::lane_table::Retired::Pending
-        ));
-        let back = futures::executor::block_on(handle.finished());
-        let took = posted_at.elapsed();
-        assert!(matches!(
-            back,
-            Some(crate::lane_table::LaneTxReturn::Retired(_))
-        ));
-        assert!(
-            took < Duration::from_millis(30),
-            "the post cut the 50 ms tick sleep short: {took:?}"
-        );
-        let count = fires.lock().len();
-        std::thread::sleep(Duration::from_millis(120));
-        assert_eq!(fires.lock().len(), count, "no fire after the retirement");
-        lane.join().unwrap();
-    }
-
-    // ---- End lane table ----
 }

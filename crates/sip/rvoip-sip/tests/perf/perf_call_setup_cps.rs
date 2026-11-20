@@ -266,7 +266,6 @@ fn classify_bye_failure(error: &rvoip_sip::SessionError) -> (&'static str, &'sta
         SessionError::SessionNotFound(_) => ("session_not_found", "dispatch"),
         SessionError::InvalidTransition(_) => ("invalid_transition_other", "dispatch"),
         SessionError::DialogError(_) => ("dialog_other", "dispatch"),
-        SessionError::InviteNotSent(_) => ("invite_not_sent", "dispatch"),
         SessionError::ProtocolError(_) => ("protocol_other", "confirmation"),
         SessionError::NetworkError(_) | SessionError::IoError(_) => {
             ("transport_failed", "dispatch")
@@ -1131,7 +1130,6 @@ async fn wait_until_cooldown_deadline(deadline: Instant) {
     tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
 }
 
-#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[test]
 fn perf_call_setup_cps() {
     let worker_threads = env_usize("RVOIP_PERF_WORKER_THREADS", 8).max(1);
@@ -1767,7 +1765,7 @@ fn runtime_switch_snapshot() -> Value {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hex::encode(hasher.finalize())
+    format!("{:x}", hasher.finalize())
 }
 
 fn update_atomic_max(target: &AtomicU64, value: u64) {

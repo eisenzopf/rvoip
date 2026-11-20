@@ -1,4 +1,3 @@
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
@@ -25,11 +24,10 @@ fn is_user_unreserved(c: u8) -> bool {
 // This adapts the existing ipv6_reference parser for use in userinfo
 fn ipv6_reference_raw(input: &[u8]) -> ParseResult<'_, &[u8]> {
     recognize(delimited(
-        tag(&b"["[..]),
+        tag(b"["),
         take_while1(|c: u8| c.is_ascii_hexdigit() || c == b':' || c == b'.' || c == b'%'),
-        tag(&b"]"[..]),
-    ))
-    .parse(input)
+        tag(b"]"),
+    ))(input)
 }
 
 // user = 1*( unreserved / escaped / user-unreserved )
@@ -45,8 +43,7 @@ pub fn user(input: &[u8]) -> ParseResult<'_, &[u8]> {
             escaped,
             take_while1(is_user_unreserved),
         )))),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
@@ -56,13 +53,13 @@ fn is_password_char(c: u8) -> bool {
 }
 
 fn password_char(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((escaped, take_while1(is_password_char))).parse(input)
+    alt((escaped, take_while1(is_password_char)))(input)
 }
 
 // password = *( unreserved / escaped / "&" / "=" / "+" / "$" / "," )
 // Returns raw bytes, unescaping happens in userinfo
 pub fn password(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(many0(password_char)).parse(input)
+    recognize(many0(password_char))(input)
 }
 
 // userinfo = user [ ":" password ] "@"
@@ -104,47 +101,13 @@ pub fn userinfo(input: &[u8]) -> ParseResult<'_, (String, Option<String>)> {
 
     // Now proceed with parsing
     map_res(
-        terminated(
-            pair(user, opt(preceded(tag(&b":"[..]), password))),
-            tag(&b"@"[..]),
-        ),
+        terminated(pair(user, opt(preceded(tag(b":"), password))), tag(b"@")),
         |(user_bytes, pass_opt_bytes)| -> Result<(String, Option<String>), Error> {
             let user_str = unescape_uri_component(user_bytes)?;
             let pass_str_opt = pass_opt_bytes.map(unescape_uri_component).transpose()?;
             Ok((user_str, pass_str_opt))
         },
-    )
-    .parse(input)
-}
-
-/// Userinfo with each component's decoded value and its exact wire text:
-/// `((user, user_wire), Option<(password, password_wire)>)`.
-pub type UserInfoWithWire = ((String, String), Option<(String, String)>);
-
-/// Like [`userinfo`], but also returns each component exactly as it appeared
-/// on the wire, which RFC 3261 §19.1.4 needs to keep a URI's identity (an
-/// escaped `reserved` character is not equivalent to the literal one).
-pub fn userinfo_with_wire(input: &[u8]) -> ParseResult<'_, UserInfoWithWire> {
-    let (rem, (user, password)) = userinfo(input)?;
-    // `userinfo` only succeeds on grammar-valid ASCII ending in `@`.
-    let consumed = &input[..input.len() - rem.len() - 1];
-    let consumed = std::str::from_utf8(consumed).map_err(|_| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
-    })?;
-    let (user_wire, password_wire) = match password {
-        Some(_) => match consumed.rsplit_once(':') {
-            Some((user_wire, password_wire)) => (user_wire, Some(password_wire)),
-            None => (consumed, None),
-        },
-        None => (consumed, None),
-    };
-    Ok((
-        rem,
-        (
-            (user, user_wire.to_string()),
-            password.map(|password| (password, password_wire.unwrap_or("").to_string())),
-        ),
-    ))
+    )(input)
 }
 
 #[cfg(test)]

@@ -530,7 +530,7 @@ async fn docker_cluster_follows_moved_after_cached_topology_changes() {
     let (namespace, slot, source) = (0..16_384)
         .find_map(|candidate| {
             let namespace = format!("{base_namespace}:{candidate}");
-            let slot = cluster_key_slot(digest_slot_key(&namespace).as_bytes());
+            let slot = redis::cluster_routing::get_slot(digest_slot_key(&namespace).as_bytes());
             let source = nodes
                 .iter()
                 .find(|node| node.owns(slot))
@@ -685,50 +685,4 @@ async fn untrusted_ca_is_rejected_for_single_node_and_cluster() {
         )
         .await
         .is_err());
-}
-
-/// Redis Cluster key slot (CLUSTER KEYSLOT): CRC16/XMODEM of the key, or of
-/// its `{hash tag}` when one is present, modulo 16384. redis 1.x no longer
-/// exports `cluster_routing::get_slot`.
-fn cluster_key_slot(key: &[u8]) -> u16 {
-    let hashed = key
-        .iter()
-        .position(|&b| b == b'{')
-        .and_then(|open| {
-            let rest = &key[open + 1..];
-            rest.iter()
-                .position(|&b| b == b'}')
-                .filter(|&close| close > 0)
-                .map(|close| &rest[..close])
-        })
-        .unwrap_or(key);
-    let mut crc: u16 = 0;
-    for &byte in hashed {
-        crc ^= u16::from(byte) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x1021
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc % 16_384
-}
-
-#[test]
-fn cluster_key_slot_matches_redis_reference_values() {
-    // Values from `CLUSTER KEYSLOT` (Redis Cluster spec, appendix A).
-    assert_eq!(cluster_key_slot(b"123456789"), 0x31C3 % 16_384);
-    assert_eq!(cluster_key_slot(b"foo"), 12182);
-    assert_eq!(
-        cluster_key_slot(b"{user1000}.following"),
-        cluster_key_slot(b"user1000")
-    );
-    assert_eq!(cluster_key_slot(b"foo{bar}{zap}"), cluster_key_slot(b"bar"));
-    assert_eq!(
-        cluster_key_slot(b"foo{{bar}}zap"),
-        cluster_key_slot(b"{bar")
-    );
-    assert_ne!(cluster_key_slot(b"foo{}{bar}"), cluster_key_slot(b"bar"));
 }

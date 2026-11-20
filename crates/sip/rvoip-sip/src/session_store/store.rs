@@ -1,7 +1,5 @@
 use crate::cleanup_diag::{self, CleanupStage};
-use crate::session_lifecycle::{
-    AdmissionIdentity, SessionLeaseAuthority, SessionOperationKind, TeardownOutcome,
-};
+use crate::session_lifecycle::{SessionLeaseAuthority, SessionOperationKind, TeardownOutcome};
 use crate::session_registry::{SessionRegistry, SessionRegistryHandle};
 use crate::state_table::{CallId, DialogId, MediaSessionId, Role, SessionId};
 use crate::types::CallState;
@@ -193,33 +191,6 @@ impl SessionStore {
         (snapshot.lifecycle_handle.as_ref() == Some(handle)
             && self.authority.is_current(handle.key()))
         .then(|| cell.hangup_control())
-    }
-
-    /// Subscribe to committed call-state changes of one exact lifetime. The
-    /// receiver holds no session-map entry and cannot follow raw-ID reuse.
-    pub(crate) fn subscribe_call_state_exact(
-        &self,
-        handle: &SessionRegistryHandle,
-    ) -> Option<tokio::sync::watch::Receiver<Option<CallState>>> {
-        let cell = self.cell_for_handle(handle)?;
-        let _update = cell.lock_update();
-        if !self.authority.is_current(handle.key()) || !self.map_owns_cell(handle, &cell) {
-            return None;
-        }
-        Some(cell.subscribe_call_state())
-    }
-
-    /// Subscribe to committed media-readiness changes of one exact lifetime.
-    pub(crate) fn subscribe_media_readiness_exact(
-        &self,
-        handle: &SessionRegistryHandle,
-    ) -> Option<tokio::sync::watch::Receiver<Option<super::state::MediaReadinessSignal>>> {
-        let cell = self.cell_for_handle(handle)?;
-        let _update = cell.lock_update();
-        if !self.authority.is_current(handle.key()) || !self.map_owns_cell(handle, &cell) {
-            return None;
-        }
-        Some(cell.subscribe_media_readiness())
     }
 
     /// Resolve the async state-machine lane for this exact current lifetime.
@@ -429,54 +400,7 @@ impl SessionStore {
     where
         F: FnOnce(&mut SessionState),
     {
-        self.create_session_initialized_with_identity(
-            session_id,
-            role,
-            with_history,
-            AdmissionIdentity::Reusable,
-            initialize,
-        )
-        .await
-    }
-
-    /// Like [`Self::create_session_initialized`] for an identifier the stack
-    /// minted itself and never reuses (an inbound INVITE's session). Its
-    /// anti-reuse fence is reclaimed as soon as exact removal completes, so a
-    /// finished call stops counting against retained lifecycle capacity.
-    pub(crate) async fn create_session_initialized_unique<F>(
-        &self,
-        session_id: SessionId,
-        role: Role,
-        with_history: bool,
-        initialize: F,
-    ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>>
-    where
-        F: FnOnce(&mut SessionState),
-    {
-        self.create_session_initialized_with_identity(
-            session_id,
-            role,
-            with_history,
-            AdmissionIdentity::Unique,
-            initialize,
-        )
-        .await
-    }
-
-    async fn create_session_initialized_with_identity<F>(
-        &self,
-        session_id: SessionId,
-        role: Role,
-        with_history: bool,
-        identity: AdmissionIdentity,
-        initialize: F,
-    ) -> Result<SessionState, Box<dyn std::error::Error + Send + Sync>>
-    where
-        F: FnOnce(&mut SessionState),
-    {
-        let lease = self
-            .authority
-            .admit_with_identity(session_id.clone(), identity)?;
+        let lease = self.authority.admit(session_id.clone())?;
         let handle = match self.registry.register_handle_exact(lease.key()) {
             Ok(handle) => handle,
             Err(error) => {
@@ -813,7 +737,6 @@ impl SessionStore {
         let (previous, published) = cell.publish(session);
         match guard.finish() {
             Ok(()) => {
-                cell.notify_state_committed(published.state());
                 debug!(session_id = %handle.session_id(), "updated exact SIP session lifetime");
                 Ok(published)
             }
@@ -939,11 +862,10 @@ impl SessionStore {
             self.index_delta_committed();
         }
 
-        let (previous, published) = cell.publish(session);
+        let (previous, _published) = cell.publish(session);
 
         match guard.finish() {
             Ok(()) => {
-                cell.notify_state_committed(published.state());
                 debug!(session_id = %handle.session_id(), "updated exact SIP session lifetime");
                 Ok(result)
             }
@@ -1009,12 +931,7 @@ impl SessionStore {
             .remove_if(handle.session_id(), |_, candidate| {
                 Arc::ptr_eq(candidate, &cell)
             });
-        cell.close_call_state_updates();
         self.remove_indexes_for_session(snapshot.state(), handle);
-        // Every store and registry reference to this exact lifetime is gone.
-        // A stack-minted unique identifier no longer needs its anti-reuse
-        // fence; reusable identifiers keep theirs for the full horizon.
-        self.authority.reclaim_unique_retired_fence(handle.key());
         self.removed_total.fetch_add(1, Ordering::Relaxed);
         #[cfg(feature = "perf-infra-memory-diagnostics")]
         rvoip_infra_common::memory_diagnostics::record_dropped(
@@ -1072,8 +989,6 @@ impl SessionStore {
                 "active_capacity_in_use": authority.active_capacity_in_use,
                 "retained_capacity": authority.retained_capacity,
                 "retained_total": authority.lifecycle_count,
-            "unique_fences_reclaimed": authority.unique_fences_reclaimed,
-            "reusable_deadlines": authority.reusable_deadlines,
                 "admission_index_capacity": authority.admission_index_capacity,
                 "reusable_deadline_capacity": authority.reusable_deadline_capacity,
                 "retained_identifier_payload_bytes": authority.retained_identifier_payload_bytes,
@@ -1128,26 +1043,6 @@ impl SessionStore {
                 self.authority
                     .is_current(handle.key())
                     .then(|| session.clone())
-            })
-            .collect()
-    }
-
-    /// Identity and lifecycle state of every current lifetime, for the
-    /// orphan sweeper. Reads each cell's published snapshot once and copies
-    /// only the fields the sweeper needs, never the full session state.
-    pub(crate) fn sweep_entries(&self) -> Vec<crate::orphan_sweep::SweepEntry> {
-        self.sessions
-            .iter()
-            .filter_map(|entry| {
-                let snapshot = entry.value().snapshot();
-                let handle = snapshot.lifecycle_handle.as_ref()?;
-                self.authority
-                    .is_current(handle.key())
-                    .then(|| crate::orphan_sweep::SweepEntry {
-                        session_id: entry.key().clone(),
-                        handle: handle.clone(),
-                        call_state: snapshot.call_state,
-                    })
             })
             .collect()
     }
@@ -1247,124 +1142,6 @@ pub struct SessionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn media_readiness_retains_committed_owner_and_negotiation_without_unrelated_wakes() {
-        let store = SessionStore::new();
-        let id = SessionId::new();
-        let handle = store
-            .create_session(id.clone(), Role::UAS, false)
-            .await
-            .unwrap()
-            .lifecycle_handle
-            .unwrap();
-        let mut readiness = store.subscribe_media_readiness_exact(&handle).unwrap();
-        assert!(!readiness.borrow().unwrap().owner_ready);
-        store
-            .update_session_with(&id, |state| state.media_session_ready = true)
-            .await
-            .unwrap();
-        assert!(
-            !readiness.has_changed().unwrap(),
-            "revisions that keep readiness must not wake the media driver"
-        );
-        store
-            .update_session_with(&id, |state| {
-                state.media_session_id = Some(MediaSessionId::new("readiness-owner"));
-                state.sdp_negotiated = true;
-            })
-            .await
-            .unwrap();
-        readiness.changed().await.unwrap();
-        let committed = readiness.borrow_and_update().unwrap();
-        assert!(committed.owner_ready && committed.negotiation_decided && !committed.terminal);
-        // A subscriber arriving after the commit starts from the ready value.
-        let late = store.subscribe_media_readiness_exact(&handle).unwrap();
-        assert_eq!(*late.borrow(), Some(committed));
-        store
-            .update_session_with(&id, |state| state.call_state = CallState::Terminating)
-            .await
-            .unwrap();
-        readiness.changed().await.unwrap();
-        assert!(readiness.borrow_and_update().unwrap().terminal);
-        store.remove_session_exact(&handle).await.unwrap();
-        assert_eq!(*readiness.borrow_and_update(), None);
-        assert!(store.subscribe_media_readiness_exact(&handle).is_none());
-    }
-
-    #[tokio::test]
-    async fn call_state_subscription_retains_transitions_and_ignores_unrelated_updates() {
-        let store = SessionStore::new();
-        let id = SessionId::new();
-        let created = store
-            .create_session(id.clone(), Role::UAS, false)
-            .await
-            .unwrap();
-        let handle = created.lifecycle_handle.unwrap();
-        let mut states = store.subscribe_call_state_exact(&handle).unwrap();
-        assert_eq!(*states.borrow_and_update(), Some(CallState::Idle));
-
-        store
-            .update_session_with(&id, |state| state.call_state = CallState::Answering)
-            .await
-            .unwrap();
-        // The ACK can commit before the accept task next polls its receiver.
-        store
-            .update_session_with(&id, |state| state.call_state = CallState::Active)
-            .await
-            .unwrap();
-        states.changed().await.unwrap();
-        assert_eq!(*states.borrow_and_update(), Some(CallState::Active));
-        assert!(!states.has_changed().unwrap());
-
-        store
-            .update_session_with(&id, |state| state.media_session_ready = true)
-            .await
-            .unwrap();
-        assert!(
-            !states.has_changed().unwrap(),
-            "revisions that keep the call state must not wake ACK waiters"
-        );
-        let late = store.subscribe_call_state_exact(&handle).unwrap();
-        assert_eq!(*late.borrow(), Some(CallState::Active));
-
-        let mut terminal = store.get_session(&id).await.unwrap();
-        terminal.call_state = CallState::Terminating;
-        store.update_session(terminal).await.unwrap();
-        states.changed().await.unwrap();
-        assert_eq!(*states.borrow_and_update(), Some(CallState::Terminating));
-    }
-
-    #[tokio::test]
-    async fn call_state_subscription_closes_with_its_exact_session() {
-        let store = SessionStore::new();
-        let id = SessionId::new();
-        let created = store
-            .create_session(id.clone(), Role::UAS, false)
-            .await
-            .unwrap();
-        let handle = created.lifecycle_handle.unwrap();
-        let mut states = store.subscribe_call_state_exact(&handle).unwrap();
-        store.remove_session_exact(&handle).await.unwrap();
-        assert_eq!(*states.borrow_and_update(), None);
-        assert!(states.changed().await.is_err());
-        assert!(store.subscribe_call_state_exact(&handle).is_none());
-
-        let other = SessionId::new();
-        store
-            .create_session(other.clone(), Role::UAS, false)
-            .await
-            .unwrap();
-        store
-            .update_session_with(&other, |state| state.call_state = CallState::Active)
-            .await
-            .unwrap();
-        assert_eq!(
-            *states.borrow(),
-            None,
-            "another lifetime must not wake a retired receiver"
-        );
-    }
 
     #[test]
     fn configured_capacity_is_logical_and_store_indexes_reserve_lazily() {
@@ -1885,63 +1662,5 @@ mod tests {
         assert!(current.pending_auth_transaction_id.is_none());
         assert!(current.auth_challenge_raw.is_none());
         assert!(current.digest_nc.is_empty());
-    }
-
-    fn tight_store() -> SessionStore {
-        // One active call and one retained lifetime: any lingering anti-reuse
-        // fence blocks the next admission.
-        let authority =
-            SessionLeaseAuthority::with_capacities(1, 1).expect("tight lifecycle capacities");
-        let registry = Arc::new(SessionRegistry::with_authority(Arc::clone(&authority)));
-        SessionStore::with_lifecycle(authority, registry, Some(1))
-    }
-
-    #[tokio::test]
-    async fn removing_a_unique_lifetime_frees_retained_capacity_immediately() {
-        let store = tight_store();
-        for round in 0..64 {
-            let id = SessionId::new();
-            let handle = store
-                .create_session_initialized_unique(id.clone(), Role::UAS, false, |_| {})
-                .await
-                .unwrap_or_else(|error| panic!("round {round} admission rejected: {error}"))
-                .lifecycle_handle
-                .expect("exact handle");
-            store
-                .remove_session_exact(&handle)
-                .await
-                .expect("exact removal");
-            assert!(store.get_session_retained_snapshot_exact(&handle).is_err());
-            assert!(store.lifecycle_handle(&id).is_none());
-            let diagnostics = store.authority().diagnostics();
-            assert_eq!(diagnostics.lifecycle_count, 0, "round {round} left a fence");
-            assert_eq!(diagnostics.active_capacity_in_use, 0);
-            // A late removal for the same exact lifetime is a harmless error.
-            assert!(store.remove_session_exact(&handle).await.is_err());
-            assert!(store.remove_quiesced_session_exact(&handle).is_err());
-        }
-        assert_eq!(store.authority().diagnostics().unique_fences_reclaimed, 64);
-    }
-
-    #[tokio::test]
-    async fn removing_a_reusable_lifetime_keeps_its_anti_reuse_fence() {
-        let store = tight_store();
-        let id = SessionId::from_string("application-chosen-id");
-        let handle = store
-            .create_session(id.clone(), Role::UAC, false)
-            .await
-            .expect("admission")
-            .lifecycle_handle
-            .expect("exact handle");
-        store.remove_session_exact(&handle).await.expect("removal");
-        assert_eq!(store.authority().diagnostics().lifecycle_count, 1);
-        let blocked = store
-            .create_session(SessionId::new(), Role::UAC, false)
-            .await
-            .expect_err("the fence still occupies the only retained slot");
-        assert!(matches!(
-            blocked.downcast_ref::<crate::session_lifecycle::SessionAdmissionError>(),
-            Some(crate::session_lifecycle::SessionAdmissionError::RetainedCapacityExhausted)
-        ));
     }
 }

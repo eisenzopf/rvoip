@@ -189,13 +189,15 @@
 //! Stable → HaveRemoteOffer → HaveLocalPranswer → Stable
 //! ```
 //!
-//! # Specification
+//! # Specifications
 //!
 //! - [W3C WebRTC Specification]
 //! - [RFC 8445] - ICE: Interactive Connectivity Establishment
+//! - [RFC 5245] - ICE (obsoleted by RFC 8445)
 //!
-//! [W3C WebRTC Specification]: https://www.w3.org/TR/webrtc/
+//! [W3C WebRTC Specification]: https://w3c.github.io/webrtc-pc/
 //! [RFC 8445]: https://datatracker.ietf.org/doc/html/rfc8445
+//! [RFC 5245]: https://datatracker.ietf.org/doc/html/rfc5245
 
 pub(crate) mod ice_connection_state;
 pub(crate) mod ice_gathering_state;

@@ -19,14 +19,14 @@ pub use absolute::parse_absolute_uri;
 pub use headers::uri_headers;
 pub use host::{host, hostport, port};
 pub use params::uri_parameters;
-pub use userinfo::{userinfo, userinfo_with_wire, UserInfoWithWire};
+pub use userinfo::userinfo;
 
 // Add imports for combinators and types
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while},
     combinator::{opt, recognize},
+    sequence::tuple,
 };
 use std::collections::HashMap;
 
@@ -34,52 +34,26 @@ use crate::parser::ParseResult;
 use crate::types::uri::Scheme;
 use crate::types::uri::{Host, Uri};
 
-/// Parsed userinfo as `Uri` fields: `(user, user_wire, password, password_wire)`.
-/// An empty user is treated as absent.
-type UriUserFields = (
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-);
-
-fn uri_user_fields(info: Option<UserInfoWithWire>) -> UriUserFields {
-    let Some(((user, user_wire), password)) = info else {
-        return (None, None, None, None);
-    };
-    let (password, password_wire) = match password {
-        Some((password, wire)) => (Some(password), Some(wire)),
-        None => (None, None),
-    };
-    if user.is_empty() {
-        (None, None, password, password_wire)
-    } else {
-        (Some(user), Some(user_wire), password, password_wire)
-    }
-}
-
 // SIP-URI = "sip:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
-    let res = (
-        tag_no_case(&b"sip:"[..]),
-        opt(userinfo_with_wire),
+    let res = tuple((
+        tag_no_case(b"sip:"),
+        opt(userinfo),
         hostport,
         opt(uri_parameters),
         opt(uri_headers),
-    )
-        .parse(bytes_slice);
+    ))(bytes_slice);
 
     match res {
         Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
-            let (user, user_wire, password, password_wire) = uri_user_fields(user_info_opt);
+            // user_info is already (String, Option<String>)
+            let (user, password) = user_info_opt.unwrap_or((String::new(), None));
 
             let uri = Uri {
                 scheme: Scheme::Sip,
-                user,
-                user_wire,
+                user: if user.is_empty() { None } else { Some(user) },
                 password,
-                password_wire,
                 host,
                 port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
@@ -97,25 +71,23 @@ pub fn parse_sip_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
 // SIPS-URI = "sips:" [ userinfo ] hostport uri-parameters [ headers ]
 pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     let bytes_slice = bytes;
-    let res = (
-        tag_no_case(&b"sips:"[..]),
-        opt(userinfo_with_wire),
+    let res = tuple((
+        tag_no_case(b"sips:"),
+        opt(userinfo),
         hostport,
         opt(uri_parameters),
         opt(uri_headers),
-    )
-        .parse(bytes_slice);
+    ))(bytes_slice);
 
     match res {
         Ok((remaining, (_, user_info_opt, (host, port_opt), params_opt, headers_opt))) => {
-            let (user, user_wire, password, password_wire) = uri_user_fields(user_info_opt);
+            // user_info is already (String, Option<String>)
+            let (user, password) = user_info_opt.unwrap_or((String::new(), None));
 
             let uri = Uri {
                 scheme: Scheme::Sips,
-                user,
-                user_wire,
+                user: if user.is_empty() { None } else { Some(user) },
                 password,
-                password_wire,
                 host,
                 port: port_opt,
                 parameters: params_opt.unwrap_or_default(),
@@ -130,49 +102,11 @@ pub fn parse_sips_uri(bytes: &[u8]) -> ParseResult<'_, Uri> {
     }
 }
 
-/// Length of the hostport at the start of `input`: up to the first ';' or '?'
-/// that is not inside an IPv6 reference.
-fn hostport_extent(input: &[u8]) -> usize {
-    let mut in_reference = false;
-    for (index, &byte) in input.iter().enumerate() {
-        match byte {
-            b'[' => in_reference = true,
-            b']' => in_reference = false,
-            b';' | b'?' if !in_reference => return index,
-            _ => {}
-        }
-    }
-    input.len()
-}
-
 /// Public entry point for parsing a SIP or SIPS URI
 /// Can be re-exported by the main parser mod.rs
 pub fn parse_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Use alt to try each parser
-    alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri)).parse(input)
-}
-
-/// `SIP-URI / SIPS-URI / absoluteURI` (RFC 3261 §25.1, the Request-URI and
-/// addr-spec grammar), consuming all of `input`.
-///
-/// `sip:`, `sips:` and `tel:` URIs must parse completely as such: an invalid
-/// SIP URI is an error, never an opaque URI. Any other scheme is an
-/// absoluteURI, kept verbatim with its scheme.
-pub fn sip_or_absolute_uri(input: &[u8]) -> ParseResult<'_, Uri> {
-    let scheme_end = input.iter().position(|&b| b == b':').ok_or_else(|| {
-        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Tag))
-    })?;
-    let scheme = &input[..scheme_end];
-    let modelled = [b"sip".as_slice(), b"sips", b"tel"]
-        .iter()
-        .any(|known| scheme.eq_ignore_ascii_case(known));
-    if modelled {
-        return nom::combinator::all_consuming(parse_uri).parse(input);
-    }
-    let (rest, absolute) = nom::combinator::all_consuming(parse_absolute_uri).parse(input)?;
-    let text = std::str::from_utf8(absolute)
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))?;
-    Ok((rest, Uri::custom(text)))
+    alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input)
 }
 
 /// Special version of parse_uri that allows for non-standard schemes
@@ -180,7 +114,7 @@ pub fn sip_or_absolute_uri(input: &[u8]) -> ParseResult<'_, Uri> {
 /// such as in the macro builder or when processing messages from other systems
 pub fn parse_uri_lenient(input: &[u8]) -> ParseResult<'_, Uri> {
     // First try the standard parsers (SIP, SIPS, TEL)
-    let result = alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri)).parse(input);
+    let result = alt((parse_sip_uri_fixed, parse_sips_uri_fixed, parse_tel_uri))(input);
 
     if result.is_ok() {
         return result;
@@ -216,9 +150,7 @@ fn parse_generic_uri(input: &[u8]) -> ParseResult<'_, Uri> {
             let uri = Uri {
                 scheme,
                 user: None,
-                user_wire: None,
                 password: None,
-                password_wire: None,
                 host: Host::domain("example.com"), // Default host
                 port: None,
                 parameters: Vec::new(),
@@ -238,7 +170,7 @@ fn parse_generic_uri(input: &[u8]) -> ParseResult<'_, Uri> {
 
 // Fixed implementation of SIP URI parser that correctly handles params and headers
 fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
-    let (input, _) = tag_no_case(&b"sip:"[..])(input)?;
+    let (input, _) = tag_no_case(b"sip:")(input)?;
 
     // Get the user info (if any)
     let mut userinfo_present = false;
@@ -247,7 +179,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     // Check if @ symbol exists in input
     if let Some(at_pos) = input.iter().position(|&c| c == b'@') {
         userinfo_present = true;
-        match userinfo_with_wire(&input[..at_pos + 1]) {
+        match userinfo(&input[..at_pos + 1]) {
             Ok((_, parsed_userinfo)) => {
                 user_info = Some(parsed_userinfo);
             }
@@ -270,11 +202,8 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     };
 
     // Special check for non-numeric port values
-    // If there's a colon not followed by digits, treat it as an error. Only
-    // the hostport is checked: it ends at the first ';' (uri-parameters) or
-    // '?' (headers) outside an IPv6 reference, and those may contain ':'.
-    let hostport_end = hostport_extent(input);
-    if let Some(colon_pos) = input[..hostport_end].iter().position(|&c| c == b':') {
+    // If there's a colon not followed by digits, treat it as an error
+    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
         // First check if this is inside an IPv6 reference
         // Look for opening bracket before this position
         let has_ipv6_before = input[..colon_pos].iter().any(|&c| c == b'[');
@@ -386,13 +315,11 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
             }
 
             // Create URI
-            let (user, user_wire, password, password_wire) = uri_user_fields(user_info);
+            let (user, password) = user_info.unwrap_or((String::new(), None));
             let uri = Uri {
                 scheme: Scheme::Sip,
-                user,
-                user_wire,
+                user: if user.is_empty() { None } else { Some(user) },
                 password,
-                password_wire,
                 host,
                 port,
                 parameters: params,
@@ -412,7 +339,7 @@ fn parse_sip_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
 
 // Fixed implementation of SIPS URI parser that correctly handles params and headers
 fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
-    let (input, _) = tag_no_case(&b"sips:"[..])(input)?;
+    let (input, _) = tag_no_case(b"sips:")(input)?;
 
     // Get the user info (if any)
     let mut userinfo_present = false;
@@ -421,7 +348,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     // Check if @ symbol exists in input
     if let Some(at_pos) = input.iter().position(|&c| c == b'@') {
         userinfo_present = true;
-        match userinfo_with_wire(&input[..at_pos + 1]) {
+        match userinfo(&input[..at_pos + 1]) {
             Ok((_, parsed_userinfo)) => {
                 user_info = Some(parsed_userinfo);
             }
@@ -444,11 +371,8 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
     };
 
     // Special check for non-numeric port values
-    // If there's a colon not followed by digits, treat it as an error. Only
-    // the hostport is checked: it ends at the first ';' (uri-parameters) or
-    // '?' (headers) outside an IPv6 reference, and those may contain ':'.
-    let hostport_end = hostport_extent(input);
-    if let Some(colon_pos) = input[..hostport_end].iter().position(|&c| c == b':') {
+    // If there's a colon not followed by digits, treat it as an error
+    if let Some(colon_pos) = input.iter().position(|&c| c == b':') {
         // First check if this is inside an IPv6 reference
         // Look for opening bracket before this position
         let has_ipv6_before = input[..colon_pos].iter().any(|&c| c == b'[');
@@ -559,13 +483,11 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
             }
 
             // Create URI
-            let (user, user_wire, password, password_wire) = uri_user_fields(user_info);
+            let (user, password) = user_info.unwrap_or((String::new(), None));
             let uri = Uri {
                 scheme: Scheme::Sips,
-                user,
-                user_wire,
+                user: if user.is_empty() { None } else { Some(user) },
                 password,
-                password_wire,
                 host,
                 port,
                 parameters: params,
@@ -588,7 +510,7 @@ fn parse_sips_uri_fixed(input: &[u8]) -> ParseResult<'_, Uri> {
 // telephone-subscriber = global-number / local-number
 fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Tag for "tel:"
-    let (input, _) = tag_no_case(&b"tel:"[..])(input)?;
+    let (input, _) = tag_no_case(b"tel:")(input)?;
 
     // In our implementation, we store the telephone number as the host part of the URI
     // while marking the URI scheme as Tel
@@ -596,8 +518,7 @@ fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
     // Capture everything until a parameter or end of input
     let (input, number) = recognize(take_while(|c| {
         c != b';' && c != b'?' // Stop at parameter or header delimiter
-    }))
-    .parse(input)?;
+    }))(input)?;
 
     // Convert number to string
     let number_str = std::str::from_utf8(number)
@@ -623,8 +544,6 @@ fn parse_tel_uri(input: &[u8]) -> ParseResult<'_, Uri> {
         scheme: Scheme::Tel,
         user: None, // TEL URI doesn't have a user component in our model
         password: None,
-        password_wire: None,
-        user_wire: None,
         host: Host::Domain(number_str), // Store the phone number as domain
         port: None,                     // TEL URI doesn't have a port
         parameters: params,
@@ -1333,7 +1252,7 @@ mod tests {
     #[test]
     fn test_strict_rfc_compliance_edge_cases_host_invalid_chars() {
         // 6. Invalid characters in host
-        let result = "sip:alice@example_com".parse::<Uri>();
+        let result = parse_uri(b"sip:alice@example_com");
         assert!(result.is_err(), "Parser should reject underscores in host");
     }
 

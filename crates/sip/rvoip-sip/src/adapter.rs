@@ -23,10 +23,10 @@ use rvoip_core::adapter::{
     legacy_normalized_event_receiver, AdapterEvent, AdapterKind, AdapterLifecycleCapabilities,
     AdapterLifecycleSink, AdapterLifecycleSinkSlot, ConnectionAdapter, ConnectionHandle, EndReason,
     ExternalConnectionReference, InboundAssertedIdentity, InboundConnectionContext,
-    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, ObservedCallerNumber,
-    ObservedCallerSource, OrchestratorAdapterEvent, OriginateRequest, OutboundActivation,
-    RejectReason, SignatureHeaders, TerminalDelivery, TransferAttemptId, TransferStatus,
-    TransferTarget, TrustedSignalingMetadata, TrustedSignalingProvenance,
+    InboundContextError, InboundRoutingHint, InboundSignalingMetadata, OrchestratorAdapterEvent,
+    OriginateRequest, OutboundActivation, RejectReason, SignatureHeaders, TerminalDelivery,
+    TransferAttemptId, TransferStatus, TransferTarget, TrustedSignalingMetadata,
+    TrustedSignalingProvenance,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
@@ -65,7 +65,7 @@ const SIP_INBOUND_REJECTION_CONCURRENCY: usize = 256;
 const DEFAULT_SIP_ACTIVE_CONNECTION_BUDGET: usize = 262_144;
 const SIP_OUTBOUND_EVENT_STAGE_CAPACITY: usize = 32;
 const MAX_SIP_OUTBOUND_TARGET_BYTES: usize = 4_096;
-pub(crate) const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
+const SIP_RETAINED_TASK_TIMEOUT: Duration = Duration::from_secs(2);
 const SIP_OUTBOUND_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(30);
 const SIP_CONFIRMED_HANGUP_TIMEOUT: Duration = Duration::from_secs(3);
 const SIP_ADAPTER_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
@@ -268,25 +268,17 @@ enum SipActivationFailure {
     EventPublication,
     InvalidPlan,
     InviteFailed,
-    /// The INVITE failed before any of it reached the network.
-    InviteNotSent,
-    /// The outbound peer lease refused dispatch; no INVITE was sent.
-    PeerRevokedBeforeDispatch,
     MediaFailed,
 }
 
 impl SipActivationFailure {
     fn into_error(self) -> RvoipError {
         let detail = match self {
-            Self::PeerRevokedBeforeDispatch => {
-                return RvoipError::OutboundPeerUnavailableBeforeWrite;
-            }
             Self::RouteEnded => "SIP outbound route ended during activation",
             Self::EventOverflow => "SIP outbound lifecycle event stage overflowed",
             Self::EventPublication => "SIP outbound lifecycle event publication was unavailable",
             Self::InvalidPlan => "SIP outbound activation plan was invalid",
             Self::InviteFailed => "SIP outbound INVITE activation failed",
-            Self::InviteNotSent => return RvoipError::OutboundNotSent,
             Self::MediaFailed => "SIP outbound media activation failed",
         };
         RvoipError::Adapter(detail.to_string())
@@ -337,9 +329,6 @@ struct SipOutboundRoute {
     activation: watch::Sender<Option<SipActivationCompletion>>,
     cleanup: watch::Sender<Option<bool>>,
     cancel: watch::Sender<bool>,
-    /// Set by retained cleanup once the route's terminal event has been
-    /// consumed by the Orchestrator (or its direct lifecycle sink).
-    terminal_published: AtomicBool,
 }
 
 impl SipOutboundRoute {
@@ -382,7 +371,6 @@ impl SipOutboundRoute {
             activation,
             cleanup,
             cancel,
-            terminal_published: AtomicBool::new(false),
         })
     }
 
@@ -438,18 +426,6 @@ impl SipOutboundRoute {
         }
         state.wire = SipOutboundWireState::Possible;
         Ok(())
-    }
-
-    /// The coordinator proved the INVITE never reached the network, so
-    /// cleanup owes no CANCEL/BYE.
-    fn mark_wire_not_sent(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.wire == SipOutboundWireState::Possible {
-            state.wire = SipOutboundWireState::NotStarted;
-        }
     }
 
     fn mark_wire_sent(&self) {
@@ -658,47 +634,14 @@ impl SipOutboundRoute {
         }
     }
 
-    /// Wait for the activation outcome. A failed activation first waits for
-    /// retained cleanup, which publishes the route's own terminal event, so
-    /// that terminal (for example the peer's final non-2xx response) reaches
-    /// the Orchestrator before core sees the failed receipt and runs its own
-    /// abort. When that terminal was consumed, report
-    /// [`RvoipError::OutboundTerminalPublishedDuringActivation`] so callers do
-    /// not publish a second failure.
-    ///
-    /// The exception is a failure that proves nothing reached the wire
-    /// ([`RvoipError::OutboundNotSent`],
-    /// [`RvoipError::OutboundPeerUnavailableBeforeWrite`]): that error is
-    /// kept, because it is what tells the caller a retry cannot duplicate the
-    /// call and no teardown is owed. Cleanup has still completed first, so the
-    /// route's terminal is already ordered ahead of the failed receipt.
-    async fn wait_activation_receipt(&self) -> CoreResult<OutboundActivation> {
-        let result = self.wait_activation().await;
-        if let Err(error) = &result {
-            self.wait_cleanup().await?;
-            let never_sent = matches!(
-                error,
-                RvoipError::OutboundNotSent | RvoipError::OutboundPeerUnavailableBeforeWrite
-            );
-            if !never_sent && self.terminal_published.load(Ordering::Acquire) {
-                return Err(RvoipError::OutboundTerminalPublishedDuringActivation);
-            }
-        }
-        result
-    }
-
     fn request_cleanup(&self, event: Option<AdapterEvent>) -> bool {
         let start = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // An explicit cause wins over the signaling terminal its own
-            // cleanup produces, but not over a remote terminal (such as the
-            // peer's final non-2xx response) staged before cleanup began:
-            // that terminal is the cause, not an effect, of the cleanup.
             if let Some(event) = event {
-                if state.cleanup_event.is_none() && !state.remote_terminal_seen {
+                if state.cleanup_event.is_none() {
                     state.cleanup_event = Some(event);
                 }
             }
@@ -926,7 +869,6 @@ impl SipInboundContextPolicy {
         if observation.principal.is_none() {
             return Ok(None);
         }
-        let mut observed_caller_number = None;
         let (routing_hint, metadata, asserted_identity, trusted_signaling) =
             if let Some(request) = observation.request.as_ref() {
                 let routing_hint = request
@@ -980,9 +922,6 @@ impl SipInboundContextPolicy {
                 } else {
                     None
                 };
-                if trusted_peer {
-                    observed_caller_number = observed_caller_number_of(request);
-                }
                 let trusted_signaling = if trusted_peer {
                     let fields = request
                         .headers
@@ -1030,8 +969,6 @@ impl SipInboundContextPolicy {
             metadata,
             asserted_identity,
             trusted_signaling,
-            observed_peer_address: observation.observed_peer_address,
-            observed_caller_number,
         }))
     }
 }
@@ -1256,44 +1193,6 @@ struct PendingSipInboundContext {
     metadata: InboundSignalingMetadata,
     asserted_identity: Option<InboundAssertedIdentity>,
     trusted_signaling: Option<TrustedSignalingMetadata>,
-    observed_peer_address: Option<std::net::IpAddr>,
-    observed_caller_number: Option<ObservedCallerNumber>,
-}
-
-/// An E.164 number from a SIP URI user part: `+` (or `%2B`) and 7 to 15
-/// digits without a leading zero. Anything else, including national or
-/// dial-string forms, yields `None` rather than a guessed normalization.
-fn observed_e164_user(user: Option<&str>) -> Option<String> {
-    let user = user?;
-    let digits = user
-        .strip_prefix('+')
-        .or_else(|| user.strip_prefix("%2B"))
-        .or_else(|| user.strip_prefix("%2b"))?;
-    (digits.len() >= 7
-        && digits.len() <= 15
-        && !digits.starts_with('0')
-        && digits.bytes().all(|byte| byte.is_ascii_digit()))
-    .then(|| format!("+{digits}"))
-}
-
-/// Caller number of an INVITE from a peer admitted by trusted-trunk policy:
-/// the first E.164 `P-Asserted-Identity` URI, otherwise an E.164 `From` user.
-fn observed_caller_number_of(request: &rvoip_sip_core::Request) -> Option<ObservedCallerNumber> {
-    let asserted = request.headers.iter().find_map(|header| match header {
-        TypedHeader::PAssertedIdentity(identity) => identity
-            .iter()
-            .find_map(|address| observed_e164_user(address.uri().username())),
-        _ => None,
-    });
-    let (number, source) = asserted
-        .map(|number| (number, ObservedCallerSource::TrustedAssertedIdentity))
-        .or_else(|| {
-            request
-                .from()
-                .and_then(|from| observed_e164_user(from.uri().username()))
-                .map(|number| (number, ObservedCallerSource::AdmittedFrom))
-        })?;
-    ObservedCallerNumber::new(number, source).ok()
 }
 
 struct PendingSipInboundObservation {
@@ -1301,86 +1200,6 @@ struct PendingSipInboundObservation {
     principal: Option<AuthenticatedPrincipal>,
     context: Option<Box<PendingSipInboundContext>>,
     context_error: Option<InboundContextError>,
-}
-
-/// Pending inbound observations with a lower bound on their oldest
-/// `observed_at`, so an INVITE only scans for expired entries when at least
-/// one can have expired, instead of on every insert.
-///
-/// The watermark may be older than the true oldest entry (removing the
-/// oldest does not recompute it), which can cost an extra scan but never
-/// misses an expired entry. It keeps no expiry queue, so churn cannot grow
-/// retained state.
-#[derive(Default)]
-struct PendingSipInboundObservations {
-    entries: HashMap<SessionId, PendingSipInboundObservation>,
-    oldest_observed_at: Option<Instant>,
-    #[cfg(test)]
-    expiry_scans: usize,
-}
-
-impl PendingSipInboundObservations {
-    /// Remove every entry older than `ttl`, returning how many were removed.
-    fn purge_expired(&mut self, now: Instant, ttl: Duration) -> usize {
-        if self
-            .oldest_observed_at
-            .is_none_or(|oldest| now.saturating_duration_since(oldest) <= ttl)
-        {
-            return 0;
-        }
-        #[cfg(test)]
-        {
-            self.expiry_scans += 1;
-        }
-        let before = self.entries.len();
-        let mut oldest: Option<Instant> = None;
-        self.entries.retain(|_, observation| {
-            let fresh = now.saturating_duration_since(observation.observed_at) <= ttl;
-            if fresh {
-                oldest = Some(oldest.map_or(observation.observed_at, |at| {
-                    at.min(observation.observed_at)
-                }));
-            }
-            fresh
-        });
-        self.oldest_observed_at = oldest;
-        before - self.entries.len()
-    }
-
-    fn insert(&mut self, session_id: SessionId, observation: PendingSipInboundObservation) {
-        self.oldest_observed_at = Some(
-            self.oldest_observed_at
-                .map_or(observation.observed_at, |at| {
-                    at.min(observation.observed_at)
-                }),
-        );
-        self.entries.insert(session_id, observation);
-    }
-
-    fn remove(&mut self, session_id: &SessionId) -> Option<PendingSipInboundObservation> {
-        let removed = self.entries.remove(session_id);
-        if self.entries.is_empty() {
-            self.oldest_observed_at = None;
-        }
-        removed
-    }
-
-    fn get(&self, session_id: &SessionId) -> Option<&PendingSipInboundObservation> {
-        self.entries.get(session_id)
-    }
-
-    fn contains_key(&self, session_id: &SessionId) -> bool {
-        self.entries.contains_key(session_id)
-    }
-
-    fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.oldest_observed_at = None;
-    }
 }
 
 enum SipInboundContextState {
@@ -1423,7 +1242,7 @@ impl SipInboundLimits {
 }
 
 struct SipInboundContextStore {
-    pending_by_session: StdMutex<PendingSipInboundObservations>,
+    pending_by_session: StdMutex<HashMap<SessionId, PendingSipInboundObservation>>,
     by_connection: DashMap<ConnectionId, SipInboundContextState>,
     max_pending: usize,
     pending_ttl: Duration,
@@ -1432,7 +1251,7 @@ struct SipInboundContextStore {
 impl Default for SipInboundContextStore {
     fn default() -> Self {
         Self {
-            pending_by_session: StdMutex::new(PendingSipInboundObservations::default()),
+            pending_by_session: StdMutex::new(HashMap::new()),
             by_connection: DashMap::new(),
             max_pending: MAX_PENDING_SIP_INBOUND_CONTEXTS,
             pending_ttl: PENDING_SIP_INBOUND_CONTEXT_TTL,
@@ -1480,7 +1299,9 @@ impl SipInboundContextStore {
             .pending_by_session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pending.purge_expired(now, self.pending_ttl);
+        pending.retain(|_, observation| {
+            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
+        });
         if pending.contains_key(&session_id) {
             return true;
         }
@@ -1530,13 +1351,10 @@ impl SipInboundContextStore {
                     pending.metadata,
                 )
                 .map(|context| {
-                    context
-                        .with_trusted_signaling(
-                            pending.asserted_identity,
-                            pending.trusted_signaling,
-                        )
-                        .with_observed_peer_address(pending.observed_peer_address)
-                        .with_observed_caller_number(pending.observed_caller_number)
+                    context.with_trusted_signaling(
+                        pending.asserted_identity,
+                        pending.trusted_signaling,
+                    )
                 }) {
                     Ok(context) => SipInboundContextState::Available(Box::new(context)),
                     Err(error) => {
@@ -1582,7 +1400,11 @@ impl SipInboundContextStore {
             .pending_by_session
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        pending.purge_expired(now, self.pending_ttl)
+        let before = pending.len();
+        pending.retain(|_, observation| {
+            now.saturating_duration_since(observation.observed_at) <= self.pending_ttl
+        });
+        before.saturating_sub(pending.len())
     }
 
     fn take(&self, connection_id: &ConnectionId) -> Option<InboundConnectionContext> {
@@ -1662,9 +1484,6 @@ pub struct SipAdapter {
     /// inspect `Connection.streams` off the `InboundConnection` event
     /// see a non-empty vec (QUIC/WT parity, gap plan §2.2).
     streams_cache: Arc<DashMap<ConnectionId, Arc<crate::media_stream::SipMediaStream>>>,
-    /// Calls whose media key agreement failed (`MediaSecurityFailed`), so
-    /// their terminal event reports the failure instead of a normal end.
-    media_security_failures: DashMap<SessionId, crate::api::events::MediaSecurityFailure>,
     inbound_contexts: Arc<SipInboundContextStore>,
     authenticated_inbound_sessions: DashMap<SessionId, ()>,
     lifecycle: AdapterLifecycleSinkSlot,
@@ -1674,13 +1493,6 @@ pub struct SipAdapter {
     inbound_rejection_slots: Arc<tokio::sync::Semaphore>,
     /// Exact lifetimes whose rejection a retained task owns.
     inbound_rejections: Arc<DashMap<SessionRegistryHandle, ()>>,
-    /// Exact lifetimes with a retained reclaim in flight (an inbound end
-    /// reclaim or an orphan reclaim). The orphan sweeper treats them as owned.
-    session_reclaims: Arc<DashMap<SessionRegistryHandle, ()>>,
-    /// Bounds concurrent orphan reclaims; the rest wait for a later pass.
-    orphan_reclaim_slots: Arc<tokio::sync::Semaphore>,
-    /// Ownerless call sessions found by the last orphan sweep, by state.
-    orphan_sessions_by_state: StdMutex<Vec<(&'static str, u64)>>,
     draining: AtomicBool,
     drained: AtomicBool,
     /// The first destructive drain failure is sticky. Once route ownership
@@ -1691,9 +1503,6 @@ pub struct SipAdapter {
     force_drain_compensation_failure: AtomicBool,
     #[cfg(test)]
     inbound_rejection_test_gate: StdMutex<Option<InboundRejectionTestGate>>,
-    /// Stream to cache for the next mapped connection instead of a fresh one.
-    #[cfg(test)]
-    next_test_stream: StdMutex<Option<Arc<crate::media_stream::SipMediaStream>>>,
     drain_gate: AsyncMutex<()>,
     observer_registered: AtomicBool,
     inbound_invite_observer_id: u64,
@@ -1714,19 +1523,6 @@ struct InboundRejectionOwner {
 }
 
 impl Drop for InboundRejectionOwner {
-    fn drop(&mut self) {
-        self.jobs.remove(&self.handle);
-    }
-}
-
-/// Marks one exact lifetime as having a retained reclaim in flight until
-/// dropped, so the orphan sweeper never races that reclaim's own bounds.
-struct SessionReclaimClaim {
-    jobs: Arc<DashMap<SessionRegistryHandle, ()>>,
-    handle: SessionRegistryHandle,
-}
-
-impl Drop for SessionReclaimClaim {
     fn drop(&mut self) {
         self.jobs.remove(&self.handle);
     }
@@ -1942,7 +1738,6 @@ impl SipAdapter {
             out_tx: out_tx.clone(),
             out_rx: StdMutex::new(Some(out_rx)),
             streams_cache: Arc::new(DashMap::new()),
-            media_security_failures: DashMap::new(),
             inbound_contexts,
             authenticated_inbound_sessions: DashMap::new(),
             lifecycle: AdapterLifecycleSinkSlot::default(),
@@ -1952,11 +1747,6 @@ impl SipAdapter {
                 SIP_INBOUND_REJECTION_CONCURRENCY,
             )),
             inbound_rejections: Arc::new(DashMap::new()),
-            session_reclaims: Arc::new(DashMap::new()),
-            orphan_reclaim_slots: Arc::new(tokio::sync::Semaphore::new(
-                crate::orphan_sweep::ORPHAN_RECLAIM_CONCURRENCY,
-            )),
-            orphan_sessions_by_state: StdMutex::new(Vec::new()),
             draining: AtomicBool::new(false),
             drained: AtomicBool::new(false),
             drain_failure: StdMutex::new(None),
@@ -1964,8 +1754,6 @@ impl SipAdapter {
             force_drain_compensation_failure: AtomicBool::new(false),
             #[cfg(test)]
             inbound_rejection_test_gate: StdMutex::new(None),
-            #[cfg(test)]
-            next_test_stream: StdMutex::new(None),
             drain_gate: AsyncMutex::new(()),
             observer_registered: AtomicBool::new(true),
             inbound_invite_observer_id,
@@ -1998,19 +1786,13 @@ impl SipAdapter {
             debug!("SipAdapter event translator stream ended");
         });
         debug_assert!(translator_spawned);
-        // The orphan sweeper shares the context reaper's retained task, so
-        // the adapter's permanent task count is unchanged.
-        let orphan_sweep = coordinator
-            .session_cleanup_config()
-            .orphan_session_ttl
-            .map(crate::orphan_sweep::OrphanSweepConfig::with_ttl);
-        let reaper_spawned = adapter.retained_tasks.spawn(Self::run_adapter_maintenance(
-            Arc::downgrade(&adapter),
-            Arc::downgrade(&adapter.inbound_contexts),
-            context_reaper_cancel_rx,
-            PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
-            orphan_sweep,
-        ));
+        let reaper_spawned = adapter
+            .retained_tasks
+            .spawn(Self::run_pending_context_reaper(
+                Arc::downgrade(&adapter.inbound_contexts),
+                context_reaper_cancel_rx,
+                PENDING_SIP_INBOUND_CONTEXT_REAPER_INTERVAL,
+            ));
         debug_assert!(reaper_spawned);
 
         Ok(adapter)
@@ -2570,7 +2352,6 @@ impl SipAdapter {
             | AdapterEvent::Failed { connection_id, .. }
             | AdapterEvent::Dtmf { connection_id, .. }
             | AdapterEvent::Quality { connection_id, .. }
-            | AdapterEvent::MediaCommitted { connection_id, .. }
             | AdapterEvent::Message { connection_id, .. }
             | AdapterEvent::DataMessage { connection_id, .. }
             | AdapterEvent::TransferStatus { connection_id, .. }
@@ -2606,30 +2387,14 @@ impl SipAdapter {
         Ok(())
     }
 
-    #[cfg(test)]
     async fn run_pending_context_reaper(
-        contexts: Weak<SipInboundContextStore>,
-        cancel: watch::Receiver<bool>,
-        interval: Duration,
-    ) {
-        Self::run_adapter_maintenance(Weak::new(), contexts, cancel, interval, None).await;
-    }
-
-    /// Purge expired inbound contexts every `interval` and, when the orphan
-    /// sweeper is on, run one orphan sweep pass every sweep interval.
-    async fn run_adapter_maintenance(
-        adapter: Weak<SipAdapter>,
         contexts: Weak<SipInboundContextStore>,
         mut cancel: watch::Receiver<bool>,
         interval: Duration,
-        orphan_sweep: Option<crate::orphan_sweep::OrphanSweepConfig>,
     ) {
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         tick.tick().await;
-        let mut tracker = crate::orphan_sweep::OrphanTracker::default();
-        let mut next_sweep =
-            orphan_sweep.map(|config| tokio::time::Instant::now() + config.interval);
         loop {
             tokio::select! {
                 changed = cancel.changed() => {
@@ -2642,137 +2407,12 @@ impl SipAdapter {
                         break;
                     };
                     let removed = contexts.purge_expired();
-                    drop(contexts);
                     if removed > 0 {
                         debug!(removed, "SipAdapter purged expired inbound contexts");
                     }
-                    let (Some(config), Some(due_at)) = (orphan_sweep, next_sweep) else {
-                        continue;
-                    };
-                    let now = tokio::time::Instant::now();
-                    if now < due_at {
-                        continue;
-                    }
-                    next_sweep = Some(now + config.interval);
-                    let Some(adapter) = adapter.upgrade() else {
-                        break;
-                    };
-                    if !adapter.is_draining() {
-                        adapter.orphan_sweep_pass(&mut tracker, now, config.ttl).await;
-                    }
                 }
             }
         }
-    }
-
-    /// Whether a lifetime has an owner that will end it: a route (so an
-    /// orchestrator connection, or one being published or prepared), an
-    /// observed INVITE the translator has not mapped yet, an in-flight
-    /// rejection, or a retained reclaim.
-    fn session_has_owner(&self, session_id: &SessionId, handle: &SessionRegistryHandle) -> bool {
-        self.by_session.contains_key(session_id)
-            || self.inbound_rejections.contains_key(handle)
-            || self.session_reclaims.contains_key(handle)
-            || self.inbound_contexts.has_pending(session_id)
-    }
-
-    /// Ownerless call sessions found by the last orphan sweep, by lifecycle
-    /// state. Empty when the sweeper is off
-    /// ([`SessionCleanupConfig::orphan_session_ttl`](crate::api::unified::SessionCleanupConfig::orphan_session_ttl))
-    /// or has not run yet. A state that stays nonzero while the system is
-    /// idle names the path that leaks; the sweeper reclaims those sessions
-    /// once they pass the TTL.
-    pub fn orphan_sessions_by_state(&self) -> Vec<(&'static str, u64)> {
-        self.orphan_sessions_by_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
-    }
-
-    /// One orphan sweep pass. Classifies every session-store lifetime,
-    /// records the ownerless ones by state, and hands each lifetime that has
-    /// been ownerless for `ttl` with no new RTP to a bounded, retained
-    /// reclaim. Returns how many reclaims it started.
-    pub(crate) async fn orphan_sweep_pass(
-        &self,
-        tracker: &mut crate::orphan_sweep::OrphanTracker,
-        now: tokio::time::Instant,
-        ttl: Duration,
-    ) -> usize {
-        use crate::cleanup_diag::{
-            record_orphan_session_reclaim_outcome, record_orphan_session_reclaim_started,
-            OrphanSessionReclaimOutcome,
-        };
-        let rtp_coordinator = Arc::clone(&self.coordinator);
-        let pass = tracker
-            .pass(
-                self.coordinator.orphan_sweep_entries(),
-                now,
-                ttl,
-                |session_id: &SessionId, handle: &SessionRegistryHandle| {
-                    self.session_has_owner(session_id, handle)
-                },
-                |session_id: SessionId| {
-                    let coordinator = Arc::clone(&rtp_coordinator);
-                    async move { coordinator.orphan_rtp_packets_received(&session_id).await }
-                },
-            )
-            .await;
-        *self
-            .orphan_sessions_by_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = pass
-            .orphans_by_state
-            .iter()
-            .map(|(state, count)| (*state, *count))
-            .collect();
-        let orphans = pass.orphans();
-        let mut started = 0;
-        for (handle, state) in pass.due {
-            let Ok(permit) = Arc::clone(&self.orphan_reclaim_slots).try_acquire_owned() else {
-                break;
-            };
-            match self.session_reclaims.entry(handle.clone()) {
-                dashmap::mapref::entry::Entry::Occupied(_) => continue,
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(());
-                }
-            }
-            let claim = SessionReclaimClaim {
-                jobs: Arc::clone(&self.session_reclaims),
-                handle: handle.clone(),
-            };
-            tracker.forget(&handle);
-            let coordinator = Arc::clone(&self.coordinator);
-            let mut draining = self.translator_cancel.subscribe();
-            let reclaim_handle = handle.clone();
-            let spawned = self.retained_tasks.spawn(async move {
-                let (_permit, _claim) = (permit, claim);
-                // A drain stops only this waiter, as every other bound here does.
-                let outcome = tokio::select! {
-                    outcome = coordinator.reclaim_orphan_session_exact(&reclaim_handle) => outcome,
-                    _ = draining.wait_for(|draining| *draining) => {
-                        OrphanSessionReclaimOutcome::TimedOut
-                    }
-                };
-                record_orphan_session_reclaim_outcome(outcome);
-            });
-            if !spawned {
-                break;
-            }
-            started += 1;
-            if let Some(occurrences) = record_orphan_session_reclaim_started() {
-                warn!(
-                    session = %handle.session_id(),
-                    state = crate::orphan_sweep::state_label(state),
-                    ttl_ms = ttl.as_millis() as u64,
-                    orphans,
-                    occurrences,
-                    "SIP session had no owner and no media past the orphan TTL; reclaiming it and its media port"
-                );
-            }
-        }
-        started
     }
 
     /// Remove exactly one authority-qualified route while holding
@@ -2967,14 +2607,7 @@ impl SipAdapter {
         use crate::cleanup_diag::{record_inbound_end_reclaim_outcome, InboundEndReclaimOutcome};
         crate::cleanup_diag::record_inbound_end_reclaim();
         let coordinator = Arc::clone(&self.coordinator);
-        // The orphan sweeper must not race this reclaim's own bounds.
-        self.session_reclaims.insert(handle.clone(), ());
-        let claim = SessionReclaimClaim {
-            jobs: Arc::clone(&self.session_reclaims),
-            handle: handle.clone(),
-        };
         let spawned = self.retained_tasks.spawn(async move {
-            let _claim = claim;
             if wait_for_outbound_session_release(&coordinator, &handle).await {
                 record_inbound_end_reclaim_outcome(InboundEndReclaimOutcome::Released);
                 return;
@@ -3337,131 +2970,6 @@ impl SipAdapter {
         }
     }
 
-    /// Hold or resume one route, completing on the peer's answer.
-    ///
-    /// The state machine commits `OnHold` (or `Active`) only when the 2xx to
-    /// the re-INVITE arrives, and keeps the call as it was on a non-2xx or
-    /// timeout (RFC 3261 section 14.1). This waits for that outcome, as
-    /// `renegotiate_media` does, so a rejected hold or resume is an error
-    /// instead of a success that only meant the request was sent. A committed
-    /// answer is then applied to the live stream as a new media generation:
-    /// the answer may select another codec, and the inbound playout restarts
-    /// instead of keeping a playout clock that ran on through the hold, which
-    /// would drop the resumed audio of a source that paused its RTP clock.
-    async fn change_hold_direction(&self, conn: ConnectionId, hold: bool) -> CoreResult<()> {
-        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
-        let epoch = {
-            let _mapping = self
-                .mapping_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.route_epoch_for_connection_locked(&conn)
-        };
-        let Some((epoch, handle)) = epoch.and_then(|epoch| {
-            let handle = epoch.admitted_handle().cloned()?;
-            (epoch.session_id == session_id).then_some((epoch, handle))
-        }) else {
-            // No admitted SIP lifetime to observe: dispatch as before.
-            return if hold {
-                self.coordinator.hold(&session_id).await
-            } else {
-                self.coordinator.resume(&session_id).await
-            }
-            .map_err(Self::map_session_err);
-        };
-        let target = if hold {
-            CallState::OnHold
-        } else {
-            CallState::Active
-        };
-        let before = self
-            .coordinator
-            .get_state_exact(&handle)
-            .await
-            .map_err(Self::map_session_err)?;
-        let mut completions = self.coordinator.subscribe_renegotiation_completions();
-        if hold {
-            self.coordinator.hold_exact(&handle).await
-        } else {
-            self.coordinator.resume_exact(&handle).await
-        }
-        .map_err(Self::map_session_err)?;
-        if before == target {
-            // Already in the requested direction: the state table answers
-            // this without a re-INVITE.
-            return Ok(());
-        }
-
-        let deadline = tokio::time::sleep(self.coordinator.reinvite_completion_timeout_duration());
-        tokio::pin!(deadline);
-        loop {
-            tokio::select! {
-                _ = &mut deadline => {
-                    return Err(RvoipError::AdmissionRejected(
-                        "SIP hold/resume re-INVITE timed out before a committed answer",
-                    ));
-                }
-                result = completions.recv() => {
-                    let completion = result.map_err(|_| RvoipError::AdmissionRejected(
-                        "SIP hold/resume completion observation was unavailable",
-                    ))?;
-                    if completion.handle != handle || completion.method != "INVITE" {
-                        continue;
-                    }
-                    if completion.outcome
-                        == crate::api::lifecycle::RenegotiationCompletionOutcome::Failed
-                    {
-                        return Err(RvoipError::AdmissionRejected(
-                            "SIP hold/resume re-INVITE was not accepted by the peer",
-                        ));
-                    }
-                    break;
-                }
-            }
-        }
-        let state = self
-            .coordinator
-            .get_state_exact(&handle)
-            .await
-            .map_err(Self::map_session_err)?;
-        if state != target {
-            return Err(RvoipError::AdmissionRejected(
-                "SIP hold/resume answer did not commit the requested direction",
-            ));
-        }
-
-        let stream = {
-            let _mapping = self
-                .mapping_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !self.epoch_is_current_locked(&epoch) {
-                return Err(RvoipError::ConnectionNotFound(conn));
-            }
-            self.streams_cache
-                .get(&conn)
-                .map(|entry| Arc::clone(entry.value()))
-        };
-        if let Some(stream) = stream {
-            if let Some((config, payload_type)) = self
-                .coordinator
-                .negotiated_media_config_exact(&handle)
-                .await
-                .map_err(Self::map_session_err)?
-            {
-                stream
-                    .apply_negotiated_media(&config, payload_type)
-                    .map_err(|_| {
-                        RvoipError::UnsupportedCodec(
-                            "SIP hold/resume answer selected a codec unavailable to the media graph"
-                                .into(),
-                        )
-                    })?;
-            }
-        }
-        Ok(())
-    }
-
     /// Atomically reserve the only transfer attempt permitted for this exact
     /// live route. The history entry is intentionally not reusable after a
     /// terminal status: raw REFER events lack transaction correlation, so a
@@ -3688,14 +3196,6 @@ impl SipAdapter {
         if let Some(stream) = self.streams_cache.get(conn) {
             return (stream.direction() == direction).then(|| Arc::clone(stream.value()));
         }
-        #[cfg(test)]
-        let stream = self
-            .next_test_stream
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
-            .unwrap_or_else(|| crate::media_stream::SipMediaStream::dormant_deferred(direction));
-        #[cfg(not(test))]
         let stream = crate::media_stream::SipMediaStream::dormant_deferred(direction);
         self.streams_cache.insert(conn.clone(), Arc::clone(&stream));
         Some(stream)
@@ -3865,23 +3365,12 @@ impl SipAdapter {
         signaling_end: Option<EndReason>,
     ) -> (AdapterEvent, &'static str) {
         let connection_id = epoch.connection_id.clone();
-        // A call rvoip-sip ended because its media key agreement failed sends
-        // its own BYE, so signaling usually ends first. The recorded failure
-        // still decides the terminal, exactly as in `translate_api_event`.
-        let security_failure = self
-            .media_security_failures
-            .remove(&epoch.session_id)
-            .map(|(_, failure)| media_security_failure_detail(failure));
         match signaling_end {
             Some(reason) => {
                 debug!(
                     ?reason,
                     "SipAdapter media stopped after signaling ended; reporting the signaling terminal"
                 );
-                let reason = match security_failure {
-                    Some(detail) => EndReason::Failed { detail },
-                    None => reason,
-                };
                 (
                     AdapterEvent::Ended {
                         connection_id,
@@ -3893,10 +3382,7 @@ impl SipAdapter {
             None => (
                 AdapterEvent::Failed {
                     connection_id,
-                    detail: match security_failure {
-                        Some(detail) => format!("SIP media driver failed; {detail}"),
-                        None => "SIP media driver failed".to_string(),
-                    },
+                    detail: "SIP media driver failed".to_string(),
                 },
                 "media-failed",
             ),
@@ -4043,14 +3529,6 @@ impl SipAdapter {
                         connection_id: epoch.connection_id.clone(),
                     },
                 );
-                self.publish_committed_media(&epoch);
-            }
-            ApiEvent::MediaSecurityNegotiated { call_id, .. } => {
-                // A wake-up only: the exact committed snapshot is re-read, so
-                // security set up before an inbound ACK publishes nothing.
-                if let Some(epoch) = self.existing_mapped_epoch(&call_id) {
-                    self.publish_committed_media(&epoch);
-                }
             }
             ApiEvent::CallProgress {
                 call_id,
@@ -4071,17 +3549,7 @@ impl SipAdapter {
                     },
                 );
             }
-            ApiEvent::MediaSecurityFailed {
-                call_id, reason, ..
-            } => {
-                // rvoip-sip ends the call next; its terminal event carries
-                // the failure to the orchestrator.
-                if self.existing_mapped_epoch(&call_id).is_some() {
-                    self.media_security_failures.insert(call_id, reason);
-                }
-            }
             ApiEvent::CallEnded { call_id, .. } => {
-                let security_failure = self.media_security_failures.remove(&call_id);
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -4093,15 +3561,8 @@ impl SipAdapter {
                         // terminal event (including a peer BYE). Signaling
                         // failures arrive separately as `CallFailed`; treating
                         // a normal remote hangup as failed makes every
-                        // answered outbound call settle incorrectly. The one
-                        // exception is a call rvoip-sip ended because its
-                        // media key agreement failed.
-                        reason: match security_failure {
-                            Some((_, failure)) => EndReason::Failed {
-                                detail: media_security_failure_detail(failure),
-                            },
-                            None => EndReason::Normal,
-                        },
+                        // answered outbound call settle incorrectly.
+                        reason: EndReason::Normal,
                     },
                     "call-ended",
                 )
@@ -4112,7 +3573,6 @@ impl SipAdapter {
                 status_code,
                 reason,
             } => {
-                let security_failure = self.media_security_failures.remove(&call_id);
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -4120,20 +3580,13 @@ impl SipAdapter {
                     &epoch,
                     AdapterEvent::Failed {
                         connection_id: epoch.connection_id.clone(),
-                        detail: match security_failure {
-                            Some((_, failure)) => format!(
-                                "{status_code} {reason}; {}",
-                                media_security_failure_detail(failure)
-                            ),
-                            None => format!("{} {}", status_code, reason),
-                        },
+                        detail: format!("{} {}", status_code, reason),
                     },
                     "call-failed",
                 )
                 .await;
             }
             ApiEvent::CallCancelled { call_id } => {
-                let security_failure = self.media_security_failures.remove(&call_id);
                 let Some(epoch) = self.existing_mapped_terminal_epoch(&call_id) else {
                     return;
                 };
@@ -4141,12 +3594,7 @@ impl SipAdapter {
                     &epoch,
                     AdapterEvent::Ended {
                         connection_id: epoch.connection_id.clone(),
-                        reason: match security_failure {
-                            Some((_, failure)) => EndReason::Failed {
-                                detail: media_security_failure_detail(failure),
-                            },
-                            None => EndReason::Cancelled,
-                        },
+                        reason: EndReason::Cancelled,
                     },
                     "call-cancelled",
                 )
@@ -4398,33 +3846,6 @@ impl SipAdapter {
     /// The nonblocking channel write occurs under `mapping_lock`, so terminal
     /// retirement cannot linearize between the liveness check and enqueue.
     /// Stale supervisors are treated as successfully discarded.
-    /// Publish the epoch's current committed audio selection, if any. Safe
-    /// to call on every wake-up: it reads the exact session snapshot.
-    fn publish_committed_media(&self, epoch: &SipRouteEpoch) {
-        let Some(handle) = epoch.admitted_handle() else {
-            return;
-        };
-        let Ok(snapshot) = self
-            .coordinator
-            .helpers
-            .state_machine
-            .store
-            .get_session_snapshot_exact(handle)
-        else {
-            return;
-        };
-        let Some(media) = committed_audio_media(snapshot.state(), snapshot.revision()) else {
-            return;
-        };
-        self.try_send_for_epoch(
-            epoch,
-            AdapterEvent::MediaCommitted {
-                connection_id: epoch.connection_id.clone(),
-                media,
-            },
-        );
-    }
-
     fn try_send_for_epoch(&self, epoch: &SipRouteEpoch, event: AdapterEvent) -> bool {
         let _mapping = self
             .mapping_lock
@@ -4584,88 +4005,6 @@ impl SipAdapter {
     }
 }
 
-/// The committed audio selection of one SIP session, or `None` while no
-/// offer/answer is complete (or one is pending) or the dialog is not
-/// established. Reads the same session-store values the media layer encodes
-/// with; the session revision orders successive selections.
-fn committed_audio_media(
-    session: &crate::session_store::state::SessionState,
-    revision: u64,
-) -> Option<rvoip_core::adapter::CommittedAudioMedia> {
-    if !session.sdp_negotiated
-        || session.pending_offer_answer.is_some()
-        || !matches!(
-            session.call_state,
-            CallState::Active | CallState::Bridged | CallState::OnHold
-        )
-    {
-        return None;
-    }
-    let config = session.negotiated_config.as_ref()?;
-    let media = rvoip_core::adapter::CommittedAudioMedia::new(
-        revision,
-        config.codec.to_ascii_uppercase(),
-        session.committed_negotiated_payload_type()?,
-        config.sample_rate,
-        config.channels,
-    );
-    let profile = committed_audio_profile(session);
-    let media = match session.media_security.as_ref() {
-        None => match profile {
-            Some(profile) if matches!(profile.as_str(), "RTP/AVP" | "RTP/AVPF") => {
-                media.with_media_profile(profile)
-            }
-            _ => media,
-        },
-        Some(security) => {
-            use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile};
-            // A secured selection always names its profile; one that does not
-            // match the negotiated security is not reported at all.
-            let profile = profile.filter(|profile| match security.profile {
-                MediaSecurityProfile::RtpSavp => {
-                    matches!(profile.as_str(), "RTP/SAVP" | "RTP/SAVPF")
-                }
-                MediaSecurityProfile::UdpTlsRtpSavp => {
-                    matches!(profile.as_str(), "UDP/TLS/RTP/SAVP" | "UDP/TLS/RTP/SAVPF")
-                }
-            })?;
-            let keying = match security.keying {
-                MediaSecurityKeying::Sdes => "sdes",
-                MediaSecurityKeying::DtlsSrtp => "dtls_srtp",
-            };
-            media.with_security(
-                profile,
-                keying,
-                security.suite.as_str(),
-                security.contexts_installed,
-            )
-        }
-    };
-    media.valid().then_some(media)
-}
-
-/// The audio transport profile both completed descriptions agree on for the
-/// committed payload type. Unknown or mismatched profiles yield `None`; they
-/// never imply plaintext.
-fn committed_audio_profile(session: &crate::session_store::state::SessionState) -> Option<String> {
-    fn profile(sdp: &str, payload: u8) -> Option<String> {
-        let parsed = rvoip_sip_core::types::sdp::SdpSession::from_str(sdp).ok()?;
-        let audio = parsed
-            .media_descriptions
-            .iter()
-            .find(|m| m.media.eq_ignore_ascii_case("audio") && m.port != 0)?;
-        audio
-            .formats
-            .iter()
-            .any(|p| p.parse::<u8>().ok() == Some(payload))
-            .then(|| audio.protocol.to_ascii_uppercase())
-    }
-    let payload = session.committed_negotiated_payload_type()?;
-    let local = profile(session.local_sdp.as_deref()?, payload)?;
-    let remote = profile(session.remote_sdp.as_deref()?, payload)?;
-    (local == remote).then_some(local)
-}
-
 async fn wait_for_route_cancel(cancel: &mut watch::Receiver<bool>) {
     loop {
         if *cancel.borrow_and_update() {
@@ -4693,38 +4032,24 @@ async fn wait_for_outbound_session_active(
     let deadline = tokio::time::Instant::now() + SIP_OUTBOUND_ACTIVATION_TIMEOUT;
     let mut lifecycle = coordinator.lifecycle_watcher_exact(&lifecycle_handle);
     let mut cancel = route.cancel.subscribe();
-    let mut terminal_fact_deadline = None;
 
     loop {
         let snapshot = coordinator
             .lifecycle_snapshot_exact(&lifecycle_handle)
             .await
             .map_err(|_| SipActivationFailure::RouteEnded)?;
-        if let Some(terminal) = snapshot.terminal.as_ref() {
-            // The lifecycle records the terminal fact before the adapter's
-            // own event translator sees it. Stage it on the route now, so the
-            // activation failure it causes reports the actual cause (such as
-            // the peer's final response) instead of a generic failure.
-            route.stage_event(outbound_terminal_event(
-                route.connection_id.clone(),
-                terminal,
-            ));
+        if snapshot.terminal.is_some() {
             return Err(SipActivationFailure::RouteEnded);
         }
         match snapshot.state {
             Some(CallState::Active) => return Ok(()),
-            // A final state is committed just before its terminal fact is
-            // recorded. Wait a bounded time for that fact rather than fail
-            // activation without its cause.
-            Some(state) if state.is_final() => {
-                let wait_until = *terminal_fact_deadline.get_or_insert_with(|| {
-                    deadline.min(tokio::time::Instant::now() + SIP_RETAINED_TASK_TIMEOUT)
-                });
-                if tokio::time::Instant::now() >= wait_until {
-                    return Err(SipActivationFailure::RouteEnded);
-                }
-            }
-            Some(CallState::CancelPending | CallState::Cancelling | CallState::Terminating) => {
+            Some(state)
+                if state.is_final()
+                    || matches!(
+                        state,
+                        CallState::CancelPending | CallState::Cancelling | CallState::Terminating
+                    ) =>
+            {
                 return Err(SipActivationFailure::RouteEnded);
             }
             None => return Err(SipActivationFailure::RouteEnded),
@@ -4736,12 +4061,8 @@ async fn wait_for_outbound_session_active(
             _ = wait_for_route_cancel(&mut cancel) => {
                 return Err(SipActivationFailure::RouteEnded);
             }
-            _ = tokio::time::sleep_until(terminal_fact_deadline.unwrap_or(deadline)) => {
-                return Err(if terminal_fact_deadline.is_some() {
-                    SipActivationFailure::RouteEnded
-                } else {
-                    SipActivationFailure::InviteFailed
-                });
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(SipActivationFailure::InviteFailed);
             }
             changed = lifecycle.changed() => {
                 if changed.is_err() {
@@ -4749,32 +4070,6 @@ async fn wait_for_outbound_session_active(
                 }
             }
         }
-    }
-}
-
-/// The adapter event for a terminal lifecycle fact, as the event translator
-/// publishes it for `CallFailed`, `CallCancelled` and `CallEnded`.
-fn outbound_terminal_event(
-    connection_id: ConnectionId,
-    terminal: &crate::api::lifecycle::CallTerminalInfo,
-) -> AdapterEvent {
-    use crate::api::lifecycle::CallTerminalInfo;
-    match terminal {
-        CallTerminalInfo::Failed {
-            status_code,
-            reason,
-        } => AdapterEvent::Failed {
-            connection_id,
-            detail: format!("{status_code} {reason}"),
-        },
-        CallTerminalInfo::Cancelled => AdapterEvent::Ended {
-            connection_id,
-            reason: EndReason::Cancelled,
-        },
-        CallTerminalInfo::Ended { .. } => AdapterEvent::Ended {
-            connection_id,
-            reason: EndReason::Normal,
-        },
     }
 }
 
@@ -4931,37 +4226,13 @@ async fn run_outbound_activation(
     events: mpsc::Sender<OrchestratorAdapterEvent>,
     retained_tasks: Arc<RetainedTasks>,
 ) {
-    let result = {
-        let activation = activate_outbound_route(
-            weak_adapter.clone(),
-            Arc::clone(&coordinator),
-            Arc::clone(&route),
-            events.clone(),
-        );
-        tokio::pin!(activation);
-        if let Some(peer) = route.context.outbound_peer() {
-            let mut revoked = peer.revocation();
-            tokio::select! {
-                biased;
-                _ = wait_for_route_cancel(&mut revoked) => {
-                    if route.cleanup_snapshot().0 == SipOutboundWireState::NotStarted {
-                        Err(SipActivationFailure::PeerRevokedBeforeDispatch)
-                    } else {
-                        // The INVITE may have left. Capture its exact admitted
-                        // lifetime so retained cleanup can CANCEL or BYE it;
-                        // never report this as zero-wire.
-                        if let Some(adapter) = weak_adapter.upgrade() {
-                            adapter.promote_outbound_route_if_admitted(&route);
-                        }
-                        Err(SipActivationFailure::RouteEnded)
-                    }
-                }
-                result = &mut activation => result,
-            }
-        } else {
-            activation.await
-        }
-    };
+    let result = activate_outbound_route(
+        weak_adapter.clone(),
+        Arc::clone(&coordinator),
+        Arc::clone(&route),
+        events.clone(),
+    )
+    .await;
     match result {
         Ok(receipt) => {
             let media_weak_adapter = weak_adapter.clone();
@@ -5002,12 +4273,7 @@ async fn run_outbound_activation(
                 events,
                 Some(AdapterEvent::Failed {
                     connection_id: route.connection_id.clone(),
-                    detail: if failure == SipActivationFailure::PeerRevokedBeforeDispatch {
-                        "joined outbound peer unavailable before INVITE"
-                    } else {
-                        "SIP outbound activation failed"
-                    }
-                    .to_string(),
+                    detail: "SIP outbound activation failed".to_string(),
                 }),
                 "activation-failed",
             );
@@ -5081,13 +4347,6 @@ async fn activate_outbound_route(
         .with_headers(headers)
         .map_err(|_| SipActivationFailure::InvalidPlan)?;
 
-    // A peer-bound call claims its single dispatch at the last moment before
-    // the wire becomes possible; a refusal here sent nothing.
-    if let Some(peer) = route.context.outbound_peer() {
-        if !peer.try_begin_dispatch() {
-            return Err(SipActivationFailure::PeerRevokedBeforeDispatch);
-        }
-    }
     // `Possible` begins immediately before the first poll of `send`: cleanup
     // must assume a packet escaped if this future is subsequently cancelled.
     route.begin_wire_send()?;
@@ -5102,20 +4361,9 @@ async fn activate_outbound_route(
             }
             return Err(SipActivationFailure::RouteEnded);
         }
-        // The first INVITE's send includes DNS resolution and the TCP/TLS
-        // connect and handshake. The short retained-cleanup budget would
-        // cancel a reachable peer whose handshake takes longer than 2 s;
-        // bound the send by the outbound activation budget instead.
-        result = tokio::time::timeout(SIP_OUTBOUND_ACTIVATION_TIMEOUT, &mut send) => {
+        result = tokio::time::timeout(SIP_RETAINED_TASK_TIMEOUT, &mut send) => {
             match result {
                 Ok(Ok(session_id)) => session_id,
-                Ok(Err(crate::errors::SessionError::InviteNotSent(_))) => {
-                    route.mark_wire_not_sent();
-                    if let Some(adapter) = weak_adapter.upgrade() {
-                        adapter.promote_outbound_route_if_admitted(&route);
-                    }
-                    return Err(SipActivationFailure::InviteNotSent);
-                }
                 Ok(Err(_)) | Err(_) => {
                     if let Some(adapter) = weak_adapter.upgrade() {
                         adapter.promote_outbound_route_if_admitted(&route);
@@ -5213,7 +4461,6 @@ async fn monitor_outbound_media(
     events: mpsc::Sender<OrchestratorAdapterEvent>,
 ) {
     let mut media = route.stream.subscribe_lifecycle();
-    let mut peer_revoked = route.context.outbound_peer().map(|peer| peer.revocation());
     loop {
         // Copy the state out of the watch guard before an arm can request
         // cleanup. Cleanup closes the same stream and publishes a new
@@ -5242,36 +4489,8 @@ async fn monitor_outbound_media(
             | crate::media_stream::SipMediaLifecycle::Binding
             | crate::media_stream::SipMediaLifecycle::Bound => {}
         }
-        let revoked = async {
-            match peer_revoked.as_mut() {
-                Some(signal) => wait_for_route_cancel(signal).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        tokio::select! {
-            biased;
-            _ = revoked => {
-                // The peer this call depends on retired after dispatch:
-                // retained cleanup ends the call on the wire.
-                begin_outbound_cleanup(
-                    weak_adapter,
-                    coordinator,
-                    Arc::clone(&route),
-                    lifecycle,
-                    events,
-                    Some(AdapterEvent::Failed {
-                        connection_id: route.connection_id.clone(),
-                        detail: "joined outbound peer retired".to_string(),
-                    }),
-                    "outbound-peer-retired",
-                );
-                return;
-            }
-            changed = media.changed() => {
-                if changed.is_err() {
-                    return;
-                }
-            }
+        if media.changed().await.is_err() {
+            return;
         }
     }
 }
@@ -5420,33 +4639,10 @@ async fn run_outbound_cleanup(
     if let Some(adapter) = weak_adapter.upgrade() {
         adapter.retire_outbound_route(&route);
     }
-    let terminal_delivered = if let Some(event) = terminal {
-        // Wait for core consumption, not queue admission: a failed
-        // activation receipt is released only after this, so the route's
-        // own terminal wins over core's fallback abort.
-        let delivery = tokio::time::timeout(
-            SIP_RETAINED_TASK_TIMEOUT,
-            lifecycle.queue_or_deliver_orchestrator_terminal_with_receipt(&events, event),
-        )
-        .await;
-        let delivered = matches!(
-            delivery,
-            Ok(TerminalDelivery::Queued | TerminalDelivery::Fallback)
-        );
-        if !delivered {
-            warn!(
-                source,
-                "SipAdapter outbound terminal event was undeliverable"
-            );
-        }
-        route.terminal_published.store(delivered, Ordering::Release);
-        delivered
-    } else {
-        true
-    };
-    route.complete_cleanup(
-        wire_teardown_success && local_release_success && media_success && terminal_delivered,
-    );
+    if let Some(event) = terminal {
+        SipAdapter::deliver_terminal_event_to(&lifecycle, &events, event, source).await;
+    }
+    route.complete_cleanup(wire_teardown_success && local_release_success && media_success);
 }
 
 impl Drop for SipAdapter {
@@ -5610,7 +4806,7 @@ impl ConnectionAdapter for SipAdapter {
             Ok(false) => {}
             Err(error) => return Err(error.into_error()),
         }
-        route.wait_activation_receipt().await
+        route.wait_activation().await
     }
 
     async fn start_inbound_early_media(&self, conn: ConnectionId) -> CoreResult<()> {
@@ -5675,21 +4871,6 @@ impl ConnectionAdapter for SipAdapter {
                     .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?,
             )
         };
-        // Subscribe before the 200 OK can reach the peer: its ACK may commit
-        // before accept returns, and the watch retains that committed state.
-        let mut inbound_states = match inbound_epoch.as_ref() {
-            Some(epoch) => Some(
-                self.coordinator
-                    .subscribe_call_state_exact(epoch.admitted_handle().ok_or(
-                        RvoipError::InvalidState(
-                            "SIP inbound route has no exact lifecycle authority",
-                        ),
-                    )?)
-                    .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?,
-            ),
-            None => None,
-        };
-        let mut draining = self.translator_cancel.subscribe();
         let session_id = inbound_epoch
             .as_ref()
             .map(|epoch| epoch.session_id.clone())
@@ -5746,73 +4927,24 @@ impl ConnectionAdapter for SipAdapter {
         // event is emitted for an inbound ACK. Waiting here keeps that
         // protocol distinction out of the public event stream and lets the
         // adapter publish exactly the transport-neutral Connected event at
-        // the real establishment boundary. The wait wakes on committed
-        // call-state changes of this exact lifetime, drain, or the deadline,
-        // instead of polling the session map every 10 ms.
-        let Some(states) = inbound_states.as_mut() else {
-            return Err(RvoipError::InvalidState(
-                "SIP inbound route has no exact lifecycle authority",
-            ));
-        };
-        let deadline = tokio::time::sleep(self.coordinator.setup_teardown_timeout_duration());
-        tokio::pin!(deadline);
+        // the real establishment boundary.
+        let deadline = Instant::now() + self.coordinator.setup_teardown_timeout_duration();
         loop {
             if self.draining.load(Ordering::Acquire) {
                 return Err(RvoipError::AdmissionRejected(
                     "SIP adapter began draining while an inbound accept awaited ACK",
                 ));
             }
-            let state = *states.borrow_and_update();
-            match state {
-                Some(CallState::Active | CallState::Bridged) => {
+            match self.coordinator.get_state(&session_id).await {
+                Ok(CallState::Active | CallState::Bridged) => {
                     let epoch = self
                         .existing_mapped_epoch(&session_id)
                         .filter(|epoch| epoch.connection_id == conn)
                         .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
-                    // The ACK establishes signaling, but the inbound stream's
-                    // media bind runs independently and may not have finished.
-                    // `Connected` tells consumers the stream can be written,
-                    // so join that bind (it shares the stream's one retained
-                    // driver) within the same setup deadline, as outbound
-                    // activation does before its receipt.
-                    let stream = self
-                        .streams_cache
-                        .get(&conn)
-                        .map(|entry| Arc::clone(entry.value()))
-                        .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
-                    tokio::select! {
-                        bound = stream.bind(Arc::clone(&self.coordinator), session_id.clone()) => {
-                            bound.map_err(Self::map_session_err)?;
-                        }
-                        _ = draining.changed() => {
-                            return Err(RvoipError::AdmissionRejected(
-                                "SIP adapter began draining while an inbound accept awaited media",
-                            ));
-                        }
-                        () = &mut deadline => {
-                            return Err(RvoipError::AdmissionRejected(
-                                "SIP inbound accept timed out awaiting media readiness",
-                            ));
-                        }
-                    }
-                    if self.draining.load(Ordering::Acquire) {
-                        return Err(RvoipError::AdmissionRejected(
-                            "SIP adapter began draining while an inbound accept awaited media",
-                        ));
-                    }
-                    if !matches!(
-                        *states.borrow_and_update(),
-                        Some(CallState::Active | CallState::Bridged)
-                    ) {
-                        return Err(RvoipError::InvalidState(
-                            "SIP inbound session ended while awaiting media readiness",
-                        ));
-                    }
-                    stream.try_frames_out()?;
                     // As in `try_send_for_epoch`, the epoch check and the
                     // enqueue share `mapping_lock`, so retirement cannot slip
                     // between them. The reserved slot cannot be full.
-                    let mapping = self
+                    let _mapping = self
                         .mapping_lock
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -5824,36 +4956,25 @@ impl ConnectionAdapter for SipAdapter {
                             connection_id: conn.clone(),
                         },
                     ));
-                    drop(mapping);
-                    self.publish_committed_media(&epoch);
                     return Ok(());
                 }
-                Some(state) if state.is_final() || state == CallState::Terminating => {
+                Ok(state) if state.is_final() || state == CallState::Terminating => {
                     return Err(RvoipError::InvalidState(
                         "SIP inbound session ended before ACK establishment",
                     ));
                 }
-                Some(_) => {}
-                // The exact lifetime was removed.
-                None => return Err(RvoipError::ConnectionNotFound(conn)),
+                Ok(_) => {}
+                Err(_) if self.lookup_session(&conn).is_err() => {
+                    return Err(RvoipError::ConnectionNotFound(conn));
+                }
+                Err(_) => {}
             }
-            tokio::select! {
-                changed = states.changed() => {
-                    if changed.is_err() {
-                        return Err(RvoipError::ConnectionNotFound(conn));
-                    }
-                }
-                _ = draining.changed() => {
-                    return Err(RvoipError::AdmissionRejected(
-                        "SIP adapter began draining while an inbound accept awaited ACK",
-                    ));
-                }
-                () = &mut deadline => {
-                    return Err(RvoipError::AdmissionRejected(
-                        "SIP inbound accept timed out awaiting ACK",
-                    ));
-                }
+            if Instant::now() >= deadline {
+                return Err(RvoipError::AdmissionRejected(
+                    "SIP inbound accept timed out awaiting ACK",
+                ));
             }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
@@ -5971,11 +5092,19 @@ impl ConnectionAdapter for SipAdapter {
     }
 
     async fn hold(&self, conn: ConnectionId) -> CoreResult<()> {
-        self.change_hold_direction(conn, true).await
+        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
+        self.coordinator
+            .hold(&session_id)
+            .await
+            .map_err(Self::map_session_err)
     }
 
     async fn resume(&self, conn: ConnectionId) -> CoreResult<()> {
-        self.change_hold_direction(conn, false).await
+        let session_id = self.lookup_session_for_non_terminal_control(&conn)?;
+        self.coordinator
+            .resume(&session_id)
+            .await
+            .map_err(Self::map_session_err)
     }
 
     async fn transfer(&self, conn: ConnectionId, target: TransferTarget) -> CoreResult<()> {
@@ -6256,7 +5385,6 @@ impl ConnectionAdapter for SipAdapter {
                     "SIP re-INVITE selected a codec unavailable to the media graph".into(),
                 )
             })?;
-        self.publish_committed_media(&epoch);
         Ok(NegotiatedCodecs {
             audio: Some(chosen),
             video: None,
@@ -6309,12 +5437,6 @@ fn sip_quality_snapshot(
         remote_packet_loss_pct: quality.remote_packet_loss_percent,
         remote_jitter_ms: quality.remote_jitter_ms,
     }
-}
-
-/// Orchestrator-facing detail for a call rvoip-sip ended because its media
-/// key agreement failed: a fixed prefix plus the bounded failure class.
-fn media_security_failure_detail(failure: crate::api::events::MediaSecurityFailure) -> String {
-    format!("media-security-failed: {failure}")
 }
 
 #[cfg(test)]
@@ -6421,12 +5543,13 @@ Signal=5\r\nDuration=160\r\n";
     async fn malformed_inbound_invite_accept_sends_488_before_exact_cleanup() {
         use rvoip_sip_core::{parse_message, Message as SipMessage};
 
-        let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
-            let mut config = ApiConfig::local("adapter-malformed-inbound", port);
-            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-            config
-        })
-        .await;
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+
+        let mut config = ApiConfig::local("adapter-malformed-inbound", port);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
         let adapter = SipAdapter::new(Arc::clone(&coordinator))
             .await
             .expect("adapter");
@@ -6824,14 +5947,14 @@ Signal=5\r\nDuration=160\r\n";
             Self::start_with(name, |config| config).await
         }
 
-        async fn start_with(name: &str, configure: impl Fn(ApiConfig) -> ApiConfig) -> Self {
-            let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
-                let mut config = configure(ApiConfig::local(name, port));
-                config.media_mode =
-                    crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-                config
-            })
-            .await;
+        async fn start_with(name: &str, configure: impl FnOnce(ApiConfig) -> ApiConfig) -> Self {
+            let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
+            let port = probe.local_addr().expect("probe address").port();
+            drop(probe);
+
+            let mut config = configure(ApiConfig::local(name, port));
+            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+            let coordinator = UnifiedCoordinator::new(config).await.expect("coordinator");
             let adapter = SipAdapter::new(Arc::clone(&coordinator))
                 .await
                 .expect("adapter");
@@ -7010,15 +6133,6 @@ Signal=5\r\nDuration=160\r\n";
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn inbound_end_succeeds_when_crossed_peer_bye_releases_first() {
-        reserved_inbound_handoff_then_hangup(
-            "adapter-crossed-bye-peer-first",
-            ReservedHangup::CrossedLocalPeerReleasesFirst,
-        )
-        .await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn inbound_end_cancellation_preserves_terminal_handoff() {
         reserved_inbound_handoff_then_hangup(
             "adapter-end-waiter-cancelled",
@@ -7067,10 +6181,6 @@ Signal=5\r\nDuration=160\r\n";
         Remote,
         /// A local `end` whose BYE the peer's own BYE crosses.
         CrossedLocal,
-        /// As `CrossedLocal`, but the peer's BYE releases the call before
-        /// the local BYE is answered, so that release removes the local
-        /// BYE's receipt while its confirmation is still outstanding.
-        CrossedLocalPeerReleasesFirst,
         /// A local `end` whose caller is cancelled once its BYE is sent.
         CancelledLocal,
     }
@@ -7121,13 +6231,6 @@ Signal=5\r\nDuration=160\r\n";
                 .adapter
                 .lookup_session(&call.connection_id)
                 .expect("exact session before hangup");
-            let lifetime = call
-                .coordinator
-                .helpers
-                .state_machine
-                .store
-                .lifecycle_handle(&session_id)
-                .expect("exact lifetime before hangup");
             let adapter = Arc::clone(&call.adapter);
             let connection_id = call.connection_id.clone();
             let ending = tokio::spawn(async move {
@@ -7172,16 +6275,6 @@ Signal=5\r\nDuration=160\r\n";
                 // Cross the in-flight local BYE with the peer's own BYE, then
                 // confirm the local one.
                 call.send_request("BYE", 2, &to).await;
-                if hangup == ReservedHangup::CrossedLocalPeerReleasesFirst {
-                    let store = &call.coordinator.helpers.state_machine.store;
-                    tokio::time::timeout(Duration::from_secs(5), async {
-                        while store.get_session_retained_snapshot_exact(&lifetime).is_ok() {
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                        }
-                    })
-                    .await
-                    .expect("the peer BYE released the call");
-                }
                 Some(ending)
             };
             let headers = local_bye
@@ -7345,7 +6438,6 @@ Signal=5\r\nDuration=160\r\n";
         let trusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
-                observed_peer_address: None,
                 request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from(TRUSTED_TRUNK_ISSUER)),
             })
@@ -7398,7 +6490,6 @@ Signal=5\r\nDuration=160\r\n";
         let untrusted = policy
             .capture(&InboundInviteObservation {
                 session_id: SessionId::new(),
-                observed_peer_address: None,
                 request: Some(request_with_private_identity("bridge", asserted)),
                 principal: Some(principal_from("some-other-issuer")),
             })
@@ -7411,64 +6502,6 @@ Signal=5\r\nDuration=160\r\n";
         assert!(untrusted.trusted_signaling.is_none());
     }
 
-    #[test]
-    fn observed_caller_number_requires_a_trusted_trunk_and_an_e164_user() {
-        let policy = SipInboundContextPolicy::new(Vec::<String>::new()).expect("policy");
-        let capture = |issuer: &str, asserted: &str| {
-            policy
-                .capture(&InboundInviteObservation {
-                    session_id: SessionId::new(),
-                    observed_peer_address: Some("192.0.2.7".parse().unwrap()),
-                    request: Some(request_with_private_identity("bridge", asserted)),
-                    principal: Some(principal_from(issuer)),
-                })
-                .expect("capture")
-                .expect("context")
-        };
-
-        let trusted = capture(TRUSTED_TRUNK_ISSUER, "<sip:+14085551212@carrier.example>");
-        let caller = trusted.observed_caller_number.expect("asserted caller");
-        assert_eq!(caller.number(), "+14085551212");
-        assert_eq!(
-            caller.source(),
-            ObservedCallerSource::TrustedAssertedIdentity
-        );
-        assert_eq!(
-            trusted.observed_peer_address,
-            Some("192.0.2.7".parse().unwrap())
-        );
-
-        // The fixture's From user (`spoofed`) is not E.164, and a non-E.164
-        // assertion is not normalized, so nothing is observed.
-        let national = capture(TRUSTED_TRUNK_ISSUER, "<sip:4085551212@carrier.example>");
-        assert!(national.observed_caller_number.is_none());
-
-        let untrusted = capture("some-other-issuer", "<sip:+14085551212@carrier.example>");
-        assert!(untrusted.observed_caller_number.is_none());
-        assert_eq!(
-            untrusted.observed_peer_address,
-            Some("192.0.2.7".parse().unwrap()),
-            "the transport-observed address is a fact for every principal"
-        );
-    }
-
-    #[test]
-    fn observed_e164_user_rejects_non_e164_forms() {
-        for (user, expected) in [
-            (Some("+14085551212"), Some("+14085551212")),
-            (Some("%2B14085551212"), Some("+14085551212")),
-            (Some("%2b14085551212"), Some("+14085551212")),
-            (Some("14085551212"), None),
-            (Some("+04085551212"), None),
-            (Some("+140855"), None),
-            (Some("+1408555121212345"), None),
-            (Some("+1408555;cpc=x"), None),
-            (None, None),
-        ] {
-            assert_eq!(observed_e164_user(user).as_deref(), expected, "{user:?}");
-        }
-    }
-
     fn observation(
         session_id: SessionId,
         route: &str,
@@ -7477,7 +6510,6 @@ Signal=5\r\nDuration=160\r\n";
     ) -> InboundInviteObservation {
         InboundInviteObservation {
             session_id,
-            observed_peer_address: None,
             request: Some(request(route, correlation_values)),
             principal,
         }
@@ -7715,7 +6747,7 @@ Signal=5\r\nDuration=160\r\n";
         assert!(context.initial_headers().is_empty());
         assert_eq!(
             format!("{context:?}"),
-            "SipOriginateContext { has_profile_revision: false, has_outbound_peer: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
+            "SipOriginateContext { has_profile_revision: false, has_from_uri: false, has_outbound_proxy: false, has_auth: false, initial_header_count: 0, registered_flow_route_count: 0 }"
         );
     }
 
@@ -8586,10 +7618,13 @@ Signal=5\r\nDuration=160\r\n";
 
     #[tokio::test]
     async fn shutdown_releases_listener_even_when_adapter_drain_fails() {
-        let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
-            ApiConfig::local("shutdown-release", port)
-        })
-        .await;
+        let probe = std::net::UdpSocket::bind("127.0.0.1:0").expect("probe SIP port");
+        let port = probe.local_addr().expect("probe address").port();
+        drop(probe);
+
+        let coordinator = UnifiedCoordinator::new(ApiConfig::local("shutdown-release", port))
+            .await
+            .expect("coordinator");
         let adapter = SipAdapter::new(Arc::clone(&coordinator))
             .await
             .expect("adapter");
@@ -9919,145 +8954,6 @@ Signal=5\r\nDuration=160\r\n";
             .expect("shutdown");
     }
 
-    /// `Connected` tells the orchestrator the connection's media can be
-    /// written. An inbound ACK establishes SIP signaling independently of the
-    /// stream's media bind, so a slow bind must hold `Connected` back rather
-    /// than let the first frame written on it be refused.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn inbound_connected_waits_for_writable_media_after_ack() {
-        let (coordinator, port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
-            ApiConfig::local("connected-after-media-bind", port)
-        })
-        .await;
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        // Hold the bind of the stream the next inbound connection caches, so
-        // the ACK reliably establishes signaling before media is bound.
-        let delayed = crate::media_stream::SipMediaStream::dormant_deferred(Direction::Inbound);
-        let bind_gate = delayed.pause_bind_for_test().await;
-        *adapter.next_test_stream.lock().unwrap() = Some(Arc::clone(&delayed));
-        let mut events = adapter
-            .try_subscribe_atomic_events()
-            .expect("atomic events");
-        let caller = UnifiedCoordinator::new(ApiConfig::local("connected-after-media-caller", 0))
-            .await
-            .expect("caller");
-        let caller_session = caller
-            .invite(None, format!("sip:callee@127.0.0.1:{port}"))
-            .send()
-            .await
-            .expect("INVITE");
-        let connection_id = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(OrchestratorAdapterEvent::Public(AdapterEvent::InboundConnection {
-                    connection,
-                })) = events.recv().await
-                {
-                    break connection.id.clone();
-                }
-            }
-        })
-        .await
-        .expect("inbound INVITE published");
-        assert!(Arc::ptr_eq(
-            adapter.streams_cache.get(&connection_id).unwrap().value(),
-            &delayed
-        ));
-        let session_id = adapter.lookup_session(&connection_id).expect("session");
-        let accepting_adapter = Arc::clone(&adapter);
-        let accepting_connection = connection_id.clone();
-        let mut accept = tokio::spawn(async move {
-            ConnectionAdapter::accept(accepting_adapter.as_ref(), accepting_connection).await
-        });
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while coordinator.get_state(&session_id).await.ok() != Some(CallState::Active) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the ACK establishes signaling while media is still unbound");
-
-        // A consumer writes its first frame as soon as it sees Connected.
-        let first_frame = || rvoip_core::stream::MediaFrame {
-            stream_id: rvoip_core::ids::StreamId::new(),
-            kind: rvoip_core::stream::StreamKind::Audio,
-            payload: bytes::Bytes::from(vec![0xd5; 160]),
-            timestamp_rtp: 0,
-            captured_at: chrono::Utc::now(),
-            payload_type: Some(8),
-        };
-        let write_on_connected = |event: Option<OrchestratorAdapterEvent>| match event {
-            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Connected {
-                connection_id: connected,
-            })) if connected == connection_id => Some(
-                delayed
-                    .try_frames_out()
-                    .map_err(|error| error.to_string())
-                    .and_then(|frames| {
-                        frames
-                            .try_send(first_frame())
-                            .map_err(|error| error.to_string())
-                    }),
-            ),
-            _ => None,
-        };
-        let early = tokio::time::timeout(Duration::from_millis(200), async {
-            loop {
-                if let Some(write) = write_on_connected(events.recv().await) {
-                    break write;
-                }
-            }
-        })
-        .await
-        .ok();
-        let accepted_before_bind = tokio::time::timeout(Duration::from_millis(1), &mut accept)
-            .await
-            .is_ok();
-
-        drop(bind_gate);
-        let first_write = match early {
-            Some(write) => write,
-            None => tokio::time::timeout(Duration::from_secs(5), async {
-                loop {
-                    if let Some(write) = write_on_connected(events.recv().await) {
-                        break write;
-                    }
-                }
-            })
-            .await
-            .expect("Connected after media bind"),
-        };
-        if !accepted_before_bind {
-            tokio::time::timeout(Duration::from_secs(5), accept)
-                .await
-                .expect("accept completes once media is bound")
-                .expect("accept task")
-                .expect("accept");
-        }
-
-        caller.hangup(&caller_session).await.expect("caller hangup");
-        adapter.drain().await.expect("adapter drain");
-        caller
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("caller shutdown");
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
-
-        assert!(
-            !accepted_before_bind,
-            "accept completed after the ACK while its media stream was still unbound"
-        );
-        assert_eq!(
-            first_write,
-            Ok(()),
-            "the first frame written on Connected must be accepted"
-        );
-    }
-
     #[test]
     fn policy_is_explicit_and_hard_denies_routing_auth_and_identity_headers() {
         let policy = SipInboundContextPolicy::new(["X-Correlation-Id", "X-App-Context"])
@@ -10346,65 +9242,6 @@ Signal=5\r\nDuration=160\r\n";
         std::thread::sleep(Duration::from_millis(5));
         assert!(expiring.observe(third, Some(principal("tenant-a")), None));
         assert_eq!(expiring.pending_len(), 1);
-    }
-
-    /// Inserting while nothing can have expired never scans the pending
-    /// map; once the oldest entry expires, one scan removes exactly the
-    /// expired entries, as the per-insert retain did.
-    #[test]
-    fn pending_observations_scan_only_when_an_entry_can_have_expired() {
-        let ttl = Duration::from_secs(10);
-        let start = Instant::now();
-        let observation = |observed_at| PendingSipInboundObservation {
-            observed_at,
-            principal: None,
-            context: None,
-            context_error: None,
-        };
-        let mut pending = PendingSipInboundObservations::default();
-        let mut sessions = Vec::new();
-        for offset in 0..100_u64 {
-            let session = SessionId::new();
-            assert_eq!(
-                pending.purge_expired(start + Duration::from_millis(offset), ttl),
-                0
-            );
-            pending.insert(
-                session.clone(),
-                observation(start + Duration::from_millis(offset)),
-            );
-            sessions.push(session);
-        }
-        assert_eq!(pending.expiry_scans, 0, "no insert scanned the map");
-
-        // Removing the oldest keeps a conservative watermark: one extra scan
-        // may run, and it finds nothing to remove.
-        pending.remove(&sessions[0]);
-        assert_eq!(
-            pending.purge_expired(start + ttl + Duration::from_millis(1), ttl),
-            0
-        );
-        assert_eq!(pending.len(), 99);
-
-        // Exactly the entries older than the TTL go, matching `retain`.
-        let now = start + ttl + Duration::from_millis(50);
-        let expected: usize = (1..100_u64).filter(|offset| *offset < 50).count();
-        assert_eq!(pending.purge_expired(now, ttl), expected);
-        assert_eq!(pending.len(), 99 - expected);
-        for (offset, session) in sessions.iter().enumerate().skip(1) {
-            assert_eq!(pending.contains_key(session), offset >= 50);
-        }
-        let scans = pending.expiry_scans;
-        assert_eq!(pending.purge_expired(now, ttl), 0);
-        assert_eq!(
-            pending.expiry_scans, scans,
-            "the watermark is exact after a scan"
-        );
-
-        for session in &sessions {
-            pending.remove(session);
-        }
-        assert_eq!(pending.oldest_observed_at, None);
     }
 
     #[tokio::test]
@@ -10913,7 +9750,6 @@ Signal=5\r\nDuration=160\r\n";
                 progress: Vec::new(),
                 answered: None,
                 media_security: None,
-                media: None,
                 terminal,
                 latest_transfer_outcome: None,
             };
@@ -11362,199 +10198,6 @@ Signal=5\r\nDuration=160\r\n";
     }
 
     #[test]
-    fn staged_remote_terminal_wins_a_later_activation_failure_cause() {
-        let connection_id = ConnectionId::new();
-        let route = SipOutboundRoute::new(
-            connection_id.clone(),
-            SessionId::new(),
-            "sip:target@example.test".to_string(),
-            Arc::new(SipOriginateContext::default()),
-            crate::media_stream::SipMediaStream::dormant_deferred(Direction::Outbound),
-        );
-        assert!(route.claim_activation().unwrap());
-        // The peer's final response is staged first; the activation failure it
-        // causes then requests cleanup with its generic cause.
-        assert_eq!(
-            route.stage_event(AdapterEvent::Failed {
-                connection_id: connection_id.clone(),
-                detail: "486 Busy Here".to_string(),
-            }),
-            SipRouteStageDisposition::Retained
-        );
-        assert!(route.request_cleanup(Some(AdapterEvent::Failed {
-            connection_id: connection_id.clone(),
-            detail: "SIP outbound activation failed".to_string(),
-        })));
-        assert!(matches!(
-            route.seal_cleanup_event(),
-            Some(AdapterEvent::Failed { connection_id: observed, detail })
-                if observed == connection_id && detail == "486 Busy Here"
-        ));
-    }
-
-    #[tokio::test]
-    async fn final_state_waits_for_its_terminal_fact_before_activation_fails() {
-        let coordinator = UnifiedCoordinator::new(ApiConfig::local("final-before-terminal", 0))
-            .await
-            .expect("coordinator");
-        let session_id = SessionId::new();
-        let handle = admit_test_session(&coordinator, &session_id).await;
-        // The final state is committed before its terminal event is recorded.
-        set_test_call_state(
-            &coordinator,
-            &session_id,
-            CallState::Failed(crate::types::FailureReason::Rejected),
-        )
-        .await;
-        let route = SipOutboundRoute::new(
-            ConnectionId::new(),
-            session_id.clone(),
-            "sip:target@example.test".into(),
-            Arc::new(SipOriginateContext::default()),
-            crate::media_stream::SipMediaStream::dormant_deferred(Direction::Outbound),
-        );
-        assert!(route.claim_activation().unwrap());
-        assert!(route.attach_lifecycle_handle(handle.clone()));
-        let waiting_coordinator = Arc::clone(&coordinator);
-        let waiting_route = Arc::clone(&route);
-        let waiting = tokio::spawn(async move {
-            wait_for_outbound_session_active(&waiting_coordinator, &waiting_route).await
-        });
-        for _ in 0..10 {
-            tokio::task::yield_now().await;
-        }
-        let finished_before_terminal = waiting.is_finished();
-        coordinator
-            .publish_app_event_exact_for_test(
-                &handle,
-                ApiEvent::CallFailed {
-                    call_id: session_id,
-                    status_code: 603,
-                    reason: "Decline".into(),
-                },
-            )
-            .unwrap();
-        let outcome = tokio::time::timeout(Duration::from_secs(1), waiting)
-            .await
-            .expect("bounded wait")
-            .expect("waiting task");
-        let staged = route.seal_cleanup_event();
-        retire_test_session_if_current(&coordinator, &handle).await;
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
-
-        assert!(
-            !finished_before_terminal,
-            "a final state alone must not fail activation ahead of its cause"
-        );
-        assert!(matches!(outcome, Err(SipActivationFailure::RouteEnded)));
-        assert!(
-            matches!(&staged, Some(AdapterEvent::Failed { detail, .. }) if detail == "603 Decline"),
-            "the exact terminal must be staged on the route: {staged:?}"
-        );
-    }
-
-    /// A peer that refuses an outbound INVITE with a final response must be
-    /// reported with that response, not with the generic activation failure
-    /// its own refusal causes.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn outbound_final_response_is_the_reported_failure_cause() {
-        use rvoip_sip_core::{parse_message, Message as SipMessage, Method, StatusCode};
-        use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
-
-        let capture = tokio::net::UdpSocket::bind("127.0.0.1:0")
-            .await
-            .expect("capture UAS");
-        let target = capture.local_addr().expect("capture address");
-        let coordinator = UnifiedCoordinator::new(ApiConfig::local("busy-final-response", 0))
-            .await
-            .expect("coordinator");
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let mut events = adapter
-            .try_subscribe_atomic_events()
-            .expect("atomic events");
-        let prepared = ConnectionAdapter::originate(
-            adapter.as_ref(),
-            OriginateRequest::new(
-                CoreSessionId::new(),
-                ParticipantId::new(),
-                format!("sip:target@{target}"),
-                Direction::Outbound,
-                CapabilityDescriptor::default(),
-            )
-            .with_transport(Transport::Sip),
-        )
-        .await
-        .expect("prepared route");
-        let connection_id = prepared.connection.id.clone();
-        let activation_adapter = Arc::clone(&adapter);
-        let activation_connection = connection_id.clone();
-        let activation = tokio::spawn(async move {
-            ConnectionAdapter::activate_outbound_with_receipt(
-                activation_adapter.as_ref(),
-                activation_connection,
-            )
-            .await
-        });
-
-        let mut packet = [0u8; 16_384];
-        let (invite_bytes, uac) =
-            tokio::time::timeout(Duration::from_secs(5), capture.recv_from(&mut packet))
-                .await
-                .expect("INVITE deadline")
-                .expect("INVITE datagram");
-        let SipMessage::Request(invite) =
-            parse_message(&packet[..invite_bytes]).expect("parse INVITE")
-        else {
-            panic!("expected INVITE request")
-        };
-        assert_eq!(invite.method(), Method::Invite);
-        let mut busy = create_response(&invite, StatusCode::BusyHere);
-        if let Some(TypedHeader::To(to)) = busy
-            .headers
-            .iter_mut()
-            .find(|header| matches!(header, TypedHeader::To(_)))
-        {
-            to.set_tag("busy-final-response-uas");
-        }
-        capture
-            .send_to(&SipMessage::Response(busy).to_bytes(), uac)
-            .await
-            .expect("refuse INVITE");
-
-        let activation = tokio::time::timeout(Duration::from_secs(5), activation)
-            .await
-            .expect("activation deadline")
-            .expect("activation task");
-        let failure = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                match events.recv().await.expect("adapter events") {
-                    OrchestratorAdapterEvent::Public(AdapterEvent::Failed {
-                        connection_id: failed,
-                        detail,
-                    }) if failed == connection_id => break detail,
-                    _ => {}
-                }
-            }
-        })
-        .await
-        .expect("terminal failure event");
-
-        adapter.drain().await.expect("adapter drain");
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
-
-        assert!(activation.is_err(), "a refused INVITE cannot activate");
-        assert_eq!(failure, "486 Busy Here");
-    }
-
-    #[test]
     fn explicit_outbound_cleanup_cause_wins_resulting_signaling_terminal() {
         let connection_id = ConnectionId::new();
         let route = SipOutboundRoute::new(
@@ -11704,123 +10347,6 @@ Signal=5\r\nDuration=160\r\n";
             })) if observed == connection_id
         ));
 
-        adapter.shutdown().await.expect("adapter shutdown");
-    }
-
-    /// The failed-media owner claims the route, so it, not
-    /// `translate_api_event`, publishes the terminal. A recorded media
-    /// security failure must still decide that terminal and be consumed on
-    /// both branches.
-    #[tokio::test]
-    async fn failed_media_terminal_reports_and_consumes_a_media_security_failure() {
-        let coordinator = UnifiedCoordinator::new(ApiConfig::local("media-security-owner", 0))
-            .await
-            .expect("coordinator");
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let session_id = SessionId::new();
-        let _handle = admit_test_session(&coordinator, &session_id).await;
-        let epoch = adapter
-            .ensure_mapped_epoch(session_id.clone())
-            .expect("exact inbound route");
-        let record = || async {
-            adapter
-                .translate_api_event(ApiEvent::MediaSecurityFailed {
-                    call_id: session_id.clone(),
-                    keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
-                    reason: crate::api::events::MediaSecurityFailure::FingerprintMismatch,
-                })
-                .await;
-            assert_eq!(adapter.media_security_failures.len(), 1);
-        };
-
-        // Signaling ended first (rvoip-sip's own BYE): a failed end, not Normal.
-        record().await;
-        match adapter.failed_media_terminal(&epoch, Some(EndReason::Normal)) {
-            (
-                AdapterEvent::Ended {
-                    reason: EndReason::Failed { detail },
-                    ..
-                },
-                "media-stopped-signaling-ended",
-            ) => assert_eq!(detail, "media-security-failed: fingerprint-mismatch"),
-            other => panic!("expected a failed end, got {other:?}"),
-        }
-        assert!(adapter.media_security_failures.is_empty());
-
-        // Media failed first: the driver failure names the security cause.
-        record().await;
-        match adapter.failed_media_terminal(&epoch, None) {
-            (AdapterEvent::Failed { detail, .. }, "media-failed") => assert_eq!(
-                detail,
-                "SIP media driver failed; media-security-failed: fingerprint-mismatch"
-            ),
-            other => panic!("expected a media failure, got {other:?}"),
-        }
-        assert!(adapter.media_security_failures.is_empty());
-
-        // Without a recorded failure the signaling terminal is unchanged.
-        match adapter.failed_media_terminal(&epoch, Some(EndReason::Cancelled)) {
-            (
-                AdapterEvent::Ended {
-                    reason: EndReason::Cancelled,
-                    ..
-                },
-                _,
-            ) => {}
-            other => panic!("expected a cancelled end, got {other:?}"),
-        }
-        adapter.shutdown().await.expect("adapter shutdown");
-    }
-
-    /// A call rvoip-sip ends because its media key agreement failed reaches
-    /// the orchestrator as a failed end naming the bounded failure class,
-    /// not as a normal hang-up.
-    #[tokio::test]
-    async fn media_security_failure_turns_the_following_call_end_into_a_failed_end() {
-        let coordinator = UnifiedCoordinator::new(ApiConfig::local("media-security-end", 0))
-            .await
-            .expect("coordinator");
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let mut events = adapter
-            .try_subscribe_atomic_events()
-            .expect("atomic events");
-        let session_id = SessionId::new();
-        let handle = admit_test_session(&coordinator, &session_id).await;
-        let epoch = adapter
-            .ensure_mapped_epoch(session_id.clone())
-            .expect("exact inbound route");
-        let connection_id = epoch.connection_id.clone();
-
-        adapter
-            .translate_api_event(ApiEvent::MediaSecurityFailed {
-                call_id: session_id.clone(),
-                keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
-                reason: crate::api::events::MediaSecurityFailure::FingerprintMismatch,
-            })
-            .await;
-        retire_test_session(&coordinator, &handle).await;
-        adapter
-            .translate_api_event(ApiEvent::CallEnded {
-                call_id: session_id.clone(),
-                reason: "DTLS-SRTP handshake failed".into(),
-            })
-            .await;
-
-        match events.recv().await {
-            Some(OrchestratorAdapterEvent::Public(AdapterEvent::Ended {
-                connection_id: observed,
-                reason: EndReason::Failed { detail },
-            })) => {
-                assert_eq!(observed, connection_id);
-                assert_eq!(detail, "media-security-failed: fingerprint-mismatch");
-            }
-            other => panic!("expected a failed end, got {other:?}"),
-        }
-        assert!(adapter.media_security_failures.is_empty());
         adapter.shutdown().await.expect("adapter shutdown");
     }
 
@@ -12849,359 +11375,5 @@ mod inbound_end_bound_tests {
             join_inbound_hangup(hangup, None, None, || false).await,
             InboundHangupJoin::Completed(Err(()))
         );
-    }
-}
-
-#[cfg(test)]
-mod orphan_sweep_tests {
-    use super::*;
-    use crate::api::unified::SessionCleanupConfig;
-    use crate::orphan_sweep::OrphanTracker;
-    use crate::state_table::types::Role;
-
-    const TTL: Duration = Duration::from_secs(6);
-
-    async fn coordinator(name: &str, media_start: u16) -> Arc<UnifiedCoordinator> {
-        UnifiedCoordinator::new(
-            ApiConfig::local(name, 0).with_media_ports(media_start, media_start + 600),
-        )
-        .await
-        .expect("orphan sweep coordinator")
-    }
-
-    /// One lifetime with real media (and so a media port), moved to `state`.
-    async fn lifetime(
-        coordinator: &UnifiedCoordinator,
-        session_id: &SessionId,
-        state: CallState,
-    ) -> SessionRegistryHandle {
-        let store = &coordinator.helpers.state_machine.store;
-        store
-            .create_session(session_id.clone(), Role::UAS, false)
-            .await
-            .expect("admit lifetime");
-        let handle = store.lifecycle_handle(session_id).expect("exact lifetime");
-        coordinator
-            .allocate_media_for_test(session_id)
-            .await
-            .expect("allocate media");
-        store
-            .update_session_exact_with(&handle, None, |session| {
-                session.call_state = state;
-                session.entered_state_at = std::time::Instant::now();
-            })
-            .expect("move lifetime");
-        handle
-    }
-
-    fn present(coordinator: &UnifiedCoordinator, handle: &SessionRegistryHandle) -> bool {
-        coordinator
-            .helpers
-            .state_machine
-            .store
-            .get_session_retained_snapshot_exact(handle)
-            .is_ok()
-    }
-
-    async fn wait_for_sessions(coordinator: &UnifiedCoordinator, expected: usize) {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while coordinator.list_sessions().await.len() != expected {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("session count did not reach {expected}"));
-    }
-
-    /// A reclaim's claim drops after its outcome is counted.
-    async fn wait_for_reclaims(adapter: &SipAdapter) {
-        tokio::time::timeout(Duration::from_secs(20), async {
-            while !adapter.session_reclaims.is_empty() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("orphan reclaims finished");
-    }
-
-    async fn release(coordinator: &UnifiedCoordinator, handle: &SessionRegistryHandle) {
-        coordinator
-            .begin_force_reclaim_local_session_exact(handle)
-            .await
-            .finish()
-            .await;
-    }
-
-    /// A setup abandoned after its route was retired has no owner left: no
-    /// route, no rejection, no reclaim, no RTP and no watchdog. With the
-    /// sweeper on (default TTL shortened to the minimum), the adapter's own
-    /// maintenance task returns the session slot and its media port.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn abandoned_setup_is_swept_with_its_media_port_after_the_ttl() {
-        let coordinator =
-            UnifiedCoordinator::new(
-                ApiConfig::local("orphan-sweep-abandoned", 0)
-                    .with_media_ports(35_000, 35_100)
-                    .with_session_cleanup(SessionCleanupConfig::default().with_orphan_session_ttl(
-                        Some(SessionCleanupConfig::MIN_ORPHAN_SESSION_TTL),
-                    )),
-            )
-            .await
-            .expect("orphan sweep coordinator");
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let ports_before = coordinator.allocated_media_port_count().await;
-        let reclaims_before =
-            crate::cleanup_diag::session_cleanup_counters().orphan_session_reclaims;
-
-        let session_id = SessionId::new();
-        let handle = lifetime(&coordinator, &session_id, CallState::AnsweringHangupPending).await;
-        let epoch = adapter
-            .ensure_mapped_epoch(session_id)
-            .expect("the setup had a route");
-        assert!(
-            adapter.forget_epoch(&epoch),
-            "the abandoned setup's route is retired"
-        );
-        assert!(coordinator.allocated_media_port_count().await > ports_before);
-
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while present(&coordinator, &handle) {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await
-        .expect("the abandoned setup was not released");
-        assert_eq!(
-            coordinator.allocated_media_port_count().await,
-            ports_before,
-            "the abandoned setup's media port is returned"
-        );
-        assert!(coordinator.list_sessions().await.is_empty());
-        assert!(
-            crate::cleanup_diag::session_cleanup_counters().orphan_session_reclaims
-                > reclaims_before
-        );
-        drop(adapter);
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
-    }
-
-    /// The sweeper reclaims a lifetime that has had no route for the TTL, and
-    /// only then. A live call with a route and a registration lifetime with
-    /// none are never touched.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sweeper_reclaims_an_ownerless_session_after_the_ttl_and_spares_owned_ones() {
-        let coordinator = coordinator("orphan-sweep-ttl", 33_000).await;
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let ports_before = coordinator.allocated_media_port_count().await;
-
-        let active_id = SessionId::new();
-        let active = lifetime(&coordinator, &active_id, CallState::Active).await;
-        let active_epoch = adapter
-            .ensure_mapped_epoch(active_id)
-            .expect("active call route");
-        let orphan_id = SessionId::new();
-        let orphan = lifetime(&coordinator, &orphan_id, CallState::AnsweringHangupPending).await;
-        let registration_id = SessionId::new();
-        let registration = lifetime(&coordinator, &registration_id, CallState::Registered).await;
-        let ports_with_calls = coordinator.allocated_media_port_count().await;
-        assert!(ports_with_calls > ports_before);
-        let before = crate::cleanup_diag::session_cleanup_counters();
-
-        let mut tracker = OrphanTracker::default();
-        let started = tokio::time::Instant::now();
-        assert_eq!(
-            adapter.orphan_sweep_pass(&mut tracker, started, TTL).await,
-            0
-        );
-        assert_eq!(tracker.tracked(), 1, "only the routeless call is an orphan");
-        assert_eq!(
-            adapter.orphan_sessions_by_state(),
-            vec![("AnsweringHangupPending", 1)]
-        );
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL / 2, TTL)
-                .await,
-            0,
-            "nothing is reclaimed before the TTL"
-        );
-        assert!(present(&coordinator, &orphan));
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL, TTL)
-                .await,
-            1
-        );
-
-        // The reclaim drops the orphan from `list_sessions` as soon as it
-        // quiesces the lifetime, but removes the retained cell and returns
-        // the media port only when it finishes. Join the reclaim itself
-        // before checking what it left behind.
-        wait_for_reclaims(&adapter).await;
-        assert!(!present(&coordinator, &orphan));
-        assert_eq!(coordinator.list_sessions().await.len(), 2);
-        assert!(
-            present(&coordinator, &active),
-            "a call with a route is never reclaimed"
-        );
-        assert!(
-            present(&coordinator, &registration),
-            "registration lifetimes are never swept"
-        );
-        assert!(coordinator.allocated_media_port_count().await < ports_with_calls);
-        let after = crate::cleanup_diag::session_cleanup_counters();
-        assert!(after.orphan_session_reclaims > before.orphan_session_reclaims);
-        assert!(after.orphan_session_reclaims_forced > before.orphan_session_reclaims_forced);
-
-        // Later passes leave the live call and the registration alone.
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL * 3, TTL)
-                .await,
-            0
-        );
-        assert_eq!(tracker.tracked(), 0);
-        assert!(adapter.orphan_sessions_by_state().is_empty());
-
-        assert!(adapter.forget_epoch(&active_epoch));
-        release(&coordinator, &active).await;
-        release(&coordinator, &registration).await;
-        assert!(coordinator.list_sessions().await.is_empty());
-        assert_eq!(coordinator.allocated_media_port_count().await, ports_before);
-        drop(adapter);
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
-    }
-
-    /// A lifetime whose retained reclaim is already running (the inbound end
-    /// reclaim) is owned: the sweeper never starts a second one for it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn sweeper_skips_a_session_whose_reclaim_is_in_flight() {
-        let coordinator = coordinator("orphan-sweep-claimed", 36_000).await;
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let session_id = SessionId::new();
-        let handle = lifetime(&coordinator, &session_id, CallState::Terminated).await;
-        let claim = SessionReclaimClaim {
-            jobs: Arc::clone(&adapter.session_reclaims),
-            handle: handle.clone(),
-        };
-        adapter.session_reclaims.insert(handle.clone(), ());
-
-        let mut tracker = OrphanTracker::default();
-        let started = tokio::time::Instant::now();
-        assert_eq!(
-            adapter.orphan_sweep_pass(&mut tracker, started, TTL).await,
-            0
-        );
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL * 2, TTL)
-                .await,
-            0
-        );
-        assert_eq!(tracker.tracked(), 0);
-        assert!(present(&coordinator, &handle));
-
-        // Once the claim drops, the lifetime is ownerless and its clock starts.
-        drop(claim);
-        assert!(adapter.session_reclaims.is_empty());
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL * 3, TTL)
-                .await,
-            0
-        );
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL * 4, TTL)
-                .await,
-            1
-        );
-        wait_for_sessions(&coordinator, 0).await;
-        wait_for_reclaims(&adapter).await;
-        drop(adapter);
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
-    }
-
-    /// A burst of failed and abandoned setups, in every state a signaling
-    /// overload can leave them: never routed (rejected or dropped before the
-    /// translator mapped them) or routed and then retired (`reject`, inbound
-    /// `end`). Session and media-port counts return to their starting values
-    /// within one TTL plus a pass.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn session_and_port_counts_return_to_zero_after_a_failed_setup_burst() {
-        const BURST: usize = 48;
-        let coordinator = coordinator("orphan-sweep-burst", 34_000).await;
-        let adapter = SipAdapter::new(Arc::clone(&coordinator))
-            .await
-            .expect("adapter");
-        let ports_before = coordinator.allocated_media_port_count().await;
-        let states = [
-            CallState::Ringing,
-            CallState::Answering,
-            CallState::AnsweringHangupPending,
-            CallState::Terminated,
-        ];
-        for index in 0..BURST {
-            let session_id = SessionId::new();
-            lifetime(&coordinator, &session_id, states[index % states.len()]).await;
-            if index % 2 == 0 {
-                let epoch = adapter.ensure_mapped_epoch(session_id).expect("route");
-                assert!(
-                    adapter.forget_epoch(&epoch),
-                    "the failed setup's route is retired"
-                );
-            }
-        }
-        assert_eq!(coordinator.list_sessions().await.len(), BURST);
-        assert!(coordinator.allocated_media_port_count().await >= ports_before + BURST);
-
-        let mut tracker = OrphanTracker::default();
-        let started = tokio::time::Instant::now();
-        assert_eq!(
-            adapter.orphan_sweep_pass(&mut tracker, started, TTL).await,
-            0
-        );
-        assert_eq!(tracker.tracked(), BURST);
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL, TTL)
-                .await,
-            BURST
-        );
-
-        wait_for_sessions(&coordinator, 0).await;
-        wait_for_reclaims(&adapter).await;
-        assert_eq!(coordinator.allocated_media_port_count().await, ports_before);
-        assert!(adapter.session_reclaims.is_empty());
-        assert_eq!(
-            adapter.orphan_reclaim_slots.available_permits(),
-            crate::orphan_sweep::ORPHAN_RECLAIM_CONCURRENCY
-        );
-        assert_eq!(
-            adapter
-                .orphan_sweep_pass(&mut tracker, started + TTL * 2, TTL)
-                .await,
-            0
-        );
-        drop(adapter);
-        coordinator
-            .shutdown_gracefully(Some(Duration::from_secs(1)))
-            .await
-            .expect("shutdown");
     }
 }

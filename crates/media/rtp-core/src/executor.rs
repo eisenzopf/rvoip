@@ -50,64 +50,6 @@
 //! - [`MediaExecutorConfig::lane_pass_clock`]: a lane poller pass reads the
 //!   clock once and the futures it polls read that value through
 //!   [`crate::media_clock::now`]. Needs the lane poller.
-//! - [`MediaExecutorConfig::owner_srtp`]: the receive loop checks the
-//!   transport's inbound SRTP context out and uses it without the context
-//!   lock, which it takes again only after a rekey, rollback or removal.
-//! - [`MediaExecutorConfig::owner_rtcp`]: RTCP multiplexed on the RTP socket
-//!   is processed by the session's RTCP handling on the socket owner instead
-//!   of crossing the transport broadcast to the session task, and periodic
-//!   reports leave with a synchronous send (from a future hosted on the
-//!   socket's lane poller when the lane poller is on).
-//! - [`MediaExecutorConfig::owner_receive_stats`]: the socket owner publishes
-//!   the per-packet receive statistics through a single-writer seqlock
-//!   instead of taking the session statistics mutex per packet.
-//! - [`MediaExecutorConfig::counter_pool_cleanup`]: the per-thread PCM pool
-//!   keeps up to 1024 small buffers instead of 32, and a lane poller on a
-//!   current-thread runtime publishes the per-event counters its passes add
-//!   (PCM pool misses, owner RTCP) once per batch of passes.
-//! - [`MediaExecutorConfig::hot_state`]: per-call state the socket owner
-//!   touches for every packet is packed onto fewer cache lines (the SRTP
-//!   context's per-direction keys and rollover state, the receive loop's
-//!   control entry in its lane's slab, the synchronous TX path's
-//!   destination), the receive loop checks its control-plane fences through
-//!   one doorbell line, and lane clocks prefetch the state of the futures
-//!   they are about to wake (see [`crate::hot_state`]).
-//!
-//! The SIP media path adds its own switches (read by `rvoip-sip`):
-//!
-//! - [`MediaExecutorConfig::fused_inbound_pump`]: a SIP stream's inbound
-//!   pump (playout, re-encode, `frames_in`) runs as the dialog's inline audio
-//!   consumer on the socket owner instead of as its own task. Needs inline
-//!   decode.
-//! - [`MediaExecutorConfig::direct_inbound_sink`]: a fused pump hands each
-//!   frame to a synchronous inbound frame sink the consumer offered, instead
-//!   of through `frames_in`. Needs the fused pump.
-//! - [`MediaExecutorConfig::count_only_sink`]: a sink that does not read
-//!   payloads gets each frame without the G.711 re-encode. Needs the direct
-//!   sink.
-//! - [`MediaExecutorConfig::tx_handle_cache`]: an encoded G.711 TX path is
-//!   resolved once per media lifetime, re-checked per frame by generation
-//!   fences (atomic loads), and sends synchronously.
-//! - [`MediaExecutorConfig::ai_tx`]: a SIP stream's outbound pump sends
-//!   encoded G.711 through that cached path, and its pumps run on the lane
-//!   that owns the RTP socket; the stream offers its lane to media graphs
-//!   that write into it. Needs the TX handle cache.
-//! - [`MediaExecutorConfig::ai_rx`]: the stream offers its lane to media
-//!   graphs that read from it.
-//! - [`MediaExecutorConfig::direct_encoded_writer`]: a SIP stream offers an
-//!   encoded G.711 writer to its sole producer.
-//! - [`MediaExecutorConfig::session_owner_placement`]: a SIP stream's pumps
-//!   run on the lane that owns its RTP socket.
-//! - [`MediaExecutorConfig::callback_send`]: per-call TX sources that an
-//!   application installs with [`crate::lane_table::install_tx`] are fired
-//!   straight from their lane poller's table and timing wheel instead of
-//!   running as paced futures (see [`crate::lane_table`]). Needs the lane
-//!   timing wheel, lane-hosted TX and the cached TX path.
-//! - [`MediaExecutorConfig::playout_zero_copy`]: a fused pump's playout
-//!   buffer keeps its pending frames in a few unordered slots and lends each
-//!   due frame to the pump, then keeps it as its concealment template,
-//!   instead of copying its PCM into the template. Same frames, timestamps
-//!   and statistics. Needs the fused pump.
 //!
 //! Every decision is read when an object is built (a transport starts, a
 //! session or SRTP context is created, a poller starts), never per packet.
@@ -246,115 +188,6 @@ pub struct MediaExecutorConfig {
     /// Needs [`Self::lane_poller`]; without it, it reads as off.
     pub lane_pass_clock: bool,
     // ---- End lane timing wheel and pass clock ----
-    /// The receive loop owns the transport's inbound SRTP/SRTCP context and
-    /// uses it without the context lock. A transport with a separate RTCP
-    /// socket (whose own receive task also unprotects SRTCP) keeps the lock.
-    pub owner_srtp: bool,
-    /// Multiplexed inbound RTCP is processed on the socket owner (same
-    /// stranger filter and handling as the session task), and periodic
-    /// reports are sent synchronously; with [`Self::lane_poller`] the report
-    /// task is hosted on the socket's lane poller. RTCP on a separate RTCP
-    /// socket keeps its own receive task.
-    pub owner_rtcp: bool,
-    /// The socket owner, the only writer of a v2 session's per-packet receive
-    /// statistics, publishes them without the session statistics mutex
-    /// (a single-writer seqlock that readers overlay).
-    pub owner_receive_stats: bool,
-    // ---- Counter and PCM pool cleanup ----
-    /// The per-thread PCM pool (with [`Self::pcm_pool`]) keeps up to 1024
-    /// small buffers instead of 32, so a lane pass whose arrivals and playout
-    /// ticks do not interleave no longer allocates, and a lane poller on a
-    /// current-thread runtime publishes the per-event counters added during
-    /// its passes (PCM pool misses, owner RTCP) once per batch of passes
-    /// instead of one shared atomic add per event (see
-    /// [`add_lane_deferred`]).
-    pub counter_pool_cleanup: bool,
-    // ---- End counter and PCM pool cleanup ----
-    // ---- Hot call state ----
-    /// Per-call state the socket owner touches for every packet is packed
-    /// onto fewer cache lines, without changing any output: the SRTP
-    /// context's per-direction keys, keyed HMAC and active stream's
-    /// rollover/replay state (three lines per direction), the receive loop's
-    /// control entry (in its lane's slab on a dedicated current-thread lane),
-    /// and the synchronous TX path's destination. The receive loop reads one
-    /// doorbell line per datagram instead of the transport's control-plane
-    /// atomics, which it re-reads only after a control-plane change. Lane
-    /// clocks prefetch the state of the futures they are about to wake. See
-    /// [`crate::hot_state`].
-    pub hot_state: bool,
-    // ---- End hot call state ----
-    // ---- SIP media path (fused pump, sinks, cached TX) ----
-    /// A SIP stream's inbound pump runs as the dialog's inline audio
-    /// consumer on the socket owner. Needs [`Self::inline_decode`].
-    pub fused_inbound_pump: bool,
-    /// A fused pump hands frames to the stream's offered inbound frame sink
-    /// instead of `frames_in`. Needs [`Self::fused_inbound_pump`].
-    pub direct_inbound_sink: bool,
-    /// A direct sink that does not read payloads gets G.711 frames without
-    /// the re-encode. Needs [`Self::direct_inbound_sink`].
-    pub count_only_sink: bool,
-    /// Encoded G.711 TX paths are resolved once per media lifetime and
-    /// fenced, then send synchronously.
-    pub tx_handle_cache: bool,
-    /// A SIP stream's outbound pump sends encoded G.711 through the cached
-    /// TX path, its pumps run on the RTP socket's lane, and the stream hosts
-    /// graphs that write into it. Needs [`Self::tx_handle_cache`].
-    pub ai_tx: bool,
-    /// A SIP stream hosts graphs that read from it on its RTP socket's lane.
-    pub ai_rx: bool,
-    /// A SIP stream offers an encoded G.711 writer to its sole producer.
-    pub direct_encoded_writer: bool,
-    /// A SIP stream's pumps run on the lane that owns its RTP socket.
-    pub session_owner_placement: bool,
-    // ---- End SIP media path ----
-    // ---- Lane table callback send ----
-    /// Lane pollers keep a lane table: per-call TX sources an application
-    /// installs with [`crate::lane_table::install_tx`] (from a supervisor
-    /// future hosted on the call's lane) are fired straight from the table's
-    /// timing wheel when their deadline is due, with no waker, hosted-future
-    /// poll or `select!` per frame. Only pollers on [`MediaLanes::Dedicated`]
-    /// lanes keep a table; elsewhere, and with the switch off,
-    /// `install_tx` gives the source back and the application drives it as
-    /// a paced future. Needs [`Self::lane_timer_wheel`] (so the lane clock
-    /// and the lane poller too), [`Self::lane_tx`] and
-    /// [`Self::tx_handle_cache`] (the fenced synchronous TX path a paced
-    /// sender writes through); without them it reads as off.
-    ///
-    /// [`MediaLanes::Dedicated`]: crate::task_runtime::MediaLanes::Dedicated
-    pub callback_send: bool,
-    // ---- End lane table callback send ----
-    // ---- Lane table receive ----
-    /// A v2 receive loop hosted on its lane poller moves into its lane's
-    /// table once it owns its call state (the session's inline ingress was
-    /// adopted): the lane calls it when its socket is readable and when its
-    /// owner deadline is due, from the table's ready list and timing wheel,
-    /// with no hosted-future poll, waker re-registration or `select!` per
-    /// datagram. Every datagram goes through the async loop's own
-    /// per-packet step, in the same order. The loop's future stays as the
-    /// entry's supervisor (close, a receive error, teardown). Needs
-    /// [`Self::callback_send`] (the lane table); without it it reads as off,
-    /// and on a lane without a table the loop stays a hosted future.
-    pub callback_rx_kernel: bool,
-    /// A receive loop in its lane's table reads its socket on the lane's
-    /// readiness reports instead of until the socket is empty: the lane
-    /// keeps one level-triggered epoll for its graduated sockets (registered
-    /// with the lane's reactor as one descriptor) and reads each reported
-    /// socket once per report, so no read finds the socket empty and an
-    /// owner deadline never reads it. Linux only. Needs
-    /// [`Self::callback_rx_kernel`]; without it, or off Linux, it reads as
-    /// off (the entries read as without it).
-    pub lane_rx_readiness: bool,
-    // ---- End lane table receive ----
-    // ---- Zero-copy playout ----
-    /// A fused SIP inbound pump's playout buffer keeps its pending frames in
-    /// a few unordered slots instead of an ordered map, and lends each due
-    /// frame to the pump and then keeps it as its concealment template,
-    /// instead of copying the frame's PCM into the template and handing the
-    /// frame out. The frames, their order, timestamps, concealment and
-    /// playout statistics are identical. Needs
-    /// [`Self::fused_inbound_pump`]; without it it reads as off.
-    pub playout_zero_copy: bool,
-    // ---- End zero-copy playout ----
 }
 
 impl Default for MediaExecutorConfig {
@@ -381,34 +214,11 @@ impl MediaExecutorConfig {
             // Lane timing wheel and pass clock.
             lane_timer_wheel: false,
             lane_pass_clock: false,
-            owner_srtp: false,
-            owner_rtcp: false,
-            owner_receive_stats: false,
-            // Counter and PCM pool cleanup.
-            counter_pool_cleanup: false,
-            // Hot call state.
-            hot_state: false,
-            // SIP media path.
-            fused_inbound_pump: false,
-            direct_inbound_sink: false,
-            count_only_sink: false,
-            tx_handle_cache: false,
-            ai_tx: false,
-            ai_rx: false,
-            direct_encoded_writer: false,
-            session_owner_placement: false,
-            // Lane table callback send.
-            callback_send: false,
-            // Lane table receive.
-            callback_rx_kernel: false,
-            lane_rx_readiness: false,
-            // Zero-copy playout.
-            playout_zero_copy: false,
         }
     }
 
     /// The inline executor with every switch on, a 2 ms lane tick with grid
-    /// timers, the lane timing wheel, the pass clock and the lane table.
+    /// timers, the lane timing wheel and the pass clock.
     pub fn v2() -> Self {
         Self {
             mode: MediaExecutorMode::V2,
@@ -425,29 +235,6 @@ impl MediaExecutorConfig {
             // Lane timing wheel and pass clock.
             lane_timer_wheel: true,
             lane_pass_clock: true,
-            owner_srtp: true,
-            owner_rtcp: true,
-            owner_receive_stats: true,
-            // Counter and PCM pool cleanup.
-            counter_pool_cleanup: true,
-            // Hot call state.
-            hot_state: true,
-            // SIP media path.
-            fused_inbound_pump: true,
-            direct_inbound_sink: true,
-            count_only_sink: true,
-            tx_handle_cache: true,
-            ai_tx: true,
-            ai_rx: true,
-            direct_encoded_writer: true,
-            session_owner_placement: true,
-            // Lane table callback send.
-            callback_send: true,
-            // Lane table receive.
-            callback_rx_kernel: true,
-            lane_rx_readiness: true,
-            // Zero-copy playout.
-            playout_zero_copy: true,
         }
     }
 
@@ -528,126 +315,6 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
-    // ---- SIP media path ----
-
-    /// Set [`Self::fused_inbound_pump`].
-    pub fn with_fused_inbound_pump(mut self, enabled: bool) -> Self {
-        self.fused_inbound_pump = enabled;
-        self
-    }
-
-    /// Set [`Self::direct_inbound_sink`].
-    pub fn with_direct_inbound_sink(mut self, enabled: bool) -> Self {
-        self.direct_inbound_sink = enabled;
-        self
-    }
-
-    /// Set [`Self::count_only_sink`].
-    pub fn with_count_only_sink(mut self, enabled: bool) -> Self {
-        self.count_only_sink = enabled;
-        self
-    }
-
-    /// Set [`Self::tx_handle_cache`].
-    pub fn with_tx_handle_cache(mut self, enabled: bool) -> Self {
-        self.tx_handle_cache = enabled;
-        self
-    }
-
-    /// Set [`Self::ai_tx`].
-    pub fn with_ai_tx(mut self, enabled: bool) -> Self {
-        self.ai_tx = enabled;
-        self
-    }
-
-    /// Set [`Self::ai_rx`].
-    pub fn with_ai_rx(mut self, enabled: bool) -> Self {
-        self.ai_rx = enabled;
-        self
-    }
-
-    /// Set [`Self::direct_encoded_writer`].
-    pub fn with_direct_encoded_writer(mut self, enabled: bool) -> Self {
-        self.direct_encoded_writer = enabled;
-        self
-    }
-
-    /// Set [`Self::session_owner_placement`].
-    pub fn with_session_owner_placement(mut self, enabled: bool) -> Self {
-        self.session_owner_placement = enabled;
-        self
-    }
-
-    // ---- End SIP media path ----
-
-    /// Set [`Self::owner_srtp`].
-    pub fn with_owner_srtp(mut self, enabled: bool) -> Self {
-        self.owner_srtp = enabled;
-        self
-    }
-
-    /// Set [`Self::owner_rtcp`].
-    pub fn with_owner_rtcp(mut self, enabled: bool) -> Self {
-        self.owner_rtcp = enabled;
-        self
-    }
-
-    /// Set [`Self::owner_receive_stats`].
-    pub fn with_owner_receive_stats(mut self, enabled: bool) -> Self {
-        self.owner_receive_stats = enabled;
-        self
-    }
-
-    // ---- Counter and PCM pool cleanup ----
-    /// Set [`Self::counter_pool_cleanup`].
-    pub fn with_counter_pool_cleanup(mut self, enabled: bool) -> Self {
-        self.counter_pool_cleanup = enabled;
-        self
-    }
-    // ---- End counter and PCM pool cleanup ----
-    // ---- Lane table callback send ----
-
-    /// Set [`Self::callback_send`].
-    pub fn with_callback_send(mut self, enabled: bool) -> Self {
-        self.callback_send = enabled;
-        self
-    }
-
-    // ---- End lane table callback send ----
-    // ---- Lane table receive ----
-
-    /// Set [`Self::callback_rx_kernel`].
-    pub fn with_callback_rx_kernel(mut self, enabled: bool) -> Self {
-        self.callback_rx_kernel = enabled;
-        self
-    }
-
-    /// Set [`Self::lane_rx_readiness`].
-    pub fn with_lane_rx_readiness(mut self, enabled: bool) -> Self {
-        self.lane_rx_readiness = enabled;
-        self
-    }
-
-    // ---- End lane table receive ----
-
-    // ---- Hot call state ----
-
-    /// Set [`Self::hot_state`].
-    pub fn with_hot_state(mut self, enabled: bool) -> Self {
-        self.hot_state = enabled;
-        self
-    }
-
-    // ---- End hot call state ----
-    // ---- Zero-copy playout ----
-
-    /// Set [`Self::playout_zero_copy`].
-    pub fn with_playout_zero_copy(mut self, enabled: bool) -> Self {
-        self.playout_zero_copy = enabled;
-        self
-    }
-
-    // ---- End zero-copy playout ----
 
     /// Check the configuration without installing it.
     ///
@@ -655,9 +322,6 @@ impl MediaExecutorConfig {
     /// (switching the lane poller off is the documented way to keep receive
     /// loops on their own tasks). Rules for switches that need a specific
     /// media runtime layout are checked here.
-    ///
-    /// Under v2, [`Self::tx_batch`] requires [`Self::tx_handle_cache`]: the
-    /// only callers that batch are the cached TX paths.
     pub fn validate(&self) -> Result<(), MediaExecutorConfigError> {
         // ---- Lane tick ----
         if let Some(tick) = self.lane_tick {
@@ -668,14 +332,6 @@ impl MediaExecutorConfig {
             }
         }
         // ---- End lane tick ----
-        // ---- SIP media path ----
-        if self.is_v2() && self.tx_batch && !self.tx_handle_cache {
-            return Err(MediaExecutorConfigError::Requires {
-                switch: "tx_batch",
-                requires: "tx_handle_cache",
-            });
-        }
-        // ---- End SIP media path ----
         Ok(())
     }
 
@@ -755,126 +411,6 @@ impl MediaExecutorConfig {
     }
 
     // ---- End lane timing wheel and pass clock ----
-    /// Whether receive loops started now own the inbound SRTP context.
-    pub fn owner_srtp_active(&self) -> bool {
-        self.is_v2() && self.owner_srtp
-    }
-
-    /// Whether sessions created now process multiplexed RTCP on the socket
-    /// owner and send periodic reports synchronously.
-    pub fn owner_rtcp_active(&self) -> bool {
-        self.is_v2() && self.owner_rtcp
-    }
-
-    /// Whether the periodic report task of a session created now is hosted
-    /// on its socket's lane poller.
-    pub fn owner_rtcp_on_lane_active(&self) -> bool {
-        self.owner_rtcp_active() && self.lane_poller_active()
-    }
-
-    /// Whether sessions created now publish receive statistics from the
-    /// socket owner without the statistics mutex.
-    pub fn owner_receive_stats_active(&self) -> bool {
-        self.is_v2() && self.owner_receive_stats
-    }
-
-    // ---- Counter and PCM pool cleanup ----
-    /// Whether the PCM pool keeps more small buffers and lane pollers batch
-    /// the per-event counters of their passes.
-    pub fn counter_pool_cleanup_active(&self) -> bool {
-        self.is_v2() && self.counter_pool_cleanup
-    }
-    // ---- End counter and PCM pool cleanup ----
-
-    // ---- Hot call state ----
-
-    /// Whether objects built now pack and gate their per-call hot state.
-    pub fn hot_state_active(&self) -> bool {
-        self.is_v2() && self.hot_state
-    }
-
-    // ---- End hot call state ----
-    // ---- SIP media path ----
-
-    /// Whether a SIP stream fuses its inbound pump onto the socket owner.
-    pub fn fused_inbound_pump_active(&self) -> bool {
-        self.inline_decode_active() && self.fused_inbound_pump
-    }
-
-    /// Whether a fused pump adopts an offered inbound frame sink.
-    pub fn direct_inbound_sink_active(&self) -> bool {
-        self.fused_inbound_pump_active() && self.direct_inbound_sink
-    }
-
-    /// Whether a direct sink that reads no payloads skips the re-encode.
-    pub fn count_only_sink_active(&self) -> bool {
-        self.direct_inbound_sink_active() && self.count_only_sink
-    }
-
-    /// Whether encoded G.711 TX paths are cached and fenced.
-    pub fn tx_handle_cache_active(&self) -> bool {
-        self.is_v2() && self.tx_handle_cache
-    }
-
-    /// Whether a SIP outbound pump sends through the cached TX path on its
-    /// socket's lane.
-    pub fn ai_tx_active(&self) -> bool {
-        self.tx_handle_cache_active() && self.ai_tx
-    }
-
-    /// Whether a SIP stream hosts graphs that read from it on its lane.
-    pub fn ai_rx_active(&self) -> bool {
-        self.is_v2() && self.ai_rx
-    }
-
-    /// Whether a SIP stream offers an encoded G.711 writer.
-    pub fn direct_encoded_writer_active(&self) -> bool {
-        self.is_v2() && self.direct_encoded_writer
-    }
-
-    /// Whether a SIP stream's pumps run on its RTP socket's lane.
-    pub fn session_owner_placement_active(&self) -> bool {
-        self.is_v2() && self.session_owner_placement
-    }
-
-    // ---- End SIP media path ----
-    // ---- Lane table callback send ----
-
-    /// Whether lane pollers keep a lane table that fires installed TX
-    /// sources (needs the lane timing wheel, lane-hosted TX and the cached
-    /// TX path).
-    pub fn callback_send_active(&self) -> bool {
-        self.lane_timer_wheel_active()
-            && self.lane_tx_active()
-            && self.tx_handle_cache_active()
-            && self.callback_send
-    }
-
-    // ---- End lane table callback send ----
-    // ---- Lane table receive ----
-
-    /// Whether receive loops started now move into their lane's table once
-    /// they own their call state (needs the lane table).
-    pub fn callback_rx_kernel_active(&self) -> bool {
-        self.callback_send_active() && self.callback_rx_kernel
-    }
-
-    /// Whether receive loops in a lane table read on the lane's readiness
-    /// reports (needs [`Self::callback_rx_kernel_active`]; Linux only).
-    pub fn lane_rx_readiness_active(&self) -> bool {
-        cfg!(target_os = "linux") && self.callback_rx_kernel_active() && self.lane_rx_readiness
-    }
-
-    // ---- End lane table receive ----
-    // ---- Zero-copy playout ----
-
-    /// Whether a fused SIP inbound pump lends due frames from slot-stored
-    /// playout instead of copying them (needs the fused pump).
-    pub fn playout_zero_copy_active(&self) -> bool {
-        self.fused_inbound_pump_active() && self.playout_zero_copy
-    }
-
-    // ---- End zero-copy playout ----
 }
 
 /// Why a [`MediaExecutorConfig`] was rejected.
@@ -908,16 +444,6 @@ pub enum MediaExecutorConfigError {
         quantum: Duration,
     },
     // ---- End lane tick ----
-    // ---- SIP media path ----
-    /// A switch is on without a switch it requires.
-    #[error("media executor switch {switch} requires {requires}")]
-    Requires {
-        /// The switch that is on.
-        switch: &'static str,
-        /// The switch it needs.
-        requires: &'static str,
-    },
-    // ---- End SIP media path ----
 }
 
 static PROCESS_CONFIG: OnceLock<MediaExecutorConfig> = OnceLock::new();
@@ -1068,143 +594,6 @@ pub fn lane_pass_clock_enabled() -> bool {
 }
 
 // ---- End lane timing wheel and pass clock ----
-// ---- SIP media path ----
-
-/// Whether a SIP stream bound now fuses its inbound pump onto the socket
-/// owner.
-pub fn fused_inbound_pump_enabled() -> bool {
-    with_config(MediaExecutorConfig::fused_inbound_pump_active)
-}
-
-/// Whether a fused pump adopts an offered inbound frame sink. Read when the
-/// sink is offered.
-pub fn direct_inbound_sink_enabled() -> bool {
-    with_config(MediaExecutorConfig::direct_inbound_sink_active)
-}
-
-/// Whether a direct sink that reads no payloads skips the re-encode. Read
-/// when the pump is built.
-pub fn count_only_sink_enabled() -> bool {
-    with_config(MediaExecutorConfig::count_only_sink_active)
-}
-
-/// Whether an encoded G.711 writer built now caches its TX path.
-pub fn tx_handle_cache_enabled() -> bool {
-    with_config(MediaExecutorConfig::tx_handle_cache_active)
-}
-
-/// Whether a SIP stream bound now sends its outbound G.711 through the
-/// cached TX path on its socket's lane.
-pub fn ai_tx_enabled() -> bool {
-    with_config(MediaExecutorConfig::ai_tx_active)
-}
-
-/// Whether a SIP stream bound now hosts reader graphs on its lane.
-pub fn ai_rx_enabled() -> bool {
-    with_config(MediaExecutorConfig::ai_rx_active)
-}
-
-/// Whether a SIP stream offers an encoded G.711 writer.
-pub fn direct_encoded_writer_enabled() -> bool {
-    with_config(MediaExecutorConfig::direct_encoded_writer_active)
-}
-
-/// Whether a SIP stream bound now runs its pumps on its socket's lane.
-pub fn session_owner_placement_enabled() -> bool {
-    with_config(MediaExecutorConfig::session_owner_placement_active)
-}
-
-// ---- End SIP media path ----
-
-/// Whether a receive loop started now owns its transport's inbound SRTP
-/// context. Read when a transport starts.
-pub fn owner_srtp_enabled() -> bool {
-    with_config(MediaExecutorConfig::owner_srtp_active)
-}
-
-/// Whether a session created now processes multiplexed RTCP on the socket
-/// owner and sends periodic reports synchronously. Read when a session is
-/// created.
-pub fn owner_rtcp_enabled() -> bool {
-    with_config(MediaExecutorConfig::owner_rtcp_active)
-}
-
-/// Whether a session created now hosts its periodic report task on its
-/// socket's lane poller. Read when a session starts.
-pub fn owner_rtcp_on_lane_enabled() -> bool {
-    with_config(MediaExecutorConfig::owner_rtcp_on_lane_active)
-}
-
-/// Whether a session created now publishes its receive statistics from the
-/// socket owner without the statistics mutex. Read when a session is created.
-pub fn owner_receive_stats_enabled() -> bool {
-    with_config(MediaExecutorConfig::owner_receive_stats_active)
-}
-
-// ---- Counter and PCM pool cleanup ----
-
-/// Whether the PCM pool keeps more small buffers and lane pollers batch the
-/// per-event counters of their passes. Read by the pool when a buffer comes
-/// back to a pool that already holds 32 (a buffer may be returned by another
-/// object than the one that took it), and when a lane poller starts.
-pub fn counter_pool_cleanup_enabled() -> bool {
-    with_config(MediaExecutorConfig::counter_pool_cleanup_active)
-}
-
-// ---- End counter and PCM pool cleanup ----
-// ---- Lane table callback send ----
-
-/// Whether lane pollers keep a lane table
-/// ([`MediaExecutorConfig::callback_send_active`]). Read when a lane poller
-/// starts; an application reads it once per call to decide whether to offer
-/// its TX source to [`crate::lane_table::install_tx`] (which still gives the
-/// source back on a lane without a table).
-pub fn callback_send_enabled() -> bool {
-    with_config(MediaExecutorConfig::callback_send_active)
-}
-
-// ---- End lane table callback send ----
-// ---- Lane table receive ----
-
-/// Whether a receive loop started now may move into its lane's table
-/// ([`MediaExecutorConfig::callback_rx_kernel_active`]). Read once per
-/// receive loop, when the transport starts receiving.
-pub fn callback_rx_kernel_enabled() -> bool {
-    with_config(MediaExecutorConfig::callback_rx_kernel_active)
-}
-
-/// Whether a receive loop started now reads on its lane's readiness reports
-/// once it is in the lane's table
-/// ([`MediaExecutorConfig::lane_rx_readiness_active`]). Read once per
-/// receive loop, when the transport starts receiving.
-pub fn lane_rx_readiness_enabled() -> bool {
-    with_config(MediaExecutorConfig::lane_rx_readiness_active)
-}
-
-// ---- End lane table receive ----
-
-// ---- Hot call state ----
-
-/// Whether objects built now pack and gate their per-call hot state
-/// ([`MediaExecutorConfig::hot_state_active`]). Read when an SRTP context,
-/// transport, packet writer, session ingress or lane clock is built, never
-/// per packet.
-pub fn hot_state_enabled() -> bool {
-    with_config(MediaExecutorConfig::hot_state_active)
-}
-
-// ---- End hot call state ----
-
-// ---- Zero-copy playout ----
-
-/// Whether a fused SIP inbound pump built now lends due frames from
-/// slot-stored playout ([`MediaExecutorConfig::playout_zero_copy_active`]).
-/// Read when the pump is built.
-pub fn playout_zero_copy_enabled() -> bool {
-    with_config(MediaExecutorConfig::playout_zero_copy_active)
-}
-
-// ---- End zero-copy playout ----
 
 /// Restores the previous per-thread override when dropped.
 #[doc(hidden)]
@@ -1349,19 +738,12 @@ pub(crate) trait InlineRtpIngress: Send + 'static {
     fn next_deadline(&mut self, now: Instant) -> Option<Instant>;
     fn on_deadline(&mut self, now: Instant);
 
-    /// One RTCP compound received on the RTP socket (multiplexed) from
-    /// `source`, after the transport's latch check and SRTCP unprotect.
-    /// Returns whether it was processed here; `false` (the default) sends it
-    /// to the transport broadcast, as v1 does.
-    fn on_rtcp(&mut self, _data: &[u8], _source: SocketAddr, _now: Instant) -> bool {
+    /// One RTCP compound received on the RTP socket (multiplexed), after the
+    /// transport's source check and SRTCP unprotect. Returns whether it was
+    /// processed here; `false` (the default) sends it to the transport
+    /// broadcast, as v1 does. Owner-side RTCP processing builds on this.
+    fn on_rtcp(&mut self, _data: &[u8], _now: Instant) -> bool {
         false
-    }
-
-    /// Hot call state: the address of the state the ingress's deadlines are
-    /// served from (its inline sink), which the lane clock prefetches when
-    /// the owner timer falls due; 0: none.
-    fn prefetch_hint(&self) -> usize {
-        0
     }
 }
 
@@ -1468,26 +850,6 @@ static TX_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
 static TX_BATCHES: AtomicU64 = AtomicU64::new(0);
 static TX_BATCHED_PACKETS: AtomicU64 = AtomicU64::new(0);
 static TX_BATCH_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-static OWNER_SRTP_LOOPS: AtomicU64 = AtomicU64::new(0);
-static OWNER_SRTP_HANDOFFS: AtomicU64 = AtomicU64::new(0);
-static SRTP_LOCKS_AVOIDED: AtomicU64 = AtomicU64::new(0);
-static OWNER_RTCP_INBOUND: AtomicU64 = AtomicU64::new(0);
-static RTCP_SYNC_SENDS: AtomicU64 = AtomicU64::new(0);
-static RTCP_SYNC_DEFERRED: AtomicU64 = AtomicU64::new(0);
-static RTCP_LANE_TASKS: AtomicU64 = AtomicU64::new(0);
-static OWNER_RECEIVE_STATS: AtomicU64 = AtomicU64::new(0);
-// SIP media path.
-static FUSED_BACKLOG_DROPS: AtomicU64 = AtomicU64::new(0);
-static DIRECT_SINKS: AtomicU64 = AtomicU64::new(0);
-static DIRECT_SINK_FRAMES: AtomicU64 = AtomicU64::new(0);
-static COUNT_ONLY_SINKS: AtomicU64 = AtomicU64::new(0);
-static COUNT_ONLY_FRAMES: AtomicU64 = AtomicU64::new(0);
-static TX_HANDLE_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
-static TX_HANDLE_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
-static AI_TX_PUMPS_ON_LANE: AtomicU64 = AtomicU64::new(0);
-static AI_TX_RESOLVES: AtomicU64 = AtomicU64::new(0);
-static AI_TX_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-static DIRECT_ENCODED_WRITERS: AtomicU64 = AtomicU64::new(0);
 
 /// Media executor totals for this process since start. Each field is
 /// individually atomic; the set is not a transaction.
@@ -1552,54 +914,6 @@ pub struct InlineExecutorCounters {
     /// Batches (or batch remainders) sent packet by packet because
     /// `sendmmsg` is unavailable or returned short.
     pub tx_batch_fallbacks: u64,
-    /// Receive loops that own their transport's inbound SRTP context.
-    pub owner_srtp_loops: u64,
-    /// Times an owning receive loop adopted or gave back the context (the
-    /// first check-out, a rekey, a rollback, a removal).
-    pub owner_srtp_handoffs: u64,
-    /// Inbound SRTP/SRTCP datagrams authenticated without taking the
-    /// context lock.
-    pub srtp_locks_avoided: u64,
-    /// Inbound RTCP compounds processed on the socket owner (each also
-    /// counts one avoided session-task wakeup in `wakeups_avoided`).
-    pub owner_rtcp_inbound: u64,
-    /// Periodic RTCP reports written with `try_send_to` from the report
-    /// task's poll.
-    pub rtcp_sync_sends: u64,
-    /// Periodic RTCP reports the socket did not take at once and that went
-    /// through the awaited send (already protected, so each SRTCP index is
-    /// still consumed once).
-    pub rtcp_sync_deferred: u64,
-    /// Periodic report tasks hosted on a lane poller.
-    pub rtcp_lane_tasks: u64,
-    /// Sessions whose socket owner publishes receive statistics without the
-    /// statistics mutex.
-    pub owner_receive_stats: u64,
-    // ---- SIP media path ----
-    /// Decoded frames a fused SIP inbound pump dropped because its consumer
-    /// was backed up and its backlog full (where the audio channel would
-    /// have been full).
-    pub fused_backlog_drops: u64,
-    /// Inbound frame sinks adopted by a fused pump.
-    pub direct_sinks: u64,
-    /// Frames handed to a direct sink with a payload.
-    pub direct_sink_frames: u64,
-    /// Direct sinks adopted without payloads (no re-encode).
-    pub count_only_sinks: u64,
-    /// Frames handed to a count-only sink.
-    pub count_only_frames: u64,
-    /// Frames whose cached TX path passed its fences.
-    pub tx_handle_cache_hits: u64,
-    /// TX path resolutions (first frame, or after a fence closed).
-    pub tx_handle_cache_misses: u64,
-    /// SIP stream pumps placed on their RTP socket's lane by `ai_tx`.
-    pub ai_tx_pumps_on_lane: u64,
-    /// Outbound pump TX path resolutions.
-    pub ai_tx_resolves: u64,
-    /// Outbound pump frames that took the regular async path.
-    pub ai_tx_fallbacks: u64,
-    /// Encoded G.711 writers handed out by SIP streams.
-    pub direct_encoded_writers: u64,
 }
 
 /// The media executor totals since start.
@@ -1626,26 +940,6 @@ pub fn inline_executor_counters() -> InlineExecutorCounters {
         tx_batches: TX_BATCHES.load(Ordering::Relaxed),
         tx_batched_packets: TX_BATCHED_PACKETS.load(Ordering::Relaxed),
         tx_batch_fallbacks: TX_BATCH_FALLBACKS.load(Ordering::Relaxed),
-        owner_srtp_loops: OWNER_SRTP_LOOPS.load(Ordering::Relaxed),
-        owner_srtp_handoffs: OWNER_SRTP_HANDOFFS.load(Ordering::Relaxed),
-        srtp_locks_avoided: SRTP_LOCKS_AVOIDED.load(Ordering::Relaxed),
-        owner_rtcp_inbound: OWNER_RTCP_INBOUND.load(Ordering::Relaxed),
-        rtcp_sync_sends: RTCP_SYNC_SENDS.load(Ordering::Relaxed),
-        rtcp_sync_deferred: RTCP_SYNC_DEFERRED.load(Ordering::Relaxed),
-        rtcp_lane_tasks: RTCP_LANE_TASKS.load(Ordering::Relaxed),
-        owner_receive_stats: OWNER_RECEIVE_STATS.load(Ordering::Relaxed),
-        // SIP media path.
-        fused_backlog_drops: FUSED_BACKLOG_DROPS.load(Ordering::Relaxed),
-        direct_sinks: DIRECT_SINKS.load(Ordering::Relaxed),
-        direct_sink_frames: DIRECT_SINK_FRAMES.load(Ordering::Relaxed),
-        count_only_sinks: COUNT_ONLY_SINKS.load(Ordering::Relaxed),
-        count_only_frames: COUNT_ONLY_FRAMES.load(Ordering::Relaxed),
-        tx_handle_cache_hits: TX_HANDLE_CACHE_HITS.load(Ordering::Relaxed),
-        tx_handle_cache_misses: TX_HANDLE_CACHE_MISSES.load(Ordering::Relaxed),
-        ai_tx_pumps_on_lane: AI_TX_PUMPS_ON_LANE.load(Ordering::Relaxed),
-        ai_tx_resolves: AI_TX_RESOLVES.load(Ordering::Relaxed),
-        ai_tx_fallbacks: AI_TX_FALLBACKS.load(Ordering::Relaxed),
-        direct_encoded_writers: DIRECT_ENCODED_WRITERS.load(Ordering::Relaxed),
     }
 }
 
@@ -1788,9 +1082,6 @@ pub(crate) struct OwnerTimer {
     /// The instant the runtime entry was last set to and not yet observed to
     /// fire. `None` when there is no entry or it fired.
     live: Option<Instant>,
-    /// Hot call state: the address the lane clock prefetches when this
-    /// timer falls due (0: none); see [`Self::set_prefetch_hint`].
-    hint: usize,
 }
 
 impl OwnerTimer {
@@ -1799,21 +1090,6 @@ impl OwnerTimer {
             sleep: None,
             armed: None,
             live: None,
-            hint: 0,
-        }
-    }
-
-    /// Have the lane clock prefetch `address` (the owner's deadline
-    /// consumer) when this timer falls due. Applied to the current sleep now
-    /// and to a sleep created later; a sleep not filed in a lane clock
-    /// ignores it.
-    pub(crate) fn set_prefetch_hint(&mut self, address: usize) {
-        if self.hint == address {
-            return;
-        }
-        self.hint = address;
-        if let Some(sleep) = self.sleep.as_mut() {
-            sleep.as_mut().set_prefetch_hint(address);
         }
     }
 
@@ -1837,13 +1113,7 @@ impl OwnerTimer {
         let extends = self.live.is_some_and(|live| live > now && deadline >= live);
         match self.sleep.as_mut() {
             Some(sleep) => sleep.as_mut().reset(when),
-            None => {
-                let mut sleep = Box::pin(crate::media_clock::sleep_until(when));
-                if self.hint != 0 {
-                    sleep.as_mut().set_prefetch_hint(self.hint);
-                }
-                self.sleep = Some(sleep);
-            }
+            None => self.sleep = Some(Box::pin(crate::media_clock::sleep_until(when))),
         }
         self.live = Some(deadline);
         if extends {
@@ -1871,46 +1141,6 @@ impl OwnerTimer {
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {
         self.armed.is_some_and(|deadline| deadline <= now)
-    }
-
-    /// [`Self::arm`]'s bookkeeping (and outcome, for the counters) for an
-    /// owner whose deadline a lane table files on its own wheel: no runtime
-    /// timer is created or moved.
-    pub(crate) fn note(&mut self, deadline: Option<Instant>, now: Instant) -> ArmOutcome {
-        if deadline == self.armed {
-            return ArmOutcome::Unchanged;
-        }
-        self.armed = deadline;
-        let Some(deadline) = deadline else {
-            return ArmOutcome::Cleared;
-        };
-        let extends = self.live.is_some_and(|live| live > now && deadline >= live);
-        self.live = Some(deadline);
-        if extends {
-            ArmOutcome::Extended
-        } else {
-            ArmOutcome::Registered
-        }
-    }
-
-    /// A lane table files this owner's deadline from now on: drop the
-    /// runtime timer (its lane-clock entry goes with it). The bookkeeping
-    /// stays, so [`Self::note`] continues where [`Self::arm`] stopped.
-    pub(crate) fn unback(&mut self) {
-        self.sleep = None;
-    }
-
-    /// The owner's async loop waits on this timer again: register whatever
-    /// is armed with a runtime timer.
-    pub(crate) fn reback(&mut self, now: Instant) -> ArmOutcome {
-        let armed = self.armed.take();
-        self.live = None;
-        self.arm(armed, now)
-    }
-
-    /// The armed deadline (the instant a lane table files).
-    pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.armed
     }
 }
 
@@ -2184,8 +1414,6 @@ pub struct TxPathCounters {
     pending_batches: u64,
     pending_batched: u64,
     pending_fallbacks: u64,
-    pending_cache_hits: u64,
-    pending_cache_misses: u64,
 }
 
 impl TxPathCounters {
@@ -2195,12 +1423,7 @@ impl TxPathCounters {
     }
 
     fn maybe_flush(&mut self) {
-        if self.pending_sync
-            + self.pending_deferred
-            + self.pending_batches
-            + self.pending_fallbacks
-            + self.pending_cache_hits
-            + self.pending_cache_misses
+        if self.pending_sync + self.pending_deferred + self.pending_batches + self.pending_fallbacks
             >= FLUSH_EVERY
         {
             self.flush();
@@ -2232,18 +1455,6 @@ impl TxPathCounters {
         self.maybe_flush();
     }
 
-    /// A cached TX path passed its fences for one call.
-    pub fn cache_hit(&mut self) {
-        self.pending_cache_hits += 1;
-        self.maybe_flush();
-    }
-
-    /// The TX path was resolved (again).
-    pub fn cache_miss(&mut self) {
-        self.pending_cache_misses += 1;
-        self.maybe_flush();
-    }
-
     /// Publish everything pending to the process totals.
     pub fn flush(&mut self) {
         publish(&TX_SYNC_SENDS, &mut self.pending_sync);
@@ -2251,8 +1462,6 @@ impl TxPathCounters {
         publish(&TX_BATCHES, &mut self.pending_batches);
         publish(&TX_BATCHED_PACKETS, &mut self.pending_batched);
         publish(&TX_BATCH_FALLBACKS, &mut self.pending_fallbacks);
-        publish(&TX_HANDLE_CACHE_HITS, &mut self.pending_cache_hits);
-        publish(&TX_HANDLE_CACHE_MISSES, &mut self.pending_cache_misses);
     }
 }
 
@@ -2261,429 +1470,6 @@ impl Drop for TxPathCounters {
         self.flush();
     }
 }
-
-/// Count one receive loop that owns its inbound SRTP context.
-pub(crate) fn record_owner_srtp_loop() {
-    OWNER_SRTP_LOOPS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Count one adoption or return of the inbound SRTP context by its owner.
-/// Rekey rate.
-pub(crate) fn record_owner_srtp_handoff() {
-    OWNER_SRTP_HANDOFFS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Count one inbound RTCP compound processed on the socket owner. RTCP rate
-/// (a few seconds apart per call); batched with the lane pass when the
-/// poller defers (see [`add_lane_deferred`]).
-pub(crate) fn record_owner_rtcp_inbound() {
-    add_lane_deferred(&OWNER_RTCP_INBOUND, 1);
-    add_lane_deferred(&WAKEUPS_AVOIDED, 1);
-}
-
-/// Count one synchronous periodic report send (`synchronous`), or one the
-/// socket deferred to the awaited send; batched with the lane pass when the
-/// poller defers.
-pub(crate) fn record_rtcp_send(synchronous: bool) {
-    add_lane_deferred(
-        if synchronous {
-            &RTCP_SYNC_SENDS
-        } else {
-            &RTCP_SYNC_DEFERRED
-        },
-        1,
-    );
-}
-
-// ---- Counter and PCM pool cleanup: lane-deferred counters ----
-
-/// Lane passes a deferring poller runs between two publications of its
-/// thread's pending [`add_lane_deferred`] values. It also publishes them on
-/// every idle pass and when it stops.
-pub(crate) const LANE_DEFERRED_FLUSH_PASSES: u32 = 64;
-
-/// Distinct counters one thread holds pending; a value for a further counter
-/// is added at once.
-const LANE_DEFERRED_SLOTS: usize = 8;
-
-/// One thread's pending lane-deferred values.
-struct LaneDeferredTable {
-    /// Inside a deferring scope (a lane poller pass).
-    deferring: bool,
-    /// Counters in first-use order, each with its pending value.
-    slots: [(Option<&'static AtomicU64>, u64); LANE_DEFERRED_SLOTS],
-}
-
-impl LaneDeferredTable {
-    const fn new() -> Self {
-        Self {
-            deferring: false,
-            slots: [(None, 0); LANE_DEFERRED_SLOTS],
-        }
-    }
-
-    /// Hold `value` for `total`; `false` when every slot holds another
-    /// counter.
-    #[inline]
-    fn queue(&mut self, total: &'static AtomicU64, value: u64) -> bool {
-        for slot in &mut self.slots {
-            match slot.0 {
-                Some(held) if std::ptr::eq(held, total) => {
-                    slot.1 += value;
-                    return true;
-                }
-                Some(_) => {}
-                None => {
-                    *slot = (Some(total), value);
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    fn pending(&self, total: &AtomicU64) -> u64 {
-        self.slots
-            .iter()
-            .find(|(held, _)| held.is_some_and(|held| std::ptr::eq(held, total)))
-            .map_or(0, |&(_, pending)| pending)
-    }
-
-    fn flush(&mut self) {
-        for (total, pending) in &mut self.slots {
-            let Some(total) = total else {
-                break; // slots fill in order
-            };
-            if *pending > 0 {
-                publish_lane_deferred(total, std::mem::take(pending));
-            }
-        }
-    }
-}
-
-impl Drop for LaneDeferredTable {
-    fn drop(&mut self) {
-        // Thread exit: nothing held here is lost.
-        self.flush();
-    }
-}
-
-thread_local! {
-    static LANE_DEFERRED: std::cell::RefCell<LaneDeferredTable> =
-        const { std::cell::RefCell::new(LaneDeferredTable::new()) };
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Atomic adds this thread made for lane-deferred counters (tests).
-    static LANE_DEFERRED_PUBLISHES: Cell<u64> = const { Cell::new(0) };
-}
-
-#[inline]
-fn publish_lane_deferred(total: &AtomicU64, value: u64) {
-    total.fetch_add(value, Ordering::Relaxed);
-    #[cfg(test)]
-    let _ = LANE_DEFERRED_PUBLISHES.try_with(|count| count.set(count.get() + 1));
-}
-
-/// Run `apply` on this thread's table; `None` during thread teardown or a
-/// re-entrant call.
-#[inline]
-fn with_lane_deferred<R>(apply: impl FnOnce(&mut LaneDeferredTable) -> R) -> Option<R> {
-    LANE_DEFERRED
-        .try_with(|table| {
-            table
-                .try_borrow_mut()
-                .ok()
-                .map(|mut table| apply(&mut table))
-        })
-        .ok()
-        .flatten()
-}
-
-/// Add `value` to `total`, a process counter of the media path that is
-/// updated per event (PCM pool misses, owner RTCP) rather than kept by an
-/// owner and published in batches.
-///
-/// During a lane poller pass with
-/// [`MediaExecutorConfig::counter_pool_cleanup`] active on a current-thread
-/// runtime (whose poller never changes thread), the value is held in a small
-/// per-thread table and the poller publishes the table every 64 passes, on
-/// every idle pass and when it stops; a thread's pending values are also
-/// published when it exits. Everywhere else the value is added at once.
-/// Either way every value reaches `total` exactly once, so readers see the
-/// same totals, at most a batch of lane passes later.
-#[inline]
-pub fn add_lane_deferred(total: &'static AtomicU64, value: u64) {
-    let held = with_lane_deferred(|table| table.deferring && table.queue(total, value));
-    if held != Some(true) {
-        publish_lane_deferred(total, value);
-    }
-}
-
-/// While alive, [`add_lane_deferred`] on this thread holds values instead of
-/// adding them. Dropping it restores the previous state and publishes
-/// nothing.
-pub(crate) struct LaneDeferredScope {
-    previous: bool,
-}
-
-impl LaneDeferredScope {
-    fn enter() -> Self {
-        let previous = with_lane_deferred(|table| std::mem::replace(&mut table.deferring, true))
-            .unwrap_or(false);
-        Self { previous }
-    }
-}
-
-impl Drop for LaneDeferredScope {
-    fn drop(&mut self) {
-        let previous = self.previous;
-        with_lane_deferred(|table| table.deferring = previous);
-    }
-}
-
-/// Publish everything this thread holds pending.
-fn flush_lane_deferred() {
-    with_lane_deferred(LaneDeferredTable::flush);
-}
-
-/// A lane poller's schedule for publishing the values its passes hold.
-pub(crate) struct LaneDeferredBatch {
-    passes: u32,
-}
-
-impl LaneDeferredBatch {
-    /// The schedule for a poller starting on this thread, or `None` when it
-    /// adds at once: [`MediaExecutorConfig::counter_pool_cleanup`] is not
-    /// active, or the runtime is multi-threaded (its poller may move between
-    /// workers, leaving values behind on a thread it no longer runs on).
-    pub(crate) fn for_this_poller() -> Option<Self> {
-        let current_thread = tokio::runtime::Handle::try_current().is_ok_and(|handle| {
-            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
-        });
-        (current_thread && counter_pool_cleanup_enabled()).then_some(Self { passes: 0 })
-    }
-
-    /// Hold this thread's lane-deferred values until the scope drops (one
-    /// poller pass).
-    pub(crate) fn enter_pass(&self) -> LaneDeferredScope {
-        LaneDeferredScope::enter()
-    }
-
-    /// A pass ended. `idle`: it polled no hosted future, or the poller hosts
-    /// none (the lane may now sleep for long).
-    #[inline]
-    pub(crate) fn pass_end(&mut self, idle: bool) {
-        self.passes += 1;
-        if idle || self.passes >= LANE_DEFERRED_FLUSH_PASSES {
-            self.passes = 0;
-            flush_lane_deferred();
-        }
-    }
-}
-
-impl Drop for LaneDeferredBatch {
-    fn drop(&mut self) {
-        flush_lane_deferred();
-    }
-}
-
-/// Restores this thread's previous state when dropped, after publishing what
-/// it holds pending.
-#[doc(hidden)]
-pub struct LaneDeferredGuard {
-    _scope: LaneDeferredScope,
-}
-
-impl Drop for LaneDeferredGuard {
-    fn drop(&mut self) {
-        flush_lane_deferred();
-    }
-}
-
-/// Test seam: hold [`add_lane_deferred`] values on this thread, as a
-/// deferring lane poller pass does, until the guard drops.
-#[doc(hidden)]
-pub fn defer_lane_counters_on_this_thread() -> LaneDeferredGuard {
-    LaneDeferredGuard {
-        _scope: LaneDeferredScope::enter(),
-    }
-}
-
-/// Test seam: the value this thread holds for `total` and has not yet
-/// added to it.
-#[doc(hidden)]
-pub fn pending_lane_deferred_on_this_thread(total: &AtomicU64) -> u64 {
-    with_lane_deferred(|table| table.pending(total)).unwrap_or(0)
-}
-
-// ---- End counter and PCM pool cleanup: lane-deferred counters ----
-
-/// Count one periodic report task hosted on a lane poller.
-pub(crate) fn record_rtcp_lane_task() {
-    RTCP_LANE_TASKS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Count one session whose socket owner publishes its receive statistics.
-pub(crate) fn record_owner_receive_stats() {
-    OWNER_RECEIVE_STATS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Lock-free SRTP datagrams of one owning receive loop, published in
-/// batches.
-#[derive(Default)]
-pub(crate) struct SrtpOwnerCounters {
-    pending: u64,
-}
-
-impl SrtpOwnerCounters {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    #[inline]
-    pub(crate) fn lock_avoided(&mut self) {
-        self.pending += 1;
-        if self.pending >= FLUSH_EVERY {
-            self.flush();
-        }
-    }
-
-    pub(crate) fn flush(&mut self) {
-        publish(&SRTP_LOCKS_AVOIDED, &mut self.pending);
-    }
-}
-
-impl Drop for SrtpOwnerCounters {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
-// ---- SIP media path ----
-
-/// One fused SIP inbound pump dropped a decoded frame (backlog full).
-/// Backpressure rate only.
-pub fn record_fused_backlog_drop() {
-    FUSED_BACKLOG_DROPS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// A fused pump adopted an inbound frame sink; `count_only` when it reads
-/// no payloads. Once per stream.
-pub fn record_direct_sink_active(count_only: bool) {
-    DIRECT_SINKS.fetch_add(1, Ordering::Relaxed);
-    if count_only {
-        COUNT_ONLY_SINKS.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-/// A SIP stream's pumps were placed on its socket's lane by `ai_tx`.
-pub fn record_ai_tx_pump_on_lane() {
-    AI_TX_PUMPS_ON_LANE.fetch_add(1, Ordering::Relaxed);
-}
-
-/// A SIP stream handed out its encoded G.711 writer.
-pub fn record_direct_encoded_writer() {
-    DIRECT_ENCODED_WRITERS.fetch_add(1, Ordering::Relaxed);
-}
-
-/// Direct inbound sink frame counters owned by one fused pump, published in
-/// batches.
-#[derive(Debug, Default)]
-pub struct DirectSinkCounters {
-    pending_frames: u64,
-    pending_count_only: u64,
-}
-
-impl DirectSinkCounters {
-    /// Counters with nothing pending.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// One frame (with its payload) went to the sink.
-    #[inline]
-    pub fn frame(&mut self) {
-        self.pending_frames += 1;
-        if self.pending_frames >= FLUSH_EVERY {
-            publish(&DIRECT_SINK_FRAMES, &mut self.pending_frames);
-        }
-    }
-
-    /// One frame went to a count-only sink.
-    #[inline]
-    pub fn count_only_frame(&mut self) {
-        self.pending_count_only += 1;
-        if self.pending_count_only >= FLUSH_EVERY {
-            publish(&COUNT_ONLY_FRAMES, &mut self.pending_count_only);
-        }
-    }
-
-    /// Publish everything pending.
-    pub fn flush(&mut self) {
-        publish(&DIRECT_SINK_FRAMES, &mut self.pending_frames);
-        publish(&COUNT_ONLY_FRAMES, &mut self.pending_count_only);
-    }
-}
-
-impl Drop for DirectSinkCounters {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
-/// Outbound pump (AI TX) counters owned by one pump, published in batches.
-/// Frames that left synchronously are counted by [`TxPathCounters`].
-#[derive(Debug, Default)]
-pub struct AiTxCounters {
-    pending_resolves: u64,
-    pending_fallbacks: u64,
-    tx: TxPathCounters,
-}
-
-impl AiTxCounters {
-    /// Counters with nothing pending.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The TX path was resolved (again).
-    pub fn resolve(&mut self) {
-        self.pending_resolves += 1;
-        if self.pending_resolves >= FLUSH_EVERY {
-            publish(&AI_TX_RESOLVES, &mut self.pending_resolves);
-        }
-    }
-
-    /// One frame took the regular async path.
-    pub fn fallback(&mut self) {
-        self.pending_fallbacks += 1;
-        if self.pending_fallbacks >= FLUSH_EVERY {
-            publish(&AI_TX_FALLBACKS, &mut self.pending_fallbacks);
-        }
-    }
-
-    /// The synchronous TX counters of this pump.
-    pub fn tx(&mut self) -> &mut TxPathCounters {
-        &mut self.tx
-    }
-
-    /// Publish everything pending.
-    pub fn flush(&mut self) {
-        publish(&AI_TX_RESOLVES, &mut self.pending_resolves);
-        publish(&AI_TX_FALLBACKS, &mut self.pending_fallbacks);
-        self.tx.flush();
-    }
-}
-
-impl Drop for AiTxCounters {
-    fn drop(&mut self) {
-        self.flush();
-    }
-}
-
-// ---- End SIP media path ----
 
 #[cfg(test)]
 mod tests {
@@ -2701,10 +1487,6 @@ mod tests {
         assert!(!v1.fast_ssrc_hash_active());
         assert!(!v1.inline_decode_active());
         assert!(!v1.pcm_pool_active());
-        assert!(!v1.owner_srtp_active());
-        assert!(!v1.owner_rtcp_active());
-        assert!(!v1.owner_rtcp_on_lane_active());
-        assert!(!v1.owner_receive_stats_active());
 
         let v2 = MediaExecutorConfig::v2();
         assert_eq!(v2.mode, MediaExecutorMode::V2);
@@ -2715,10 +1497,6 @@ mod tests {
         assert!(v2.fast_ssrc_hash_active());
         assert!(v2.inline_decode_active());
         assert!(v2.pcm_pool_active());
-        assert!(v2.owner_srtp_active());
-        assert!(v2.owner_rtcp_active());
-        assert!(v2.owner_rtcp_on_lane_active());
-        assert!(v2.owner_receive_stats_active());
         assert!(v2.validate().is_ok());
     }
 
@@ -2906,309 +1684,6 @@ mod tests {
 
     // ---- End lane timing wheel and pass clock ----
 
-    // ---- Lane table callback send ----
-
-    #[test]
-    fn callback_send_is_off_in_v1_on_in_v2_and_reads_as_off_without_its_prerequisites() {
-        let v1 = MediaExecutorConfig::v1();
-        assert!(!v1.callback_send && !v1.callback_send_active());
-        let v2 = MediaExecutorConfig::v2();
-        assert!(v2.callback_send && v2.callback_send_active());
-        assert!(v2.validate().is_ok());
-
-        assert!(
-            !v2.clone()
-                .with_mode(MediaExecutorMode::V1)
-                .callback_send_active(),
-            "never under v1"
-        );
-        // Every prerequisite missing reads as off and is not an error.
-        for missing in [
-            MediaExecutorConfig::v2().with_lane_poller(false),
-            MediaExecutorConfig::v2().with_lane_timer(false),
-            MediaExecutorConfig::v2().with_lane_timer_wheel(false),
-            MediaExecutorConfig::v2().with_lane_tx(false),
-            // `tx_batch` needs the cache too, so it goes with it.
-            MediaExecutorConfig::v2()
-                .with_tx_handle_cache(false)
-                .with_tx_batch(false),
-            MediaExecutorConfig::v2().with_callback_send(false),
-        ] {
-            assert!(missing.validate().is_ok(), "{missing:?}");
-            assert!(!missing.callback_send_active(), "{missing:?}");
-        }
-        // The cached TX path is a prerequisite on its own: the SIP switches
-        // that build on it are not.
-        assert!(!MediaExecutorConfig::v2()
-            .with_tx_handle_cache(false)
-            .with_tx_batch(false)
-            .with_ai_tx(false)
-            .callback_send_active());
-        assert!(MediaExecutorConfig::v2()
-            .with_ai_tx(false)
-            .with_tx_batch(false)
-            .callback_send_active());
-        // Neither the tick nor the pass clock is a prerequisite.
-        assert!(MediaExecutorConfig::v2()
-            .with_lane_tick(None)
-            .with_lane_pass_clock(false)
-            .callback_send_active());
-
-        let accessor = |config: MediaExecutorConfig| {
-            let _guard = override_media_executor_config_on_this_thread(config);
-            callback_send_enabled()
-        };
-        assert!(!accessor(MediaExecutorConfig::v1()));
-        assert!(accessor(MediaExecutorConfig::v2()));
-        assert!(!accessor(MediaExecutorConfig::v2().with_lane_tx(false)));
-        assert!(!accessor(
-            MediaExecutorConfig::v2()
-                .with_tx_handle_cache(false)
-                .with_tx_batch(false)
-        ));
-        assert!(!accessor(
-            MediaExecutorConfig::v1().with_callback_send(true)
-        ));
-    }
-
-    #[test]
-    fn callback_rx_kernel_is_off_in_v1_on_in_v2_and_reads_as_off_without_the_lane_table() {
-        let v1 = MediaExecutorConfig::v1();
-        assert!(!v1.callback_rx_kernel && !v1.callback_rx_kernel_active());
-        let v2 = MediaExecutorConfig::v2();
-        assert!(v2.callback_rx_kernel && v2.callback_rx_kernel_active());
-        assert!(v2.validate().is_ok());
-        assert!(
-            !v2.clone()
-                .with_mode(MediaExecutorMode::V1)
-                .callback_rx_kernel_active(),
-            "never under v1"
-        );
-        // Without the lane table (or any of its own prerequisites) it reads
-        // as off and is not an error.
-        for missing in [
-            MediaExecutorConfig::v2().with_callback_send(false),
-            MediaExecutorConfig::v2().with_lane_poller(false),
-            MediaExecutorConfig::v2().with_lane_timer_wheel(false),
-            MediaExecutorConfig::v2().with_lane_tx(false),
-            MediaExecutorConfig::v2()
-                .with_tx_handle_cache(false)
-                .with_tx_batch(false),
-            MediaExecutorConfig::v2().with_callback_rx_kernel(false),
-        ] {
-            assert!(missing.validate().is_ok(), "{missing:?}");
-            assert!(!missing.callback_rx_kernel_active(), "{missing:?}");
-        }
-        // The lane table stays on without it.
-        assert!(MediaExecutorConfig::v2()
-            .with_callback_rx_kernel(false)
-            .callback_send_active());
-        let accessor = |config: MediaExecutorConfig| {
-            let _guard = override_media_executor_config_on_this_thread(config);
-            callback_rx_kernel_enabled()
-        };
-        assert!(!accessor(MediaExecutorConfig::v1()));
-        assert!(accessor(MediaExecutorConfig::v2()));
-        assert!(!accessor(
-            MediaExecutorConfig::v2().with_callback_send(false)
-        ));
-        assert!(!accessor(
-            MediaExecutorConfig::v1().with_callback_rx_kernel(true)
-        ));
-    }
-
-    #[test]
-    fn lane_rx_readiness_is_off_in_v1_on_in_v2_on_linux_and_reads_as_off_without_its_prerequisites()
-    {
-        let linux = cfg!(target_os = "linux");
-        let v1 = MediaExecutorConfig::v1();
-        assert!(!v1.lane_rx_readiness && !v1.lane_rx_readiness_active());
-        let v2 = MediaExecutorConfig::v2();
-        assert!(v2.lane_rx_readiness);
-        assert_eq!(v2.lane_rx_readiness_active(), linux, "Linux only");
-        assert!(v2.validate().is_ok());
-        for missing in [
-            MediaExecutorConfig::v2().with_mode(MediaExecutorMode::V1),
-            MediaExecutorConfig::v2().with_callback_rx_kernel(false),
-            MediaExecutorConfig::v2().with_callback_send(false),
-            MediaExecutorConfig::v2().with_lane_poller(false),
-            MediaExecutorConfig::v2().with_lane_rx_readiness(false),
-        ] {
-            assert!(missing.validate().is_ok(), "{missing:?}");
-            assert!(!missing.lane_rx_readiness_active(), "{missing:?}");
-        }
-        // Receive entries stay on without it.
-        assert!(MediaExecutorConfig::v2()
-            .with_lane_rx_readiness(false)
-            .callback_rx_kernel_active());
-        let accessor = |config: MediaExecutorConfig| {
-            let _guard = override_media_executor_config_on_this_thread(config);
-            lane_rx_readiness_enabled()
-        };
-        assert!(!accessor(MediaExecutorConfig::v1()));
-        assert_eq!(accessor(MediaExecutorConfig::v2()), linux);
-        assert!(!accessor(
-            MediaExecutorConfig::v2().with_callback_rx_kernel(false)
-        ));
-    }
-
-    #[tokio::test]
-    async fn an_owner_timer_filed_by_a_table_keeps_its_bookkeeping_and_comes_back() {
-        let now = Instant::now();
-        let mut timer = OwnerTimer::new();
-        assert_eq!(
-            timer.arm(Some(now + Duration::from_millis(10)), now),
-            ArmOutcome::Registered
-        );
-        assert!(timer.armed_sleep().is_some());
-        // Graduated: no runtime timer; the table files `deadline()`.
-        timer.unback();
-        assert!(timer.armed_sleep().is_none());
-        assert_eq!(timer.deadline(), Some(now + Duration::from_millis(10)));
-        assert_eq!(
-            timer.note(Some(now + Duration::from_millis(10)), now),
-            ArmOutcome::Unchanged
-        );
-        assert_eq!(
-            timer.note(Some(now + Duration::from_millis(20)), now),
-            ArmOutcome::Extended,
-            "later while live: extended, as `arm` counts it"
-        );
-        assert!(timer.armed_sleep().is_none(), "still no runtime timer");
-        assert_eq!(
-            timer.note(Some(now + Duration::from_millis(5)), now),
-            ArmOutcome::Registered
-        );
-        assert_eq!(timer.note(None, now), ArmOutcome::Cleared);
-        assert_eq!(timer.deadline(), None);
-        assert_eq!(
-            timer.note(Some(now + Duration::from_millis(7)), now),
-            ArmOutcome::Extended,
-            "the cleared entry is still live"
-        );
-        // Back in the async loop: the armed deadline gets a runtime timer.
-        assert_eq!(timer.reback(now), ArmOutcome::Registered);
-        assert!(timer.armed_sleep().is_some());
-        assert_eq!(timer.deadline(), Some(now + Duration::from_millis(7)));
-    }
-
-    // ---- End lane table callback send ----
-
-    #[test]
-    fn sip_media_switches_are_off_under_v1_on_in_v2_and_follow_their_prerequisites() {
-        let v1 = MediaExecutorConfig::v1();
-        let v1_with_switches = MediaExecutorConfig::v2().with_mode(MediaExecutorMode::V1);
-        for config in [&v1, &v1_with_switches] {
-            assert!(!config.fused_inbound_pump_active());
-            assert!(!config.direct_inbound_sink_active());
-            assert!(!config.count_only_sink_active());
-            assert!(!config.tx_handle_cache_active());
-            assert!(!config.ai_tx_active());
-            assert!(!config.ai_rx_active());
-            assert!(!config.direct_encoded_writer_active());
-            assert!(!config.session_owner_placement_active());
-        }
-        assert!(
-            v1_with_switches.validate().is_ok(),
-            "v1 ignores every switch"
-        );
-
-        let v2 = MediaExecutorConfig::v2();
-        assert!(v2.fused_inbound_pump_active());
-        assert!(v2.direct_inbound_sink_active());
-        assert!(v2.count_only_sink_active());
-        assert!(v2.tx_handle_cache_active());
-        assert!(v2.ai_tx_active());
-        assert!(v2.ai_rx_active());
-        assert!(v2.direct_encoded_writer_active());
-        assert!(v2.session_owner_placement_active());
-
-        let no_inline = MediaExecutorConfig::v2().with_inline_decode(false);
-        assert!(
-            !no_inline.fused_inbound_pump_active(),
-            "the pump fuses onto the inline sink"
-        );
-        assert!(!no_inline.direct_inbound_sink_active() && !no_inline.count_only_sink_active());
-        let no_fuse = MediaExecutorConfig::v2().with_fused_inbound_pump(false);
-        assert!(
-            !no_fuse.direct_inbound_sink_active(),
-            "only a fused pump adopts a sink"
-        );
-        let no_sink = MediaExecutorConfig::v2().with_direct_inbound_sink(false);
-        assert!(no_sink.fused_inbound_pump_active() && !no_sink.count_only_sink_active());
-
-        let no_cache = MediaExecutorConfig::v2()
-            .with_tx_handle_cache(false)
-            .with_tx_batch(false);
-        assert!(no_cache.validate().is_ok());
-        assert!(
-            !no_cache.ai_tx_active(),
-            "AI TX sends through the cached path"
-        );
-        assert!(no_cache.ai_rx_active() && no_cache.direct_encoded_writer_active());
-    }
-
-    #[test]
-    fn tx_batch_requires_the_tx_handle_cache_under_v2() {
-        let error = MediaExecutorConfig::v2()
-            .with_tx_handle_cache(false)
-            .validate()
-            .unwrap_err();
-        assert_eq!(
-            error,
-            MediaExecutorConfigError::Requires {
-                switch: "tx_batch",
-                requires: "tx_handle_cache"
-            }
-        );
-        assert!(install_into(
-            &OnceLock::new(),
-            MediaExecutorConfig::v2().with_tx_handle_cache(false)
-        )
-        .is_err());
-        assert!(MediaExecutorConfig::v2()
-            .with_tx_handle_cache(false)
-            .with_mode(MediaExecutorMode::V1)
-            .validate()
-            .is_ok());
-    }
-
-    #[test]
-    fn sip_media_counters_flush_in_batches_and_on_drop() {
-        let before = inline_executor_counters();
-        {
-            let mut sink = DirectSinkCounters::new();
-            for _ in 0..FLUSH_EVERY {
-                sink.frame();
-            }
-            sink.count_only_frame();
-            let mut ai = AiTxCounters::new();
-            ai.resolve();
-            ai.fallback();
-            ai.tx().cache_hit();
-            ai.tx().cache_miss();
-            ai.tx().sync_sent(2);
-            record_direct_sink_active(true);
-            record_ai_tx_pump_on_lane();
-            record_direct_encoded_writer();
-            record_fused_backlog_drop();
-        }
-        let after = inline_executor_counters();
-        // Process-wide totals: other tests may add to them concurrently.
-        assert!(after.direct_sink_frames >= before.direct_sink_frames + FLUSH_EVERY);
-        assert!(after.count_only_frames > before.count_only_frames);
-        assert!(after.ai_tx_resolves > before.ai_tx_resolves);
-        assert!(after.ai_tx_fallbacks > before.ai_tx_fallbacks);
-        assert!(after.tx_handle_cache_hits > before.tx_handle_cache_hits);
-        assert!(after.tx_handle_cache_misses > before.tx_handle_cache_misses);
-        assert!(after.tx_sync_sends >= before.tx_sync_sends + 2);
-        assert!(after.direct_sinks > before.direct_sinks);
-        assert!(after.count_only_sinks > before.count_only_sinks);
-        assert!(after.ai_tx_pumps_on_lane > before.ai_tx_pumps_on_lane);
-        assert!(after.direct_encoded_writers > before.direct_encoded_writers);
-        assert!(after.fused_backlog_drops > before.fused_backlog_drops);
-    }
-
     #[test]
     fn switches_never_apply_under_v1_and_dependents_follow_the_lane_poller() {
         let v1_with_switches = MediaExecutorConfig::v2().with_mode(MediaExecutorMode::V1);
@@ -3218,12 +1693,6 @@ mod tests {
         assert!(!v1_with_switches.fast_ssrc_hash_active(), "never under v1");
         assert!(!v1_with_switches.inline_decode_active(), "never under v1");
         assert!(!v1_with_switches.pcm_pool_active(), "never under v1");
-        assert!(!v1_with_switches.owner_srtp_active(), "never under v1");
-        assert!(!v1_with_switches.owner_rtcp_active(), "never under v1");
-        assert!(
-            !v1_with_switches.owner_receive_stats_active(),
-            "never under v1"
-        );
 
         let no_poller = MediaExecutorConfig::v2().with_lane_poller(false);
         assert!(no_poller.validate().is_ok());
@@ -3252,149 +1721,18 @@ mod tests {
         assert!(MediaExecutorConfig::v2()
             .with_inline_decode(false)
             .pcm_pool_active());
-        assert!(
-            no_poller.owner_srtp_active(),
-            "a receive task owns its context as well as a hosted loop"
-        );
-        assert!(no_poller.owner_rtcp_active());
-        assert!(
-            !no_poller.owner_rtcp_on_lane_active(),
-            "without the poller the report task stays a task"
-        );
 
         let one_off = MediaExecutorConfig::v2()
             .with_lane_timer(false)
             .with_lane_tx(false)
             .with_tx_batch(false)
-            .with_fast_ssrc_hash(false)
-            .with_owner_srtp(false)
-            .with_owner_rtcp(false)
-            .with_owner_receive_stats(false);
+            .with_fast_ssrc_hash(false);
         assert!(one_off.lane_poller_active());
         assert!(!one_off.lane_timer_active());
         assert!(!one_off.lane_tx_active());
         assert!(!one_off.tx_batch_active());
         assert!(!one_off.fast_ssrc_hash_active());
-        assert!(!one_off.owner_srtp_active());
-        assert!(!one_off.owner_rtcp_active());
-        assert!(!one_off.owner_rtcp_on_lane_active());
-        assert!(!one_off.owner_receive_stats_active());
     }
-
-    #[test]
-    fn owner_srtp_counters_reach_the_totals() {
-        let before = inline_executor_counters();
-        let mut counters = SrtpOwnerCounters::new();
-        for _ in 0..(FLUSH_EVERY + 2) {
-            counters.lock_avoided();
-        }
-        let flushed = inline_executor_counters();
-        assert!(flushed.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY);
-        drop(counters);
-        record_owner_srtp_loop();
-        record_owner_srtp_handoff();
-        let after = inline_executor_counters();
-        assert!(after.srtp_locks_avoided >= before.srtp_locks_avoided + FLUSH_EVERY + 2);
-        assert!(after.owner_srtp_loops > before.owner_srtp_loops);
-        assert!(after.owner_srtp_handoffs > before.owner_srtp_handoffs);
-    }
-
-    #[test]
-    fn owner_rtcp_counters_reach_the_totals() {
-        let before = inline_executor_counters();
-        record_owner_rtcp_inbound();
-        record_rtcp_send(true);
-        record_rtcp_send(false);
-        record_rtcp_lane_task();
-        let after = inline_executor_counters();
-        assert!(after.owner_rtcp_inbound > before.owner_rtcp_inbound);
-        assert!(after.wakeups_avoided > before.wakeups_avoided);
-        assert!(after.rtcp_sync_sends > before.rtcp_sync_sends);
-        assert!(after.rtcp_sync_deferred > before.rtcp_sync_deferred);
-        assert!(after.rtcp_lane_tasks > before.rtcp_lane_tasks);
-    }
-
-    #[test]
-    fn owner_receive_stats_sessions_are_counted() {
-        let before = inline_executor_counters();
-        record_owner_receive_stats();
-        assert!(inline_executor_counters().owner_receive_stats > before.owner_receive_stats);
-    }
-
-    // ---- Hot call state ----
-
-    #[test]
-    fn hot_state_is_off_in_v1_on_in_v2_and_never_applies_under_v1() {
-        assert!(!MediaExecutorConfig::v1().hot_state);
-        assert!(!MediaExecutorConfig::v1().hot_state_active());
-        assert!(MediaExecutorConfig::v2().hot_state);
-        assert!(MediaExecutorConfig::v2().hot_state_active());
-        assert!(MediaExecutorConfig::v2().validate().is_ok());
-        assert!(
-            !MediaExecutorConfig::v1()
-                .with_hot_state(true)
-                .hot_state_active(),
-            "never under v1"
-        );
-        let off = MediaExecutorConfig::v2().with_hot_state(false);
-        assert!(!off.hot_state_active());
-        assert!(off.validate().is_ok());
-        // No prerequisite: it applies without the lane poller (the receive
-        // loop's entry then stays local to the loop).
-        assert!(MediaExecutorConfig::v2()
-            .with_lane_poller(false)
-            .hot_state_active());
-        {
-            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
-            assert!(hot_state_enabled());
-            let _off = override_media_executor_config_on_this_thread(off);
-            assert!(!hot_state_enabled());
-        }
-    }
-
-    // ---- End hot call state ----
-
-    // ---- Zero-copy playout ----
-
-    #[test]
-    fn playout_zero_copy_is_off_in_v1_on_in_v2_and_reads_as_off_without_the_fused_pump() {
-        assert!(!MediaExecutorConfig::v1().playout_zero_copy);
-        assert!(!MediaExecutorConfig::v1().playout_zero_copy_active());
-        let v2 = MediaExecutorConfig::v2();
-        assert!(v2.playout_zero_copy && v2.playout_zero_copy_active());
-        assert!(v2.validate().is_ok());
-        assert!(
-            !MediaExecutorConfig::v1()
-                .with_playout_zero_copy(true)
-                .playout_zero_copy_active(),
-            "never under v1"
-        );
-        let off = MediaExecutorConfig::v2().with_playout_zero_copy(false);
-        assert!(!off.playout_zero_copy_active());
-        assert!(off.fused_inbound_pump_active(), "independent of the pump");
-        for missing in [
-            MediaExecutorConfig::v2().with_fused_inbound_pump(false),
-            MediaExecutorConfig::v2().with_inline_decode(false),
-        ] {
-            assert!(missing.playout_zero_copy);
-            assert!(
-                !missing.playout_zero_copy_active(),
-                "only a fused pump plays out"
-            );
-            assert!(
-                missing.validate().is_ok(),
-                "a missing prerequisite is not an error"
-            );
-        }
-        {
-            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
-            assert!(playout_zero_copy_enabled());
-            let _off = override_media_executor_config_on_this_thread(off);
-            assert!(!playout_zero_copy_enabled());
-        }
-    }
-
-    // ---- End zero-copy playout ----
 
     #[test]
     fn mode_names_parse_and_reject_unknown_values() {
@@ -3652,222 +1990,4 @@ mod tests {
             "the extension holds: no early expiry at {first:?}"
         );
     }
-
-    // ---- Counter and PCM pool cleanup ----
-
-    #[test]
-    fn counter_pool_cleanup_is_part_of_v2_and_off_under_v1() {
-        assert!(!MediaExecutorConfig::v1().counter_pool_cleanup);
-        assert!(!MediaExecutorConfig::v1().counter_pool_cleanup_active());
-        assert!(MediaExecutorConfig::v2().counter_pool_cleanup_active());
-        assert!(
-            !MediaExecutorConfig::v1()
-                .with_counter_pool_cleanup(true)
-                .counter_pool_cleanup_active(),
-            "never under v1"
-        );
-        let off = MediaExecutorConfig::v2().with_counter_pool_cleanup(false);
-        assert!(!off.counter_pool_cleanup_active());
-        assert!(off.pcm_pool_active(), "independent of the pool switch");
-        off.validate().unwrap();
-        MediaExecutorConfig::v2()
-            .with_lane_poller(false)
-            .validate()
-            .unwrap();
-        let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
-        assert!(counter_pool_cleanup_enabled());
-        let _off = override_media_executor_config_on_this_thread(off);
-        assert!(!counter_pool_cleanup_enabled());
-    }
-
-    /// Only a poller on a current-thread runtime with the switch defers: a
-    /// multi-threaded runtime may move the poller between workers.
-    #[test]
-    fn only_a_current_thread_poller_with_the_switch_defers() {
-        std::thread::spawn(|| {
-            let current = tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap();
-            let multi = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1)
-                .build()
-                .unwrap();
-            let defers = |runtime: &tokio::runtime::Runtime| {
-                runtime.block_on(async { LaneDeferredBatch::for_this_poller().is_some() })
-            };
-            let _v2 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v2());
-            assert!(defers(&current));
-            assert!(!defers(&multi));
-            assert!(
-                LaneDeferredBatch::for_this_poller().is_none(),
-                "outside a runtime"
-            );
-            let _off = override_media_executor_config_on_this_thread(
-                MediaExecutorConfig::v2().with_counter_pool_cleanup(false),
-            );
-            assert!(!defers(&current));
-            let _v1 = override_media_executor_config_on_this_thread(MediaExecutorConfig::v1());
-            assert!(!defers(&current));
-        })
-        .join()
-        .unwrap();
-    }
-
-    fn lane_deferred_publishes() -> u64 {
-        LANE_DEFERRED_PUBLISHES.with(Cell::get)
-    }
-
-    /// The same events, counted per event and through a deferring lane batch:
-    /// identical totals, one atomic add per counter per batch instead of one
-    /// per event.
-    #[test]
-    fn lane_deferred_counts_reach_the_same_totals_with_fewer_atomic_adds() {
-        static PER_EVENT_A: AtomicU64 = AtomicU64::new(0);
-        static PER_EVENT_B: AtomicU64 = AtomicU64::new(0);
-        static BATCHED_A: AtomicU64 = AtomicU64::new(0);
-        static BATCHED_B: AtomicU64 = AtomicU64::new(0);
-        const PASSES: u32 = 200;
-        std::thread::spawn(|| {
-            let start = lane_deferred_publishes();
-            for pass in 0..PASSES {
-                add_lane_deferred(&PER_EVENT_A, 1);
-                add_lane_deferred(&PER_EVENT_B, u64::from(pass % 3));
-            }
-            let per_event = lane_deferred_publishes() - start;
-
-            let mut batch = LaneDeferredBatch { passes: 0 };
-            let start = lane_deferred_publishes();
-            for pass in 0..PASSES {
-                let _pass = batch.enter_pass();
-                add_lane_deferred(&BATCHED_A, 1);
-                add_lane_deferred(&BATCHED_B, u64::from(pass % 3));
-                if pass == 10 {
-                    assert_eq!(pending_lane_deferred_on_this_thread(&BATCHED_A), 11);
-                    assert_eq!(BATCHED_A.load(Ordering::Relaxed), 0, "held, not added");
-                }
-                batch.pass_end(false);
-            }
-            drop(batch);
-            let batched = lane_deferred_publishes() - start;
-
-            assert_eq!(
-                BATCHED_A.load(Ordering::Relaxed),
-                PER_EVENT_A.load(Ordering::Relaxed)
-            );
-            assert_eq!(
-                BATCHED_B.load(Ordering::Relaxed),
-                PER_EVENT_B.load(Ordering::Relaxed)
-            );
-            assert_eq!(PER_EVENT_A.load(Ordering::Relaxed), u64::from(PASSES));
-            assert_eq!(per_event, 2 * u64::from(PASSES));
-            // Flushes after passes 64, 128 and 192, and when the batch drops.
-            assert_eq!(batched, 2 * 4);
-            assert_eq!(pending_lane_deferred_on_this_thread(&BATCHED_A), 0);
-        })
-        .join()
-        .unwrap();
-    }
-
-    /// An idle pass publishes at once; outside a pass values are added at
-    /// once even while others are held; scopes nest; a counter beyond the
-    /// table's slots is added at once; a thread's held values survive its
-    /// exit.
-    #[test]
-    fn lane_deferred_values_are_published_exactly_once_on_every_path() {
-        static IDLE: AtomicU64 = AtomicU64::new(0);
-        static OUTSIDE: AtomicU64 = AtomicU64::new(0);
-        static EXITED: AtomicU64 = AtomicU64::new(0);
-        static MANY: [AtomicU64; LANE_DEFERRED_SLOTS + 2] =
-            [const { AtomicU64::new(0) }; LANE_DEFERRED_SLOTS + 2];
-        std::thread::spawn(|| {
-            let mut batch = LaneDeferredBatch { passes: 0 };
-            {
-                let _pass = batch.enter_pass();
-                add_lane_deferred(&IDLE, 3);
-                assert_eq!(IDLE.load(Ordering::Relaxed), 0);
-                batch.pass_end(true);
-            }
-            assert_eq!(IDLE.load(Ordering::Relaxed), 3, "an idle pass publishes");
-
-            {
-                let _pass = batch.enter_pass();
-                add_lane_deferred(&OUTSIDE, 1);
-                {
-                    let _nested = batch.enter_pass();
-                    add_lane_deferred(&OUTSIDE, 1);
-                }
-                assert!(
-                    with_lane_deferred(|table| table.deferring).unwrap(),
-                    "a nested scope restores the outer one"
-                );
-                batch.pass_end(false);
-            }
-            assert!(!with_lane_deferred(|table| table.deferring).unwrap());
-            add_lane_deferred(&OUTSIDE, 5);
-            assert_eq!(
-                OUTSIDE.load(Ordering::Relaxed),
-                5,
-                "outside a pass: at once"
-            );
-            assert_eq!(pending_lane_deferred_on_this_thread(&OUTSIDE), 2);
-            drop(batch);
-            assert_eq!(OUTSIDE.load(Ordering::Relaxed), 7);
-
-            // Every slot is taken by now (IDLE, OUTSIDE, then MANY): the
-            // counters that do not fit are added at once.
-            let guard = defer_lane_counters_on_this_thread();
-            for counter in &MANY {
-                add_lane_deferred(counter, 1);
-            }
-            let held = MANY
-                .iter()
-                .filter(|counter| counter.load(Ordering::Relaxed) == 0)
-                .count();
-            assert_eq!(held, LANE_DEFERRED_SLOTS - 2);
-            drop(guard);
-            assert!(MANY
-                .iter()
-                .all(|counter| counter.load(Ordering::Relaxed) == 1));
-
-            // Held when the thread exits.
-            let _pass = LaneDeferredScope::enter();
-            add_lane_deferred(&EXITED, 9);
-            std::mem::forget(_pass);
-        })
-        .join()
-        .unwrap();
-        assert_eq!(
-            EXITED.load(Ordering::Relaxed),
-            9,
-            "thread exit published it"
-        );
-    }
-
-    /// The owner RTCP counters count the same through a deferring pass.
-    #[test]
-    fn owner_rtcp_counts_are_held_for_the_lane_batch_and_reach_the_totals() {
-        std::thread::spawn(|| {
-            let before = inline_executor_counters();
-            let guard = defer_lane_counters_on_this_thread();
-            record_owner_rtcp_inbound();
-            record_rtcp_send(true);
-            record_rtcp_send(true);
-            record_rtcp_send(false);
-            assert_eq!(pending_lane_deferred_on_this_thread(&OWNER_RTCP_INBOUND), 1);
-            assert_eq!(pending_lane_deferred_on_this_thread(&WAKEUPS_AVOIDED), 1);
-            assert_eq!(pending_lane_deferred_on_this_thread(&RTCP_SYNC_SENDS), 2);
-            assert_eq!(pending_lane_deferred_on_this_thread(&RTCP_SYNC_DEFERRED), 1);
-            drop(guard);
-            assert_eq!(pending_lane_deferred_on_this_thread(&RTCP_SYNC_SENDS), 0);
-            let after = inline_executor_counters();
-            assert!(after.owner_rtcp_inbound > before.owner_rtcp_inbound);
-            assert!(after.wakeups_avoided > before.wakeups_avoided);
-            assert!(after.rtcp_sync_sends >= before.rtcp_sync_sends + 2);
-            assert!(after.rtcp_sync_deferred > before.rtcp_sync_deferred);
-        })
-        .join()
-        .unwrap();
-    }
-
-    // ---- End counter and PCM pool cleanup ----
 }

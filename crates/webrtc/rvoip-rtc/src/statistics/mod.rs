@@ -10,27 +10,22 @@
 //! to filter the returned statistics to only those relevant to a specific
 //! sender or receiver.
 //!
-//! # Examples
+//! # Example
 //!
-//! ```
-//! use rtc::peer_connection::RTCPeerConnection;
-//! use rtc::rtp_transceiver::RTCRtpSenderId;
+//! ```ignore
 //! use rtc::statistics::StatsSelector;
-//! use std::time::Instant;
 //!
-//! # fn example(pc: &mut RTCPeerConnection, sender_id: RTCRtpSenderId) {
 //! // Get all stats
 //! let all_stats = pc.get_stats(Instant::now(), StatsSelector::None);
 //!
 //! // Get stats for a specific sender
 //! let sender_stats = pc.get_stats(Instant::now(), StatsSelector::Sender(sender_id));
-//! # }
 //! ```
 
 use crate::rtp_transceiver::{RTCRtpReceiverId, RTCRtpSenderId};
 
 #[cfg(test)]
-mod statistics_test;
+mod statistics_tests;
 
 pub(crate) mod accumulator;
 pub mod report;
@@ -42,7 +37,7 @@ pub mod stats;
 /// W3C WebRTC `getStats()` method. When provided, it filters the returned
 /// statistics to only those relevant to the specified sender or receiver.
 ///
-/// # Specification
+/// # W3C Reference
 ///
 /// See [The stats selection algorithm](https://www.w3.org/TR/webrtc/#the-stats-selection-algorithm)
 ///
@@ -51,7 +46,6 @@ pub mod stats;
 /// - `None` - Return all statistics for the entire connection
 /// - `Sender` - Return statistics for a specific RTP sender and referenced objects
 /// - `Receiver` - Return statistics for a specific RTP receiver and referenced objects
-#[non_exhaustive]
 pub enum StatsSelector {
     /// Gather stats for the whole connection.
     ///

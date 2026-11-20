@@ -158,21 +158,11 @@ pub struct WebRtcConfig {
     #[serde(default = "default_handler_channel_capacity")]
     pub handler_channel_capacity: usize,
 
-    /// Deadline applied to inbound media-pump sends. When a stream's inbound
-    /// frame queue is full, the pump waits at most this long for room, then
-    /// drops the arriving frame and counts it in `frames_dropped`. Keep it
-    /// below one packet period so a stalled consumer cannot slow the RTP
-    /// reader below the wire rate. Default 5 ms.
+    /// Deadline applied to inbound media-pump sends. If a downstream consumer can't
+    /// drain a `MediaFrame` within this window the frame is dropped and a counter
+    /// is incremented (avoids stalling the inbound RTP task forever).
     #[serde(default = "default_inbound_send_deadline_ms")]
     pub inbound_send_deadline_ms: u64,
-
-    /// Capacity, in frames, of each media stream's inbound frame queue
-    /// between the RTP reader and the stream's consumer. It bounds both the
-    /// memory and the stale audio a consumer that stops reading (or has not
-    /// started yet) receives when it resumes. `0` is treated as `1`.
-    /// Default 8 (160 ms of 20 ms audio).
-    #[serde(default = "default_inbound_frame_queue_capacity")]
-    pub inbound_frame_queue_capacity: usize,
 
     /// Time after which a failed or closed route is reaped by the background
     /// session reaper. `0` disables the reaper.
@@ -272,10 +262,6 @@ impl fmt::Debug for WebRtcConfig {
             .field("connection_timeout_secs", &self.connection_timeout_secs)
             .field("handler_channel_capacity", &self.handler_channel_capacity)
             .field("inbound_send_deadline_ms", &self.inbound_send_deadline_ms)
-            .field(
-                "inbound_frame_queue_capacity",
-                &self.inbound_frame_queue_capacity,
-            )
             .field("session_idle_ttl_secs", &self.session_idle_ttl_secs)
             .field("trickle_ice", &self.trickle_ice)
             .field("hold_renegotiate", &self.hold_renegotiate)
@@ -378,11 +364,7 @@ fn default_handler_channel_capacity() -> usize {
 }
 
 fn default_inbound_send_deadline_ms() -> u64 {
-    crate::media::pump::DEFAULT_INBOUND_SEND_DEADLINE_MS
-}
-
-fn default_inbound_frame_queue_capacity() -> usize {
-    crate::media::pump::DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY
+    200
 }
 
 fn default_session_idle_ttl_secs() -> u64 {
@@ -422,7 +404,6 @@ impl Default for WebRtcConfig {
             capabilities: default_capabilities(),
             handler_channel_capacity: default_handler_channel_capacity(),
             inbound_send_deadline_ms: default_inbound_send_deadline_ms(),
-            inbound_frame_queue_capacity: default_inbound_frame_queue_capacity(),
             session_idle_ttl_secs: default_session_idle_ttl_secs(),
             trickle_ice: false,
             hold_renegotiate: default_hold_renegotiate(),
@@ -453,7 +434,6 @@ impl WebRtcConfig {
             capabilities: crate::sdp::capability::default_webrtc_capabilities(),
             handler_channel_capacity: default_handler_channel_capacity(),
             inbound_send_deadline_ms: default_inbound_send_deadline_ms(),
-            inbound_frame_queue_capacity: default_inbound_frame_queue_capacity(),
             session_idle_ttl_secs: default_session_idle_ttl_secs(),
             trickle_ice: false,
             hold_renegotiate: default_hold_renegotiate(),

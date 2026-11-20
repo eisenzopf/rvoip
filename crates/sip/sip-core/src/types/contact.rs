@@ -49,7 +49,6 @@
 //! assert_eq!(contact.expires(), Some(3600));
 //! ```
 use crate::types::address::Address;
-use nom::Parser;
 // use crate::types::Param; // Removed duplicate import
 use crate::error::{Error, Result};
 // For FromStr
@@ -676,7 +675,7 @@ impl FromStr for Contact {
     fn from_str(s: &str) -> Result<Self> {
         use nom::combinator::all_consuming;
         // The parser `parse_contact` returns a ContactValue, we need to wrap it in a Vec
-        match all_consuming(crate::parser::headers::contact::parse_contact).parse(s.as_bytes()) {
+        match all_consuming(crate::parser::headers::contact::parse_contact)(s.as_bytes()) {
             // Wrap the ContactValue in a Vec for the Contact constructor
             Ok((_, value)) => Ok(Contact(vec![value])),
             Err(e) => Err(crate::error::Error::from(e)), // Use From trait

@@ -8,7 +8,6 @@
 // P-Preferred-Identity has identical syntax.
 
 use nom::combinator::map;
-use nom::Parser;
 
 use crate::parser::address::name_addr_or_addr_spec;
 use crate::parser::common::comma_separated_list1;
@@ -25,12 +24,12 @@ pub fn parse_p_asserted_identity_value(input: &[u8]) -> ParseResult<'_, Vec<Addr
 
 /// Parse a `P-Asserted-Identity` header value into the typed wrapper.
 pub fn parse_p_asserted_identity(input: &[u8]) -> ParseResult<'_, PAssertedIdentity> {
-    map(parse_p_asserted_identity_value, PAssertedIdentity).parse(input)
+    map(parse_p_asserted_identity_value, PAssertedIdentity)(input)
 }
 
 /// Parse a `P-Preferred-Identity` header value into the typed wrapper.
 pub fn parse_p_preferred_identity(input: &[u8]) -> ParseResult<'_, PPreferredIdentity> {
-    map(parse_p_asserted_identity_value, PPreferredIdentity).parse(input)
+    map(parse_p_asserted_identity_value, PPreferredIdentity)(input)
 }
 
 #[cfg(test)]

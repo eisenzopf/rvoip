@@ -40,7 +40,6 @@ use crate::parser::headers::accept::AcceptValue;
 use crate::parser::headers::parse_accept;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -328,7 +327,7 @@ fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<AcceptValue>> {
             &bytes
         };
 
-    match all_consuming(parse_accept).parse(bytes_to_parse) {
+    match all_consuming(parse_accept)(bytes_to_parse) {
         Ok((_, accept)) => Ok(accept.0),
         Err(e) => Err(Error::ParseError(format!(
             "Failed to parse Accept header: {:?}",
@@ -384,11 +383,7 @@ impl fmt::Display for AcceptValue {
         let mut s = format!("{}/{}", self.m_type, self.m_subtype);
 
         // First output params other than 'q'
-        // Parameter order carries no meaning; name order keeps the
-        // rendering deterministic.
-        let mut sorted: Vec<_> = self.params.iter().collect();
-        sorted.sort();
-        for (k, v) in sorted {
+        for (k, v) in &self.params {
             if k != "q" {
                 s.push_str(&format!(";{}={}", k, v));
             }

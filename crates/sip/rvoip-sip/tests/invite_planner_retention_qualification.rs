@@ -43,24 +43,22 @@ fn metric(snapshot: &serde_json::Value, pointer: &str) -> u64 {
         .unwrap_or(0)
 }
 
-async fn wait_for_metrics(
+async fn wait_for_metric(
     coordinator: &Arc<UnifiedCoordinator>,
-    expected: &[(&str, u64)],
+    pointer: &str,
+    expected: u64,
 ) -> serde_json::Value {
     timeout(Duration::from_secs(15), async {
         loop {
             let snapshot = coordinator.perf_diagnostic_snapshot().await;
-            if expected
-                .iter()
-                .all(|(pointer, value)| metric(&snapshot, pointer) == *value)
-            {
+            if metric(&snapshot, pointer) == expected {
                 return snapshot;
             }
             sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("timed out waiting for {expected:?}"))
+    .unwrap_or_else(|_| panic!("timed out waiting for {pointer}={expected}"))
 }
 
 #[ignore = "release qualification: runs a real 100-capacity/10-CPS localhost stack for >90s"]
@@ -192,20 +190,10 @@ async fn real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_
     .await
     .expect("all INVITE/486/ACK exchanges completed on localhost");
 
-    // Every 486 ends its call, so the application detaches each dialog. A
-    // terminal (not wire-unknown) plan then keeps only its exact
-    // transaction-keyed tombstone for late/forked 2xx handling; the two
-    // dialog-keyed reverse indexes are dropped with the dialog
-    // (`remove_invite_failover_state_for_dialog` in sip-dialog). Wait for
-    // that detach to settle, not just for active ownership to end.
-    let retained = wait_for_metrics(
+    let retained = wait_for_metric(
         &coordinator,
-        &[
-            ("/dialog_manager/active_invite_failover_by_dialog", 0),
-            ("/dialog_manager/dialogs", 0),
-            ("/dialog_manager/invite_failover_plans_by_dialog", 0),
-            ("/dialog_manager/invite_failover_attempts_by_dialog", 0),
-        ],
+        "/dialog_manager/active_invite_failover_by_dialog",
+        0,
     )
     .await;
     assert_eq!(
@@ -224,17 +212,23 @@ async fn real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_
         ),
         retained_plans
     );
-    let retained_attempts = metric(&retained, "/dialog_manager/invite_failover_attempts");
-    assert!(
-        retained_attempts >= retained_plans,
-        "every retained plan must stay reachable by its exact attempt transaction key"
+    assert_eq!(
+        metric(&retained, "/dialog_manager/invite_failover_plans_by_dialog"),
+        retained_plans
     );
     assert_eq!(
         metric(
             &retained,
             "/dialog_manager/invite_failover_attempt_reservations"
         ),
-        retained_attempts
+        metric(&retained, "/dialog_manager/invite_failover_attempts")
+    );
+    assert_eq!(
+        metric(
+            &retained,
+            "/dialog_manager/invite_failover_attempts_by_dialog"
+        ),
+        metric(&retained, "/dialog_manager/invite_failover_attempts")
     );
     assert!(
         metric(
@@ -255,7 +249,10 @@ async fn real_stack_capacity_100_at_10_cps_crosses_retention_horizon_and_drains_
             "invite_packets": invite_count.load(Ordering::Acquire),
             "ack_packets": ack_count.load(Ordering::Acquire),
             "retained_plans": retained_plans,
-            "retained_attempts": retained_attempts,
+            "retained_attempts": metric(
+                &retained,
+                "/dialog_manager/invite_failover_attempts"
+            ),
             "retired_client_transactions": metric(
                 &retained,
                 "/transaction_manager/retired_client_transactions"

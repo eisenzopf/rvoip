@@ -19,7 +19,7 @@ use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::RTCDtlsRole;
@@ -163,9 +163,8 @@ async fn run_test() -> Result<()> {
     let rtc_socket = runtime.wrap_udp_socket(std_socket)?;
     log::info!("RTC peer bound to {}", rtc_local_addr);
 
-    let setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Server)
-        .build();
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
 
     let mut media_engine = MediaEngine::default();
 
@@ -220,7 +219,7 @@ async fn run_test() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created RTC peer connection");
 
     let mid = "0".to_owned();
@@ -274,7 +273,7 @@ async fn run_test() -> Result<()> {
 
     // ──── Signaling ────
     let offer = rtc_pc.create_offer(None)?;
-    rtc_pc.set_local_description(Instant::now(), offer.clone())?;
+    rtc_pc.set_local_description(offer.clone())?;
     log::info!("RTC created and set offer");
 
     webrtc_pc
@@ -295,7 +294,7 @@ async fn run_test() -> Result<()> {
 
     let rtc_answer =
         rtc::peer_connection::sdp::RTCSessionDescription::answer(answer_with_cands.sdp)?;
-    rtc_pc.set_remote_description(Instant::now(), rtc_answer)?;
+    rtc_pc.set_remote_description(rtc_answer)?;
     log::info!("RTC set remote description (answer)");
 
     // ──── Connection + streaming loop ────
@@ -411,7 +410,7 @@ async fn run_test() -> Result<()> {
                     header,
                     payload: bytes::Bytes::from(dummy_frame.clone()),
                 };
-                if let Err(e) = rtp_sender.write_rtp(Instant::now(), packet) {
+                if let Err(e) = rtp_sender.write_rtp(packet) {
                     log::debug!("Failed to send RTP on {}: {}", rid, e);
                 }
                 sequence_number = sequence_number.wrapping_add(1);

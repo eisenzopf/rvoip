@@ -15,8 +15,8 @@ use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
-use hmac::{Hmac, KeyInit, Mac};
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
+use hmac::{Hmac, Mac};
+use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use x509_parser::prelude::*;
 
@@ -206,7 +206,7 @@ impl Mikey {
 
         // Generate random value for initiator
         let mut rand_i = vec![0u8; 16];
-        UnwrapErr(SysRng).fill_bytes(&mut rand_i);
+        OsRng.fill_bytes(&mut rand_i);
         self.rand_i = Some(rand_i.clone());
 
         // Create message with Common Header payload
@@ -234,11 +234,11 @@ impl Mikey {
 
         // Generate random TEK (Traffic Encryption Key)
         let mut tek = vec![0u8; 16]; // 128-bit key
-        UnwrapErr(SysRng).fill_bytes(&mut tek);
+        OsRng.fill_bytes(&mut tek);
 
         // Generate random salt
         let mut salt = vec![0u8; 14]; // SRTP salt length
-        UnwrapErr(SysRng).fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut salt);
 
         // Add Key Data payload
         let key_data = KeyDataPayload {
@@ -426,7 +426,7 @@ impl Mikey {
 
         // Generate random value for responder
         let mut rand_r = vec![0u8; 16];
-        UnwrapErr(SysRng).fill_bytes(&mut rand_r);
+        OsRng.fill_bytes(&mut rand_r);
         self.rand_r = Some(rand_r.clone());
         response.add_rand(rand_r);
 
@@ -475,7 +475,7 @@ impl Mikey {
 
         // Generate random value for initiator
         let mut rand_i = vec![0u8; 16];
-        UnwrapErr(SysRng).fill_bytes(&mut rand_i);
+        OsRng.fill_bytes(&mut rand_i);
         self.rand_i = Some(rand_i.clone());
 
         // Create message with Common Header payload
@@ -517,12 +517,12 @@ impl Mikey {
 
         // Generate random TEK (Traffic Encryption Key)
         let mut tek = vec![0u8; 16]; // 128-bit key
-        UnwrapErr(SysRng).fill_bytes(&mut tek);
+        OsRng.fill_bytes(&mut tek);
         self.generated_tek = Some(tek.clone());
 
         // Generate random salt
         let mut salt = vec![0u8; 14]; // SRTP salt length
-        UnwrapErr(SysRng).fill_bytes(&mut salt);
+        OsRng.fill_bytes(&mut salt);
         self.generated_salt = Some(salt.clone());
 
         // Create key data to be encrypted
@@ -774,7 +774,7 @@ impl Mikey {
 
         // Generate random value for responder
         let mut rand_r = vec![0u8; 16];
-        UnwrapErr(SysRng).fill_bytes(&mut rand_r);
+        OsRng.fill_bytes(&mut rand_r);
         self.rand_r = Some(rand_r.clone());
         response.add_rand(rand_r);
 
