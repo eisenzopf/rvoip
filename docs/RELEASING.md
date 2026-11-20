@@ -169,8 +169,12 @@ Diagnose and reproduce a failed gate by itself before spending another complete
 qualification run.
 
 For a real EC2 performance, soak, or interoperability failure, dispatch
-`remote-diagnostic` on protected `main` and enter one or more exact catalog gate
-IDs in `diagnostic_gates`, separated by commas. The planner accepts only
+`remote-diagnostic` and enter one or more exact catalog gate IDs in
+`diagnostic_gates`, separated by commas. A candidate on `main` may be
+dispatched from `main`. A branch head must be dispatched from that branch
+(`gh workflow run release-qualify.yml --ref <branch> -f candidate=<its head>`):
+a run's caches are scoped to the ref it runs on, so code that is not on
+`main` never saves a cache that `main`'s runs restore. The planner accepts only
 executable EC2 or bench-lane gates from the release profiles, adds their
 declared dependencies, and runs them fresh with their release commands,
 machines, workloads, and thresholds. At most 20 gates may be requested. The

@@ -121,24 +121,28 @@ jobs:
         run: |
           set -euo pipefail
           git fetch origin main
-          if [[ "$PROFILE" == remote-diagnostic ]]; then
-            candidate="$(git rev-parse HEAD)"
-            git ls-remote --heads origin \
-              | awk -v candidate="$candidate" '$1 == candidate { found = 1 } END { exit !found }' \
-              || {
-                echo "diagnostic candidates must be the exact head of a branch in this repository" >&2
-                exit 1
-              }
-          else
+          candidate="$(git rev-parse HEAD)"
+          if git merge-base --is-ancestor HEAD origin/main; then
             # Any commit on main, not only its head: a release qualifies a
             # green nightly candidate or the version bump on top of it, and
             # a merge during the run no longer restarts it. Reused receipts
             # must come from the candidate's own ancestors (its receipt
             # chain); the plan records the delta from each one.
-            git merge-base --is-ancestor HEAD origin/main || {
-              echo "release candidates must be commits on origin/main" >&2
+            echo "candidate $candidate is on origin/main"
+          elif [[ "$PROFILE" == remote-diagnostic ]]; then
+            # Code that is not on main runs only from its own branch ref
+            # (gh workflow run --ref <branch>). Every cache this run saves is
+            # scoped to github.ref, so unreviewed branch code can never write
+            # a cache that main's runs restore (CodeQL actions/cache-poisoning).
+            branch_head="$(git ls-remote origin "$GITHUB_REF" \
+              | awk -v ref="$GITHUB_REF" '$2 == ref { print $1 }')"
+            if [[ "$GITHUB_REF" != refs/heads/* || "$branch_head" != "$candidate" ]]; then
+              echo "a diagnostic candidate that is not on main must be the head of the branch the run is dispatched on (gh workflow run --ref <branch>); this run is on $GITHUB_REF" >&2
               exit 1
-            }
+            fi
+          else
+            echo "release candidates must be commits on origin/main" >&2
+            exit 1
           fi
 
       - name: Require complete structured release coverage
