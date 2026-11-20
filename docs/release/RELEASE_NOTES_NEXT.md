@@ -205,7 +205,7 @@ Jambonz OSS remains a mandatory external SIP interoperability peer.
   RTPengine media anchor. The tests use the same `Endpoint`, `StreamPeer`
   and `CallbackPeer` APIs as Asterisk and FreeSWITCH.
 - **Pinning.** The release profile pins the latest reviewed open-source
-  component line, currently Jambonz OSS `0.9.14`. Source archives and containers are digest-verified, and
+  component line, currently Jambonz OSS `0.9.15`. Source archives and containers are digest-verified, and
   qualification fails if the pins are no longer the selected upstream heads.
 - **Matrix.** The mandatory UDP/plain-RTP matrix covers:
   - authenticated registration;
