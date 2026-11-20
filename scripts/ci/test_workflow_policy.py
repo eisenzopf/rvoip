@@ -706,6 +706,61 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("--prior-evidence target/prior-evidence", workflow)
         self.assertIn("fetch-depth: 0", workflow.split("  collect:\n", maxsplit=1)[1])
 
+    def test_branch_diagnostics_run_only_on_their_own_ref(self) -> None:
+        # A run's caches are scoped to github.ref. Code that is not on main
+        # must therefore run from its own branch ref, never from main's, or
+        # the caches it saves would reach main's runs (CodeQL #913).
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        name = "Require protected main candidate or trusted diagnostic branch head"
+        step = workflow.split(f"- name: {name}\n", 1)[1]
+        lines = step.split("        run: |\n", 1)[1].splitlines()
+        script = []
+        for line in lines:
+            if line.strip() and not line.startswith(" " * 10):
+                break
+            script.append(line[10:])
+        script = "\n".join(script) + "\n"
+
+        import subprocess
+        import tempfile
+
+        def git(cwd, *args):
+            return subprocess.run(
+                ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main", *args],
+                cwd=cwd, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            origin, work = root / "origin.git", root / "work"
+            git(root, "init", "--bare", str(origin))
+            git(root, "init", str(work))
+            git(work, "commit", "--allow-empty", "-m", "main")
+            main = git(work, "rev-parse", "HEAD")
+            git(work, "remote", "add", "origin", str(origin))
+            git(work, "push", "origin", "HEAD:refs/heads/main")
+            git(work, "commit", "--allow-empty", "-m", "branch 1")
+            stale = git(work, "rev-parse", "HEAD")
+            git(work, "commit", "--allow-empty", "-m", "branch 2")
+            head = git(work, "rev-parse", "HEAD")
+            git(work, "push", "origin", "HEAD:refs/heads/feature/x")
+
+            def allowed(candidate, profile, ref):
+                git(work, "checkout", "--quiet", "--detach", candidate)
+                return subprocess.run(
+                    ["bash", "-c", script], cwd=work, capture_output=True, text=True,
+                    env={"PATH": __import__("os").environ["PATH"], "PROFILE": profile,
+                         "GITHUB_REF": ref, "HOME": directory},
+                ).returncode == 0
+
+            self.assertTrue(allowed(main, "remote-release", "refs/heads/main"))
+            self.assertTrue(allowed(main, "remote-diagnostic", "refs/heads/main"))
+            self.assertTrue(allowed(head, "remote-diagnostic", "refs/heads/feature/x"))
+            self.assertFalse(allowed(head, "remote-diagnostic", "refs/heads/main"))
+            self.assertFalse(allowed(head, "remote-release", "refs/heads/feature/x"))
+            self.assertFalse(allowed(stale, "remote-diagnostic", "refs/heads/feature/x"))
+            self.assertFalse(allowed(head, "remote-diagnostic", "refs/tags/feature/x"))
+
     def test_remote_diagnostics_are_exact_gate_fresh_and_non_publishing(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
         publication = (ROOT / ".github/workflows/release-publish.yml").read_text()
@@ -716,8 +771,8 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('test "$PROFILE" = remote-diagnostic', workflow)
         self.assertIn("inputs.profile != 'remote-diagnostic'", workflow)
         self.assertIn("inputs.diagnostic_gates || 'all'", workflow)
-        self.assertIn("diagnostic candidates must be the exact head", workflow)
-        self.assertIn("git ls-remote --heads origin", workflow)
+        self.assertIn("must be the head of the branch the run is dispatched on", workflow)
+        self.assertNotIn("git ls-remote --heads origin", workflow)
         self.assertIn("Upload non-reusable diagnostic evidence", workflow)
         self.assertIn("name: diagnostic-gate-evidence", workflow)
         self.assertIn("Reusable for release: no", workflow)
