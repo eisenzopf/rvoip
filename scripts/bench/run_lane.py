@@ -28,6 +28,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -45,6 +46,12 @@ import search  # noqa: E402
 
 RECEIPT_SCHEMA = 'rvoip-bench-lane-receipt-v1'
 BASELINES = REPO / 'crates/sip/rvoip-sip/perf-baselines/rfc7502'
+# The env-id's lane config: the infra/aws/bench Terraform outputs (scripts/bench/lane_config.py writes it), so a
+# lane runs where there is no Terraform state, such as a hosted CI runner. It names the env-id and the sha256 of
+# that env-id's env.json, so a config written for another environment (or before a re-pin) is refused.
+LANES = REPO / 'infra/aws/bench/lanes'
+# vCPUs of the lane instance types (the quota preflight; Terraform's lane_vcpus assumes its own caller count).
+INSTANCE_VCPUS = {'c8i.large': 2, 'c8i.4xlarge': 16, 'c8i.12xlarge': 48, 'c8in.12xlarge': 48, 'c8in.24xlarge': 96}
 EXIT_PASS, EXIT_FAIL, EXIT_USAGE, EXIT_INFRA, EXIT_WALL = 0, 1, 2, 3, 4
 DUT_SIP_PORT = {'tls': 5061, 'udp': 5060}
 CALLER_CONNECTIONS = 8
@@ -187,20 +194,48 @@ class Lane:
         return self.state['lane']
 
     def tf_outputs(self):
+        """The lane config: --lane-config, else the pinned env-id's lane.json, else `terraform output`."""
         if self.args.lane_config:
             return json.loads(Path(self.args.lane_config).read_text())
         try:
             out = subprocess.run(['terraform', '-chdir=%s' % (REPO / 'infra/aws/bench'), 'output', '-json'],
                                  capture_output=True, text=True)
         except FileNotFoundError:
-            raise Usage('terraform is not installed (pass --lane-config)')
+            raise Usage('terraform is not installed and there is no lane config for this env-id in %s (pass '
+                        '--lane-config, or run scripts/bench/lane_config.py write where the bench Terraform state '
+                        'is)' % LANES)
         if out.returncode:
             raise Usage('terraform output failed (pass --lane-config): %s' % out.stderr.strip()[-500:])
         return {k: v['value'] for k, v in json.loads(out.stdout).items()}
 
-    def preflight(self, tf):
+    def lane_vcpus(self, tf):
+        dut = (self.args.ea_host_type if self.ea_uas else self.args.dut_type) or tf['dut_instance_type']
+        caller = self.args.caller_type or tf['caller_instance_type']
+        if dut in INSTANCE_VCPUS and caller in INSTANCE_VCPUS:
+            return INSTANCE_VCPUS[dut] + self.args.callers * INSTANCE_VCPUS[caller]
         # The baseline swaps the DUT for a larger ea-uas host (at most 32 vCPU more).
-        need = tf['lane_vcpus'] + (32 if self.ea_uas else 0)
+        return tf['lane_vcpus'] + (32 if self.ea_uas else 0)
+
+    def verify_lane_config(self, tf):
+        """The lane config must describe what EC2 has: the launch templates' default version boots the AMI the
+        config and the env-id pin, on the subnet the config names. A drifted lane.json is a usage error."""
+        pinned_ami = (self.args.pinned or {}).get('ami_id')
+        if pinned_ami and tf.get('ami_id') and tf['ami_id'] != pinned_ami:
+            raise Usage('lane config AMI %s differs from the env-id AMI %s' % (tf['ami_id'], pinned_ami))
+        for key in ('dut_launch_template', 'caller_launch_template'):
+            data = self.aws.template_data(tf[key])
+            image = data.get('ImageId')
+            if image and tf.get('ami_id') and image != tf['ami_id'] and not self.args.dut_type:
+                raise Usage('launch template %s boots %s, the lane config says %s: regenerate the lane config '
+                            '(scripts/bench/lane_config.py) or re-pin the environment' % (
+                                tf[key], image, tf['ami_id']))
+            subnet = ((data.get('NetworkInterfaces') or [{}])[0]).get('SubnetId')
+            if subnet and tf.get('subnet_id') and subnet != tf['subnet_id']:
+                raise Usage('launch template %s uses subnet %s, the lane config says %s' % (
+                    tf[key], subnet, tf['subnet_id']))
+
+    def preflight(self, tf):
+        need = self.lane_vcpus(tf)
         quota = self.aws.vcpu_quota()
         used = self.aws.running_standard_vcpus()
         self.log('quota: %d vCPU, in use %d, lane needs %d' % (quota, used, need))
@@ -261,6 +296,7 @@ class Lane:
 
     def launch(self, budget_hours):
         tf = self.tf_outputs()
+        self.verify_lane_config(tf)
         self.preflight(tf)
         self.wait_for_placement_group(tf)
         expires = utc(time.time() + (budget_hours + 1) * 3600)
@@ -1148,6 +1184,7 @@ def parse_args(argv):
         args.reserve_capacity = bool(profiles.PROFILES[args.profile].get('reserve_capacity'))
     args.env_tag = None    # the env-id the lane's reservations are tagged with (set once resolved)
     args.caller_media = None    # env.json caller_media (set once resolved)
+    args.pinned = None    # the env-id's env.json (set once resolved)
     args.cap_lower_bound = set()    # rows whose tester cap comes from a lower-bound baseline
     args.r0 = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.r0)}
     args.cap = {k: int(v) for k, v in (kv.split('=', 1) for kv in args.cap)}
@@ -1215,6 +1252,33 @@ def resolve_environment(args, aws):
     return env_id, pinned
 
 
+def lane_config_path(env_id):
+    return LANES / ('%s.json' % env_id)
+
+
+def resolve_lane_config(given, env_id, pinned):
+    """--lane-config, else infra/aws/bench/lanes/<env-id>.json, else None (`terraform output`, an operator's
+    checkout with the bench Terraform state). The pinned config must name this env-id and the sha256 of its
+    env.json: a config written for another environment, or before the environment was re-pinned, is refused."""
+    if given:
+        return given
+    if not env_id:
+        return None
+    path = lane_config_path(env_id)
+    if not path.is_file():
+        return None
+    config = json.loads(path.read_text())
+    env_json = BASELINES / env_id / 'env.json'
+    if config.get('env_id') != env_id:
+        raise Usage('%s names env-id %r, not %s' % (path, config.get('env_id'), env_id))
+    if env_json.is_file() and config.get('env_json_sha256') != sha256_file(env_json):
+        raise Usage('%s was written for another %s (env_json_sha256 differs): regenerate it with '
+                    'scripts/bench/lane_config.py write' % (path, env_json))
+    if pinned and pinned.get('ami_id') and config.get('ami_id') != pinned['ami_id']:
+        raise Usage('%s boots %s but the env-id pins %s' % (path, config.get('ami_id'), pinned['ami_id']))
+    return str(path)
+
+
 def resolve_az(wanted, pinned, leg):
     """The lane's AZ: --az, else env.json's pinned AZ, else an earlier leg's. A baseline and the runs gated on
     it share one AZ, and so do the legs of one run: a conflict is a usage error, never a fallback."""
@@ -1238,6 +1302,122 @@ def resolve_callers(wanted, pinned, leg, profile):
     if pinned and wanted and wanted != pinned and profile in PINNED_PROFILES:
         raise Usage('--callers %d, but the env-id pins %d callers' % (wanted, pinned))
     return wanted or leg or pinned or 2
+
+
+def dry_run_walk(ctx, args, aws, profile, rows_wanted, lock, log):
+    """--dry-run: every step a lane takes before its first launch, against the real AWS account, with nothing
+    created, reserved, launched or written: the pinned environment and its tester builds (fetched from S3 and
+    sha-checked), the lane config and its match with the launch templates, the AZ, callers and media layout,
+    the recorded rates the profile needs, the vCPU quota, the lane lock, orphaned reservations and the placement
+    group (read only), EC2 DryRun of every reservation and launch the lane would make, TLS material (openssl),
+    and the binaries. Every check is logged; exit 0 when all pass, else the first failure's exit code."""
+    checks = []
+
+    def check(name, fn):
+        try:
+            detail = fn()
+            checks.append((name, 'ok', detail))
+            log('dry-run check %s: ok %s' % (name, detail if detail is not None else ''))
+            return detail
+        except Usage as error:
+            checks.append((name, 'usage', str(error)))
+        except Exception as error:  # noqa: BLE001  -- a dry run reports every failing step, never aborts
+            checks.append((name, 'infra', ('%s: %s' % (type(error).__name__, error))[-500:]))
+        log('dry-run check %s: FAIL %s' % (name, checks[-1][2]))
+        return None
+
+    def dry(fn):
+        try:
+            fn()
+        except AwsError as error:
+            if 'DryRunOperation' in str(error):
+                return 'DryRunOperation (would succeed)'
+            raise
+        raise Infra('EC2 did not answer DryRunOperation')
+
+    env = check('environment', lambda: resolve_environment(args, aws))
+    if env:
+        env_id, pinned = env
+    else:    # still walk the rest for the pinned env-id
+        pin = BASELINES / 'ENVIRONMENT'
+        env_id, pinned = args.env_id or (pin.read_text().strip() if pin.is_file() else None), None
+        if env_id and (BASELINES / env_id / 'env.json').is_file():
+            pinned = json.loads((BASELINES / env_id / 'env.json').read_text())
+    args.env_tag, args.pinned = env_id, pinned
+    check('placement inputs', lambda: (
+        setattr(args, 'az', resolve_az(args.az, (pinned or {}).get('az'), None)),
+        setattr(args, 'callers', resolve_callers(args.callers, (pinned or {}).get('caller_count'), None,
+                                                 args.profile)),
+        setattr(args, 'caller_media', (pinned or {}).get('caller_media')),
+        {'az': args.az, 'callers': args.callers, 'caller_media': args.caller_media})[-1])
+    check('lane config', lambda: setattr(args, 'lane_config', resolve_lane_config(args.lane_config, env_id, pinned))
+          or args.lane_config or 'terraform output')
+    tf = check('lane config read', ctx.lane.tf_outputs)
+    if tf is not None:
+        check('lane config matches EC2', lambda: ctx.lane.verify_lane_config(tf) or 'templates boot %s' % tf.get('ami_id'))
+    rates, rates_path = load_rates(env_id) if env_id else (None, None)
+    if args.profile == 'release':
+        check('recorded rates', lambda: rates['rows'] and str(rates_path) if rates and rates.get('rows')
+              else (_ for _ in ()).throw(Usage('no recorded rates for %s (%s)' % (env_id, rates_path))))
+    elif not profile.get('ea_uas'):
+        check('tester caps', lambda: (rates or {}).get('tester_caps') or 'none recorded (searches run uncapped)')
+    if tf is not None:
+        check('vCPU quota', lambda: ctx.lane.preflight(tf) or '%d vCPU for the lane' % ctx.lane.lane_vcpus(tf))
+        check('placement group', lambda: (lambda g, az: [m for m in aws.placement_group_members(g) if m[1] != az]
+                                          and (_ for _ in ()).throw(Infra('placement group %s bound elsewhere' % g))
+                                          or '%s free for %s' % (g, az))(*ctx.lane.lane_placement(tf)))
+    check('lane lock', lambda: (lambda held: held and held.get('run_id') != args.run_id and not args.break_lock
+                                and (_ for _ in ()).throw(Infra('lane lock held by %s' % held))
+                                or 'free' if not held else 'held by this run')(aws.s3_get_json(lock)))
+    check('orphan reservations', lambda: [r['CapacityReservationId'] for r in aws.describe_capacity_reservations(
+        filters=(('tag:rvoip-bench', 'true'), ('tag:rvoip-env-id', env_id or 'unpinned'), ('state', 'active,pending')))]
+          or 'none')
+    if tf is not None:
+        group, az = ctx.lane.lane_placement(tf)
+        moved = {}
+        if args.az and args.az != tf.get('availability_zone'):
+            moved = check('template in %s' % args.az, lambda: {key: aws.template_in_az(tf[key], args.az)
+                                                                for key in ('dut_launch_template',
+                                                                            'caller_launch_template')}) or {}
+        dut_type = (args.ea_host_type if ctx.lane.ea_uas else args.dut_type) or tf['dut_instance_type']
+        caller_type = args.caller_type or tf['caller_instance_type']
+        if args.reserve_capacity:
+            group_arn = aws.placement_group_arn(group) if group else None
+            counts = {}
+            for itype, n in ((dut_type, 1), (caller_type, args.callers)):
+                counts[itype] = counts.get(itype, 0) + n
+            for itype, n in counts.items():
+                check('reserve %d x %s in %s' % (n, itype, az), lambda itype=itype, n=n: dry(
+                    lambda: aws.create_capacity_reservation(itype, az, n, utc(time.time() + 3600),
+                                                            {'rvoip-bench': 'true', 'rvoip-run-id': args.run_id},
+                                                            '%s-dry' % args.run_id[:56], group_arn, dry_run=True)))
+        tags = {'rvoip-bench': 'true', 'managed-by': 'github-actions', 'rvoip-run-id': args.run_id,
+                'rvoip-expires-at': utc(time.time() + 3600)}
+        for key, count, itype, role in (('dut_launch_template', 1, dut_type, 'dut'),
+                                        ('caller_launch_template', args.callers, caller_type, 'caller')):
+            check('launch %d x %s' % (count, itype), lambda key=key, count=count, itype=itype, role=role: dry(
+                lambda: aws.run_from_template(tf[key], count, dict(tags, Name='rvoip-bench-' + role, **{'rvoip-role': role}),
+                                              instance_type=itype, dry_run=True, **moved.get(key, {}))))
+    check('TLS material (openssl)', lambda: make_tls(Path(tempfile.mkdtemp(prefix='rvoip-bench-tls-')),
+                                                     ['10.0.0.1'], ['10.0.0.2']) or 'ok')
+    def binaries():
+        found = {}
+        for role, attr in (('rvoip-loadgen', 'caller_bin'),
+                           ('ea-uas' if ctx.lane.ea_uas else 'rvoip-bench-uas', 'ea_uas_bin' if ctx.lane.ea_uas else 'dut_bin')):
+            path = getattr(args, attr)
+            if not path or not Path(path).is_file():
+                raise Usage('no %s binary (%s)' % (role, path or 'not resolved: see the environment check'))
+            found[role] = '%s (%d bytes)' % (path, Path(path).stat().st_size)
+        return found
+
+    check('binaries', binaries)
+    failed = [c for c in checks if c[1] != 'ok']
+    log('dry-run: %d checks, %d failed%s' % (len(checks), len(failed),
+                                            (': ' + '; '.join('%s (%s)' % (c[0], c[2][:160]) for c in failed))
+                                            if failed else ''))
+    if not failed:
+        return EXIT_PASS
+    return EXIT_USAGE if failed[0][1] == 'usage' else EXIT_INFRA
 
 
 def outcome_code(status):
@@ -1287,9 +1467,7 @@ def run(argv=None):
     interrupted = False
     try:
         if args.dry_run:
-            log('dry run: quota', aws.vcpu_quota(), 'in use', aws.running_standard_vcpus(),
-                'outputs', ctx.lane.tf_outputs())
-            return EXIT_PASS
+            return dry_run_walk(ctx, args, aws, profile, rows_wanted, lock, log)
         if args.resume:
             ctx.restore()
             final = ctx.state.get('final')
@@ -1309,6 +1487,8 @@ def run(argv=None):
         args.callers = resolve_callers(args.callers, (pinned or {}).get('caller_count'),
                                        len((ctx.state.get('lane') or {}).get('callers') or []) or None, args.profile)
         args.env_tag = env_id
+        args.pinned = pinned
+        args.lane_config = resolve_lane_config(args.lane_config, env_id, pinned)
         # The callers' media executor is part of the testbed: the env-id's pinned layout, or rvoip's default.
         args.caller_media = (pinned or {}).get('caller_media')
         args.check_wall(LAUNCH_ALLOWANCE_SECONDS + TRIAL_ALLOWANCE_SECONDS)

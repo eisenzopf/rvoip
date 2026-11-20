@@ -57,7 +57,8 @@ class Aws:
         return self.call('ec2', 'describe-placement-groups', '--group-names', name)['PlacementGroups'][0]['GroupArn']
 
     # ---- On-Demand Capacity Reservations (targeted: only launches that name them use them)
-    def create_capacity_reservation(self, instance_type, az, count, end, tags, token, placement_group_arn=None):
+    def create_capacity_reservation(self, instance_type, az, count, end, tags, token, placement_group_arn=None,
+                                    dry_run=False):
         spec = [{'ResourceType': 'capacity-reservation', 'Tags': [{'Key': k, 'Value': v} for k, v in tags.items()]}]
         args = ['ec2', 'create-capacity-reservation', '--instance-type', instance_type,
                 '--instance-platform', 'Linux/UNIX', '--availability-zone', az, '--instance-count', str(count),
@@ -65,6 +66,8 @@ class Aws:
                 '--client-token', token, '--tag-specifications', json.dumps(spec)]
         if placement_group_arn:
             args += ['--placement-group-arn', placement_group_arn]
+        if dry_run:
+            args.append('--dry-run')    # EC2 answers DryRunOperation (an AwsError) when the call would succeed
         return self.call(*args, retries=2)['CapacityReservation']['CapacityReservationId']
 
     def describe_capacity_reservations(self, ids=(), filters=()):
@@ -119,7 +122,7 @@ class Aws:
         return {'network_interfaces': enis, 'placement': placement}
 
     def run_from_template(self, template, count, tags, ami=None, instance_type=None, user_data=None,
-                          network_interfaces=None, placement=None, capacity_reservation=None):
+                          network_interfaces=None, placement=None, capacity_reservation=None, dry_run=False):
         spec = [{'ResourceType': rt, 'Tags': [{'Key': k, 'Value': v} for k, v in tags.items()]}
                 for rt in ('instance', 'volume')]
         args = ['ec2', 'run-instances', '--launch-template', 'LaunchTemplateName=%s,Version=$Default' % template,
@@ -137,6 +140,8 @@ class Aws:
                      json.dumps({'CapacityReservationTarget': {'CapacityReservationId': capacity_reservation}})]
         if user_data:
             args += ['--user-data', base64.b64encode(user_data.encode()).decode()]
+        if dry_run:
+            args.append('--dry-run')    # EC2 answers DryRunOperation (an AwsError) when the call would succeed
         out = self.call(*args, retries=2)
         return [i['InstanceId'] for i in out['Instances']]
 
