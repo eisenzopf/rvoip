@@ -1732,6 +1732,25 @@ class CiLaneConfigTests(LaneCase):
         self.assertEqual(self.bed.cloud.keys(BUCKET), [], 'a dry run writes nothing to the bucket')
         self.assertIsNone(receipt)
 
+    def test_dry_run_reports_every_failing_step_and_keeps_the_env_id(self):
+        """The build-host walk: no aws CLI, so the tester fetch failed; the walk must still check the pinned
+        lane config and report the missing binaries instead of aborting."""
+        argv = [a for a in self.ci_argv('minor', 'ci-dry-fail', '--rows', 'R1', '--r0', 'R1=3000', '--dry-run')]
+        i = argv.index('--caller-bin')
+        del argv[i:i + 2]    # fetched from env.json's S3 copy, which this env.json does not name
+        self.bed.cloud.world = world_for(tester_capacity=TESTER)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.no_terraform:
+            code = run_lane.main(argv)
+        log = out.getvalue()
+        self.assertEqual(code, 2, log)
+        self.assertIn('dry-run check environment: FAIL', log)
+        self.assertIn('dry-run check lane config read: ok', log)
+        self.assertIn('dry-run check binaries: FAIL', log)
+        self.assertIn('no rvoip-loadgen binary', log)
+        self.assertNotIn('Traceback', log)
+        self.assertEqual(self.bed.cloud.launched, [])
+
     def test_dry_run_reports_what_a_release_lacks(self):
         code, receipt, log = self.ci_run('release', 'ci-dry-rel', '--dry-run', world=World())
         self.assertEqual(code, 2, log)

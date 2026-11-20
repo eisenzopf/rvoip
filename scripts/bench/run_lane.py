@@ -1321,8 +1321,8 @@ def dry_run_walk(ctx, args, aws, profile, rows_wanted, lock, log):
             return detail
         except Usage as error:
             checks.append((name, 'usage', str(error)))
-        except (Infra, AwsError, OSError, subprocess.CalledProcessError, KeyError, ValueError) as error:
-            checks.append((name, 'infra', str(error)[-500:]))
+        except Exception as error:  # noqa: BLE001  -- a dry run reports every failing step, never aborts
+            checks.append((name, 'infra', ('%s: %s' % (type(error).__name__, error))[-500:]))
         log('dry-run check %s: FAIL %s' % (name, checks[-1][2]))
         return None
 
@@ -1336,7 +1336,13 @@ def dry_run_walk(ctx, args, aws, profile, rows_wanted, lock, log):
         raise Infra('EC2 did not answer DryRunOperation')
 
     env = check('environment', lambda: resolve_environment(args, aws))
-    env_id, pinned = env if env else (args.env_id, None)
+    if env:
+        env_id, pinned = env
+    else:    # still walk the rest for the pinned env-id
+        pin = BASELINES / 'ENVIRONMENT'
+        env_id, pinned = args.env_id or (pin.read_text().strip() if pin.is_file() else None), None
+        if env_id and (BASELINES / env_id / 'env.json').is_file():
+            pinned = json.loads((BASELINES / env_id / 'env.json').read_text())
     args.env_tag, args.pinned = env_id, pinned
     check('placement inputs', lambda: (
         setattr(args, 'az', resolve_az(args.az, (pinned or {}).get('az'), None)),
@@ -1394,9 +1400,17 @@ def dry_run_walk(ctx, args, aws, profile, rows_wanted, lock, log):
                                               instance_type=itype, dry_run=True, **moved.get(key, {}))))
     check('TLS material (openssl)', lambda: make_tls(Path(tempfile.mkdtemp(prefix='rvoip-bench-tls-')),
                                                      ['10.0.0.1'], ['10.0.0.2']) or 'ok')
-    check('binaries', lambda: {role: '%s (%d bytes)' % (p, p.stat().st_size) for role, p in ctx.lane.binaries().items()
-                               if p.is_file() or (_ for _ in ()).throw(Usage('%s: no %s binary at %s' % (role, role, p)))}
-          if not (not ctx.lane.ea_uas and not args.dut_bin) else 'DUT not built (bench_gate --dry-run builds nothing)')
+    def binaries():
+        found = {}
+        for role, attr in (('rvoip-loadgen', 'caller_bin'),
+                           ('ea-uas' if ctx.lane.ea_uas else 'rvoip-bench-uas', 'ea_uas_bin' if ctx.lane.ea_uas else 'dut_bin')):
+            path = getattr(args, attr)
+            if not path or not Path(path).is_file():
+                raise Usage('no %s binary (%s)' % (role, path or 'not resolved: see the environment check'))
+            found[role] = '%s (%d bytes)' % (path, Path(path).stat().st_size)
+        return found
+
+    check('binaries', binaries)
     failed = [c for c in checks if c[1] != 'ok']
     log('dry-run: %d checks, %d failed%s' % (len(checks), len(failed),
                                             (': ' + '; '.join('%s (%s)' % (c[0], c[2][:160]) for c in failed))
