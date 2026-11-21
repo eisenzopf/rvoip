@@ -27,14 +27,4 @@ impl RTCIceCandidatePair {
     pub fn new(local: RTCIceCandidate, remote: RTCIceCandidate) -> Self {
         RTCIceCandidatePair { local, remote }
     }
-
-    /// The local candidate of the pair.
-    pub fn local(&self) -> &RTCIceCandidate {
-        &self.local
-    }
-
-    /// The remote candidate of the pair.
-    pub fn remote(&self) -> &RTCIceCandidate {
-        &self.remote
-    }
 }

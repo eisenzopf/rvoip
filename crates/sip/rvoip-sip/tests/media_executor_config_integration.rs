@@ -7,8 +7,7 @@
 //! PCMU both ways: both RTP transports must receive on their lane pollers,
 //! account RTP inline on the socket owner, and audio must flow in both
 //! directions, paced at 20 ms although both lanes run on v2's 2 ms lane tick
-//! with the lane timing wheel and the pass clock, and their pollers keep
-//! the lane table for per-call TX sources. SRTP calls, with RTCP
+//! with the lane timing wheel and the pass clock. SRTP calls, with RTCP
 //! multiplexed and with a separate RTCP port, run on the same executor: the
 //! receive loop owns the inbound SRTP context only when RTCP shares the RTP
 //! socket. A plain call binds `SipMediaStream`s: the inbound pump is fused
@@ -23,7 +22,6 @@ use rvoip_media_core::types::AudioFrame;
 use rvoip_rtp_core::executor::{
     inline_executor_counters, lane_wheel_counters, media_executor_config,
 };
-use rvoip_rtp_core::lane_table::callback_lane_counters;
 use rvoip_rtp_core::lane_tick::lane_tick_counters;
 use rvoip_sip::api::unified::Config;
 use rvoip_sip::{
@@ -175,7 +173,6 @@ async fn call_media_flows_both_ways_on_executor_v2() {
     let before = inline_executor_counters();
     let wheel_before = lane_wheel_counters();
     let tick_before = lane_tick_counters();
-    let table_before = callback_lane_counters();
     let (alice_sip, bob_sip) = (37_710, 37_711);
     let mut bob = StreamPeer::with_config(config("bob", bob_sip, (37_750, 37_769)))
         .await
@@ -255,51 +252,6 @@ async fn call_media_flows_both_ways_on_executor_v2() {
     assert!(
         wheel_after.pass_clock_cached_reads > wheel_before.pass_clock_cached_reads,
         "reads served from a pass reading: {wheel_before:?} -> {wheel_after:?}"
-    );
-    // The dedicated lanes' pollers keep a lane table (v2's callback send),
-    // ready for per-call TX sources; this call installs none.
-    let table_after = callback_lane_counters();
-    assert!(
-        table_after.table_lanes >= 1,
-        "lane pollers keep a lane table on dedicated lanes"
-    );
-    assert_eq!(
-        table_after.unsupported_lanes, table_before.unsupported_lanes,
-        "every lane could keep one"
-    );
-    // Each endpoint's receive loop moved into its lane's table once it
-    // owned its call state (v2's `callback_rx_kernel`) and, on Linux, read
-    // its socket on the lane epoll's reports (`lane_rx_readiness`). Table
-    // counters are published every 64 passes of a lane, and these lanes
-    // keep ticking while they host the call: wait for the batch.
-    let linux = cfg!(target_os = "linux");
-    let waited = std::time::Instant::now();
-    let rx_after = loop {
-        let now = callback_lane_counters();
-        let graduated = now.rx_installs >= table_before.rx_installs + 2;
-        let read = !linux || now.rx_readable_calls > table_before.rx_readable_calls;
-        if (graduated && read) || waited.elapsed() > Duration::from_secs(30) {
-            break now;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    };
-    assert!(
-        rx_after.rx_installs >= table_before.rx_installs + 2,
-        "both receive loops graduated into lane tables: {table_before:?} -> {rx_after:?}"
-    );
-    if linux {
-        assert!(
-            rx_after.rx_epoll_registered >= table_before.rx_epoll_registered + 2,
-            "both sockets registered with their lane epolls: {rx_after:?}"
-        );
-        assert!(
-            rx_after.rx_readable_calls > table_before.rx_readable_calls,
-            "the call's RTP was read on lane epoll reports: {rx_after:?}"
-        );
-    }
-    assert_eq!(
-        rx_after.rx_poisoned, table_before.rx_poisoned,
-        "no receive entry panicked"
     );
 
     // Each session's periodic RTCP task runs on its socket's lane poller,

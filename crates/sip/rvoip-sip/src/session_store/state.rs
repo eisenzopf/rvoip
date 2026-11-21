@@ -279,10 +279,6 @@ pub struct SessionStateCold {
     pub transfer_target_progress_seen: bool,
     pub transfer_target_last_progress: Option<(u16, String)>,
     pub pending_bye_reason: Option<(String, u16, Option<String>)>,
-    /// `CallEnded` reason for a teardown rvoip started on its own (for
-    /// example after a failed DTLS-SRTP handshake), whichever completion
-    /// path publishes the terminal event.
-    pub(crate) local_end_reason: Option<String>,
     pub pending_invite_options:
         Option<Arc<crate::api::send::outbound_call::OutboundCallOptionsSnapshot>>,
     /// Exact body placed on the initial INVITE wire, retained through
@@ -399,17 +395,6 @@ pub struct SessionState {
     pub local_media_direction: MediaDirection,
     /// Current remote offer direction from the peer's perspective.
     pub remote_media_direction: MediaDirection,
-    /// Offer this call's SDP as plain RTP (`RTP/AVP`) instead of the endpoint's
-    /// configured secure/WebRTC profile.
-    ///
-    /// Set per outbound call via
-    /// [`OutboundCallBuilder::with_plain_rtp`](crate::api::send::OutboundCallBuilder::with_plain_rtp).
-    /// It suppresses ICE, DTLS-SRTP and SDES attributes in the local offer and
-    /// relaxes the answer checks (RTCP mux, SRTP requirement) that belong to
-    /// the secure profile, so a WebRTC-configured endpoint can dial a plain RTP
-    /// peer — e.g. a SIP carrier trunk — on one leg while its other legs keep
-    /// the secure profile.
-    pub plain_rtp_offer: bool,
 
     // Related IDs
     pub dialog_id: Option<DialogId>,
@@ -1096,7 +1081,6 @@ impl SessionState {
             sdp_origin_version: 0,
             local_media_direction: MediaDirection::SendRecv,
             remote_media_direction: MediaDirection::SendRecv,
-            plain_rtp_offer: false,
             dialog_id: None,
             media_session_id: None,
             call_id: None,
@@ -1153,7 +1137,6 @@ impl SessionState {
                 transfer_target_progress_seen: false,
                 transfer_target_last_progress: None,
                 pending_bye_reason: None,
-                local_end_reason: None,
                 pending_invite_options: None,
                 initial_invite_offer_sdp: None,
                 initial_invite_trying_received: false,
@@ -1197,20 +1180,6 @@ impl SessionState {
                 history: None,
             }),
         }
-    }
-
-    /// The negotiated RTP payload type only when SDP negotiation supplied it
-    /// for the current negotiated config, without the static legacy fallback
-    /// of [`Self::negotiated_payload_type`].
-    pub(crate) fn committed_negotiated_payload_type(&self) -> Option<u8> {
-        self.negotiated_payload
-            .as_ref()
-            .filter(|identity| {
-                self.negotiated_config
-                    .as_ref()
-                    .is_some_and(|config| identity.matches(config))
-            })
-            .map(|identity| identity.payload_type)
     }
 
     /// Return the exact negotiated RTP payload type when SDP negotiation
@@ -1853,7 +1822,6 @@ mod tests {
             supported_100rel: true,
             extra_headers: vec![secret_header()],
             topology_hiding: true,
-            plain_rtp: false,
             registered_flow_routes: Vec::new(),
         }));
         session.pending_register_options = Some(Arc::new(

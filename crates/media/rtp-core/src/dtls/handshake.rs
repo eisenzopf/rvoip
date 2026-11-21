@@ -34,7 +34,7 @@
 //! these differences would need to be addressed for full compliance with the specification.
 
 use bytes::Bytes;
-use rand::RngExt;
+use rand::Rng;
 
 use super::message::extension::{Extension, SrtpProtectionProfile, UseSrtpExtension};
 use super::message::handshake::{
@@ -713,7 +713,7 @@ impl HandshakeState {
                             self.step = HandshakeStep::ReceivedClientHello;
 
                             // Generate a cookie (in a real implementation, this would be cryptographically secure)
-                            let mut rng = rand::rng();
+                            let mut rng = rand::thread_rng();
                             let mut cookie = vec![0u8; 16];
                             rng.fill(&mut cookie[..]);
 
@@ -745,7 +745,7 @@ impl HandshakeState {
                                      &client_hello.random[..8]);
 
                             // Generate a session ID
-                            let mut rng = rand::rng();
+                            let mut rng = rand::thread_rng();
                             let mut session_id = vec![0u8; 32];
                             rng.fill(&mut session_id[..]);
 
@@ -868,7 +868,7 @@ impl HandshakeState {
                         self.client_random = Some(client_hello.random);
 
                         // Generate a session ID
-                        let mut rng = rand::rng();
+                        let mut rng = rand::thread_rng();
                         let mut session_id = vec![0u8; 32];
                         rng.fill(&mut session_id[..]);
 

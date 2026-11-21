@@ -49,7 +49,7 @@
 //! connection for processing and transmission:
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //! use rtc::media_stream::MediaStreamTrackId;
 //!
 //! # fn send_media(track_id: MediaStreamTrackId, rtp_packet: rtp::Packet) {
@@ -67,7 +67,7 @@
 //! them based on type:
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //!
 //! # fn receive_messages(message: RTCMessage) {
 //! match message {
@@ -87,8 +87,6 @@
 //!             println!("Binary message");
 //!         }
 //!     }
-//!     // RTCMessage is #[non_exhaustive]: a wildcard arm is required.
-//!     _ => {}
 //! }
 //! # }
 //! ```
@@ -98,7 +96,7 @@
 //! ## Media Streaming
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //! use rtc::media_stream::MediaStreamTrackId;
 //!
 //! # fn stream_media(track_id: MediaStreamTrackId) {
@@ -128,7 +126,7 @@
 //! ## Quality Monitoring
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //!
 //! # fn monitor_quality(message: RTCMessage) {
 //! if let RTCMessage::RtcpPacket(track_id, packets) = message {
@@ -144,7 +142,7 @@
 //! ## Data Channel Communication
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //! use rtc::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
 //! use bytes::BytesMut;
 //!
@@ -170,7 +168,7 @@
 //! ## Filtering Messages by Type
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //!
 //! fn process_messages(messages: Vec<RTCMessage>) {
 //!     // Process only media messages
@@ -192,7 +190,7 @@
 //! ## Batching Messages
 //!
 //! ```no_run
-//! use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+//! use rtc::peer_connection::message::RTCMessage;
 //! use rtc::media_stream::MediaStreamTrackId;
 //!
 //! # fn batch_send(track_id: MediaStreamTrackId, packets: Vec<rtp::Packet>) {
@@ -214,7 +212,7 @@
 //! - **Batching**: Send multiple messages together to reduce overhead
 //! - **Prioritization**: Applications can prioritize data channel messages over media
 //!
-//! # Specification
+//! # Specifications
 //!
 //! - [RFC 3550] - RTP: Real-time Transport Protocol
 //! - [RFC 3551] - RTP Profile for Audio and Video
@@ -226,12 +224,11 @@
 //! [RFC 3551]: https://datatracker.ietf.org/doc/html/rfc3551
 //! [RFC 3711]: https://datatracker.ietf.org/doc/html/rfc3711
 //! [RFC 8831]: https://datatracker.ietf.org/doc/html/rfc8831
-//! [W3C WebRTC]: https://www.w3.org/TR/webrtc/
+//! [W3C WebRTC]: https://w3c.github.io/webrtc-pc/
 
 use crate::data_channel::RTCDataChannelId;
 use crate::data_channel::message::RTCDataChannelMessage;
 use crate::media_stream::track::MediaStreamTrackId;
-use std::time::Instant;
 
 pub(crate) mod internal;
 
@@ -260,7 +257,7 @@ pub(crate) mod internal;
 /// ## Sending RTP Media
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtc::peer_connection::message::RTCMessage;
 /// use rtc::media_stream::MediaStreamTrackId;
 ///
 /// # fn example(track_id: MediaStreamTrackId, rtp_packet: rtp::Packet) {
@@ -275,7 +272,7 @@ pub(crate) mod internal;
 /// ## Sending RTCP Feedback
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtc::peer_connection::message::RTCMessage;
 /// use rtc::media_stream::MediaStreamTrackId;
 ///
 /// # fn example(track_id: MediaStreamTrackId, rtcp_packets: Vec<Box<dyn rtcp::Packet>>) {
@@ -290,7 +287,7 @@ pub(crate) mod internal;
 /// ## Sending Data Channel Message
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtc::peer_connection::message::RTCMessage;
 /// use rtc::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
 /// use bytes::BytesMut;
 ///
@@ -315,7 +312,7 @@ pub(crate) mod internal;
 /// ## Processing Incoming Messages
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtc::peer_connection::message::RTCMessage;
 ///
 /// # fn handle_message(message: RTCMessage) {
 /// match message {
@@ -332,8 +329,6 @@ pub(crate) mod internal;
 ///         println!("Received data on channel {}", channel_id);
 ///         // Process application data
 ///     }
-///     // RTCMessage is #[non_exhaustive]: a wildcard arm is required.
-///     _ => {}
 /// }
 /// # }
 /// ```
@@ -341,7 +336,7 @@ pub(crate) mod internal;
 /// ## Filtering by Message Type
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtc::peer_connection::message::RTCMessage;
 ///
 /// fn is_media_message(message: &RTCMessage) -> bool {
 ///     matches!(message, RTCMessage::RtpPacket(_, _) | RTCMessage::RtcpPacket(_, _))
@@ -363,7 +358,7 @@ pub(crate) mod internal;
 /// ## Extracting Message Content
 ///
 /// ```no_run
-/// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+/// use rtc::peer_connection::message::RTCMessage;
 /// use rtc::media_stream::MediaStreamTrackId;
 ///
 /// # fn example(message: RTCMessage) {
@@ -386,8 +381,6 @@ pub(crate) mod internal;
 ///             println!("Binary: {} bytes", msg.data.len());
 ///         }
 ///     }
-///     // RTCMessage is #[non_exhaustive]: a wildcard arm is required.
-///     _ => {}
 /// }
 /// # }
 /// ```
@@ -404,7 +397,7 @@ pub(crate) mod internal;
 /// Network Layer
 /// ```
 ///
-/// # Specification
+/// # Specifications
 ///
 /// - [RFC 3550] - RTP: Real-time Transport Protocol
 /// - [RFC 3551] - RTP Profile for Audio and Video
@@ -416,7 +409,6 @@ pub(crate) mod internal;
 /// [RFC 3711]: https://datatracker.ietf.org/doc/html/rfc3711
 /// [RFC 8831]: https://datatracker.ietf.org/doc/html/rfc8831
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum RTCMessage {
     /// RTP packet for a specific media track.
     ///
@@ -436,10 +428,10 @@ pub enum RTCMessage {
     /// - **Receiving**: Decode RTP packets and render media
     /// - **Processing**: Analyze sequence numbers for packet loss detection
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```no_run
-    /// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+    /// use rtc::peer_connection::message::RTCMessage;
     /// use rtc::media_stream::MediaStreamTrackId;
     ///
     /// # fn example(track_id: MediaStreamTrackId, rtp_packet: rtp::Packet) {
@@ -478,10 +470,10 @@ pub enum RTCMessage {
     /// Multiple RTCP packets can be combined into a single compound RTCP message
     /// for efficiency.
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```no_run
-    /// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+    /// use rtc::peer_connection::message::RTCMessage;
     /// use rtc::media_stream::MediaStreamTrackId;
     ///
     /// # fn example(track_id: MediaStreamTrackId, rtcp_packets: Vec<Box<dyn rtcp::Packet>>) {
@@ -520,10 +512,10 @@ pub enum RTCMessage {
     /// - **Reliable & Ordered**: Messages arrive in order, guaranteed
     /// - **Unreliable & Unordered**: Like UDP, may arrive out of order or not at all
     ///
-    /// # Examples
+    /// # Example
     ///
     /// ```no_run
-    /// use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+    /// use rtc::peer_connection::message::RTCMessage;
     /// use rtc::data_channel::{RTCDataChannelId, RTCDataChannelMessage};
     /// use bytes::BytesMut;
     ///
@@ -544,19 +536,4 @@ pub enum RTCMessage {
     /// # }
     /// ```
     DataChannelMessage(RTCDataChannelId, RTCDataChannelMessage),
-}
-
-/// An [`RTCMessage`] together with the instant it belongs to.
-///
-/// This is the application-facing half of the sans-I/O clock contract: the core is *told* the
-/// time, it never asks. On the way in (`handle_write`) `now` is when the application is sending
-/// the message; on the way out (`poll_read`) it is when the packet was **observed at the
-/// socket**, which is what RTT and jitter estimation want — not when the application got round
-/// to draining it.
-pub struct TaggedRTCMessage {
-    /// The instant this message belongs to. See the type documentation for which instant that
-    /// is in each direction.
-    pub now: Instant,
-    /// The message itself.
-    pub message: RTCMessage,
 }

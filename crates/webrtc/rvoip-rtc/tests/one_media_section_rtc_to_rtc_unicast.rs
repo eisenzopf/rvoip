@@ -16,9 +16,9 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::RTCDtlsRole;
 use rtc::peer_connection::transport::RTCIceServer;
@@ -54,9 +54,8 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
     let answerer_local_addr = answerer_socket.local_addr()?;
     log::info!("Answerer bound to {}", answerer_local_addr);
 
-    let answerer_setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Server)
-        .build();
+    let mut answerer_setting_engine = SettingEngine::default();
+    answerer_setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
 
     let mut answerer_media_engine = MediaEngine::default();
 
@@ -84,7 +83,7 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
         .with_configuration(answerer_config)
         .with_setting_engine(answerer_setting_engine)
         .with_media_engine(answerer_media_engine)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created answerer peer connection");
 
     // Add local candidate for answerer
@@ -107,9 +106,8 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
     let offerer_local_addr = offerer_socket.local_addr()?;
     log::info!("Offerer bound to {}", offerer_local_addr);
 
-    let offerer_setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Server)
-        .build();
+    let mut offerer_setting_engine = SettingEngine::default();
+    offerer_setting_engine.set_answering_dtls_role(RTCDtlsRole::Server)?;
 
     let mut offerer_media_engine = MediaEngine::default();
     offerer_media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
@@ -125,7 +123,7 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
         .with_configuration(offerer_config)
         .with_setting_engine(offerer_setting_engine)
         .with_media_engine(offerer_media_engine)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created offerer peer connection");
 
     // Create 3 tracks for simulcast layers with RIDs
@@ -175,11 +173,11 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
     log::info!("Offerer created offer {}", offer);
 
     // Set local description on offerer
-    offerer_pc.set_local_description(Instant::now(), offer.clone())?;
+    offerer_pc.set_local_description(offer.clone())?;
     log::info!("Offerer set local description");
 
     // Set remote description on answerer
-    answerer_pc.set_remote_description(Instant::now(), offer.clone())?;
+    answerer_pc.set_remote_description(offer.clone())?;
     log::info!("Answerer set remote description");
 
     // Create answer from answerer
@@ -187,12 +185,12 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
     log::info!("Answerer created answer");
 
     // Set local description on answerer
-    answerer_pc.set_local_description(Instant::now(), answer.clone())?;
+    answerer_pc.set_local_description(answer.clone())?;
     log::info!("Answerer set local description");
 
     // Set remote description on offerer
     log::info!("Offerer set remote description {}", answer);
-    offerer_pc.set_remote_description(Instant::now(), answer)?;
+    offerer_pc.set_remote_description(answer)?;
 
     // Run event loops for both peers
     let offerer_socket = Arc::new(offerer_socket);
@@ -304,7 +302,7 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
         }
 
         // Poll read - receive RTP packets on answerer
-        while let Some(TaggedRTCMessage { message, .. }) = answerer_pc.poll_read() {
+        while let Some(message) = answerer_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     // Get the receiver for this track
@@ -342,7 +340,6 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
                     // RTCP packets are handled internally
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
-                _ => {}
             }
         }
 
@@ -360,22 +357,12 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
 
             packets_sent += 1;
 
-            // write_rtp requires the packet's PT to match a negotiated codec; derive it
-            // from the sender's parameters instead of hardcoding (single video codec).
-            let payload_type = rtp_sender
-                .get_parameters()
-                .rtp_parameters
-                .codecs
-                .first()
-                .map(|codec| codec.payload_type)
-                .unwrap_or(96);
-
             // Create RTP packet header
             let header = rtp::header::Header {
                 version: 2,
                 padding: false,
                 marker: false,
-                payload_type,
+                payload_type: 96,
                 sequence_number: packets_sent,
                 timestamp: (Instant::now().duration_since(start_time).as_millis() * 90) as u32,
                 ssrc,
@@ -402,7 +389,7 @@ async fn test_one_media_section_rtc_to_rtc_unicast() -> Result<()> {
                 ssrc,
                 packet.header.sequence_number
             );
-            if let Err(e) = rtp_sender.write_rtp(Instant::now(), packet) {
+            if let Err(e) = rtp_sender.write_rtp(packet) {
                 log::debug!("Failed to send RTP on {}: {}", ssrc, e);
             }
 

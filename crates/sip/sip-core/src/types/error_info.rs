@@ -60,7 +60,6 @@ use crate::parser::headers::error_info::{full_parse_error_info, parse_error_info
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::Param;
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -234,11 +233,7 @@ impl fmt::Display for ErrorInfo {
         write!(f, "<{}>", self.uri)?;
 
         // Parameters if any
-        // Parameter order carries no meaning; name order keeps the
-        // rendering deterministic.
-        let mut sorted: Vec<_> = self.parameters.iter().collect();
-        sorted.sort();
-        for (name, value) in sorted {
+        for (name, value) in &self.parameters {
             write!(f, ";{}={}", name, value)?;
         }
 
@@ -584,7 +579,7 @@ impl FromStr for ErrorInfoHeader {
         let trimmed_s = s.trim();
 
         // Try parsing as a full header first (with "Error-Info:" prefix)
-        let full_result = all_consuming(full_parse_error_info).parse(trimmed_s.as_bytes());
+        let full_result = all_consuming(full_parse_error_info)(trimmed_s.as_bytes());
         if let Ok((_, values)) = full_result {
             let mut header = ErrorInfoHeader::new();
             for value in values {
@@ -596,7 +591,7 @@ impl FromStr for ErrorInfoHeader {
         }
 
         // If that fails, try parsing just the value part
-        let result = all_consuming(parse_error_info).parse(trimmed_s.as_bytes());
+        let result = all_consuming(parse_error_info)(trimmed_s.as_bytes());
         match result {
             Ok((_, values)) => {
                 let mut header = ErrorInfoHeader::new();

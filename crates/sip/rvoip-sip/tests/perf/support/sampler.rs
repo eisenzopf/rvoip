@@ -290,7 +290,7 @@ impl ResourceSampler {
         // worker while retaining the existing async join handle.
         let task = tokio::task::spawn_blocking(move || {
             #[cfg(not(target_os = "linux"))]
-            let mut sys = System::new().expect("initialise sysinfo");
+            let mut sys = System::new();
             #[cfg(target_os = "linux")]
             let mut previous_cpu = None;
             #[cfg(target_os = "linux")]
@@ -313,8 +313,7 @@ impl ResourceSampler {
                 let sample = {
                     sys.refresh_processes_specifics(
                         ProcessesToUpdate::Some(&[pid]),
-                        true,
-                        ProcessRefreshKind::nothing().with_memory().with_cpu(),
+                        ProcessRefreshKind::new().with_memory().with_cpu(),
                     );
                     sys.process(pid).map(|proc_| ResourceSample {
                         t_secs: started.elapsed().as_secs_f64(),
