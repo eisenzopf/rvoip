@@ -1758,6 +1758,23 @@ version = "{version}"
                     (gate_dir / "bench-receipt.json").write_text(json.dumps({**bench, key: value}))
                     self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 1)
 
+    def test_soak_candidate_runs_two_hours_with_the_same_limit(self) -> None:
+        catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
+        gates_by_id = {gate["id"]: gate for gate in catalog["gates"]}
+        soak = gates_by_id["perf.soak-candidate"]
+        self.assertIn("RVOIP_PERF_SOAK_DURATION_SECS=7200", soak["command"])
+        self.assertIn("RVOIP_PERF_SOAK_DURATION_SECS=7200", soak["display_command"])
+        # The threshold and the window are unchanged: 15 MB/h over the
+        # harness's own last-20-minute active window (no override in argv).
+        self.assertIn("RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15", soak["command"])
+        self.assertFalse([arg for arg in soak["command"] if "GATE_WINDOW" in arg or "ACTIVE_TAIL" in arg])
+        # The measured two-hour gate takes 7,449 s; keep real headroom.
+        self.assertGreaterEqual(soak["timeout_minutes"] * 60, 7449 + 20 * 60)
+        self.assertGreaterEqual(soak["estimated_seconds"], 7200)
+        # The monolithic soak stays at one hour.
+        monolithic = " ".join(gates_by_id["perf.monolithic-soak"]["command"] or [])
+        self.assertNotIn("DURATION_SECS=7200", monolithic)
+
     def test_bench_gate_wrapper_resumes_one_lane_across_legs(self) -> None:
         bench = load_module("release_bench_gate", ROOT / "scripts/release/bench_gate.py")
         candidate = "c" * 40

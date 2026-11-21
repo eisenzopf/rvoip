@@ -293,8 +293,8 @@ library's host-CPU-derived endpoint default to change the experiment.
 The `remote-preflight` profile recreates that complete capacity shape, including
 all 18 concurrent instance creations, but its short probes never substitute for the
 real performance, interoperability, and soak commands in `remote-release`.
-The one-hour soak establishes a physical lower bound of one hour for a fresh
-qualification, plus short provisioning and evidence overhead. The shared build
+The two-hour split soak (`perf.soak-candidate`, 7,200 s from 0.5) establishes a
+physical lower bound of two hours for a fresh qualification, plus short provisioning and evidence overhead. The shared build
 stage is intentionally outside the measured workloads. Its finished bundle is
 reused across workflow reruns only when the exact candidate SHA, release
 environment, and selected performance gate set produce the same cache key. A

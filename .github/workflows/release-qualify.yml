@@ -625,7 +625,10 @@ jobs:
     if: needs.plan.outputs.aws_shard_count != '0'
     needs: [plan, preflight-aws]
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    # The prebuild (up to 90 min) plus the shard evidence deadline (170 min)
+    # plus teardown. The two-hour soak candidate's worker finishes about
+    # 178 min into a full run (a 49 min prebuild, then the 124 min soak).
+    timeout-minutes: 270
     permissions:
       contents: read
       id-token: write
