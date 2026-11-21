@@ -18,7 +18,7 @@
 use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::{Error, Result};
 use crate::types::{AudioFrame, DialogId, MediaDirection};
@@ -26,7 +26,6 @@ use rvoip_rtp_core::RtpSession;
 
 use super::{
     audio_generation::{AudioSource, AudioTransmitter, AudioTransmitterConfig},
-    types::SecureKeyingState,
     DialogTxGate, MediaSessionController,
 };
 
@@ -184,8 +183,7 @@ impl PreparedG711Sender {
 impl MediaSessionController {
     /// Resolve an encoded G.711 sender for `dialog_id` once (see
     /// [`PreparedG711Sender`]). `Ok(None)` where the PCM path would transform
-    /// the audio (comfort noise on, muted), while DTLS-SRTP keying is not
-    /// ready, where the negotiated codec is not
+    /// the audio (comfort noise on, muted), where the negotiated codec is not
     /// mono 8 kHz G.711 of `format` with `payload_type`, or when the session
     /// has no send handle; the caller then takes the PCM path.
     pub fn prepare_g711_sender(
@@ -246,11 +244,6 @@ impl MediaSessionController {
             return Ok(None);
         }
         if session.is_muted {
-            return Ok(None);
-        }
-        // While DTLS-SRTP keys are pending or have failed, the PCM path's
-        // keying gate drops or rejects the frame; the encoded path has none.
-        if session.secure_keying != SecureKeyingState::Ready {
             return Ok(None);
         }
         let sender = if session.transmission_enabled {
@@ -403,11 +396,11 @@ impl MediaSessionController {
 
     /// Send RTP packet for a dialog.
     ///
-    /// The default-payload path snapshots the session's lock-free
-    /// `RtpSendHandle` under a brief session lock, then sends through it.
-    /// Sends with an explicit payload type (every encoded audio frame) use
-    /// the handle the wrapper captured at creation and never take the
-    /// session mutex. Neither path holds a map shard across an await.
+    /// Snapshots the session's lock-free `RtpSendHandle` under a brief
+    /// lock, drops the session guard, then sends through the handle —
+    /// keeps the outer `Mutex<RtpSession>` available for other
+    /// per-dialog work (RTCP scheduler, set_remote_addr, etc.) during
+    /// the await on the mpsc enqueue.
     pub async fn send_rtp_packet(
         &self,
         dialog_id: &DialogId,
@@ -455,23 +448,16 @@ impl MediaSessionController {
         payload_type: Option<u8>,
         marker: bool,
     ) -> Result<()> {
+        let rtp_session = self
+            .get_rtp_session(dialog_id)
+            .await
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
         let payload_len = payload.len();
-        let (mut send_handle, rtp_session) = {
-            let wrapper = self
-                .rtp_sessions
-                .get(dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-            match (payload_type, wrapper.typed_send_handle.as_ref()) {
-                (Some(_), Some(handle)) => (Some(handle.clone()), None),
-                // The default payload type can change through the public RTP
-                // session API, so resolve it from the session itself rather
-                // than from the handle's construction-time snapshot.
-                _ => (None, Some(wrapper.session.clone())),
-            }
+        let send_handle = {
+            let session = rtp_session.lock().await;
+            session.send_handle()
         };
-        if let Some(rtp_session) = rtp_session.as_ref() {
-            send_handle = rtp_session.lock().await.send_handle();
-        }
 
         let payload_bytes = Bytes::from(payload);
         if let Some(handle) = send_handle {
@@ -487,9 +473,6 @@ impl MediaSessionController {
             // Fallback: session has no scheduler (shouldn't happen in
             // production; see RtpSession::new). Lock and call send_packet
             // through the legacy path.
-            let rtp_session = rtp_session
-                .as_ref()
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
             let session = rtp_session.lock().await;
             let result = if let Some(payload_type) = payload_type {
                 session
@@ -501,11 +484,9 @@ impl MediaSessionController {
             result.map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
         }
 
-        trace!(
+        info!(
             "📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)",
-            dialog_id,
-            timestamp,
-            payload_len
+            dialog_id, timestamp, payload_len
         );
         Ok(())
     }
@@ -1097,7 +1078,7 @@ impl MediaSessionController {
         // Check if transmission is enabled and if audio is muted.
         // DashMap shard guard is held only for the synchronous bool
         // reads + dropped via the `map` closure.
-        let (is_muted, is_enabled, keying) = self
+        let (is_muted, is_enabled) = self
             .rtp_sessions
             .get(dialog_id)
             .map(|r| {
@@ -1106,34 +1087,15 @@ impl MediaSessionController {
                     "✅ Found RTP session for dialog: {}, muted={}, enabled={}",
                     dialog_id, w.is_muted, w.transmission_enabled
                 );
-                (w.is_muted, w.transmission_enabled, w.secure_keying.clone())
+                (w.is_muted, w.transmission_enabled)
             })
             .unwrap_or_else(|| {
                 warn!(
                     "⚠️ No RTP session found for dialog: {} - using defaults",
                     dialog_id
                 );
-                (false, true, SecureKeyingState::Ready)
+                (false, true)
             });
-
-        match keying {
-            SecureKeyingState::Ready => {}
-            SecureKeyingState::Pending => {
-                // DTLS-SRTP keys are still being agreed. The transport would
-                // refuse the packet; a real-time frame is worthless by the
-                // time keys exist, so drop it and keep the caller running.
-                trace!(
-                    "Dropping outbound audio for dialog {} until its DTLS-SRTP keys are installed",
-                    dialog_id
-                );
-                return Ok(());
-            }
-            SecureKeyingState::Failed(reason) => {
-                return Err(Error::config(format!(
-                    "media keying failed for dialog {dialog_id}; no audio can be sent: {reason}"
-                )));
-            }
-        }
 
         if !is_enabled {
             // Transmission is disabled, don't send anything

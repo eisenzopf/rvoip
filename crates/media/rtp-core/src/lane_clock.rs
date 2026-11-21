@@ -236,9 +236,9 @@ pub(crate) const WHEEL_RESOLUTION: Duration = Duration::from_millis(1);
 
 /// End of a bucket list.
 const NIL: u32 = u32::MAX;
-/// [`WheelLinks::bucket`]: not in the wheel.
+/// `Entry::bucket`: not in the wheel.
 const UNFILED: u32 = u32::MAX;
-/// [`WheelLinks::bucket`]: waiting in the overflow heap.
+/// `Entry::bucket`: waiting in the overflow heap.
 const IN_OVERFLOW: u32 = u32::MAX - 1;
 
 /// Timing-wheel operations since the last read.
@@ -257,47 +257,7 @@ pub(crate) struct WheelOps {
     pub(crate) slot_scans: u64,
 }
 
-/// Where a filed entry sits in a [`Wheel`] ([`UNFILED`], [`IN_OVERFLOW`] or
-/// a bucket index) and its neighbours in that bucket's list. Kept by every
-/// slab a wheel serves (the lane clock's sleeps, the lane table's call
-/// entries).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct WheelLinks {
-    pub(crate) bucket: u32,
-    pub(crate) prev: u32,
-    pub(crate) next: u32,
-}
-
-impl WheelLinks {
-    pub(crate) const UNFILED: Self = Self {
-        bucket: UNFILED,
-        prev: NIL,
-        next: NIL,
-    };
-
-    /// Filed in a bucket or in the overflow heap.
-    #[inline]
-    pub(crate) fn is_filed(&self) -> bool {
-        self.bucket != UNFILED
-    }
-}
-
-/// One slot of a slab a [`Wheel`] is threaded through. The wheel
-/// reads the filed key, the slot's generation and liveness (to tell a stale
-/// overflow item) and owns the links. Implemented by the lane clock's
-/// entries and by the lane table's call entries (`crate::lane_table`), so
-/// both file, cancel and take deadlines by the same code.
-pub(crate) trait WheelEntry {
-    fn links(&self) -> &WheelLinks;
-    fn links_mut(&mut self) -> &mut WheelLinks;
-    /// The key the slot is filed under (`None`: not waiting).
-    fn filed_key(&self) -> Option<Instant>;
-    fn generation(&self) -> u32;
-    fn in_use(&self) -> bool;
-}
-
-/// A single-level timing wheel over a slab of [`WheelEntry`] slots (the
-/// clock's entries, or a lane table's call entries).
+/// A single-level timing wheel over the clock's entry slab.
 ///
 /// Invariants: every linked entry's tick is below `cursor + WHEEL_SPAN`;
 /// its bucket is that of `max(tick, cursor)` (deadlines filed at or after
@@ -306,7 +266,7 @@ pub(crate) trait WheelEntry {
 /// `floor` is at most every key in it (`None` iff the bucket is empty) and
 /// `floor_count` counts the keys equal to it, or is 0 when the floor is
 /// only a lower bound.
-pub(crate) struct Wheel {
+struct Wheel {
     origin: Instant,
     resolution_ns: u64,
     cursor: u64,
@@ -318,12 +278,12 @@ pub(crate) struct Wheel {
     overflow: BinaryHeap<Reverse<(Instant, u32, u32)>>,
     overflow_live: usize,
     /// Scratch for one `take_due` (kept to reuse its allocation).
-    pub(crate) due: Vec<(Instant, u32)>,
+    due: Vec<(Instant, u32)>,
     ops: WheelOps,
 }
 
 impl Wheel {
-    pub(crate) fn new(origin: Instant, resolution: Duration) -> Self {
+    fn new(origin: Instant, resolution: Duration) -> Self {
         Self {
             origin,
             resolution_ns: u64::try_from(resolution.as_nanos())
@@ -387,17 +347,17 @@ impl Wheel {
 
     /// Link `slot` (filed under `key`) at the head of its bucket and keep
     /// the bucket's floor.
-    fn link<E: WheelEntry>(&mut self, entries: &mut [E], slot: u32, key: Instant) {
+    fn link(&mut self, entries: &mut [Entry], slot: u32, key: Instant) {
         let bucket = self.bucket_of(self.tick_of(key));
         let head = self.heads[bucket];
         {
-            let links = entries[slot as usize].links_mut();
-            links.bucket = bucket as u32;
-            links.prev = NIL;
-            links.next = head;
+            let entry = &mut entries[slot as usize];
+            entry.bucket = bucket as u32;
+            entry.prev = NIL;
+            entry.next = head;
         }
         if head != NIL {
-            entries[head as usize].links_mut().prev = slot;
+            entries[head as usize].prev = slot;
         }
         self.heads[bucket] = slot;
         match self.floor[bucket] {
@@ -418,22 +378,24 @@ impl Wheel {
         self.len += 1;
     }
 
-    /// Unlink `slot` from its bucket (its links name it). The floor is left
-    /// to the caller.
-    fn unlink<E: WheelEntry>(&mut self, entries: &mut [E], slot: u32) -> usize {
+    /// Unlink `slot` from its bucket (`entry.bucket` names it). The floor
+    /// is left to the caller.
+    fn unlink(&mut self, entries: &mut [Entry], slot: u32) -> usize {
         let (bucket, prev, next) = {
-            let links = entries[slot as usize].links_mut();
-            let taken = (links.bucket as usize, links.prev, links.next);
-            *links = WheelLinks::UNFILED;
-            taken
+            let entry = &mut entries[slot as usize];
+            let links = (entry.bucket as usize, entry.prev, entry.next);
+            entry.bucket = UNFILED;
+            entry.prev = NIL;
+            entry.next = NIL;
+            links
         };
         if prev != NIL {
-            entries[prev as usize].links_mut().next = next;
+            entries[prev as usize].next = next;
         } else {
             self.heads[bucket] = next;
         }
         if next != NIL {
-            entries[next as usize].links_mut().prev = prev;
+            entries[next as usize].prev = prev;
         }
         self.len -= 1;
         bucket
@@ -441,17 +403,11 @@ impl Wheel {
 
     /// File `slot` under `key`: in its bucket, or in the overflow heap when
     /// beyond the span.
-    pub(crate) fn file<E: WheelEntry>(
-        &mut self,
-        entries: &mut [E],
-        slot: u32,
-        generation: u32,
-        key: Instant,
-    ) {
+    fn file(&mut self, entries: &mut [Entry], slot: u32, generation: u32, key: Instant) {
         if self.tick_of(key) >= self.cursor.saturating_add(WHEEL_SPAN) {
             self.overflow.push(Reverse((key, slot, generation)));
             self.overflow_live += 1;
-            entries[slot as usize].links_mut().bucket = IN_OVERFLOW;
+            entries[slot as usize].bucket = IN_OVERFLOW;
             self.ops.far_inserts += 1;
         } else {
             self.link(entries, slot, key);
@@ -461,16 +417,11 @@ impl Wheel {
 
     /// Remove `slot`'s filing (keyed `key`) wherever it is. O(1): an
     /// overflow item is left behind stale.
-    pub(crate) fn cancel<E: WheelEntry>(
-        &mut self,
-        entries: &mut [E],
-        slot: u32,
-        key: Option<Instant>,
-    ) {
-        match entries[slot as usize].links().bucket {
+    fn cancel(&mut self, entries: &mut [Entry], slot: u32, key: Option<Instant>) {
+        match entries[slot as usize].bucket {
             UNFILED => return,
             IN_OVERFLOW => {
-                entries[slot as usize].links_mut().bucket = UNFILED;
+                entries[slot as usize].bucket = UNFILED;
                 self.overflow_live -= 1;
             }
             _ => {
@@ -487,28 +438,28 @@ impl Wheel {
         self.ops.cancels += 1;
     }
 
-    fn overflow_item_is_current<E: WheelEntry>(
-        entries: &[E],
+    fn overflow_item_is_current(
+        entries: &[Entry],
         key: Instant,
         slot: u32,
         generation: u32,
     ) -> bool {
         entries.get(slot as usize).is_some_and(|entry| {
-            entry.in_use()
-                && entry.generation() == generation
-                && entry.filed_key() == Some(key)
-                && entry.links().bucket == IN_OVERFLOW
+            entry.in_use
+                && entry.generation == generation
+                && entry.deadline == Some(key)
+                && entry.bucket == IN_OVERFLOW
         })
     }
 
     /// Rescan `bucket` for its exact floor and how many keys sit on it.
-    fn refresh_floor<E: WheelEntry>(&mut self, entries: &[E], bucket: usize) {
+    fn refresh_floor(&mut self, entries: &[Entry], bucket: usize) {
         let mut floor: Option<Instant> = None;
         let mut count = 0;
         let mut slot = self.heads[bucket];
         while slot != NIL {
             let entry = &entries[slot as usize];
-            if let Some(key) = entry.filed_key() {
+            if let Some(key) = entry.deadline {
                 match floor {
                     Some(current) if current < key => {}
                     Some(current) if current == key => count += 1,
@@ -518,14 +469,14 @@ impl Wheel {
                     }
                 }
             }
-            slot = entry.links().next;
+            slot = entry.next;
         }
         self.floor[bucket] = floor;
         self.floor_count[bucket] = count;
     }
 
     /// The earliest filed key (stale overflow items are discarded).
-    pub(crate) fn next_deadline<E: WheelEntry>(&mut self, entries: &[E]) -> Option<Instant> {
+    fn next_deadline(&mut self, entries: &[Entry]) -> Option<Instant> {
         if self.len > 0 {
             if let Some(offset) = self.next_occupied(self.cursor, WHEEL_SPAN) {
                 let bucket = ((self.cursor + offset) & WHEEL_MASK) as usize;
@@ -546,7 +497,7 @@ impl Wheel {
 
     /// Unfile every entry whose key is at or before `now` and append
     /// `(key, slot)` for each to `self.due`, unsorted.
-    pub(crate) fn collect_due<E: WheelEntry>(&mut self, entries: &mut [E], now: Instant) {
+    fn collect_due(&mut self, entries: &mut [Entry], now: Instant) {
         let now_tick = self.tick_of(now);
         if now_tick > self.cursor {
             // Every bucket before the current tick is due whole: its keys
@@ -559,11 +510,13 @@ impl Wheel {
                 let mut slot = self.heads[bucket];
                 while slot != NIL {
                     let entry = &mut entries[slot as usize];
-                    let next = entry.links().next;
-                    if let Some(key) = entry.filed_key() {
+                    let next = entry.next;
+                    if let Some(key) = entry.deadline {
                         self.due.push((key, slot));
                     }
-                    *entry.links_mut() = WheelLinks::UNFILED;
+                    entry.bucket = UNFILED;
+                    entry.prev = NIL;
+                    entry.next = NIL;
                     self.len -= 1;
                     slot = next;
                 }
@@ -594,8 +547,8 @@ impl Wheel {
             self.ops.slot_scans += 1;
             let mut slot = self.heads[bucket];
             while slot != NIL {
-                let next = entries[slot as usize].links().next;
-                if let Some(key) = entries[slot as usize].filed_key().filter(|key| *key <= now) {
+                let next = entries[slot as usize].next;
+                if let Some(key) = entries[slot as usize].deadline.filter(|key| *key <= now) {
                     self.unlink(entries, slot);
                     self.due.push((key, slot));
                 }
@@ -610,9 +563,11 @@ impl Wheel {
     }
 
     /// Empty the wheel (the poller ended).
-    pub(crate) fn clear<E: WheelEntry>(&mut self, entries: &mut [E]) {
+    fn clear(&mut self, entries: &mut [Entry]) {
         for entry in entries.iter_mut() {
-            *entry.links_mut() = WheelLinks::UNFILED;
+            entry.bucket = UNFILED;
+            entry.prev = NIL;
+            entry.next = NIL;
         }
         for bucket in 0..WHEEL_SLOTS {
             self.clear_bucket(bucket);
@@ -624,30 +579,17 @@ impl Wheel {
 
     /// Rebuild the overflow heap once stale items dominate (a far deadline
     /// that keeps moving cannot grow it without bound).
-    pub(crate) fn compact_if_needed<E: WheelEntry>(&mut self, entries: &[E]) {
+    fn compact_if_needed(&mut self, entries: &[Entry]) {
         if self.overflow.len() <= 64 + 4 * self.overflow_live {
             return;
         }
         let mut overflow = BinaryHeap::with_capacity(self.overflow_live);
         for (slot, entry) in entries.iter().enumerate() {
-            if let (true, IN_OVERFLOW, Some(key)) =
-                (entry.in_use(), entry.links().bucket, entry.filed_key())
-            {
-                overflow.push(Reverse((key, slot as u32, entry.generation())));
+            if let (true, IN_OVERFLOW, Some(key)) = (entry.in_use, entry.bucket, entry.deadline) {
+                overflow.push(Reverse((key, slot as u32, entry.generation)));
             }
         }
         self.overflow = overflow;
-    }
-
-    /// Wheel operations since the last call.
-    pub(crate) fn take_ops(&mut self) -> WheelOps {
-        std::mem::take(&mut self.ops)
-    }
-
-    /// Test view: (entries linked in buckets, overflow heap items).
-    #[cfg(test)]
-    pub(crate) fn lengths(&self) -> (usize, usize) {
-        (self.len, self.overflow.len())
     }
 }
 
@@ -664,39 +606,15 @@ struct Entry {
     exact: Option<Instant>,
     waker: Option<Waker>,
     in_use: bool,
-    /// Timing wheel: the bucket holding the entry and its neighbours there.
-    links: WheelLinks,
+    /// Timing wheel: the bucket holding the entry ([`UNFILED`], [`IN_OVERFLOW`]
+    /// or a bucket index) and its neighbours in that bucket's list.
+    bucket: u32,
+    prev: u32,
+    next: u32,
     /// Hot call state: cache lines to prefetch when the entry falls due (the
     /// sleep's own place in its future, and one address its owner chose; 0:
     /// none).
     hints: [usize; 2],
-}
-
-impl WheelEntry for Entry {
-    #[inline]
-    fn links(&self) -> &WheelLinks {
-        &self.links
-    }
-
-    #[inline]
-    fn links_mut(&mut self) -> &mut WheelLinks {
-        &mut self.links
-    }
-
-    #[inline]
-    fn filed_key(&self) -> Option<Instant> {
-        self.deadline
-    }
-
-    #[inline]
-    fn generation(&self) -> u32 {
-        self.generation
-    }
-
-    #[inline]
-    fn in_use(&self) -> bool {
-        self.in_use
-    }
 }
 
 #[derive(Default)]
@@ -862,7 +780,9 @@ impl LaneClock {
             exact: None,
             waker: None,
             in_use: true,
-            links: WheelLinks::UNFILED,
+            bucket: UNFILED,
+            prev: NIL,
+            next: NIL,
             hints: [0; 2],
         });
         (slot, 0)

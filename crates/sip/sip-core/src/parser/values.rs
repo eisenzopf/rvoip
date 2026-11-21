@@ -1,9 +1,9 @@
-use nom::Parser;
 use nom::{
     character::complete::digit1,
     combinator::{map_res, recognize},
     error::ErrorKind,
     multi::many0,
+    sequence::tuple,
     IResult,
 };
 use ordered_float::NotNan;
@@ -27,14 +27,13 @@ pub fn delta_seconds(input: &[u8]) -> ParseResult<'_, u32> {
 
     map_res(digit1, |s: &[u8]| {
         str::from_utf8(s)
-            .map_err(|_| nom::Err::<_>::Failure(nom::error::Error::new(s, ErrorKind::Char)))
+            .map_err(|_| nom::Err::Failure(nom::error::Error::new(s, ErrorKind::Char)))
             .and_then(|s_str| {
                 s_str
                     .parse::<u32>()
                     .map_err(|_| nom::Err::Failure(nom::error::Error::new(s, ErrorKind::Digit)))
             })
-    })
-    .parse(input)
+    })(input)
 }
 
 // qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
@@ -168,17 +167,16 @@ fn one_qvalue(input: &[u8]) -> ParseResult<'_, NotNan<f32>> {
 // Uses text_utf8_char from the utf8 module.
 pub fn text_utf8_trim(input: &[u8]) -> ParseResult<'_, &[u8]> {
     // We need to recognize the complete expression to capture the entire match
-    recognize((
+    recognize(tuple((
         // First part: 1*TEXT-UTF8char - at least one UTF-8 character
         text_utf8_char,
         // Second part: *(*LWS TEXT-UTF8char) - optional additional characters with optional whitespace
-        many0((
+        many0(tuple((
             // Use proper lws from whitespace.rs for line folding
             many0(lws),     // Optional whitespace with correct line folding handling
             text_utf8_char, // Followed by a TEXT-UTF8char
-        )),
-    ))
-    .parse(input)
+        ))),
+    )))(input)
 }
 
 // ttl = 1*3DIGIT ; 0-255
@@ -203,11 +201,11 @@ pub fn ttl_value(input: &[u8]) -> ParseResult<'_, u8> {
     map_res(
         map_res(digit1, |s: &[u8]|
             // Convert bytes to str, then parse u8
-            str::from_utf8(s).map_err(|_| nom::Err::<_>::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
+            str::from_utf8(s).map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
                 // Use ErrorKind::Digit for parse errors
                 .and_then(|s_str| s_str.parse::<u8>().map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))))),
         Ok::<u8, nom::Err<nom::error::Error<&[u8]>>>, // Ensure Ok type matches expected Result
-    ).parse(input)
+    )(input)
 }
 
 #[cfg(test)]

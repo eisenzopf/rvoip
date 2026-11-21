@@ -1,8 +1,8 @@
-use nom::Parser;
 use nom::{
     bytes::complete::{tag, take_while_m_n},
     combinator::recognize,
     error::ErrorKind,
+    sequence::tuple,
 };
 use std::net::{IpAddr, Ipv4Addr};
 use std::str;
@@ -45,16 +45,15 @@ fn parse_decimal_octet(input: &[u8]) -> Result<u8, nom::Err<nom::error::Error<&[
 // Parse as decimal integer regardless of leading zeros
 pub fn ipv4_address(input: &[u8]) -> ParseResult<'_, Host> {
     // First try to match the pattern exactly with our constraints
-    let (remaining, ip_bytes) = recognize((
+    let (remaining, ip_bytes) = recognize(tuple((
         take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
-        tag(&b"."[..]),
+        tag(b"."),
         take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
-        tag(&b"."[..]),
+        tag(b"."),
         take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
-        tag(&b"."[..]),
+        tag(b"."),
         take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
-    ))
-    .parse(input)?;
+    )))(input)?;
 
     // Check if there's another dot immediately after, which would make this an IPv4 with too many octets
     if !remaining.is_empty() && remaining[0] == b'.' {

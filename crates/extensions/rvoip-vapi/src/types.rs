@@ -226,48 +226,6 @@ pub enum VapiPeerFailurePolicy {
     LeaveCallerConnected,
 }
 
-/// How the adapter moves audio between the Vapi socket and rvoip media.
-///
-/// [`Self::Paced`] is the default and is unchanged: the adapter reframes Vapi
-/// audio into 20 ms frames, releases it on a real-time clock through a bounded
-/// drop-oldest jitter buffer, and flushes queued audio on caller barge-in. It
-/// suits paced RTP legs (SIP, WebRTC).
-///
-/// [`Self::Ordered`] is for application-protocol gateways that frame replies
-/// themselves and need every byte in wire order (Webex BYOVA, for example):
-///
-/// - each Vapi binary message is forwarded unchanged and immediately, with no
-///   20 ms clock, no reframing and no drop-oldest queue; a consumer that does
-///   not keep up applies backpressure up to
-///   [`VapiConfig::ordered_inbound_buffer_bytes`] and fails the call after
-///   [`VapiConfig::ordered_media_stall_timeout`], never discarding audio;
-/// - the media stream asks bridges for lossless delivery
-///   (`MediaStream::lossless_delivery_stall_timeout`), so the core media graph
-///   applies backpressure instead of dropping;
-/// - every Vapi event is also published on an exclusive ordered channel
-///   ([`crate::VapiAdapter::take_ordered_events`]) stamped with the number of
-///   audio bytes forwarded before it, so a consumer can place the event
-///   exactly in the audio stream;
-/// - caller barge-in does not flush queued audio: the consumer fences stale
-///   audio by position instead, which keeps positions exact;
-/// - caller audio toward Vapi is written as it arrives, unpaced, and a stalled
-///   Vapi socket fails the call rather than dropping caller speech.
-///
-/// Positions count bytes in the call's [`VapiAudioFormat`]. They line up with
-/// what a consumer receives only when the bridge does not transcode, so pair
-/// ordered mode with a consumer that uses the same codec (PCMU/8 kHz for
-/// Webex).
-///
-/// [`VapiConfig::ordered_inbound_buffer_bytes`]: crate::VapiConfig::ordered_inbound_buffer_bytes
-/// [`VapiConfig::ordered_media_stall_timeout`]: crate::VapiConfig::ordered_media_stall_timeout
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum VapiMediaDelivery {
-    #[default]
-    Paced,
-    Ordered,
-}
-
 /// Per-call options carried opaquely through `OriginateRequest`.
 #[derive(Clone)]
 pub struct VapiCallOptions {
@@ -277,8 +235,6 @@ pub struct VapiCallOptions {
     pub name: Option<String>,
     pub metadata: Option<Value>,
     pub peer_failure_policy: VapiPeerFailurePolicy,
-    /// Paced RTP-style delivery (the default) or ordered, unpaced delivery.
-    pub media_delivery: VapiMediaDelivery,
 }
 
 impl VapiCallOptions {
@@ -290,15 +246,7 @@ impl VapiCallOptions {
             name: None,
             metadata: None,
             peer_failure_policy: VapiPeerFailurePolicy::default(),
-            media_delivery: VapiMediaDelivery::default(),
         }
-    }
-
-    /// Select [`VapiMediaDelivery::Ordered`] for an application-protocol
-    /// gateway. The default stays [`VapiMediaDelivery::Paced`].
-    pub fn with_media_delivery(mut self, media_delivery: VapiMediaDelivery) -> Self {
-        self.media_delivery = media_delivery;
-        self
     }
 
     /// Supply a credential for this call only; never changes the shared adapter.
@@ -379,7 +327,6 @@ impl fmt::Debug for VapiCallOptions {
             .field("name_present", &self.name.is_some())
             .field("metadata_present", &self.metadata.is_some())
             .field("peer_failure_policy", &self.peer_failure_policy)
-            .field("media_delivery", &self.media_delivery)
             .finish()
     }
 }

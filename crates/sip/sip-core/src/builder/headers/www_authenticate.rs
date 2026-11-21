@@ -525,7 +525,6 @@ where
         let params = vec![AuthParam {
             name: "realm".to_string(),
             value: realm.to_string(),
-            quoted: true,
         }];
 
         // Create the WWW-Authenticate header with a Basic challenge

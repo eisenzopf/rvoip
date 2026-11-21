@@ -12,7 +12,7 @@ use crate::adapters::srtp_negotiator::{
 };
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
-use crate::api::unified::{DtlsActpassAnswerRole, DtlsSetupRole, MediaMode, SdesBase64Mode};
+use crate::api::unified::{DtlsSetupRole, MediaMode, SdesBase64Mode};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_lifecycle::{
@@ -26,7 +26,7 @@ use dashmap::DashMap;
 use rvoip_media_core::types::AudioFrame;
 use rvoip_media_core::{
     relay::controller::{
-        AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaConfig, MediaSessionController,
+        AudioSource, BridgeError, BridgeHandle, MediaConfig, MediaSessionController,
         MediaSessionInfo,
     },
     DialogId,
@@ -340,27 +340,6 @@ fn fingerprint_hex(fingerprint: &[u8; 32]) -> String {
         .collect::<Vec<_>>()
         .join(":")
 }
-
-/// Bounded class of a failed RTP-component handshake from media-core's
-/// error. Only the class leaves this crate; the text never does.
-#[cfg(feature = "dtls-srtp")]
-fn classify_dtls_handshake_error(
-    error: &rvoip_media_core::Error,
-) -> crate::api::events::MediaSecurityFailure {
-    use crate::api::events::MediaSecurityFailure;
-    let text = error.to_string();
-    if text.contains("handshake timed out") {
-        MediaSecurityFailure::HandshakeTimeout
-    } else if text.contains("fingerprint does not match") {
-        MediaSecurityFailure::FingerprintMismatch
-    } else {
-        MediaSecurityFailure::HandshakeError
-    }
-}
-
-/// Coordinator callback for a failed RTP-component DTLS handshake.
-pub(crate) type MediaSecurityFailureHandler =
-    Arc<dyn Fn(SessionRegistryHandle, crate::api::events::MediaSecurityFailure) + Send + Sync>;
 
 #[cfg(feature = "dtls-srtp")]
 fn setup_role_to_dtls_role(role: SetupRole) -> Result<rvoip_media_core::DtlsRole> {
@@ -796,36 +775,6 @@ fn audio_rtpmap(
         })
 }
 
-/// The RFC 4733 telephone-event format an offer/answer agreed: the first
-/// `telephone-event` format of the answer's audio stream that the offer also
-/// lists, with the answer's payload type and clock rate.
-fn negotiated_telephone_event(
-    answer: &SdpSession,
-    offer: &SdpSession,
-) -> Option<rvoip_media_core::relay::controller::TelephoneEventFormat> {
-    fn audio(sdp: &SdpSession) -> Option<&rvoip_sip_core::MediaDescription> {
-        sdp.media_descriptions
-            .iter()
-            .find(|media| media.media.eq_ignore_ascii_case("audio"))
-    }
-    let offered = audio(offer)?;
-    audio(answer)?
-        .formats
-        .iter()
-        .filter(|format| offered.formats.contains(format))
-        .filter_map(|format| format.parse::<u8>().ok())
-        .find_map(|payload_type| {
-            let mapping = audio_rtpmap(answer, payload_type)?;
-            mapping
-                .encoding_name
-                .eq_ignore_ascii_case("telephone-event")
-                .then_some(rvoip_media_core::relay::controller::TelephoneEventFormat {
-                    payload_type,
-                    clock_rate: mapping.clock_rate,
-                })
-        })
-}
-
 fn negotiated_audio_shape_from_sdp(
     session: &SdpSession,
     payload_type: u8,
@@ -916,21 +865,10 @@ fn negotiated_audio_shape_from_sdp(
     Ok((canonical.to_string(), clock_rate, channels))
 }
 
-/// Validate a UAC's SDP answer against its offer and pick the primary audio
-/// format.
-///
-/// RFC 3264 §6.1 lets an answer carry only formats from the offer, and an
-/// unoffered format fails the answer. The one exception is
-/// `allow_unoffered_telephone_event`, set only for a call that opted into a
-/// plain-RTP offer (`OutboundCallBuilder::with_plain_rtp`): carrier trunks
-/// often answer RFC 4733 telephone-event under a payload type the offer did
-/// not list, and that format alone is then ignored. It is never used to send
-/// DTMF, and any other unoffered format still fails the answer.
 fn validate_uac_audio_answer(
     offer: &SdpSession,
     answer: &SdpSession,
     g729_annex_b: bool,
-    allow_unoffered_telephone_event: bool,
 ) -> Result<(u8, String, u32, u8)> {
     let offered_audio = offer
         .media_descriptions
@@ -945,28 +883,16 @@ fn validate_uac_audio_answer(
 
     let mut primary_payloads = Vec::new();
     for format in &answered_audio.formats {
-        let payload_type = format
-            .parse::<u8>()
-            .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-payload"))?;
         if !offered_audio
             .formats
             .iter()
             .any(|offered| offered == format)
         {
-            let telephone_event = audio_rtpmap(answer, payload_type).is_some_and(|mapping| {
-                mapping
-                    .encoding_name
-                    .eq_ignore_ascii_case("telephone-event")
-            });
-            if allow_unoffered_telephone_event && telephone_event {
-                tracing::debug!(
-                    payload_type,
-                    "ignoring an unoffered telephone-event format on a plain-RTP answer"
-                );
-                continue;
-            }
             return Err(bounded_sdp_failure("remote-answer", "unoffered-payload"));
         }
+        let payload_type = format
+            .parse::<u8>()
+            .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-payload"))?;
         if !sdp_payload_codec_available(answer, payload_type) {
             return Err(bounded_sdp_failure("remote-answer", "unsupported-payload"));
         }
@@ -1015,16 +941,6 @@ fn exact_initial_uac_offer(session: &SessionState) -> Option<&str> {
         .or(session.local_sdp.as_deref())
 }
 
-/// The SDP `<addrtype>` of a unicast address: `IP4` or `IP6` (RFC 8866
-/// §5.2 `o=` and §5.7 `c=`; RFC 4566 §5.2/§5.7). The address itself is
-/// written in its bare textual form — an `IP6-address` is never bracketed.
-pub(crate) fn sdp_addrtype(address: IpAddr) -> &'static str {
-    match address {
-        IpAddr::V4(_) => "IP4",
-        IpAddr::V6(_) => "IP6",
-    }
-}
-
 /// Build the SDP answer that declines an offered audio m-line per
 /// RFC 3264 §6 / RFC 4568 §7.3. Port=0 signals refusal; the proto is
 /// echoed from the offer so the peer can distinguish a policy
@@ -1034,22 +950,13 @@ pub(crate) fn sdp_addrtype(address: IpAddr) -> &'static str {
 pub(crate) fn build_port_zero_rejection_sdp(
     origin_session_id: &str,
     origin_version: u64,
-    local_ip: IpAddr,
+    local_ip: &str,
     offered_transport: &str,
 ) -> Result<String> {
     let version_str = origin_version.to_string();
-    let addrtype = sdp_addrtype(local_ip);
-    let local_ip = local_ip.to_string();
     let session = SdpBuilder::new("Session")
-        .origin(
-            "-",
-            origin_session_id,
-            &version_str,
-            "IN",
-            addrtype,
-            &local_ip,
-        )
-        .connection("IN", addrtype, &local_ip)
+        .origin("-", origin_session_id, &version_str, "IN", "IP4", local_ip)
+        .connection("IN", "IP4", local_ip)
         .time("0", "0")
         .media_audio(0, offered_transport)
         .formats(&["0"])
@@ -1165,9 +1072,6 @@ struct StagedMediaNegotiation {
     /// The peer's RTCP address from its `a=rtcp:` line (RFC 3605), used by
     /// a separate RTCP socket when mux was not negotiated.
     remote_rtcp_addr: Option<SocketAddr>,
-    /// RFC 4733 telephone-event format both sides kept, if any; a
-    /// transcoding bridge relays DTMF to this leg only when it is set.
-    telephone_event: Option<rvoip_media_core::relay::controller::TelephoneEventFormat>,
     #[cfg(feature = "dtls-srtp")]
     dtls: Option<StagedDtlsHandshake>,
 }
@@ -1664,23 +1568,11 @@ pub struct MediaAdapter {
     /// Role advertised in outgoing DTLS-SRTP offers.
     dtls_setup_role: DtlsSetupRole,
 
-    /// Role answered to an incoming DTLS-SRTP `actpass` offer.
-    #[cfg_attr(not(feature = "dtls-srtp"), allow(dead_code))]
-    dtls_actpass_answer_role: DtlsActpassAnswerRole,
-
     /// Per-negotiation certificate identity retained until the exact SIP
     /// answer/ACK commit boundary starts the handshake.
     #[cfg(feature = "dtls-srtp")]
     pending_dtls_identities:
         Arc<DashMap<MediaNegotiationKey, rvoip_rtp_core::dtls_srtp::DtlsIdentity>>,
-
-    /// Coordinator callback for a failed RTP-component DTLS handshake.
-    media_security_failure_handler: Arc<std::sync::OnceLock<MediaSecurityFailureHandler>>,
-
-    /// Test hook: present an unadvertised certificate on the RTP
-    /// component's DTLS handshake.
-    #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
-    dtls_wrong_rtp_certificate_for_testing: bool,
 
     /// SDP results that passed validation but have not crossed their exact
     /// SIP offer/answer commit boundary.
@@ -1846,12 +1738,8 @@ impl MediaAdapter {
             negotiated_srtp: Arc::new(DashMap::new()),
             offer_dtls_srtp: false,
             dtls_setup_role: DtlsSetupRole::Actpass,
-            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: Arc::new(DashMap::new()),
-            media_security_failure_handler: Arc::new(std::sync::OnceLock::new()),
-            #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
-            dtls_wrong_rtp_certificate_for_testing: false,
             staged_media_negotiations: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
@@ -2300,14 +2188,15 @@ impl MediaAdapter {
         rtcp_mux: bool,
         peer_requested_rtcp_xr: bool,
         remote_rtcp_addr: Option<SocketAddr>,
-        telephone_event: Option<rvoip_media_core::relay::controller::TelephoneEventFormat>,
     ) -> Result<()> {
         let mut config = self
             .controller
-            .get_session_config(dialog_id)
+            .get_session_info(dialog_id)
+            .await
             .ok_or_else(|| {
                 SessionError::MediaError(format!("No media session for dialog {}", dialog_id))
-            })?;
+            })?
+            .config;
         config.remote_addr = Some(negotiated.remote_addr);
         config = config
             .with_negotiated_audio_codec(
@@ -2317,7 +2206,6 @@ impl MediaAdapter {
                 negotiated.channels,
             )
             .with_negotiated_fmtp(negotiated.negotiated_fmtp.as_deref())
-            .with_telephone_event(telephone_event)
             // Sender policy rather than a negotiated value, but it belongs on
             // the same commit as the codec identity: this is the moment the
             // session learns it is AMR, and media-core reads both out of the
@@ -2552,11 +2440,6 @@ impl MediaAdapter {
         self.dtls_setup_role = setup_role;
     }
 
-    /// Select the role answered to an incoming DTLS-SRTP `actpass` offer.
-    pub fn set_dtls_actpass_answer_role(&mut self, role: DtlsActpassAnswerRole) {
-        self.dtls_actpass_answer_role = role;
-    }
-
     #[cfg(feature = "dtls-srtp")]
     fn dtls_offer_identity(
         &self,
@@ -2565,26 +2448,12 @@ impl MediaAdapter {
         if !self.offer_dtls_srtp {
             return Ok(None);
         }
-        // The identity must be stable for the whole negotiation. SDP can be
-        // rendered more than once (offer retransmission, re-INVITE, answer
-        // rebuild); generating a fresh certificate each time makes the
-        // a=fingerprint line advertise a certificate the handshake no longer
-        // uses, so Chrome aborts and retries ClientHello forever.
-        let identity = match self.pending_dtls_identities.get(negotiation_key) {
-            Some(existing) => existing.value().clone(),
-            None => {
-                let generated =
-                    rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
-                        SessionError::MediaError(format!(
-                            "failed to generate DTLS-SRTP identity: {error}"
-                        ))
-                    })?;
-                self.pending_dtls_identities
-                    .insert(negotiation_key.clone(), generated.clone());
-                generated
-            }
-        };
+        let identity = rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
+            SessionError::MediaError(format!("failed to generate DTLS-SRTP identity: {error}"))
+        })?;
         let fingerprint = fingerprint_hex(&identity.fingerprint_sha256);
+        self.pending_dtls_identities
+            .insert(negotiation_key.clone(), identity);
         Ok(Some(("sha-256".to_string(), fingerprint)))
     }
 
@@ -2622,7 +2491,11 @@ impl MediaAdapter {
                 tracing::debug!("Media session already started for session {}", session_id.0);
                 return Ok(());
             }
-            let started = self.controller.has_media_session(&exact.dialog_id);
+            let started = self
+                .controller
+                .get_session_info(&exact.dialog_id)
+                .await
+                .is_some();
             if !self.media_is_still_exact(&exact) {
                 return Err(SessionError::SessionNotFound(format!(
                     "Media session lifetime changed for {}",
@@ -2703,11 +2576,12 @@ impl MediaAdapter {
     /// `None` when this side makes the offer. An offerer cannot know whether
     /// the answer will decline mux, so it reserves; an answerer reserves only
     /// for an offer without `a=rtcp-mux`. Never with ICE (component 1 only),
-    /// strict mux, or signalling-only media. DTLS-SRTP keys the RTCP port
-    /// with a second handshake of its own (RFC 5764 §4.1).
+    /// DTLS-SRTP (RFC 5764 §4.1 would need a second DTLS association on the
+    /// RTCP port), strict mux, or signalling-only media.
     fn wants_separate_rtcp_port(&self, remote_offer: Option<&str>) -> bool {
         if !self.rtcp_non_mux
             || self.rtcp_mux_required
+            || self.offer_dtls_srtp
             || self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled
             || self.signaling_only_local_port().is_some()
         {
@@ -2717,7 +2591,11 @@ impl MediaAdapter {
             return true;
         };
         match SdpSession::from_str(offer) {
-            Ok(offer) => !audio_rtcp_mux(&offer),
+            Ok(offer) => {
+                !audio_rtcp_mux(&offer)
+                    && !audio_transport(&offer)
+                        .is_some_and(|transport| transport.to_ascii_uppercase().contains("TLS"))
+            }
             Err(_) => true,
         }
     }
@@ -2842,34 +2720,20 @@ impl MediaAdapter {
     ) -> SrtpDetailedResult<NegotiatedConfig> {
         let session_id = session.session_id.clone();
         let negotiation_key = Self::media_negotiation_key(session)?;
-        // Parse once for connection, codec and security validation, keeping
-        // the connection-extraction classification of a syntax failure.
+        // Parse remote SDP to extract IP and port
+        let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let parsed_answer = SdpSession::from_str(remote_sdp)
-            .map_err(|_| bounded_sdp_failure("connection-extract", "syntax"))?;
-        let (remote_ip, remote_port) = Self::sdp_connection(&parsed_answer)?;
-        // Plain-RTP calls (carrier trunks/legacy peers) do not negotiate RTCP
-        // mux; the requirement belongs to the secure/WebRTC profile.
-        if !session.plain_rtp_offer {
-            validate_rtcp_mux(&parsed_answer, self.rtcp_mux_required)?;
-        }
+            .map_err(|_| bounded_sdp_failure("remote-answer", "syntax"))?;
+        validate_rtcp_mux(&parsed_answer, self.rtcp_mux_required)?;
         let parsed_offer = exact_initial_uac_offer(session)
             .ok_or_else(|| bounded_sdp_failure("remote-answer", "missing-local-offer"))
             .and_then(|offer| {
                 SdpSession::from_str(offer)
                     .map_err(|_| bounded_sdp_failure("remote-answer", "invalid-local-offer"))
             })?;
-        // A plain-RTP call deliberately does not emit a=rtcp-mux on either
-        // side, so the secure-profile requirement must not be applied to our
-        // own offer either.
-        if !session.plain_rtp_offer {
-            validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
-        }
-        let (payload_type, negotiated_codec, clock_rate, channels) = validate_uac_audio_answer(
-            &parsed_offer,
-            &parsed_answer,
-            self.g729_annex_b,
-            session.plain_rtp_offer,
-        )?;
+        validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
+        let (payload_type, negotiated_codec, clock_rate, channels) =
+            validate_uac_audio_answer(&parsed_offer, &parsed_answer, self.g729_annex_b)?;
         let answer_direction = audio_direction(&parsed_answer);
         let srtp_diagnostics = srtp_diagnostics_enabled();
         if sdp_diagnostics_enabled() {
@@ -2882,7 +2746,11 @@ impl MediaAdapter {
         let signaling_only_port = self.signaling_only_local_port();
         if signaling_only_port.is_none() {
             let exact_media = self.lane_owned_media(session)?;
-            if !self.controller.has_media_session(&exact_media.dialog_id)
+            if self
+                .controller
+                .get_session_info(&exact_media.dialog_id)
+                .await
+                .is_none()
                 || !self.media_is_still_exact(&exact_media)
             {
                 return Err(SessionError::InvalidTransition(
@@ -2982,7 +2850,7 @@ impl MediaAdapter {
                             )
                             .into());
                         }
-                        if self.srtp_required && !session.plain_rtp_offer {
+                        if self.srtp_required {
                             return Err(SessionError::SDPNegotiationFailed(
                                 "srtp_required is set but the local SDP did not offer SRTP".into(),
                             )
@@ -3068,7 +2936,6 @@ impl MediaAdapter {
                 rtcp_mux: audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&parsed_answer),
                 rtcp_xr: sdp_requests_voip_metrics_xr(&parsed_answer),
                 remote_rtcp_addr: audio_rtcp_address(&parsed_answer, remote_ip),
-                telephone_event: negotiated_telephone_event(&parsed_answer, &parsed_offer),
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3084,7 +2951,7 @@ impl MediaAdapter {
     pub(crate) fn validate_local_sdp_offer(&self, local_sdp: &str) -> Result<()> {
         let parsed_offer = SdpSession::from_str(local_sdp)
             .map_err(|_| bounded_sdp_failure("local-offer", "syntax"))?;
-        Self::sdp_connection(&parsed_offer)?;
+        self.parse_sdp_connection(local_sdp)?;
         if !parsed_offer
             .media_descriptions
             .iter()
@@ -3103,7 +2970,7 @@ impl MediaAdapter {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
-        Self::sdp_connection(&parsed_offer)?;
+        self.parse_sdp_connection(remote_sdp)?;
 
         let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
         #[cfg(feature = "dtls-srtp")]
@@ -3203,7 +3070,7 @@ impl MediaAdapter {
         let parsed_offer = SdpSession::from_str(remote_sdp)
             .map_err(|_| bounded_sdp_failure("remote-offer", "syntax"))?;
         validate_rtcp_mux(&parsed_offer, self.rtcp_mux_required)?;
-        let (remote_ip, remote_port) = Self::sdp_connection(&parsed_offer)?;
+        let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         // ICE (RFC 8839): honor the peer's offer when policy allows. A
         // detected mismatch means a middlebox rewrote the SDP after the
         // peer built it; ICE stands down for this call rather than fighting
@@ -3249,26 +3116,16 @@ impl MediaAdapter {
                         )
                         .into());
                     }
-                    let role = offer.setup_role.answer_to(self.dtls_actpass_answer_role);
-                    // Reuse the identity created for this negotiation when the
-                    // answer SDP is rebuilt; otherwise the advertised
-                    // fingerprint and the certificate used by the handshake
-                    // diverge and Chrome retries ClientHello indefinitely.
-                    let identity = match self.pending_dtls_identities.get(&negotiation_key) {
-                        Some(existing) => existing.value().clone(),
-                        None => {
-                            let generated = rvoip_rtp_core::dtls_srtp::generate_identity()
-                                .map_err(|error| {
-                                    SessionError::MediaError(format!(
-                                        "failed to generate DTLS-SRTP answer identity: {error}"
-                                    ))
-                                })?;
-                            self.pending_dtls_identities
-                                .insert(negotiation_key.clone(), generated.clone());
-                            generated
-                        }
-                    };
+                    let role = offer.setup_role.complementary();
+                    let identity =
+                        rvoip_rtp_core::dtls_srtp::generate_identity().map_err(|error| {
+                            SessionError::MediaError(format!(
+                                "failed to generate DTLS-SRTP answer identity: {error}"
+                            ))
+                        })?;
                     let fingerprint = fingerprint_hex(&identity.fingerprint_sha256);
+                    self.pending_dtls_identities
+                        .insert(negotiation_key.clone(), identity);
                     (
                         Some(("sha-256".to_string(), fingerprint, role)),
                         Some(StagedDtlsHandshake {
@@ -3350,7 +3207,7 @@ impl MediaAdapter {
             let sdp_answer = build_port_zero_rejection_sdp(
                 &origin_session_id,
                 origin_version,
-                advertised_ip,
+                &advertised_ip.to_string(),
                 offered_transport.as_str(),
             )?;
             let config = NegotiatedConfig {
@@ -3375,7 +3232,6 @@ impl MediaAdapter {
                     rtcp_mux: false,
                     rtcp_xr: false,
                     remote_rtcp_addr: None,
-                    telephone_event: None,
                     #[cfg(feature = "dtls-srtp")]
                     dtls: None,
                 },
@@ -3513,10 +3369,10 @@ impl MediaAdapter {
                 &origin_session_id,
                 &origin_version,
                 "IN",
-                sdp_addrtype(advertised_ip),
+                "IP4",
                 &local_ip_str,
             )
-            .connection("IN", sdp_addrtype(advertised_ip), &local_ip_str)
+            .connection("IN", "IP4", &local_ip_str)
             .time("0", "0");
         if let Some(material) = &ice_material {
             if material.lite {
@@ -3580,7 +3436,6 @@ impl MediaAdapter {
             .map_err(|_| bounded_sdp_failure("answer-build", "builder"))?;
         let sdp_answer = session.to_string();
         let rtcp_mux = audio_rtcp_mux(&parsed_offer) && audio_rtcp_mux(&session);
-        let telephone_event = negotiated_telephone_event(&session, &parsed_offer);
 
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
@@ -3612,7 +3467,6 @@ impl MediaAdapter {
                 rtcp_mux,
                 rtcp_xr: sdp_requests_voip_metrics_xr(&parsed_offer),
                 remote_rtcp_addr: audio_rtcp_address(&parsed_offer, remote_ip),
-                telephone_event,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: staged_dtls,
             },
@@ -3653,9 +3507,6 @@ impl MediaAdapter {
         self.fail_staged_media_commit.store(true, Ordering::Release);
     }
 
-    /// `rtcp_component`: the call keeps a separate RTCP port (no mux), so
-    /// RFC 5764 §4.1 needs a second handshake there; see
-    /// [`Self::run_committed_dtls_handshake`].
     #[cfg(feature = "dtls-srtp")]
     fn spawn_committed_dtls_handshake(
         &self,
@@ -3664,19 +3515,11 @@ impl MediaAdapter {
         remote_addr: SocketAddr,
         identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
         plan: StagedDtlsHandshake,
-        rtcp_component: bool,
     ) {
         let adapter = self.clone();
         spawn_memory_tracked("sip.media_adapter.dtls_srtp_handshake", async move {
             let result = adapter
-                .run_committed_dtls_handshake(
-                    &handle,
-                    &dialog_id,
-                    remote_addr,
-                    identity,
-                    plan,
-                    rtcp_component,
-                )
+                .run_committed_dtls_handshake(&handle, &dialog_id, remote_addr, identity, plan)
                 .await;
             if let Err(error) = result {
                 tracing::error!(
@@ -3687,59 +3530,6 @@ impl MediaAdapter {
         });
     }
 
-    /// Install the coordinator's handler for a failed RTP-component DTLS
-    /// handshake: it publishes [`Event::MediaSecurityFailed`] and ends the
-    /// call. Set once at coordinator boot.
-    pub(crate) fn set_media_security_failure_handler(&self, handler: MediaSecurityFailureHandler) {
-        let _ = self.media_security_failure_handler.set(handler);
-    }
-
-    /// Hand a failed media key agreement to the coordinator, unless the
-    /// media lifetime it belonged to is already gone.
-    #[cfg(feature = "dtls-srtp")]
-    fn report_media_security_failure(
-        &self,
-        handle: &SessionRegistryHandle,
-        dialog_id: &DialogId,
-        failure: crate::api::events::MediaSecurityFailure,
-    ) {
-        if !self
-            .media_resources
-            .get(handle.session_id())
-            .is_some_and(|binding| binding.matches(handle, dialog_id))
-        {
-            return;
-        }
-        tracing::warn!(
-            session = %handle.session_id().0,
-            reason = failure.as_str(),
-            "DTLS-SRTP key agreement failed on the media port; ending the call"
-        );
-        match self.media_security_failure_handler.get() {
-            Some(handler) => handler(handle.clone(), failure),
-            None => tracing::debug!(
-                session = %handle.session_id().0,
-                "no media-security failure handler installed"
-            ),
-        }
-    }
-
-    /// Present a certificate other than the advertised one on the RTP
-    /// component's DTLS handshake, so the peer's fingerprint check fails.
-    #[cfg(all(feature = "dtls-srtp", feature = "test-hooks"))]
-    pub(crate) fn set_dtls_wrong_rtp_certificate_for_testing(&mut self, enabled: bool) {
-        self.dtls_wrong_rtp_certificate_for_testing = enabled;
-    }
-
-    /// Run the call's DTLS-SRTP handshake on the RTP port and, with
-    /// `rtcp_component`, the RTCP component's own handshake on the separate
-    /// RTCP port at the same time (RFC 5764 §4.1), both with the same role,
-    /// certificate and expected fingerprint.
-    ///
-    /// The RTP handshake decides the call's media security. A failed RTCP
-    /// handshake does not: the call keeps its SRTP media, the RTCP port
-    /// stays closed (nothing sent, everything received dropped), and a
-    /// warning is logged, so the call simply has no RTCP.
     #[cfg(feature = "dtls-srtp")]
     async fn run_committed_dtls_handshake(
         &self,
@@ -3748,89 +3538,23 @@ impl MediaAdapter {
         remote_addr: SocketAddr,
         identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
         plan: StagedDtlsHandshake,
-        rtcp_component: bool,
     ) -> Result<()> {
-        use crate::api::events::MediaSecurityFailure;
-        const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-        let (role, profiles) = match setup_role_to_dtls_role(plan.role)
-            .and_then(|role| Ok((role, dtls_protection_profiles(&self.srtp_offered_suites)?)))
-        {
-            Ok(resolved) => resolved,
-            Err(error) => {
-                self.report_media_security_failure(
-                    handle,
-                    dialog_id,
-                    MediaSecurityFailure::HandshakeError,
-                );
-                return Err(error);
-            }
-        };
-        let rtcp_identity = rtcp_component.then(|| identity.clone());
-        let rtp_profiles = profiles.clone();
-        #[cfg(any(test, feature = "test-hooks"))]
-        let identity = if self.dtls_wrong_rtp_certificate_for_testing {
-            rvoip_rtp_core::dtls_srtp::generate_identity()
-                .map_err(|error| SessionError::MediaError(format!("test certificate: {error}")))?
-        } else {
-            identity
-        };
-        let rtp = async {
-            let result = self
-                .controller
-                .run_dtls_handshake_and_install(
-                    dialog_id,
-                    identity,
-                    role,
-                    remote_addr,
-                    plan.expected_remote_fingerprint_sha256,
-                    rtp_profiles,
-                    HANDSHAKE_TIMEOUT,
-                )
-                .await;
-            // Report at once rather than after the RTCP handshake: the call
-            // is ended, which also stops the RTCP handshake.
-            if let Err(error) = &result {
-                self.report_media_security_failure(
-                    handle,
-                    dialog_id,
-                    classify_dtls_handshake_error(error),
-                );
-            }
-            result
-        };
-        let rtcp = async {
-            match rtcp_identity {
-                Some(identity) => Some(
-                    self.controller
-                        .run_rtcp_dtls_handshake_and_install(
-                            dialog_id,
-                            identity,
-                            role,
-                            plan.expected_remote_fingerprint_sha256,
-                            profiles,
-                            HANDSHAKE_TIMEOUT,
-                        )
-                        .await,
-                ),
-                None => None,
-            }
-        };
-        let (result, rtcp_result) = tokio::join!(rtp, rtcp);
-        match rtcp_result {
-            Some(Ok(_)) => tracing::debug!(
-                session = %handle.session_id().0,
-                "DTLS-SRTP keyed the separate RTCP port"
-            ),
-            Some(Err(error)) => tracing::warn!(
-                session = %handle.session_id().0,
-                "DTLS-SRTP handshake on the separate RTCP port failed; \
-                 the call continues without RTCP: {error}"
-            ),
-            None => {}
-        }
-        let result = result.map_err(|error| {
-            SessionError::MediaError(format!("DTLS-SRTP handshake failed: {error}"))
-        })?;
+        let role = setup_role_to_dtls_role(plan.role)?;
+        let result = self
+            .controller
+            .run_dtls_handshake_and_install(
+                dialog_id,
+                identity,
+                role,
+                remote_addr,
+                plan.expected_remote_fingerprint_sha256,
+                dtls_protection_profiles(&self.srtp_offered_suites)?,
+                Duration::from_secs(10),
+            )
+            .await
+            .map_err(|error| {
+                SessionError::MediaError(format!("DTLS-SRTP handshake failed: {error}"))
+            })?;
 
         if !self
             .media_resources
@@ -3920,10 +3644,12 @@ impl MediaAdapter {
         let dialog_id = exact_media.dialog_id.clone();
         let previous_config = self
             .controller
-            .get_session_config(&dialog_id)
+            .get_session_info(&dialog_id)
+            .await
             .ok_or_else(|| {
                 SessionError::MediaError(format!("No media session for dialog {dialog_id}"))
-            })?;
+            })?
+            .config;
         if !self.media_is_still_exact(&exact_media) {
             return Err(SessionError::InvalidTransition(
                 "media resource changed before negotiated media commit".to_string(),
@@ -3948,18 +3674,6 @@ impl MediaAdapter {
                             "Failed to latch DTLS-SRTP secure media: {error}"
                         ))
                     })?;
-                // Without mux the RTCP port gets its own DTLS keys (RFC 5764
-                // §4.1) and stays closed to RTCP until they arrive.
-                if !staged.rtcp_mux {
-                    self.controller
-                        .require_rtcp_component_keying(&dialog_id)
-                        .await
-                        .map_err(|error| {
-                            SessionError::MediaError(format!(
-                                "Failed to latch RTCP-component DTLS-SRTP keying: {error}"
-                            ))
-                        })?;
-                }
             }
             self.apply_negotiated_media_config(
                 &dialog_id,
@@ -3967,7 +3681,6 @@ impl MediaAdapter {
                 staged.rtcp_mux,
                 staged.rtcp_xr,
                 staged.remote_rtcp_addr,
-                staged.telephone_event,
             )
             .await?;
 
@@ -4157,19 +3870,12 @@ impl MediaAdapter {
                         "DTLS-SRTP identity disappeared at the SIP commit boundary".to_string(),
                     )
                 })?;
-            let rtcp_component = !prepared.rtcp_mux
-                && self
-                    .controller
-                    .get_session_info(&dialog_id)
-                    .await
-                    .is_some_and(|info| info.rtcp_port.is_some());
             self.spawn_committed_dtls_handshake(
                 handle,
                 dialog_id,
                 prepared.remote_addr,
                 identity,
                 plan,
-                rtcp_component,
             );
         }
         tracing::info!(
@@ -4486,24 +4192,6 @@ impl MediaAdapter {
         session_a: &SessionId,
         session_b: &SessionId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
-        self.bridge_rtp_sessions_with_mode(session_a, session_b, BridgeMode::Relay)
-            .await
-    }
-
-    /// Bridge two sessions, choosing relay vs per-direction transcoding.
-    ///
-    /// [`BridgeMode::Relay`] forwards payloads byte-for-byte and fails with
-    /// [`BridgeError::CodecMismatch`] when the legs negotiated different
-    /// payload types. [`BridgeMode::Transcode`] decodes each direction with the
-    /// source leg's negotiated codec and re-encodes with the destination leg's
-    /// codec, so legs that agreed different codecs with their peers can still
-    /// exchange audio.
-    pub async fn bridge_rtp_sessions_with_mode(
-        &self,
-        session_a: &SessionId,
-        session_b: &SessionId,
-        mode: BridgeMode,
-    ) -> std::result::Result<BridgeHandle, BridgeError> {
         let exact_a = self
             .current_media(session_a)
             .ok_or_else(|| BridgeError::SessionNotFound(session_a.0.clone()))?;
@@ -4513,7 +4201,7 @@ impl MediaAdapter {
 
         let handle = self
             .controller
-            .bridge_sessions_with_mode(exact_a.dialog_id.clone(), exact_b.dialog_id.clone(), mode)
+            .bridge_sessions(exact_a.dialog_id.clone(), exact_b.dialog_id.clone())
             .await?;
         if !self.media_is_still_exact(&exact_a) || !self.media_is_still_exact(&exact_b) {
             drop(handle);
@@ -5231,51 +4919,40 @@ impl MediaAdapter {
         // The classic advertise logic above stays authoritative for the
         // default `c=`/`m=` destination, so a peer without ICE lands on
         // exactly the address it always did.
-        // A per-call plain-RTP offer (carrier trunks, legacy peers) must not
-        // advertise ICE/DTLS-SRTP/SDES even when the endpoint is configured for
-        // WebRTC; the answer is validated against this offer.
-        let plain_rtp = session.plain_rtp_offer;
-        let ice_material = if !plain_rtp
-            && self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled
-        {
-            let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
-            let host_addr = SocketAddr::new(self.local_ip, local_port);
-            let public_sock = public.map(|sa| {
-                SocketAddr::new(
-                    sa.ip(),
-                    if sa.port() != 0 {
-                        sa.port()
-                    } else {
-                        local_port
-                    },
-                )
-            });
-            self.ice
-                .ensure_local(
-                    &session_id,
-                    dialog_id,
-                    &self.controller,
-                    self.ice_policy,
-                    true,
-                    host_addr,
-                    public_sock,
-                )
-                .await
-        } else {
-            None
-        };
+        let ice_material =
+            if self.ice_policy != crate::adapters::ice_adapter::SipIcePolicy::Disabled {
+                let local_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
+                let host_addr = SocketAddr::new(self.local_ip, local_port);
+                let public_sock = public.map(|sa| {
+                    SocketAddr::new(
+                        sa.ip(),
+                        if sa.port() != 0 {
+                            sa.port()
+                        } else {
+                            local_port
+                        },
+                    )
+                });
+                self.ice
+                    .ensure_local(
+                        &session_id,
+                        dialog_id,
+                        &self.controller,
+                        self.ice_policy,
+                        true,
+                        host_addr,
+                        public_sock,
+                    )
+                    .await
+            } else {
+                None
+            };
 
         // Profile + keying. DTLS-SRTP carries a certificate fingerprint and
         // setup role; SDES carries a=crypto key material. They are mutually
         // exclusive on the wire.
-        let dtls_offer_attrs = if plain_rtp {
-            None
-        } else {
-            self.dtls_offer_identity(&negotiation_key)?
-        };
-        let (transport, crypto_attrs) = if plain_rtp {
-            ("RTP/AVP", Vec::new())
-        } else if dtls_offer_attrs.is_some() {
+        let dtls_offer_attrs = self.dtls_offer_identity(&negotiation_key)?;
+        let (transport, crypto_attrs) = if dtls_offer_attrs.is_some() {
             ("UDP/TLS/RTP/SAVP", Vec::new())
         } else if self.offer_srtp {
             let (negotiator, attrs) = SrtpNegotiator::new_offerer_with_base64_mode(
@@ -5314,10 +4991,10 @@ impl MediaAdapter {
                 &origin_session_id,
                 &origin_version,
                 "IN",
-                sdp_addrtype(advertised_ip),
+                "IP4",
                 &local_ip_str,
             )
-            .connection("IN", sdp_addrtype(advertised_ip), &local_ip_str)
+            .connection("IN", "IP4", &local_ip_str)
             .time("0", "0");
         if let Some(material) = &ice_material {
             if material.lite {
@@ -5335,14 +5012,7 @@ impl MediaAdapter {
         // the advertised RTP port is the local one (no port translation).
         let local_rtp_port = info.rtp_port.unwrap_or(info.config.local_addr.port());
         let offer_rtcp_port = info.rtcp_port.filter(|_| port == local_rtp_port);
-        if !plain_rtp {
-            media_builder = self.with_offer_rtcp_mux_attributes(media_builder, offer_rtcp_port);
-        } else if let Some(rtcp_port) = offer_rtcp_port {
-            // A plain-RTP offer drops RTCP mux (a secure/WebRTC profile
-            // attribute) but still names a separate RTCP port (RFC 3605),
-            // since without mux RTCP runs on its own port (RFC 3550 §11).
-            media_builder = media_builder.attribute("rtcp", Some(rtcp_port.to_string()));
-        }
+        media_builder = self.with_offer_rtcp_mux_attributes(media_builder, offer_rtcp_port);
         if dtls_offer_attrs.is_some() {
             media_builder = media_builder.setup(self.dtls_setup_role.as_str());
         }
@@ -5700,8 +5370,8 @@ impl MediaAdapter {
             &["0", "8", "101"]
         };
         let media_builder = SdpBuilder::new("Session")
-            .origin("-", "0", "0", "IN", sdp_addrtype(self.local_ip), &local_ip)
-            .connection("IN", sdp_addrtype(self.local_ip), &local_ip)
+            .origin("-", "0", "0", "IN", "IP4", &local_ip)
+            .connection("IN", "IP4", &local_ip)
             .time("0", "0")
             .media_audio(self.media_port_start, "RTP/AVP")
             .formats(formats);
@@ -6244,10 +5914,10 @@ impl MediaAdapter {
                 &origin_session_id,
                 &origin_version,
                 "IN",
-                sdp_addrtype(advertised_ip),
+                "IP4",
                 &local_ip_str,
             )
-            .connection("IN", sdp_addrtype(advertised_ip), &local_ip_str)
+            .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(port, transport)
             .formats(&formats_ref);
@@ -6335,12 +6005,7 @@ impl MediaAdapter {
     fn parse_sdp_connection(&self, sdp: &str) -> Result<(IpAddr, u16)> {
         let session = SdpSession::from_str(sdp)
             .map_err(|_| bounded_sdp_failure("connection-extract", "syntax"))?;
-        Self::sdp_connection(&session)
-    }
 
-    /// Extract the audio connection from SDP the caller already parsed, so
-    /// one negotiation step parses each SDP body once.
-    fn sdp_connection(session: &SdpSession) -> Result<(IpAddr, u16)> {
         let media = session
             .media_descriptions
             .iter()
@@ -6507,12 +6172,8 @@ impl Clone for MediaAdapter {
             negotiated_srtp: self.negotiated_srtp.clone(),
             offer_dtls_srtp: self.offer_dtls_srtp,
             dtls_setup_role: self.dtls_setup_role,
-            dtls_actpass_answer_role: self.dtls_actpass_answer_role,
             #[cfg(feature = "dtls-srtp")]
             pending_dtls_identities: self.pending_dtls_identities.clone(),
-            media_security_failure_handler: self.media_security_failure_handler.clone(),
-            #[cfg(all(feature = "dtls-srtp", any(test, feature = "test-hooks")))]
-            dtls_wrong_rtp_certificate_for_testing: self.dtls_wrong_rtp_certificate_for_testing,
             staged_media_negotiations: self.staged_media_negotiations.clone(),
             global_coordinator: self.global_coordinator.clone(),
             app_event_publisher: self.app_event_publisher.clone(),
@@ -6747,44 +6408,6 @@ mod sdp_format_tests {
     //! second fixture for that case.
 
     use super::*;
-
-    /// Connection extraction from already parsed SDP keeps the audio
-    /// section's c= over the session c=, ignores other media sections, and
-    /// rejects a missing or unparsable address and a missing audio section.
-    #[test]
-    fn parsed_sdp_connection_preserves_audio_precedence_and_missing_address_errors() {
-        let sdp = concat!(
-            "v=0\r\n",
-            "o=- 1 0 IN IP4 192.0.2.1\r\n",
-            "s=connection-validation\r\n",
-            "c=IN IP4 192.0.2.1\r\n",
-            "t=0 0\r\n",
-            "m=video 34000 RTP/AVP 96\r\n",
-            "c=IN IP4 192.0.2.10\r\n",
-            "a=rtpmap:96 VP8/90000\r\n",
-            "m=audio 42000 RTP/AVP 0\r\n",
-            "c=IN IP6 2001:db8::2\r\n",
-            "a=rtpmap:0 PCMU/8000\r\n",
-        );
-        let mut parsed = SdpSession::from_str(sdp).unwrap();
-        assert_eq!(
-            MediaAdapter::sdp_connection(&parsed).unwrap(),
-            ("2001:db8::2".parse::<IpAddr>().unwrap(), 42000)
-        );
-        parsed.media_descriptions[1].connection_info = None;
-        assert_eq!(
-            MediaAdapter::sdp_connection(&parsed).unwrap(),
-            ("192.0.2.1".parse::<IpAddr>().unwrap(), 42000)
-        );
-        parsed.connection_info.as_mut().unwrap().connection_address = "invalid-address".into();
-        assert!(MediaAdapter::sdp_connection(&parsed).is_err());
-        parsed.connection_info = None;
-        assert!(MediaAdapter::sdp_connection(&parsed).is_err());
-        parsed
-            .media_descriptions
-            .retain(|media| media.media != "audio");
-        assert!(MediaAdapter::sdp_connection(&parsed).is_err());
-    }
 
     #[test]
     fn inbound_trunk_policies_are_isolated_and_order_the_offered_intersection() {
@@ -7895,40 +7518,6 @@ mod sdp_format_tests {
     }
 
     #[tokio::test]
-    async fn plain_rtp_offer_keeps_a_rtcp_port_and_drops_secure_profile_attributes() {
-        use crate::state_table::types::Role;
-        let mut call = non_mux_call("plain-rtp", Role::UAC, 28_400, None, |adapter| {
-            adapter.set_rtcp_non_mux(true);
-            adapter.set_srtp_policy(true, true, Vec::new());
-        })
-        .await;
-        let rtcp_port = call.info().await.rtcp_port.expect("separate RTCP port");
-
-        // The endpoint's secure profile: SDES and RTCP mux beside a=rtcp.
-        let secure = call.offer().await;
-        assert!(secure.contains("RTP/SAVP"), "{secure}");
-        assert!(secure.contains("a=crypto:"), "{secure}");
-        assert!(secure.contains("a=rtcp-mux\r\n"), "{secure}");
-
-        // The per-call plain offer drops those but still names the RTCP
-        // port (RFC 3605), since RTCP is not multiplexed.
-        call.working.plain_rtp_offer = true;
-        let plain = call.offer().await;
-        let media_line = plain
-            .lines()
-            .find(|line| line.starts_with("m=audio"))
-            .expect("m=audio line");
-        assert!(media_line.contains(" RTP/AVP "), "{plain}");
-        assert!(!plain.contains("a=crypto:"), "{plain}");
-        assert!(!plain.contains("a=rtcp-mux"), "{plain}");
-        assert!(!plain.contains("a=fingerprint:"), "{plain}");
-        assert!(!plain.contains("a=setup:"), "{plain}");
-        assert!(!plain.contains("a=candidate:"), "{plain}");
-        assert_eq!(sdp_ports(&plain).1, Some(rtcp_port), "{plain}");
-        call.hang_up().await;
-    }
-
-    #[tokio::test]
     async fn rtcp_non_mux_off_reserves_no_rtcp_port_and_offers_no_a_rtcp() {
         use crate::state_table::types::Role;
         let mut call = non_mux_call("off", Role::UAC, 26_300, None, |_| {}).await;
@@ -7952,7 +7541,7 @@ mod sdp_format_tests {
     }
 
     #[tokio::test]
-    async fn rtcp_non_mux_is_suppressed_by_strict_mux_and_ice_but_not_dtls() {
+    async fn rtcp_non_mux_is_suppressed_by_strict_mux_ice_and_dtls() {
         use crate::state_table::types::Role;
         // Strict mode: no a=rtcp: next to a=rtcp-mux-only (RFC 8858 §5.3).
         let mut call = non_mux_call("strict", Role::UAC, 26_400, None, |adapter| {
@@ -7979,17 +7568,14 @@ mod sdp_format_tests {
         assert!(adapter.wants_separate_rtcp_port(Some(&plain_offer)));
         let mux_offer = format!("{plain_offer}a=rtcp-mux\r\n");
         assert!(!adapter.wants_separate_rtcp_port(Some(&mux_offer)));
-        // DTLS-SRTP keys the RTCP port with its own handshake (RFC 5764
-        // §4.1), so it reserves like any other call.
         let dtls_offer = plain_offer.replace("RTP/AVP", "UDP/TLS/RTP/SAVP");
-        assert!(adapter.wants_separate_rtcp_port(Some(&dtls_offer)));
-        adapter.set_dtls_srtp_policy(true);
-        assert!(adapter.wants_separate_rtcp_port(None));
-        assert!(!adapter.wants_separate_rtcp_port(Some(&format!("{dtls_offer}a=rtcp-mux\r\n"))));
-        adapter.set_dtls_srtp_policy(false);
+        assert!(!adapter.wants_separate_rtcp_port(Some(&dtls_offer)));
         adapter.set_ice_policy(crate::adapters::ice_adapter::SipIcePolicy::Full);
         assert!(!adapter.wants_separate_rtcp_port(None));
         adapter.set_ice_policy(crate::adapters::ice_adapter::SipIcePolicy::Disabled);
+        adapter.set_dtls_srtp_policy(true);
+        assert!(!adapter.wants_separate_rtcp_port(None));
+        adapter.set_dtls_srtp_policy(false);
         adapter.set_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
         assert!(!adapter.wants_separate_rtcp_port(None));
     }
@@ -8106,342 +7692,6 @@ mod sdp_format_tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(!rtcp_arrives(&peer_rtp, Duration::from_millis(500)).await);
-        call.hang_up().await;
-    }
-
-    /// A raw DTLS-SRTP peer that declines mux: its own sockets, its own
-    /// handshakes (rtp-core's DTLS engine over plain connected UDP sockets,
-    /// not rvoip's transport), and its own choice of key halves.
-    #[cfg(feature = "dtls-srtp")]
-    struct RawDtlsPeer {
-        rtp: Arc<tokio::net::UdpSocket>,
-        rtcp: Arc<tokio::net::UdpSocket>,
-        identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
-    }
-
-    #[cfg(feature = "dtls-srtp")]
-    impl RawDtlsPeer {
-        async fn bind() -> Self {
-            let (rtp, rtcp) = bind_peer_port_pair().await;
-            Self {
-                rtp: Arc::new(rtp),
-                rtcp: Arc::new(rtcp),
-                identity: rvoip_rtp_core::dtls_srtp::generate_identity().unwrap(),
-            }
-        }
-
-        /// The peer's answer: DTLS client (`a=setup:active`), no
-        /// `a=rtcp-mux`, RTCP on its RTP port + 1.
-        fn answer(&self) -> String {
-            SdpBuilder::new("Session")
-                .origin("-", "answer", "0", "IN", "IP4", "127.0.0.1")
-                .connection("IN", "IP4", "127.0.0.1")
-                .time("0", "0")
-                .fingerprint(
-                    "sha-256",
-                    fingerprint_hex(&self.identity.fingerprint_sha256),
-                )
-                .media_audio(self.rtp.local_addr().unwrap().port(), "UDP/TLS/RTP/SAVP")
-                .formats(&["0"])
-                .rtpmap("0", "PCMU/8000")
-                .setup("active")
-                .done()
-                .build()
-                .expect("answer builds")
-                .to_string()
-        }
-
-        /// Run one client handshake from `socket` to `to`.
-        async fn handshake(
-            socket: &Arc<tokio::net::UdpSocket>,
-            to: SocketAddr,
-            identity: rvoip_rtp_core::dtls_srtp::DtlsIdentity,
-        ) -> rvoip_rtp_core::dtls_srtp::DtlsSrtpHandshakeResult {
-            socket.connect(to).await.unwrap();
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                rvoip_rtp_core::dtls_srtp::handshake_client(
-                    Arc::clone(socket) as _,
-                    identity,
-                    rvoip_rtp_core::dtls_srtp::default_srtp_profiles(),
-                ),
-            )
-            .await
-            .expect("peer handshake timed out")
-            .expect("peer handshake")
-        }
-    }
-
-    /// SRTCP context for one direction of one DTLS component, built from
-    /// the key half RFC 5764 §4.2 assigns it.
-    #[cfg(feature = "dtls-srtp")]
-    fn component_ctx(
-        result: &rvoip_rtp_core::dtls_srtp::DtlsSrtpHandshakeResult,
-        client_writes: bool,
-    ) -> rvoip_rtp_core::srtp::SrtpContext {
-        let key = if client_writes {
-            result.client_write_key.clone()
-        } else {
-            result.server_write_key.clone()
-        };
-        rvoip_rtp_core::srtp::SrtpContext::new(result.profile.clone(), key).unwrap()
-    }
-
-    #[cfg(feature = "dtls-srtp")]
-    fn offer_fingerprint(offer: &str) -> [u8; 32] {
-        let hex = offer
-            .lines()
-            .find_map(|line| line.strip_prefix("a=fingerprint:sha-256 "))
-            .expect("offer carries a SHA-256 fingerprint")
-            .trim();
-        let bytes: Vec<u8> = hex
-            .split(':')
-            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
-            .collect();
-        bytes.try_into().unwrap()
-    }
-
-    #[cfg(feature = "dtls-srtp")]
-    async fn dtls_non_mux_call(case: &str, port_base: u16) -> NonMuxCall {
-        use crate::state_table::types::Role;
-        non_mux_call(case, Role::UAC, port_base, None, |adapter| {
-            adapter.set_rtcp_non_mux(true);
-            adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
-            adapter.set_dtls_srtp_policy(true);
-        })
-        .await
-    }
-
-    #[cfg(feature = "dtls-srtp")]
-    async fn rtcp_component_keyed(call: &NonMuxCall) -> (bool, bool) {
-        let rtp = call
-            .controller
-            .get_rtp_session(&call.dialog_id)
-            .await
-            .unwrap();
-        let rtp = rtp.lock().await;
-        let transport = rtp.transport();
-        let udp = transport
-            .as_any()
-            .downcast_ref::<rvoip_rtp_core::transport::UdpRtpTransport>()
-            .unwrap();
-        (
-            udp.rtcp_component_keying_required(),
-            udp.rtcp_component_srtp_enabled(),
-        )
-    }
-
-    /// RFC 5764 §4.1 against an independent peer: the RTCP port runs its own
-    /// handshake, SRTCP on it uses that handshake's keys (not the RTP
-    /// component's), reports flow both ways and give an RTT, and no RTCP
-    /// reaches the peer's RTP port.
-    #[cfg(feature = "dtls-srtp")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn rtcp_non_mux_runs_its_own_dtls_handshake_on_the_rtcp_port() {
-        let mut call = dtls_non_mux_call("dtls", 27_000).await;
-        let offer = call.offer().await;
-        let (rtp_port, rtcp_port) = sdp_ports(&offer);
-        assert!(offer.contains("UDP/TLS/RTP/SAVP"), "{offer}");
-        assert_eq!(rtcp_port, Some(rtp_port + 1), "{offer}");
-        let our_fingerprint = offer_fingerprint(&offer);
-        let local_rtp = SocketAddr::from(([127, 0, 0, 1], rtp_port));
-        let local_rtcp = SocketAddr::from(([127, 0, 0, 1], rtp_port + 1));
-
-        let peer = RawDtlsPeer::bind().await;
-        call.accept_answer(&peer.answer()).await;
-        assert_eq!(call.info().await.rtcp_port, Some(rtp_port + 1));
-        assert_eq!(rtcp_component_keyed(&call).await, (true, false));
-
-        let (rtp_keys, rtcp_keys) = tokio::join!(
-            RawDtlsPeer::handshake(&peer.rtp, local_rtp, peer.identity.clone()),
-            RawDtlsPeer::handshake(&peer.rtcp, local_rtcp, peer.identity.clone()),
-        );
-        // One certificate and fingerprint cover both components.
-        assert_eq!(rtp_keys.remote_fingerprint_sha256, our_fingerprint);
-        assert_eq!(rtcp_keys.remote_fingerprint_sha256, our_fingerprint);
-        assert_ne!(
-            rtp_keys.server_write_key.key(),
-            rtcp_keys.server_write_key.key(),
-            "each component derives its own keys"
-        );
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
-        while rtcp_component_keyed(&call).await != (true, true) {
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "RTCP keys never installed"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        // SRTP media from the peer is accepted under the RTP component.
-        let mut peer_rtp_send = component_ctx(&rtp_keys, true);
-        for seq in 0..5u16 {
-            let packet = rvoip_rtp_core::packet::RtpPacket::new_with_payload(
-                0,
-                seq,
-                u32::from(seq) * 160,
-                0x5eed_0001,
-                bytes::Bytes::from(vec![0xffu8; 160]),
-            );
-            let protected = peer_rtp_send.protect(&packet).unwrap().serialize().unwrap();
-            peer.rtp.send(&protected).await.unwrap();
-        }
-
-        // Our SRTCP reaches the peer's RTCP port from our RTCP port, under
-        // the RTCP component's server write key only.
-        let mut rtcp_recv = component_ctx(&rtcp_keys, false);
-        let mut wrong_component = component_ctx(&rtp_keys, false);
-        let mut bytes = [0u8; 2048];
-        let report = tokio::time::timeout(Duration::from_secs(4), async {
-            loop {
-                let n = peer.rtcp.recv(&mut bytes).await.unwrap();
-                if !(128..=191).contains(&bytes[0]) {
-                    continue; // a late DTLS retransmission
-                }
-                assert!(wrong_component.unprotect_rtcp(&bytes[..n]).is_err());
-                let plaintext = rtcp_recv
-                    .unprotect_rtcp(&bytes[..n])
-                    .expect("SRTCP under the RTCP component's keys");
-                assert_ne!(&bytes[..n], plaintext.as_ref());
-                break rvoip_rtp_core::packet::rtcp::RtcpCompoundPacket::parse(&plaintext).unwrap();
-            }
-        })
-        .await
-        .expect("SRTCP must reach the peer's RTCP port");
-        let local_ssrc = report_ssrc(&report);
-
-        let mut rtcp_send = component_ctx(&rtcp_keys, true);
-        let protected = rtcp_send
-            .protect_rtcp(&peer_sender_report(local_ssrc))
-            .unwrap();
-        peer.rtcp.send(&protected).await.unwrap();
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            let stats = call.stats().await;
-            if stats.rtt_ms.is_some() {
-                assert!(stats.packets_received >= 1, "{stats:?}");
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "SRTCP from the peer's RTCP port was not accepted: {stats:?}"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        assert!(
-            !rtcp_arrives(&peer.rtp, Duration::from_millis(800)).await,
-            "RTCP reached the RTP port of a non-mux peer"
-        );
-        call.hang_up().await;
-    }
-
-    /// The RTCP component fails closed: before its keys exist nothing leaves
-    /// or enters the RTCP port, and a failed RTCP handshake (here the peer
-    /// presents a certificate the SDP did not name) leaves the call's SRTP
-    /// media working and its RTCP port dark.
-    #[cfg(feature = "dtls-srtp")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn rtcp_non_mux_dtls_failure_on_the_rtcp_port_keeps_rtp_media() {
-        let mut call = dtls_non_mux_call("dtls-fail", 27_100).await;
-        let (failures_tx, mut failures) = tokio::sync::mpsc::unbounded_channel();
-        call.adapter
-            .set_media_security_failure_handler(Arc::new(move |_, failure| {
-                let _ = failures_tx.send(failure);
-            }));
-        let offer = call.offer().await;
-        let (rtp_port, _) = sdp_ports(&offer);
-        let local_rtp = SocketAddr::from(([127, 0, 0, 1], rtp_port));
-        let local_rtcp = SocketAddr::from(([127, 0, 0, 1], rtp_port + 1));
-        let peer = RawDtlsPeer::bind().await;
-        call.accept_answer(&peer.answer()).await;
-
-        let rtp_keys = RawDtlsPeer::handshake(&peer.rtp, local_rtp, peer.identity.clone()).await;
-        // Plaintext RTCP to the RTCP port is refused while it has no keys.
-        peer.rtcp.connect(local_rtcp).await.unwrap();
-        peer.rtcp.send(&peer_sender_report(1)).await.unwrap();
-        assert!(
-            !rtcp_arrives(&peer.rtcp, Duration::from_millis(1_200)).await,
-            "RTCP left an unkeyed RTCP port"
-        );
-        let impostor = rvoip_rtp_core::dtls_srtp::generate_identity().unwrap();
-        let rtcp_keys = RawDtlsPeer::handshake(&peer.rtcp, local_rtcp, impostor).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        assert_eq!(
-            rtcp_component_keyed(&call).await,
-            (true, false),
-            "keys from an unauthenticated RTCP handshake were installed"
-        );
-        let mut rtcp_send = component_ctx(&rtcp_keys, true);
-        peer.rtcp
-            .send(&rtcp_send.protect_rtcp(&peer_sender_report(1)).unwrap())
-            .await
-            .unwrap();
-
-        let mut peer_rtp_send = component_ctx(&rtp_keys, true);
-        for seq in 0..5u16 {
-            let packet = rvoip_rtp_core::packet::RtpPacket::new_with_payload(
-                0,
-                seq,
-                u32::from(seq) * 160,
-                0x5eed_0002,
-                bytes::Bytes::from(vec![0xffu8; 160]),
-            );
-            let protected = peer_rtp_send.protect(&packet).unwrap().serialize().unwrap();
-            peer.rtp.send(&protected).await.unwrap();
-        }
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while call.stats().await.packets_received == 0 {
-            assert!(tokio::time::Instant::now() < deadline, "SRTP media stopped");
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let stats = call.stats().await;
-        assert_eq!(stats.rtt_ms, None, "{stats:?}");
-        assert_eq!(stats.rtcp_packets_received, 0, "{stats:?}");
-        let (on_rtp, on_rtcp) = tokio::join!(
-            rtcp_arrives(&peer.rtp, Duration::from_millis(800)),
-            rtcp_arrives(&peer.rtcp, Duration::from_millis(800)),
-        );
-        assert!(
-            !on_rtp && !on_rtcp,
-            "RTCP left a call whose RTCP handshake failed"
-        );
-        assert!(
-            failures.try_recv().is_err(),
-            "an RTCP-only DTLS failure must not end the call"
-        );
-        call.hang_up().await;
-    }
-
-    /// A certificate the SDP did not name on the RTP (media) component is a
-    /// media-security failure the coordinator ends the call for.
-    #[cfg(feature = "dtls-srtp")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn rtp_dtls_fingerprint_mismatch_reports_a_media_security_failure() {
-        let mut call = dtls_non_mux_call("dtls-rtp-fail", 27_200).await;
-        let (failures_tx, mut failures) = tokio::sync::mpsc::unbounded_channel();
-        call.adapter
-            .set_media_security_failure_handler(Arc::new(move |_, failure| {
-                let _ = failures_tx.send(failure);
-            }));
-        let offer = call.offer().await;
-        let (rtp_port, _) = sdp_ports(&offer);
-        let peer = RawDtlsPeer::bind().await;
-        call.accept_answer(&peer.answer()).await;
-        let impostor = rvoip_rtp_core::dtls_srtp::generate_identity().unwrap();
-        RawDtlsPeer::handshake(
-            &peer.rtp,
-            SocketAddr::from(([127, 0, 0, 1], rtp_port)),
-            impostor,
-        )
-        .await;
-        let failure = tokio::time::timeout(Duration::from_secs(3), failures.recv())
-            .await
-            .expect("the failure is reported")
-            .unwrap();
-        assert_eq!(
-            failure,
-            crate::api::events::MediaSecurityFailure::FingerprintMismatch
-        );
         call.hang_up().await;
     }
 
@@ -9587,7 +8837,7 @@ a=fmtp:101 0-15\r\n";
             .build()
             .unwrap();
         let multiple_primary = offer.clone();
-        let negotiated = validate_uac_audio_answer(&offer, &multiple_primary, true, false)
+        let negotiated = validate_uac_audio_answer(&offer, &multiple_primary, true)
             .expect("an answer may retain multiple offered formats");
         assert_eq!(negotiated.0, 0, "answer order selects the preferred codec");
 
@@ -9601,7 +8851,7 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true, false).is_err());
+        assert!(validate_uac_audio_answer(&offer, &missing_dynamic_map, true).is_err());
     }
 
     #[test]
@@ -10775,43 +10025,6 @@ a=fmtp:101 0-15\r\n";
     }
 
     #[test]
-    fn negotiated_telephone_event_needs_both_sides() {
-        use rvoip_media_core::relay::controller::TelephoneEventFormat;
-        let sdp = |formats: &[&str], telephone_event: Option<(&str, &str)>| {
-            let mut media = SdpBuilder::new("Session")
-                .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
-                .connection("IN", "IP4", "127.0.0.1")
-                .time("0", "0")
-                .media_audio(16_000, "RTP/AVP")
-                .formats(formats)
-                .rtpmap("0", "PCMU/8000");
-            if let Some((pt, map)) = telephone_event {
-                media = media.rtpmap(pt, map);
-            }
-            media.done().build().unwrap()
-        };
-        let offer = sdp(&["0", "101"], Some(("101", "telephone-event/8000")));
-        assert_eq!(
-            negotiated_telephone_event(&offer, &offer),
-            Some(TelephoneEventFormat {
-                payload_type: 101,
-                clock_rate: 8_000,
-            })
-        );
-        // The answer dropped it.
-        assert_eq!(negotiated_telephone_event(&sdp(&["0"], None), &offer), None);
-        // An answer format the offer never listed does not count.
-        let unoffered = sdp(&["0", "100"], Some(("100", "telephone-event/8000")));
-        assert_eq!(negotiated_telephone_event(&unoffered, &offer), None);
-        // The answer's clock rate is the one recorded.
-        let wideband_offer = sdp(&["0", "101"], Some(("101", "telephone-event/16000")));
-        assert_eq!(
-            negotiated_telephone_event(&wideband_offer, &wideband_offer).map(|f| f.clock_rate),
-            Some(16_000)
-        );
-    }
-
-    #[test]
     fn uac_answer_rejects_unoffered_unsupported_and_changed_payloads() {
         let offer = SdpBuilder::new("Session")
             .origin("-", "1", "1", "IN", "IP4", "127.0.0.1")
@@ -10834,50 +10047,7 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &unoffered, true, false).is_err());
-
-        // Real carriers append telephone-event (101) to an answer even when
-        // the offer did not list it. RFC 3264 forbids that, so it fails the
-        // answer unless the call opted into a plain-RTP offer; then that
-        // format alone is ignored and the offered primary format selected.
-        let carrier_answer = SdpBuilder::new("Session")
-            .origin("-", "2", "2", "IN", "IP4", "127.0.0.1")
-            .connection("IN", "IP4", "127.0.0.1")
-            .time("0", "0")
-            .media_audio(16_002, "RTP/AVP")
-            .formats(&["0", "101"])
-            .rtpmap("0", "PCMU/8000")
-            .rtpmap("101", "telephone-event/8000")
-            .done()
-            .build()
-            .unwrap();
-        assert!(
-            validate_uac_audio_answer(&offer, &carrier_answer, true, false).is_err(),
-            "an unoffered telephone-event fails a call that did not opt in"
-        );
-        let (payload_type, codec, clock_rate, channels) =
-            validate_uac_audio_answer(&offer, &carrier_answer, true, true)
-                .expect("carrier answer on a plain-RTP call");
-        assert_eq!(
-            (payload_type, codec.as_str(), clock_rate, channels),
-            (0, "PCMU", 8_000, 1)
-        );
-
-        // Opting in tolerates telephone-event only: unoffered CN, or an
-        // unoffered audio codec, still fails the answer.
-        let carrier_cn = SdpBuilder::new("Session")
-            .origin("-", "2", "2", "IN", "IP4", "127.0.0.1")
-            .connection("IN", "IP4", "127.0.0.1")
-            .time("0", "0")
-            .media_audio(16_002, "RTP/AVP")
-            .formats(&["0", "13"])
-            .rtpmap("0", "PCMU/8000")
-            .rtpmap("13", "CN/8000")
-            .done()
-            .build()
-            .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &carrier_cn, true, true).is_err());
-        assert!(validate_uac_audio_answer(&offer, &unoffered, true, true).is_err());
+        assert!(validate_uac_audio_answer(&offer, &unoffered, true).is_err());
 
         let changed = SdpBuilder::new("Session")
             .origin("-", "3", "3", "IN", "IP4", "127.0.0.1")
@@ -10889,7 +10059,7 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(validate_uac_audio_answer(&offer, &changed, true, false).is_err());
+        assert!(validate_uac_audio_answer(&offer, &changed, true).is_err());
 
         let unsupported_offer = SdpBuilder::new("Session")
             .origin("-", "4", "4", "IN", "IP4", "127.0.0.1")
@@ -10911,10 +10081,7 @@ a=fmtp:101 0-15\r\n";
             .done()
             .build()
             .unwrap();
-        assert!(
-            validate_uac_audio_answer(&unsupported_offer, &unsupported_answer, true, false)
-                .is_err()
-        );
+        assert!(validate_uac_audio_answer(&unsupported_offer, &unsupported_answer, true).is_err());
     }
 
     #[cfg(feature = "opus")]
@@ -10986,9 +10153,8 @@ a=fmtp:101 0-15\r\n";
         // the answer's m-line port must be 0 and the proto must echo
         // the offer's proto so the peer distinguishes a policy
         // rejection from a parse error.
-        let sdp =
-            build_port_zero_rejection_sdp("1234", 7, "192.0.2.10".parse().unwrap(), "RTP/SAVP")
-                .expect("rejection SDP builds");
+        let sdp = build_port_zero_rejection_sdp("1234", 7, "192.0.2.10", "RTP/SAVP")
+            .expect("rejection SDP builds");
 
         assert!(
             sdp.contains("m=audio 0 RTP/SAVP"),
@@ -11013,25 +10179,11 @@ a=fmtp:101 0-15\r\n";
     }
 
     #[test]
-    fn sdp_addrtype_follows_the_address_family() {
-        assert_eq!(sdp_addrtype("192.0.2.10".parse().unwrap()), "IP4");
-        assert_eq!(sdp_addrtype("2001:db8::10".parse().unwrap()), "IP6");
-
-        // RFC 8866 §5.2/§5.7: an IPv6 origin/connection is `IN IP6` with a
-        // bare (unbracketed) address, and the builder must accept it.
-        let sdp = build_port_zero_rejection_sdp("9", 1, "2001:db8::10".parse().unwrap(), "RTP/AVP")
-            .expect("IPv6 rejection SDP builds");
-        assert!(sdp.contains("o=- 9 1 IN IP6 2001:db8::10\r\n"), "{sdp}");
-        assert!(sdp.contains("c=IN IP6 2001:db8::10\r\n"), "{sdp}");
-        assert!(!sdp.contains("IP4"), "{sdp}");
-    }
-
-    #[test]
     fn port_zero_rejection_echoes_avp_proto_when_offered() {
         // If peer ever offers plaintext but we still want to decline
         // (e.g. require_srtp branch wired through this helper later),
         // the proto echoed must be `RTP/AVP`, not the SAVP default.
-        let sdp = build_port_zero_rejection_sdp("1", 0, "10.0.0.1".parse().unwrap(), "RTP/AVP")
+        let sdp = build_port_zero_rejection_sdp("1", 0, "10.0.0.1", "RTP/AVP")
             .expect("rejection SDP builds");
 
         assert!(
@@ -11343,7 +10495,6 @@ a=fmtp:101 0-15\r\n";
             rtcp_mux: false,
             rtcp_xr: false,
             remote_rtcp_addr: None,
-            telephone_event: None,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -11419,7 +10570,6 @@ a=fmtp:101 0-15\r\n";
             rtcp_mux: false,
             rtcp_xr: false,
             remote_rtcp_addr: None,
-            telephone_event: None,
             #[cfg(feature = "dtls-srtp")]
             dtls: None,
         };
@@ -11527,7 +10677,6 @@ a=fmtp:101 0-15\r\n";
                 rtcp_mux: false,
                 rtcp_xr: false,
                 remote_rtcp_addr: None,
-                telephone_event: None,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
@@ -11730,7 +10879,6 @@ a=fmtp:101 0-15\r\n";
                 rtcp_mux: false,
                 rtcp_xr: false,
                 remote_rtcp_addr: None,
-                telephone_event: None,
                 #[cfg(feature = "dtls-srtp")]
                 dtls: None,
             },
@@ -11924,213 +11072,5 @@ a=fmtp:101 0-15\r\n";
             1,
             "authority teardown must reuse the completed release cell"
         );
-    }
-
-    /// One SDES-SRTP call whose peer keeps its master key across every
-    /// re-INVITE. Returns the adapter, the exact working session, the peer's
-    /// socket and its send context, plus the RTP session to observe.
-    async fn sdes_call_with_stable_peer_key(
-        name: &str,
-        port_base: u16,
-    ) -> (
-        MediaAdapter,
-        Arc<rvoip_media_core::relay::controller::MediaSessionController>,
-        SessionState,
-        DialogId,
-        tokio::net::UdpSocket,
-        String,
-        SrtpPair,
-    ) {
-        use rvoip_media_core::relay::controller::MediaSessionController;
-        let controller = Arc::new(MediaSessionController::with_port_range(
-            port_base,
-            port_base + 100,
-        ));
-        let store = Arc::new(SessionStore::new());
-        let id = SessionId(name.into());
-        store
-            .create_session(id.clone(), crate::state_table::types::Role::UAS, false)
-            .await
-            .unwrap();
-        let mut adapter = MediaAdapter::new(
-            Arc::clone(&controller),
-            Arc::clone(&store),
-            "127.0.0.1".parse().unwrap(),
-            port_base,
-            port_base + 100,
-        );
-        adapter.set_srtp_policy(true, true, vec![CryptoSuite::AesCm128HmacSha1_80]);
-        let dialog = adapter.create_session(&id).await.unwrap();
-        let handle = store.lifecycle_handle(&id).unwrap();
-        let mut working = store.get_session_exact(&handle).await.unwrap();
-        working.media_session_id = Some(dialog.clone());
-        working.media_session_ready = true;
-        let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let (peer_offerer, peer_crypto) =
-            SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80]).unwrap();
-        let peer_offer =
-            build_srtp_offer("127.0.0.1", peer.local_addr().unwrap().port(), peer_crypto);
-        let (answer, _) = adapter
-            .negotiate_sdp_as_uas_lane_owned(&mut working, &peer_offer)
-            .await
-            .unwrap();
-        adapter
-            .commit_staged_media_negotiation_lane_owned(&mut working)
-            .await
-            .unwrap();
-        working.remote_sdp = Some(peer_offer.clone());
-        working.local_sdp = Some(answer.clone());
-        working.sdp_negotiated = true;
-        let answer_crypto =
-            MediaAdapter::extract_audio_crypto(&SdpSession::from_str(&answer).unwrap());
-        let peer_keys = peer_offerer.accept_answer(&answer_crypto[0]).unwrap();
-        (
-            adapter, controller, working, dialog, peer, peer_offer, peer_keys,
-        )
-    }
-
-    /// Send one SRTP packet from the peer and report whether the local RTP
-    /// session authenticated and delivered it.
-    async fn peer_srtp_packet_delivered(
-        peer: &tokio::net::UdpSocket,
-        local: SocketAddr,
-        events: &mut tokio::sync::broadcast::Receiver<rvoip_rtp_core::session::RtpSessionEvent>,
-        datagram: &[u8],
-        sequence: u16,
-    ) -> bool {
-        use rvoip_rtp_core::session::RtpSessionEvent;
-        peer.send_to(datagram, local).await.unwrap();
-        tokio::time::timeout(Duration::from_millis(500), async {
-            loop {
-                match events.recv().await {
-                    Ok(RtpSessionEvent::PacketReceived(packet))
-                        if packet.header.sequence_number == sequence =>
-                    {
-                        break;
-                    }
-                    Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(error) => panic!("RTP event stream closed: {error}"),
-                }
-            }
-        })
-        .await
-        .is_ok()
-    }
-
-    fn peer_srtp_datagram(peer_keys: &mut SrtpPair, sequence: u16, timestamp: u32) -> Vec<u8> {
-        let packet = rvoip_rtp_core::RtpPacket::new(
-            rvoip_rtp_core::RtpHeader::new(0, sequence, timestamp, 0x5151_5151),
-            bytes::Bytes::from(vec![0x7f; 160]),
-        );
-        peer_keys
-            .send_ctx
-            .protect(&packet)
-            .unwrap()
-            .serialize()
-            .unwrap()
-            .to_vec()
-    }
-
-    /// RFC 4568 section 7.1.4 / RFC 3711 section 3.3.1: a peer that keeps
-    /// its master key across a hold/resume re-INVITE keeps its crypto
-    /// context. Rebuilding the receive context restarts its rollover counter
-    /// at zero, so every packet after a sequence wrap fails authentication,
-    /// and forgets the replay window.
-    #[tokio::test]
-    async fn peer_hold_resume_with_unchanged_sdes_key_keeps_receive_rollover_and_replay_state() {
-        let (adapter, controller, mut working, dialog, peer, peer_offer, mut peer_keys) =
-            sdes_call_with_stable_peer_key("peer-hold-keeps-srtp-context", 38_400).await;
-        let rtp = controller.get_rtp_session(&dialog).await.unwrap();
-        let local = rtp.lock().await.local_addr().unwrap();
-        let mut events = rtp.lock().await.subscribe();
-
-        let before_wrap = peer_srtp_datagram(&mut peer_keys, 65_534, 0);
-        assert!(peer_srtp_packet_delivered(&peer, local, &mut events, &before_wrap, 65_534).await);
-        let last_before_wrap = peer_srtp_datagram(&mut peer_keys, 65_535, 160);
-        assert!(
-            peer_srtp_packet_delivered(&peer, local, &mut events, &last_before_wrap, 65_535).await
-        );
-
-        // The peer holds, then resumes, re-offering its unchanged key.
-        let hold_offer = peer_offer.replace("a=sendrecv", "a=sendonly");
-        assert_ne!(hold_offer, peer_offer);
-        for reoffer in [hold_offer, peer_offer.clone()] {
-            let (answer, _) = adapter
-                .negotiate_sdp_as_uas_lane_owned(&mut working, &reoffer)
-                .await
-                .unwrap();
-            adapter
-                .commit_staged_media_negotiation_lane_owned(&mut working)
-                .await
-                .unwrap();
-            working.remote_sdp = Some(reoffer);
-            working.local_sdp = Some(answer);
-        }
-
-        // Rollover counter 1: only the retained context can authenticate it.
-        let after_wrap = peer_srtp_datagram(&mut peer_keys, 0, 320);
-        assert!(
-            peer_srtp_packet_delivered(&peer, local, &mut events, &after_wrap, 0).await,
-            "the first packet after the sequence wrap must decrypt after resume"
-        );
-        assert!(
-            !peer_srtp_packet_delivered(&peer, local, &mut events, &last_before_wrap, 65_535).await,
-            "the replay window must survive hold and resume"
-        );
-        adapter.cleanup_session(&working.session_id).await.unwrap();
-    }
-
-    /// The same continuity for a local hold/resume: our re-offers carry fresh
-    /// keys, the peer answers with its unchanged one.
-    #[tokio::test]
-    async fn local_hold_resume_with_unchanged_peer_sdes_key_keeps_receive_rollover_state() {
-        let (adapter, controller, mut working, dialog, peer, peer_offer, mut peer_keys) =
-            sdes_call_with_stable_peer_key("local-hold-keeps-srtp-context", 38_500).await;
-        let rtp = controller.get_rtp_session(&dialog).await.unwrap();
-        let local = rtp.lock().await.local_addr().unwrap();
-        let mut events = rtp.lock().await.subscribe();
-
-        let last_before_wrap = peer_srtp_datagram(&mut peer_keys, 65_535, 0);
-        assert!(
-            peer_srtp_packet_delivered(&peer, local, &mut events, &last_before_wrap, 65_535).await
-        );
-
-        for hold in [true, false] {
-            let offer = if hold {
-                adapter
-                    .create_hold_sdp_for_session_lane_owned(&mut working)
-                    .await
-            } else {
-                adapter
-                    .create_active_sdp_for_session_lane_owned(&mut working)
-                    .await
-            }
-            .unwrap();
-            working
-                .begin_offer_answer(rvoip_sip_core::Method::Invite, offer.clone())
-                .unwrap();
-            working.local_sdp = Some(offer);
-            // The peer answers with the crypto attribute (tag 1, same key)
-            // it has used since the call started.
-            let answer =
-                peer_offer.replace("a=sendrecv", if hold { "a=recvonly" } else { "a=sendrecv" });
-            adapter
-                .negotiate_sdp_as_uac_lane_owned(&mut working, &answer)
-                .await
-                .unwrap();
-            adapter
-                .commit_staged_media_negotiation_lane_owned(&mut working)
-                .await
-                .unwrap();
-            working.remote_sdp = Some(answer);
-            working.commit_offer_answer();
-        }
-
-        let after_wrap = peer_srtp_datagram(&mut peer_keys, 0, 160);
-        assert!(
-            peer_srtp_packet_delivered(&peer, local, &mut events, &after_wrap, 0).await,
-            "the first packet after the sequence wrap must decrypt after resume"
-        );
-        adapter.cleanup_session(&working.session_id).await.unwrap();
     }
 }

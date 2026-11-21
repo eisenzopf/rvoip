@@ -14,7 +14,7 @@ use tokio::time::timeout;
 
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::RTCDataChannelEvent;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::RTCIceConnectionState;
@@ -23,7 +23,7 @@ use rtc::peer_connection::transport::RTCDtlsRole;
 use rtc::peer_connection::transport::RTCIceServer;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig};
 
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtc::peer_connection::message::RTCMessage;
 use webrtc::api::APIBuilder;
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
@@ -35,14 +35,11 @@ use webrtc::peer_connection::configuration::RTCConfiguration as WebrtcRTCConfigu
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState as WebrtcRTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as WebrtcRTCSessionDescription;
 
-mod common;
-
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
 /// Test data channel communication between rtc (sansio) and webrtc (async) implementations
 #[tokio::test]
 async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
-    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -117,9 +114,8 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Client)
-        .build();
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
 
     let config = RTCConfigurationBuilder::new()
         .with_ice_servers(vec![RTCIceServer {
@@ -131,12 +127,12 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
     let mut rtc_pc = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
         .with_setting_engine(setting_engine)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created RTC peer connection");
 
     // Set remote description (the offer from webrtc)
     log::info!("RTC set remote description {}", rtc_offer);
-    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
+    rtc_pc.set_remote_description(rtc_offer)?;
 
     // Add local candidate for rtc peer
     let candidate = CandidateHostConfig {
@@ -159,7 +155,7 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
     log::info!("RTC created answer");
 
     // Set local description on rtc peer
-    rtc_pc.set_local_description(Instant::now(), answer.clone())?;
+    rtc_pc.set_local_description(answer.clone())?;
     log::info!("RTC set local description {}", answer);
 
     // Convert rtc answer to webrtc SDP
@@ -173,10 +169,10 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
     let mut buf = vec![0u8; 2000];
     let mut rtc_connected = false;
     let mut webrtc_connected = false;
-    let mut messages_sent = false;
+    let mut message_sent = false;
     let mut data_channel_opened = false;
 
-    let test_messages = ["Hello from WebRTC!".to_string(), "".to_string()];
+    let test_message = "Hello from WebRTC!";
 
     let start_time = Instant::now();
     let test_timeout = Duration::from_secs(30);
@@ -233,7 +229,7 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
             }
         }
 
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(_, _) => {}
                 RTCMessage::RtcpPacket(_, _) => {}
@@ -256,9 +252,8 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
 
                     // Echo back
                     log::info!("RTC echoing message back: '{}'", msg_str);
-                    dc.send_text(Instant::now(), msg_str)?;
+                    dc.send_text(msg_str)?;
                 }
-                _ => {}
             }
         }
 
@@ -270,28 +265,26 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
             webrtc_connected = true;
         }
 
-        // Send messages once both are connected and data channel is open
+        // Send message once both are connected and data channel is open
         // Use ICE connected state for RTC since peer connection state may not fire in sansio model
-        if rtc_connected && webrtc_connected && data_channel_opened && !messages_sent {
-            log::info!("Both peers connected and data channel open, sending test messages");
+        if rtc_connected && webrtc_connected && data_channel_opened && !message_sent {
+            log::info!("Both peers connected and data channel open, sending test message");
             tokio::time::sleep(Duration::from_millis(500)).await;
-            log::info!("Sending messages from WebRTC: {test_messages:?}");
-            for msg in &test_messages {
-                webrtc_dc.send_text(msg).await?;
-            }
-            messages_sent = true;
+            log::info!("Sending message from WebRTC: '{}'", test_message);
+            webrtc_dc.send_text(test_message).await?;
+            message_sent = true;
         }
 
         // Check if we received the echo back and verify the messages
-        if messages_sent {
+        if message_sent {
             let rtc_msgs = rtc_received_messages.lock().await;
             let webrtc_msgs = webrtc_received_messages.lock().await;
 
             // Check if RTC received the original message
-            let rtc_received_correct = rtc_msgs.contains(&test_messages[0]);
+            let rtc_received_correct = rtc_msgs.iter().any(|msg| msg == test_message);
 
             // Check if WebRTC received the echoed message back
-            let webrtc_received_echo = webrtc_msgs.contains(&test_messages[0]);
+            let webrtc_received_echo = webrtc_msgs.iter().any(|msg| msg == test_message);
 
             if rtc_received_correct && webrtc_received_echo {
                 log::info!("✅ Test completed successfully!");
@@ -300,14 +293,13 @@ async fn test_data_channel_rtc_to_webrtc() -> Result<()> {
 
                 // Verify the messages match
                 assert_eq!(
-                    *rtc_msgs, test_messages,
-                    "RTC should have received the test messages"
+                    rtc_msgs.first(),
+                    Some(&test_message.to_string()),
+                    "RTC should have received the test message"
                 );
-                // TODO: Should match all `test_messages` once `webrtc` dev
-                // dependency is updated with empty payload fix.
                 assert_eq!(
                     webrtc_msgs.first(),
-                    Some(&test_messages[0]),
+                    Some(&test_message.to_string()),
                     "WebRTC should have received the echoed message"
                 );
 

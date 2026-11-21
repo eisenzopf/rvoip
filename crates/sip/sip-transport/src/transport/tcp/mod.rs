@@ -8,7 +8,6 @@ pub use pool::{ConnectionPool, PoolConfig};
 
 use crate::error::{Error, Result};
 use crate::transport::{
-    connect_stream_from,
     runtime::{DialAdmission, OutboundDialCoordinator, TransportTaskSet},
     safe_method_label, send_control_event, validate_typed_outbound_message, Transport,
     TransportEvent, TransportFlowId, TransportRoute, TransportType,
@@ -25,31 +24,6 @@ use tracing::{debug, error, info, trace, warn};
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 
-/// Per-flow behaviour of a [`TcpTransport`]'s connections.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct TcpFlowConfig {
-    /// Bind every dialed TCP socket to the transport's local IP address
-    /// before connecting, so the flow leaves from that address instead of
-    /// the one the kernel's routing table picks. Use it on a host with
-    /// several addresses where each transport (listener and Contact) owns
-    /// one of them, such as a multi-source load generator. The local port is
-    /// chosen by the kernel. Has no effect when the transport is bound to an
-    /// unspecified address (`0.0.0.0` / `::`) or the destination is of a
-    /// different address family. Default: `false` (the kernel picks the
-    /// source).
-    pub bind_outbound_to_local_ip: bool,
-}
-
-impl TcpFlowConfig {
-    /// Bind dialed TCP sockets to the transport's local IP address. See
-    /// [`TcpFlowConfig::bind_outbound_to_local_ip`].
-    pub fn with_bind_outbound_to_local_ip(mut self, enabled: bool) -> Self {
-        self.bind_outbound_to_local_ip = enabled;
-        self
-    }
-}
-
 /// TCP transport for SIP messages with connection pooling
 #[derive(Clone)]
 pub struct TcpTransport {
@@ -65,7 +39,6 @@ struct TcpTransportInner {
     control_events_tx: mpsc::Sender<TransportEvent>,
     outbound_dials: Arc<OutboundDialCoordinator<SocketAddr>>,
     tasks: Arc<TransportTaskSet>,
-    flow: TcpFlowConfig,
 }
 
 impl TcpTransport {
@@ -84,25 +57,6 @@ impl TcpTransport {
         channel_capacity: Option<usize>,
         pool_config: Option<PoolConfig>,
         control_events_tx: Option<mpsc::Sender<TransportEvent>>,
-    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
-        Self::bind_with_flow_config(
-            addr,
-            channel_capacity,
-            pool_config,
-            control_events_tx,
-            TcpFlowConfig::default(),
-        )
-        .await
-    }
-
-    /// Bind with a separately reserved lifecycle/control event sender and an
-    /// explicit [`TcpFlowConfig`].
-    pub async fn bind_with_flow_config(
-        addr: SocketAddr,
-        channel_capacity: Option<usize>,
-        pool_config: Option<PoolConfig>,
-        control_events_tx: Option<mpsc::Sender<TransportEvent>>,
-        flow: TcpFlowConfig,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
@@ -135,7 +89,6 @@ impl TcpTransport {
                     std::time::Duration::from_millis(100),
                 ),
                 tasks: tasks.clone(),
-                flow,
             }),
         };
 
@@ -328,24 +281,6 @@ impl TcpTransport {
                                 Err(mpsc::error::TrySendError::Closed(_)) => break,
                             }
                         }
-                        Ok(Some(ReceivedFrame::MalformedRequest(request))) => {
-                            let local_addr = connection.local_addr().unwrap_or(peer_addr);
-                            let event = TransportEvent::MalformedRequest {
-                                request: *request,
-                                source: peer_addr,
-                                destination: local_addr,
-                                transport_type: TransportType::Tcp,
-                                flow_id: Some(flow_id),
-                            };
-                            let Some(inner) = weak_inner.upgrade() else {
-                                break;
-                            };
-                            let events_tx = inner.events_tx.clone();
-                            drop(inner);
-                            if events_tx.try_send(event).is_err() {
-                                debug!(source = %peer_addr, "Dropping 400 for a malformed TCP request");
-                            }
-                        }
                         Ok(Some(ReceivedFrame::KeepAlivePong)) => {
                             let local_addr = connection.local_addr().unwrap_or(peer_addr);
                             let Some(inner) = weak_inner.upgrade() else {
@@ -463,24 +398,16 @@ impl TcpTransport {
                                 return Err(Error::TransportClosed);
                             }
                             let pool = inner.connection_pool.clone();
-                            let source = inner
-                                .flow
-                                .bind_outbound_to_local_ip
-                                .then(|| inner.local_addr.ip());
                             drop(inner);
                             if let Some(connection) = pool.get_connection(&addr).await {
                                 return Ok(connection);
                             }
 
                             debug!("Creating new connection to {}", addr);
-                            let stream = tokio::time::timeout_at(
-                                deadline,
-                                connect_stream_from(addr, source),
-                            )
-                            .await
-                            .map_err(|_| Error::ConnectionTimeout(addr))?
-                            .map_err(|e| Error::ConnectFailed(addr, e))?;
-                            let connection = TcpConnection::from_stream(stream, addr)?;
+                            let connection =
+                                tokio::time::timeout_at(deadline, TcpConnection::connect(addr))
+                                    .await
+                                    .map_err(|_| Error::ConnectionTimeout(addr))??;
                             let Some(inner) = weak_inner.upgrade() else {
                                 let _ = connection.close().await;
                                 return Err(Error::TransportClosed);
@@ -792,68 +719,6 @@ mod tests {
         );
 
         client.close().await.unwrap();
-        server.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn dialed_tcp_flow_leaves_from_local_ip_only_when_configured() {
-        // Linux routes all of 127.0.0.0/8 to loopback; other hosts (macOS)
-        // only answer on 127.0.0.1 unless an alias is configured.
-        let source_ip: std::net::IpAddr = "127.0.0.2".parse().unwrap();
-        if std::net::TcpListener::bind((source_ip, 0)).is_err() {
-            eprintln!("skipping: 127.0.0.2 is not a local address on this host");
-            return;
-        }
-        assert!(!TcpFlowConfig::default().bind_outbound_to_local_ip);
-        let (server, mut server_events) =
-            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), None, None)
-                .await
-                .unwrap();
-        let destination = server.local_addr().unwrap();
-
-        for (bind_outbound, expected_ip) in [
-            (true, source_ip),
-            (false, "127.0.0.1".parse::<std::net::IpAddr>().unwrap()),
-        ] {
-            let (client, _client_events) = TcpTransport::bind_with_flow_config(
-                SocketAddr::new(source_ip, 0),
-                None,
-                None,
-                None,
-                TcpFlowConfig::default().with_bind_outbound_to_local_ip(bind_outbound),
-            )
-            .await
-            .unwrap();
-            let request =
-                SimpleRequestBuilder::new(Method::Options, "sip:service@localhost;transport=tcp")
-                    .unwrap()
-                    .from("alice", "sip:alice@localhost", Some("tag"))
-                    .to("service", "sip:service@localhost", None)
-                    .call_id(&format!("tcp-source-bind-{bind_outbound}"))
-                    .cseq(1)
-                    .build();
-            client
-                .send_message(Message::Request(request), destination)
-                .await
-                .unwrap();
-            let source = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    match server_events.recv().await {
-                        Some(TransportEvent::MessageReceived { source, .. }) => break source,
-                        Some(_) => continue,
-                        None => panic!("server event channel closed"),
-                    }
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(
-                source.ip(),
-                expected_ip,
-                "bind_outbound_to_local_ip = {bind_outbound}"
-            );
-            client.close().await.unwrap();
-        }
         server.close().await.unwrap();
     }
 

@@ -2618,7 +2618,6 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::CallMuted { .. }
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
-                | Event::MediaSecurityFailed { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. }
                 | Event::PeerReachabilityChanged { .. }

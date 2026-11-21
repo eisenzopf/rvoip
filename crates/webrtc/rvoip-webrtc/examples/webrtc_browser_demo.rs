@@ -209,7 +209,7 @@ async fn spawn_static_server(
             get(|| async { axum::response::Redirect::temporary("/whip-publish.html") }),
         )
         .route(
-            "/{file}",
+            "/:file",
             get(move |Path(file): Path<String>| {
                 let root = root.clone();
                 async move { serve_file(&root, &file).await }

@@ -22,21 +22,14 @@ use webrtc::media_stream::track_remote::{TrackRemote, TrackRemoteEvent};
 use rvoip_core::ids::StreamId;
 use rvoip_core::stream::{MediaFrame, QualitySnapshot};
 
-use crate::media::audio_loss::OpusLossConcealment;
 use crate::media::dtmf::{DecodedDtmfEvent, DtmfDecoder, TelephoneEventCodec};
 use crate::media::outbound::OutboundAudioRtpWriter;
 
 pub const FRAME_CHANNEL_CAP: usize = 64;
 
-/// Default for `WebRtcConfig::inbound_send_deadline_ms`: how long the inbound
-/// pump waits for room in a full inbound frame queue before it drops the
-/// arriving frame. It is kept below one 10 ms packet period so that a stalled
-/// consumer never slows the RTP reader below the wire rate.
-pub const DEFAULT_INBOUND_SEND_DEADLINE_MS: u64 = 5;
-
-/// Default for `WebRtcConfig::inbound_frame_queue_capacity`: frames held for
-/// a consumer that is not reading (160 ms of 20 ms audio).
-pub const DEFAULT_INBOUND_FRAME_QUEUE_CAPACITY: usize = 8;
+/// Default deadline applied when a caller of `spawn_inbound_pump` does not
+/// provide one. Keep in sync with `WebRtcConfig::inbound_send_deadline_ms`.
+pub const DEFAULT_INBOUND_SEND_DEADLINE_MS: u64 = 200;
 
 /// Default Opus payload type registered in the media engine.
 pub const OPUS_PT_DEFAULT: u8 = 111;
@@ -135,8 +128,7 @@ pub struct WebRtcStatsSnapshot {
     /// MOS estimate (1.0–4.5) derived from jitter + packet loss.
     pub mos: f32,
     /// Frames that the inbound pump had to drop because the downstream
-    /// consumer was too slow (see `WebRtcConfig::inbound_frame_queue_capacity`
-    /// and `WebRtcConfig::inbound_send_deadline_ms`).
+    /// consumer was too slow (see `WebRtcConfig::inbound_send_deadline_ms`).
     pub frames_dropped: u64,
     /// G4 — outbound RTP aggregates (sender side). Always present;
     /// fields are zero until the first outbound stat poll completes.
@@ -372,10 +364,9 @@ fn estimate_mos(jitter_ms: f32, packet_loss_pct: f32) -> f32 {
 
 /// Spawn a task that reads RTP from a remote track into `frames_in`.
 ///
-/// `send_deadline_ms`: bounded send timeout. When `frames_in` is full the
-/// pump waits at most this long for room, then drops the arriving frame and
-/// bumps `InboundStats::frames_dropped`, so a slow downstream consumer
-/// cannot stall the inbound RTP task.
+/// `send_deadline_ms`: bounded send timeout. A slow downstream consumer no
+/// longer stalls the inbound RTP task forever — exceeding the deadline drops
+/// the frame and bumps `InboundStats::frames_dropped`.
 ///
 /// `cancel`: if provided, fires `notify_waiters()` to exit the pump cleanly.
 /// Channel close still exits as before.
@@ -418,10 +409,7 @@ pub(crate) fn spawn_inbound_pump_tracked(
         let _task_guard = task_guard;
         let deadline = Duration::from_millis(send_deadline_ms);
         let mut dtmf_decoder = DtmfDecoder::new(dtmf_codecs);
-        let mut loss_concealment = OpusLossConcealment::default();
-        // (SSRC, payload type, negotiated Opus) of the last audio source.
-        let mut audio_source: Option<(u32, u8, bool)> = None;
-        'receive: loop {
+        loop {
             // Honor cancellation as well as the per-poll timeout.
             let poll = tokio::time::timeout(Duration::from_millis(100), track.poll());
             let event = match &cancel {
@@ -436,7 +424,6 @@ pub(crate) fn spawn_inbound_pump_tracked(
                 TrackRemoteEvent::OnRtpPacket(pkt) => {
                     stats.record_packet();
                     if dtmf_decoder.accepts_payload_type(pkt.header.payload_type) {
-                        loss_concealment.reset();
                         tracing::trace!(
                             payload_type = pkt.header.payload_type,
                             timestamp = pkt.header.timestamp,
@@ -458,69 +445,36 @@ pub(crate) fn spawn_inbound_pump_tracked(
                         continue;
                     }
                     stats.record_media_payload_type(pkt.header.payload_type);
-                    let (ssrc, payload_type) = (pkt.header.ssrc, pkt.header.payload_type);
-                    let negotiated_opus = match audio_source {
-                        Some((known_ssrc, known_pt, opus))
-                            if (known_ssrc, known_pt) == (ssrc, payload_type) =>
-                        {
-                            opus
-                        }
-                        _ => {
-                            let codec = track.codec(ssrc).await;
-                            let opus = codec.as_ref().is_some_and(|codec| {
-                                codec.mime_type.eq_ignore_ascii_case("audio/opus")
-                                    && codec.clock_rate == 48_000
-                            });
-                            // Look the codec up again until the track knows it.
-                            audio_source = codec.map(|_| (ssrc, payload_type, opus));
-                            opus
-                        }
+                    // D4 follow-up — emit codec payload bytes only (no RTP
+                    // header). The orchestrator's `Transcoder` consumes
+                    // codec bytes; the local outbound pump re-wraps with
+                    // a fresh header. Preserve the timestamp in the
+                    // `MediaFrame.timestamp_rtp` field so it survives the
+                    // transcode pass.
+                    let frame = MediaFrame {
+                        stream_id: stream_id.clone(),
+                        kind: rvoip_core::stream::StreamKind::Audio,
+                        payload: pkt.payload.clone(),
+                        timestamp_rtp: pkt.header.timestamp,
+                        captured_at: Utc::now(),
+                        // Gap plan §4.3 — carry the wire RTP payload-type
+                        // so the cross-transport `frame_pump` can route
+                        // RFC 4733 telephone-events (PT 101 by convention)
+                        // distinctly from audio.
+                        payload_type: Some(pkt.header.payload_type),
                     };
-                    // Short, sequence-confirmed Opus loss is forwarded as
-                    // lost-frame indications ahead of this packet so the
-                    // decoder conceals the missing time (see `audio_loss`).
-                    let admission = loss_concealment.admit(&pkt, negotiated_opus);
-                    if admission.discard {
-                        continue;
-                    }
-                    let concealed = admission
-                        .concealment
-                        .into_iter()
-                        .flat_map(|run| run.frames());
-                    let received = std::iter::once((pkt.header.timestamp, pkt.payload.clone()));
-                    for (timestamp_rtp, payload) in concealed.chain(received) {
-                        // D4 follow-up — emit codec payload bytes only (no RTP
-                        // header). The orchestrator's `Transcoder` consumes
-                        // codec bytes; the local outbound pump re-wraps with
-                        // a fresh header. Preserve the timestamp in the
-                        // `MediaFrame.timestamp_rtp` field so it survives the
-                        // transcode pass.
-                        let frame = MediaFrame {
-                            stream_id: stream_id.clone(),
-                            kind: rvoip_core::stream::StreamKind::Audio,
-                            payload,
-                            timestamp_rtp,
-                            captured_at: Utc::now(),
-                            // Gap plan §4.3 — carry the wire RTP payload-type
-                            // so the cross-transport `frame_pump` can route
-                            // RFC 4733 telephone-events (PT 101 by convention)
-                            // distinctly from audio.
-                            payload_type: Some(payload_type),
-                        };
-                        match tokio::time::timeout(deadline, frames_in_tx.send(frame)).await {
-                            Ok(Ok(())) => {}
-                            Ok(Err(_)) => break 'receive, // downstream dropped — stop pumping
-                            Err(_) => {
-                                // Slow consumer; drop the frame and count it.
-                                let dropped =
-                                    stats.frames_dropped.fetch_add(1, Ordering::Relaxed) + 1;
-                                if dropped.is_power_of_two() {
-                                    warn!(
-                                        dropped,
-                                        deadline_ms = send_deadline_ms,
-                                        "inbound media pump dropped frame (slow consumer)"
-                                    );
-                                }
+                    match tokio::time::timeout(deadline, frames_in_tx.send(frame)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => break, // downstream dropped — stop pumping
+                        Err(_) => {
+                            // Slow consumer; drop the frame and count it.
+                            let dropped = stats.frames_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                            if dropped.is_power_of_two() {
+                                warn!(
+                                    dropped,
+                                    deadline_ms = send_deadline_ms,
+                                    "inbound media pump dropped frame (slow consumer)"
+                                );
                             }
                         }
                     }
@@ -725,175 +679,5 @@ mod tests {
         let mut wire_like = raw_codec.clone();
         assert!(rtp::Packet::unmarshal(&mut wire_like).is_ok());
         assert_eq!(&raw_codec[12..], &[0xF8, 0xFF, 0xFE]);
-    }
-
-    mod loss_concealment {
-        use super::*;
-        use async_trait::async_trait;
-        use rtc::media_stream::{
-            MediaStreamId, MediaStreamTrackId, MediaStreamTrackState, MediaTrackCapabilities,
-            MediaTrackConstraints, MediaTrackSettings,
-        };
-        use rtc::rtp_transceiver::rtp_sender::{
-            RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters, RtpCodecKind,
-        };
-        use rtc::rtp_transceiver::RtpStreamId;
-        use webrtc::media_stream::{MediaStreamTrack, Track};
-
-        /// Remote track fed by the test. Like the peer-connection driver, the
-        /// producer `try_send`s into a bounded event queue and loses packets
-        /// when the inbound pump does not keep up.
-        struct ScriptedRemoteTrack {
-            track: parking_lot::Mutex<MediaStreamTrack>,
-            events: tokio::sync::Mutex<mpsc::Receiver<TrackRemoteEvent>>,
-        }
-
-        impl ScriptedRemoteTrack {
-            fn opus(ssrc: u32, capacity: usize) -> (Arc<Self>, mpsc::Sender<TrackRemoteEvent>) {
-                let (tx, rx) = mpsc::channel(capacity);
-                let track = MediaStreamTrack::new(
-                    "remote-stream".into(),
-                    "remote-audio".into(),
-                    "remote-audio".into(),
-                    RtpCodecKind::Audio,
-                    vec![RTCRtpEncodingParameters {
-                        rtp_coding_parameters: RTCRtpCodingParameters {
-                            ssrc: Some(ssrc),
-                            ..Default::default()
-                        },
-                        codec: RTCRtpCodec {
-                            mime_type: "audio/opus".into(),
-                            clock_rate: 48_000,
-                            channels: 2,
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }],
-                );
-                let remote = Arc::new(Self {
-                    track: parking_lot::Mutex::new(track),
-                    events: tokio::sync::Mutex::new(rx),
-                });
-                (remote, tx)
-            }
-        }
-
-        #[async_trait]
-        impl Track for ScriptedRemoteTrack {
-            async fn stream_id(&self) -> MediaStreamId {
-                self.track.lock().stream_id().to_owned()
-            }
-            async fn track_id(&self) -> MediaStreamTrackId {
-                self.track.lock().track_id().to_owned()
-            }
-            async fn label(&self) -> String {
-                self.track.lock().label().to_owned()
-            }
-            async fn kind(&self) -> RtpCodecKind {
-                self.track.lock().kind()
-            }
-            async fn rid(&self, ssrc: u32) -> Option<RtpStreamId> {
-                self.track.lock().rid(ssrc).cloned()
-            }
-            async fn codec(&self, ssrc: u32) -> Option<RTCRtpCodec> {
-                self.track.lock().codec(ssrc).cloned()
-            }
-            async fn ssrcs(&self) -> Vec<u32> {
-                self.track.lock().ssrcs().collect()
-            }
-            async fn enabled(&self) -> bool {
-                self.track.lock().enabled()
-            }
-            async fn set_enabled(&self, enabled: bool) {
-                self.track.lock().set_enabled(enabled);
-            }
-            async fn muted(&self) -> bool {
-                self.track.lock().muted()
-            }
-            async fn set_muted(&self, muted: bool) {
-                self.track.lock().set_muted(muted);
-            }
-            async fn ready_state(&self) -> MediaStreamTrackState {
-                self.track.lock().ready_state()
-            }
-            async fn stop(&self) {
-                self.track.lock().stop();
-            }
-            async fn get_capabilities(&self) -> MediaTrackCapabilities {
-                self.track.lock().get_capabilities().clone()
-            }
-            async fn get_constraints(&self) -> MediaTrackConstraints {
-                self.track.lock().get_constraints().clone()
-            }
-            async fn get_settings(&self) -> MediaTrackSettings {
-                self.track.lock().get_settings().clone()
-            }
-            async fn apply_constraints(&self, constraints: Option<MediaTrackConstraints>) {
-                self.track.lock().apply_constraints(constraints);
-            }
-            async fn codings(&self) -> Vec<RTCRtpEncodingParameters> {
-                self.track.lock().codings().to_vec()
-            }
-            async fn add_coding(&self, coding: RTCRtpEncodingParameters) {
-                self.track.lock().add_coding(coding);
-            }
-        }
-
-        #[async_trait]
-        impl TrackRemote for ScriptedRemoteTrack {
-            async fn write_rtcp(
-                &self,
-                _packets: Vec<Box<dyn rtc::rtcp::Packet>>,
-            ) -> webrtc::error::Result<()> {
-                Ok(())
-            }
-
-            async fn poll(&self) -> Option<TrackRemoteEvent> {
-                self.events.lock().await.recv().await
-            }
-        }
-
-        const REMOTE_SSRC: u32 = 0x0a0b_0c0d;
-
-        #[tokio::test]
-        async fn short_opus_gap_is_concealed_before_the_next_frame() {
-            let (remote, events) = ScriptedRemoteTrack::opus(REMOTE_SSRC, 64);
-            let (frames_tx, mut frames_rx) = mpsc::channel(64);
-            let pump = spawn_inbound_pump(
-                remote,
-                StreamId::new(),
-                frames_tx,
-                Arc::new(InboundStats::default()),
-                DEFAULT_INBOUND_SEND_DEADLINE_MS,
-                None,
-                None,
-            );
-            // 102 and 103 are lost and 102 then arrives late; 105..=110
-            // (six packets) are lost.
-            for (sequence, frame) in [(100u16, 0u32), (101, 1), (104, 4), (102, 2), (111, 11)] {
-                events
-                    .send(TrackRemoteEvent::OnRtpPacket(silent_rtp_packet_for_ssrc(
-                        REMOTE_SSRC,
-                        sequence,
-                        frame * 960,
-                    )))
-                    .await
-                    .unwrap();
-            }
-            events.send(TrackRemoteEvent::OnEnded).await.unwrap();
-
-            let mut received = Vec::new();
-            while let Some(frame) = frames_rx.recv().await {
-                received.push((frame.timestamp_rtp / 960, frame.payload.len()));
-            }
-            pump.await.unwrap();
-            // Silent Opus frames are three bytes; a lost-frame indication is
-            // the one-byte TOC.
-            assert_eq!(
-                received,
-                vec![(0, 3), (1, 3), (2, 1), (3, 1), (4, 3), (11, 3)],
-                "(frame, payload bytes) forwarded by the inbound pump"
-            );
-        }
     }
 }

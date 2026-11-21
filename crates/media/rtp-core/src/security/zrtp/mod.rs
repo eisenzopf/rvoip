@@ -10,11 +10,10 @@ use crate::security::SecurityKeyExchange;
 use crate::srtp::crypto::SrtpCryptoKey;
 use crate::srtp::{SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
 use crate::Error;
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, Mac};
 use p256::ecdh::EphemeralSecret;
-use p256::elliptic_curve::Generate;
 use p256::PublicKey;
-use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
+use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 
 pub mod hash;
@@ -208,7 +207,7 @@ impl Zrtp {
     pub fn new(config: ZrtpConfig, role: ZrtpRole) -> Self {
         // Generate random ZID
         let mut zid = [0u8; 12];
-        UnwrapErr(SysRng).fill_bytes(&mut zid);
+        OsRng.fill_bytes(&mut zid);
 
         Self {
             config,
@@ -391,11 +390,11 @@ impl Zrtp {
 
         // Generate DH key pair based on selected key agreement
         if self.selected_key_agreement == Some(ZrtpKeyAgreement::EC25) {
-            self.dh_key = Some(EphemeralSecret::generate());
+            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
         } else {
             // Fallback to default EC25 for now
             // In a full implementation, we'd support all key agreement methods
-            self.dh_key = Some(EphemeralSecret::generate());
+            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
         }
 
         // Update state
@@ -419,10 +418,10 @@ impl Zrtp {
 
         // Generate DH key pair based on selected key agreement
         if self.selected_key_agreement == Some(ZrtpKeyAgreement::EC25) {
-            self.dh_key = Some(EphemeralSecret::generate());
+            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
         } else {
             // Fallback to default EC25 for now
-            self.dh_key = Some(EphemeralSecret::generate());
+            self.dh_key = Some(EphemeralSecret::random(&mut OsRng));
         }
 
         // Create DH Part 1

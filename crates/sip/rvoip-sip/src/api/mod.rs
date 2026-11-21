@@ -325,21 +325,21 @@ pub use crate::types::CallState;
 
 // Re-export the unified API
 pub use unified::{
-    Config, DtlsActpassAnswerRole, DtlsSetupRole, MediaExecutorConfig, MediaExecutorMode,
-    MediaLanes, MediaMode, MediaRuntimeConfig, MediaSessionControllerConfig, RegistrationHandle,
-    RegistrationInfo, RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig,
-    SdesBase64Mode, SessionCleanupConfig, SipContactMode, SipNatConfig, SipRuntimeConfig,
-    SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy, SymmetricRtpPolicy, UnifiedCoordinator,
+    Config, DtlsSetupRole, MediaExecutorConfig, MediaExecutorMode, MediaLanes, MediaMode,
+    MediaRuntimeConfig, MediaSessionControllerConfig, RegistrationHandle, RegistrationInfo,
+    RegistrationStatus, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
+    SessionCleanupConfig, SipContactMode, SipNatConfig, SipRuntimeConfig, SipTlsMode,
+    SrtpKeyingMode, SrtpSuitePolicy, SymmetricRtpPolicy, UnifiedCoordinator,
 };
 
 // Re-export event types
 pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
 pub use dialog_subscription::DialogSubscriptionHandle;
 pub use events::{
-    CallAuthRetryDetails, CallId, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityFailure,
-    MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, RenegotiationFailure,
-    SdesNegotiationFailure, SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState,
-    TransferKind, TransferTargetEvidence,
+    CallAuthRetryDetails, CallId, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityKeying,
+    MediaSecurityProfile, MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure,
+    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
+    TransferTargetEvidence,
 };
 
 // Re-export builder

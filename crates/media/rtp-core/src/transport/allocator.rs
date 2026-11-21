@@ -13,7 +13,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
 
-use super::validation::{bind_media_udp_socket, PlatformSocketStrategy, PlatformType};
+use super::validation::{PlatformSocketStrategy, PlatformType};
 use crate::error::Error;
 use crate::Result;
 
@@ -1317,7 +1317,7 @@ impl PortAllocator {
     /// This applies the platform-specific socket settings
     pub async fn create_validated_socket(&self, addr: SocketAddr) -> Result<UdpSocket> {
         // Bind socket
-        let socket = bind_media_udp_socket(addr)
+        let socket = UdpSocket::bind(addr)
             .await
             .map_err(|e| Error::Transport(format!("Failed to bind socket to {}: {}", addr, e)))?;
 
@@ -1498,10 +1498,10 @@ impl PortAllocator {
 
     /// Get a random port from the configured range
     async fn get_random_port(&self) -> u16 {
-        use rand::RngExt;
+        use rand::Rng;
 
         let range_size = self.config.port_range_end - self.config.port_range_start + 1;
-        let offset = rand::rng().random_range(0..range_size);
+        let offset = rand::thread_rng().gen_range(0..range_size);
 
         self.config.port_range_start + offset
     }

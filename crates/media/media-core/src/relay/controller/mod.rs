@@ -17,8 +17,8 @@
 //! Use `set_audio_muted()` and `is_audio_muted()` for muting functionality.
 
 use dashmap::DashMap;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, trace, warn};
@@ -1295,31 +1295,6 @@ fn verify_dtls_fingerprint(actual: [u8; 32], expected: [u8; 32]) -> Result<()> {
     Ok(())
 }
 
-/// Directional SRTP contexts from one completed DTLS-SRTP handshake
-/// (RFC 5764 §4.2): the DTLS client protects with the client write key and
-/// the server with the server write key; each side opens the other's.
-#[cfg(feature = "dtls-srtp")]
-fn dtls_srtp_contexts(
-    result: &rtp_core::dtls_srtp::DtlsSrtpHandshakeResult,
-    role: DtlsRole,
-) -> Result<(rtp_core::srtp::SrtpContext, rtp_core::srtp::SrtpContext)> {
-    let (send_key, recv_key) = match role {
-        DtlsRole::Client => (
-            result.client_write_key.clone(),
-            result.server_write_key.clone(),
-        ),
-        DtlsRole::Server => (
-            result.server_write_key.clone(),
-            result.client_write_key.clone(),
-        ),
-    };
-    let send_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), send_key)
-        .map_err(|e| Error::config(format!("building DTLS-SRTP send context: {e}")))?;
-    let recv_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), recv_key)
-        .map_err(|e| Error::config(format!("building DTLS-SRTP recv context: {e}")))?;
-    Ok((send_ctx, recv_ctx))
-}
-
 /// Releases a media-controller port reservation if `start_media` is cancelled
 /// before ownership is committed to the controller maps.
 struct MediaPortReservationGuard {
@@ -1436,7 +1411,7 @@ mod tests;
 
 // Re-export important types
 pub use audio_generation::{AudioSource, AudioTransmitterConfig};
-pub use bridge::{BridgeError, BridgeHandle, BridgeMode, TranscodeBridgeStats};
+pub use bridge::{BridgeError, BridgeHandle};
 pub use inline_rx::{
     inline_rx_counters, InlineAudioConsumer, InlineAudioConsumerGuard, InlineAudioDelivery,
     InlineRxCounters,
@@ -1444,13 +1419,12 @@ pub use inline_rx::{
 pub use rtp_management::{EncodedG711Format, G711SendNow, PreparedG711Sender};
 pub use types::{
     AdvancedProcessorConfig, AdvancedProcessorSet, MediaConfig, MediaSessionEvent,
-    MediaSessionInfo, MediaSessionStatus, TelephoneEventFormat, AMR_DTX_PARAMETER,
-    NEGOTIATED_FMTP_PARAMETER, REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER,
-    RTCP_REDUCED_MINIMUM_PARAMETER, RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
-    TELEPHONE_EVENT_PARAMETER,
+    MediaSessionInfo, MediaSessionStatus, AMR_DTX_PARAMETER, NEGOTIATED_FMTP_PARAMETER,
+    REMOTE_RTCP_ADDR_PARAMETER, RTCP_MUX_PARAMETER, RTCP_REDUCED_MINIMUM_PARAMETER,
+    RTCP_SEPARATE_PORT_PARAMETER, RTCP_XR_PARAMETER,
 };
 
-use types::{DialogTxGate, RtpSessionWrapper, SecureKeyingState};
+use types::{DialogTxGate, RtpSessionWrapper};
 
 #[cfg(feature = "memory-diagnostics")]
 fn spawn_memory_tracked<F>(kind: &'static str, future: F) -> tokio::task::JoinHandle<F::Output>
@@ -1669,10 +1643,9 @@ fn deliver_due_audio_frame(
                     || state.decoded_audio_frame_count == 100
                     || state.decoded_audio_frame_count == 101
                 {
-                    trace!(
+                    info!(
                         "✅ Sent decoded audio frame #{} to callback for dialog {}",
-                        state.decoded_audio_frame_count,
-                        dialog_id
+                        state.decoded_audio_frame_count, dialog_id
                     );
                 }
             }
@@ -1738,11 +1711,6 @@ pub struct MediaSessionController {
     session_to_media: Arc<DashMap<String, MediaSessionId>>,
     /// Media to session mapping
     media_to_session: Arc<DashMap<MediaSessionId, String>>,
-    /// Every forward alias currently bound to each media id, so cleanup
-    /// visits only that media's aliases instead of scanning every active
-    /// session. Mapping writers and cleanup commit under this lock; lookups
-    /// stay on the DashMaps.
-    session_mapping_owners: Arc<Mutex<HashMap<MediaSessionId, HashSet<String>>>>,
     /// Audio mixer for conference calls
     pub(super) audio_mixer: Option<Arc<AudioMixer>>,
     /// Conference mixing configuration
@@ -1805,10 +1773,6 @@ pub struct MediaSessionController {
     /// Both directions are stored so lookup is O(1) from either end. Cleared
     /// on `BridgeHandle` drop or `stop_media` of a bridged session.
     pub(super) bridge_partners: Arc<DashMap<DialogId, DialogId>>,
-    /// Bridge mode per bridged dialog. Only transcode bridges register here;
-    /// relay bridges are identified by the absence of an entry (relay is the
-    /// historical default and needs no guard bypass).
-    pub(super) bridge_modes: Arc<DashMap<DialogId, bridge::BridgeMode>>,
 
     /// Sprint 3.6 C1 follow-up — RFC 3389 comfort-noise gate state per
     /// dialog. Lazily populated on first audio frame for sessions
@@ -1976,7 +1940,6 @@ impl MediaSessionController {
             event_hub: Arc::new(RwLock::new(None)),
             session_to_media: Arc::new(DashMap::with_capacity(capacity_hint)),
             media_to_session: Arc::new(DashMap::with_capacity(capacity_hint)),
-            session_mapping_owners: Arc::new(Mutex::new(HashMap::with_capacity(capacity_hint))),
             audio_mixer: None,
             conference_config: ConferenceMixingConfig::default(),
             conference_event_tx,
@@ -1995,7 +1958,6 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::with_capacity(capacity_hint)),
-            bridge_modes: Arc::new(DashMap::with_capacity(capacity_hint)),
             cn_gate_state: Arc::new(DashMap::with_capacity(capacity_hint)),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
@@ -2047,29 +2009,8 @@ impl MediaSessionController {
 
     /// Store session to media mapping
     pub fn store_session_mapping(&self, session_id: String, media_id: MediaSessionId) {
-        let mut owners = self
-            .session_mapping_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(previous_media) = self
-            .session_to_media
-            .insert(session_id.clone(), media_id.clone())
-        {
-            if previous_media != media_id {
-                if let Some(previous_owners) = owners.get_mut(&previous_media) {
-                    previous_owners.remove(&session_id);
-                    if previous_owners.is_empty() {
-                        owners.remove(&previous_media);
-                    }
-                }
-            }
-        }
-        owners
-            .entry(media_id.clone())
-            .or_default()
-            .insert(session_id.clone());
-        // The previous media keeps its reverse entry until its own cleanup,
-        // so callers can still resolve the retiring media's session.
+        self.session_to_media
+            .insert(session_id.clone(), media_id.clone());
         self.media_to_session.insert(media_id, session_id);
     }
 
@@ -2327,7 +2268,6 @@ impl MediaSessionController {
             event_hub: Arc::new(RwLock::new(None)),
             session_to_media: Arc::new(DashMap::new()),
             media_to_session: Arc::new(DashMap::new()),
-            session_mapping_owners: Arc::new(Mutex::new(HashMap::new())),
             audio_mixer: Some(audio_mixer),
             conference_config,
             conference_event_tx,
@@ -2346,7 +2286,6 @@ impl MediaSessionController {
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
-            bridge_modes: Arc::new(DashMap::new()),
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             media_directions: Arc::new(DashMap::new()),
@@ -2560,7 +2499,6 @@ impl MediaSessionController {
             audio_transmitter: None,
             transmission_enabled: true, // Enable transmission by default
             is_muted: false,
-            secure_keying: SecureKeyingState::Ready,
             typed_send_handle,
             tx_gate: Arc::new(DialogTxGate::default()),
             #[cfg(feature = "memory-diagnostics")]
@@ -2756,25 +2694,7 @@ impl MediaSessionController {
                 )
             })?;
         udp_transport.require_secure_media();
-        // Outbound audio waits for the handshake's keys. A re-negotiation of
-        // a call that already has keys keeps sending under them.
-        let keys_installed = udp_transport.srtp_enabled().await;
-        drop(session_guard);
-        if !keys_installed {
-            self.set_secure_keying(dialog_id, SecureKeyingState::Pending);
-        }
         Ok(())
-    }
-
-    /// Record where a dialog's media keying stands for the outbound audio
-    /// gate in [`Self::encode_and_send_audio`].
-    #[cfg(feature = "dtls-srtp")]
-    fn set_secure_keying(&self, dialog_id: &DialogId, state: SecureKeyingState) {
-        if let Some(mut wrapper) = self.rtp_sessions.get_mut(dialog_id) {
-            wrapper.secure_keying = state;
-            // A prepared G.711 sender bypasses this gate; invalidate it.
-            wrapper.tx_gate.bump();
-        }
     }
 
     /// Run a real DTLS-SRTP handshake (RFC 5764) for a dialog's RTP session
@@ -2790,42 +2710,6 @@ impl MediaSessionController {
     /// by SIP/SDP. It is checked before any SRTP context is installed.
     #[cfg(feature = "dtls-srtp")]
     pub async fn run_dtls_handshake_and_install(
-        &self,
-        dialog_id: &DialogId,
-        identity: rtp_core::dtls_srtp::DtlsIdentity,
-        role: DtlsRole,
-        remote_addr: std::net::SocketAddr,
-        expected_remote_fingerprint_sha256: [u8; 32],
-        srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
-        timeout: std::time::Duration,
-    ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
-        let outcome = self
-            .run_dtls_handshake_and_install_inner(
-                dialog_id,
-                identity,
-                role,
-                remote_addr,
-                expected_remote_fingerprint_sha256,
-                srtp_profiles,
-                timeout,
-            )
-            .await;
-        // Outbound audio was waiting on this handshake: release it, or make
-        // every later send fail with the reason instead of dropping frames
-        // forever.
-        self.set_secure_keying(
-            dialog_id,
-            match &outcome {
-                Ok(_) => SecureKeyingState::Ready,
-                Err(error) => SecureKeyingState::Failed(error.to_string()),
-            },
-        );
-        outcome
-    }
-
-    #[cfg(feature = "dtls-srtp")]
-    #[allow(clippy::too_many_arguments)]
-    async fn run_dtls_handshake_and_install_inner(
         &self,
         dialog_id: &DialogId,
         identity: rtp_core::dtls_srtp::DtlsIdentity,
@@ -2853,14 +2737,7 @@ impl MediaSessionController {
                             .to_string(),
                     )
                 })?;
-            // Do not overwrite an ICE-nominated remote address with the
-            // SDP default. ICE retargets the RTP transport as soon as a pair
-            // is nominated; DTLS must send its handshake replies to that same
-            // nominated address or Chrome never sees ServerHello. Keep the
-            // SDP address only as a fallback for non-ICE calls.
-            if udp_transport.remote_rtp_addr().await.is_none() {
-                udp_transport.set_remote_rtp_addr(remote_addr).await;
-            }
+            udp_transport.set_remote_rtp_addr(remote_addr).await;
             udp_transport
                 .dtls_conn_adapter()
                 .map_err(|e| Error::config(format!("dtls_conn_adapter: {e}")))?
@@ -2890,136 +2767,25 @@ impl MediaSessionController {
             expected_remote_fingerprint_sha256,
         )?;
 
-        let (send_ctx, recv_ctx) = dtls_srtp_contexts(&result, role)?;
+        let (send_key, recv_key) = match role {
+            DtlsRole::Client => (
+                result.client_write_key.clone(),
+                result.server_write_key.clone(),
+            ),
+            DtlsRole::Server => (
+                result.server_write_key.clone(),
+                result.client_write_key.clone(),
+            ),
+        };
+        let send_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), send_key)
+            .map_err(|e| Error::config(format!("building DTLS-SRTP send context: {e}")))?;
+        let recv_ctx = rtp_core::srtp::SrtpContext::new(result.profile.clone(), recv_key)
+            .map_err(|e| Error::config(format!("building DTLS-SRTP recv context: {e}")))?;
 
         self.install_srtp_contexts(dialog_id, send_ctx, recv_ctx)
             .await?;
         info!("Installed DTLS-SRTP contexts on dialog {}", dialog_id);
 
-        Ok(result)
-    }
-
-    /// Latch a dialog's separate RTCP socket into keying of its own, for
-    /// DTLS-SRTP without RTP/RTCP multiplexing (RFC 5764 §4.1). From here on
-    /// RTCP on that socket passes only under the keys
-    /// [`Self::run_rtcp_dtls_handshake_and_install`] installs, and is
-    /// dropped until then. Also latches secure media.
-    ///
-    /// Returns `false`, changing nothing, when the session has no separate
-    /// RTCP socket (it multiplexes, or was started without
-    /// [`RTCP_SEPARATE_PORT_PARAMETER`]).
-    #[cfg(feature = "dtls-srtp")]
-    pub async fn require_rtcp_component_keying(&self, dialog_id: &DialogId) -> Result<bool> {
-        let session_arc = self
-            .rtp_sessions
-            .get(dialog_id)
-            .map(|entry| entry.value().session.clone())
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        let session_guard = session_arc.lock().await;
-        let transport = session_guard.transport();
-        let udp_transport = transport
-            .as_any()
-            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
-            .ok_or_else(|| {
-                Error::config(
-                    "require_rtcp_component_keying: RTP session is not a UdpRtpTransport"
-                        .to_string(),
-                )
-            })?;
-        Ok(udp_transport.require_rtcp_component_keying())
-    }
-
-    /// Run the RTCP component's own DTLS-SRTP handshake on a dialog's
-    /// separate RTCP socket and install the SRTCP keys it derives there
-    /// (RFC 5764 §4.1).
-    ///
-    /// Without RTP/RTCP multiplexing each component carries its own DTLS
-    /// association on its own 5-tuple. This one runs from the local RTCP
-    /// port to the peer's RTCP address (its `a=rtcp:` address, or its RTP
-    /// port + 1), with the same `role` and certificate (`identity`, a clone
-    /// of the one the RTP handshake uses) and the same expected
-    /// fingerprint, because one `a=setup` and one `a=fingerprint` cover the
-    /// whole media section. Keys map to directions as for RTP: the DTLS
-    /// client sends under the client write key. Call
-    /// [`Self::require_rtcp_component_keying`] first.
-    ///
-    /// On error nothing is installed and the RTCP port stays closed to
-    /// RTCP; RTP keyed by [`Self::run_dtls_handshake_and_install`] is not
-    /// affected.
-    #[cfg(feature = "dtls-srtp")]
-    pub async fn run_rtcp_dtls_handshake_and_install(
-        &self,
-        dialog_id: &DialogId,
-        identity: rtp_core::dtls_srtp::DtlsIdentity,
-        role: DtlsRole,
-        expected_remote_fingerprint_sha256: [u8; 32],
-        srtp_profiles: Vec<rtp_core::dtls_srtp::SrtpProtectionProfile>,
-        timeout: std::time::Duration,
-    ) -> Result<rtp_core::dtls_srtp::DtlsSrtpHandshakeResult> {
-        let session_arc = self
-            .rtp_sessions
-            .get(dialog_id)
-            .map(|entry| entry.value().session.clone())
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-        let conn = {
-            let session_guard = session_arc.lock().await;
-            let transport = session_guard.transport();
-            let udp_transport = transport
-                .as_any()
-                .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
-                .ok_or_else(|| {
-                    Error::config(
-                        "run_rtcp_dtls_handshake_and_install: RTP session is not a UdpRtpTransport"
-                            .to_string(),
-                    )
-                })?;
-            if !udp_transport.rtcp_component_keying_required() {
-                return Err(Error::config(
-                    "the RTCP component is not latched for its own DTLS-SRTP keys".to_string(),
-                ));
-            }
-            udp_transport
-                .dtls_rtcp_conn_adapter()
-                .map_err(|e| Error::config(format!("dtls_rtcp_conn_adapter: {e}")))?
-        };
-
-        let handshake = async {
-            match role {
-                DtlsRole::Client => {
-                    rtp_core::dtls_srtp::handshake_client(conn, identity, srtp_profiles).await
-                }
-                DtlsRole::Server => {
-                    rtp_core::dtls_srtp::handshake_server(conn, identity, srtp_profiles).await
-                }
-            }
-        };
-        let result = tokio::time::timeout(timeout, handshake)
-            .await
-            .map_err(|_| Error::config("RTCP DTLS-SRTP handshake timed out".to_string()))?
-            .map_err(|e| Error::config(format!("RTCP DTLS-SRTP handshake failed: {e}")))?;
-        verify_dtls_fingerprint(
-            result.remote_fingerprint_sha256,
-            expected_remote_fingerprint_sha256,
-        )?;
-        let (send_ctx, recv_ctx) = dtls_srtp_contexts(&result, role)?;
-
-        let session_guard = session_arc.lock().await;
-        session_guard
-            .transport()
-            .as_any()
-            .downcast_ref::<rtp_core::transport::UdpRtpTransport>()
-            .ok_or_else(|| {
-                Error::config(
-                    "run_rtcp_dtls_handshake_and_install: RTP session is not a UdpRtpTransport"
-                        .to_string(),
-                )
-            })?
-            .install_rtcp_component_srtp_contexts(send_ctx, recv_ctx)
-            .map_err(|e| Error::config(format!("installing RTCP component SRTCP keys: {e}")))?;
-        info!(
-            "Installed RTCP-component DTLS-SRTP contexts on dialog {}",
-            dialog_id
-        );
         Ok(result)
     }
 
@@ -3037,10 +2803,6 @@ impl MediaSessionController {
         self.retire_inline_lease(dialog_id);
 
         let media_id = MediaSessionId::from_dialog(dialog_id);
-        let mut owners = self
-            .session_mapping_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some((_, session_id)) = self.media_to_session.remove(&media_id) {
             // A raw session identifier can be rebound to a newer media
             // generation before delayed cleanup of the old reverse entry is
@@ -3050,12 +2812,20 @@ impl MediaSessionController {
                 .remove_if(&session_id, |_, mapped| mapped == &media_id);
         }
 
-        // Only this media's own aliases, never a scan of every session.
-        if let Some(session_ids) = owners.remove(&media_id) {
-            for session_id in session_ids {
-                self.session_to_media
-                    .remove_if(&session_id, |_, mapped| mapped == &media_id);
-            }
+        let stale_session_ids: Vec<String> = self
+            .session_to_media
+            .iter()
+            .filter_map(|entry| {
+                if entry.value() == &media_id {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for session_id in stale_session_ids {
+            self.session_to_media
+                .remove_if(&session_id, |_, mapped| mapped == &media_id);
         }
     }
 
@@ -3365,20 +3135,6 @@ impl MediaSessionController {
         }
 
         Ok(())
-    }
-
-    /// Whether a media session is published for `dialog_id`, without
-    /// sampling RTP statistics (which locks the RTP session).
-    pub fn has_media_session(&self, dialog_id: &DialogId) -> bool {
-        self.sessions.contains_key(dialog_id)
-    }
-
-    /// The published configuration of a media session, without sampling RTP
-    /// statistics (which locks the RTP session).
-    pub fn get_session_config(&self, dialog_id: &DialogId) -> Option<MediaConfig> {
-        self.sessions
-            .get(dialog_id)
-            .map(|entry| entry.value().config.clone())
     }
 
     /// Get information about a media session

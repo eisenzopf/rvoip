@@ -6,7 +6,6 @@
 // via-branch = "branch" EQUAL token
 // via-extension = generic-param
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while_m_n},
@@ -33,7 +32,7 @@ use crate::types::uri::Host as UriHost;
 fn via_ttl(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
         preceded(
-            pair(tag_no_case(&b"ttl"[..]), equal),
+            pair(tag_no_case(b"ttl"), equal),
             take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
         ),
         |b| {
@@ -48,8 +47,7 @@ fn via_ttl(input: &[u8]) -> ParseResult<'_, Param> {
             let capped_ttl = if parsed > 255 { 255 } else { parsed as u8 };
             Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Ttl(capped_ttl))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parser for the maddr parameter of a Via header (RFC 3261 Section 20.42)
@@ -57,73 +55,61 @@ fn via_ttl(input: &[u8]) -> ParseResult<'_, Param> {
 /// Example: maddr=example.com
 fn via_maddr(input: &[u8]) -> ParseResult<'_, Param> {
     map_res(
-        preceded(pair(tag_no_case(&b"maddr"[..]), equal), host),
+        preceded(pair(tag_no_case(b"maddr"), equal), host),
         |h: UriHost| {
-            // maddr = host: an IPv6 address keeps its IPv6reference form.
-            let host = match h {
-                UriHost::Address(std::net::IpAddr::V6(address)) => format!("[{address}]"),
-                other => other.to_string(),
-            };
-            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Maddr(host))
+            // Convert the host to a string representation for the Param
+            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Maddr(h.to_string()))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
-/// Parser for the received parameter of a Via header.
-///
-/// via-received = "received" EQUAL (IPv4address / IPv6address) (RFC 3261
-/// §20.42): an IPv6 address without "[" "]". RFC 5118 §4.5 requires
-/// accepting it with or without the delimiters; it is always sent without.
+/// Parser for the received parameter of a Via header (RFC 3261 Section 20.42)
+/// received is an IPv4address or IPv6address
+/// Example: received=192.0.2.1
 fn via_received(input: &[u8]) -> ParseResult<'_, Param> {
-    let (rest, _) = pair(tag_no_case(&b"received"[..]), equal).parse(input)?;
-    let (address, rest) = match rest.strip_prefix(b"[") {
-        Some(inner) => {
-            let close = inner.iter().position(|&c| c == b']').ok_or_else(|| {
-                nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Char))
-            })?;
-            (&inner[..close], &inner[close + 1..])
-        }
-        None => {
-            let length = rest
-                .iter()
-                .take_while(|&&c| c.is_ascii_hexdigit() || c == b':' || c == b'.')
-                .count();
-            (&rest[..length], &rest[length..])
-        }
-    };
-    let ip = str::from_utf8(address)
-        .ok()
-        .and_then(|text| text.parse::<std::net::IpAddr>().ok())
-        .ok_or_else(|| nom::Err::Error(NomError::from_error_kind(input, ErrorKind::Tag)))?;
-    Ok((rest, Param::Received(ip)))
+    map_res(
+        preceded(pair(tag_no_case(b"received"), equal), host), // host parser handles IPs
+        |h: UriHost| {
+            match h {
+                UriHost::Address(ip) => Ok(Param::Received(ip)),
+                UriHost::Domain(domain) => {
+                    // Try to convert domain to IP if possible
+                    if let Ok(ip) = domain.parse::<std::net::IpAddr>() {
+                        Ok(Param::Received(ip))
+                    } else {
+                        // Invalid received parameter - must be an IP address
+                        Err(nom::Err::Failure(NomError::from_error_kind(
+                            input,
+                            ErrorKind::Tag,
+                        )))
+                    }
+                }
+            }
+        },
+    )(input)
 }
 
 /// Parser for the branch parameter of a Via header (RFC 3261 Section 20.42)
 /// branch is a token value, must start with z9hG4bK for RFC 3261 compliant requests
 /// Example: branch=z9hG4bK776asdhds
 fn via_branch(input: &[u8]) -> ParseResult<'_, Param> {
-    map_res(
-        preceded(pair(tag_no_case(&b"branch"[..]), equal), token),
-        |b| {
-            let branch_str = str::from_utf8(b)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?
-                .to_string();
+    map_res(preceded(pair(tag_no_case(b"branch"), equal), token), |b| {
+        let branch_str = str::from_utf8(b)
+            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?
+            .to_string();
 
-            // Note: RFC 3261 compliant branch parameter must start with magic cookie z9hG4bK
-            // But we don't enforce this at parse time to allow parsing legacy implementations
+        // Note: RFC 3261 compliant branch parameter must start with magic cookie z9hG4bK
+        // But we don't enforce this at parse time to allow parsing legacy implementations
 
-            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Branch(branch_str))
-        },
-    )
-    .parse(input)
+        Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Branch(branch_str))
+    })(input)
 }
 
 /// Parser for the rport parameter of a Via header (RFC 3261 Section 18.2.1)
 /// rport can be a flag or have a port value in responses
 /// Examples: rport (request) or rport=5060 (response)
 fn via_rport(input: &[u8]) -> ParseResult<'_, Param> {
-    let (input, _) = tag_no_case(&b"rport"[..])(input)?;
+    let (input, _) = tag_no_case(b"rport")(input)?;
     let (input, port_val) = opt(preceded(
         equal,
         map_res(digit1, |b| {
@@ -135,8 +121,7 @@ fn via_rport(input: &[u8]) -> ParseResult<'_, Param> {
             })?;
             Ok::<u16, nom::Err<NomError<&[u8]>>>(port)
         }),
-    ))
-    .parse(input)?;
+    ))(input)?;
 
     Ok((input, Param::Rport(port_val)))
 }
@@ -152,8 +137,7 @@ pub fn via_param_item(input: &[u8]) -> ParseResult<'_, Param> {
         via_branch,
         via_rport,
         generic_param, // Fallback for any other parameter (must be last)
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // The list parsing *( SEMI via-params ) should happen in the main via parser (via/mod.rs)

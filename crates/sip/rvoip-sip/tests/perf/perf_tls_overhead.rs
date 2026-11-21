@@ -354,7 +354,6 @@ fn read_udp_baseline_delta(
     })
 }
 
-#[cfg_attr(debug_assertions, ignore = "requires --release")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn perf_tls_overhead() {
     let points = parse_sweep_env("RVOIP_PERF_SWEEP_TLS_CPS").unwrap_or_else(|| {
