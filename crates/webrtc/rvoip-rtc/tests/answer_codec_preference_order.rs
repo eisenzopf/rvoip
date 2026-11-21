@@ -1,7 +1,6 @@
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
-use std::time::Instant;
 
 fn audio_formats(sdp: &str) -> Vec<String> {
     sdp.lines()
@@ -21,7 +20,7 @@ fn answer_preserves_remote_audio_codec_preference_order() {
         .expect("register offer codecs");
     let mut offerer = RTCPeerConnectionBuilder::new()
         .with_media_engine(offer_media)
-        .build(Instant::now())
+        .build()
         .expect("build offerer");
     offerer
         .add_transceiver_from_kind(RtpCodecKind::Audio, None)
@@ -33,16 +32,16 @@ fn answer_preserves_remote_audio_codec_preference_order() {
         .expect("register answer codecs");
     let mut answerer = RTCPeerConnectionBuilder::new()
         .with_media_engine(answer_media)
-        .build(Instant::now())
+        .build()
         .expect("build answerer");
 
     let offer = offerer.create_offer(None).expect("create offer");
     let offered_formats = audio_formats(&offer.sdp);
     offerer
-        .set_local_description(Instant::now(), offer.clone())
+        .set_local_description(offer.clone())
         .expect("set offer locally");
     answerer
-        .set_remote_description(Instant::now(), offer)
+        .set_remote_description(offer)
         .expect("set remote offer");
 
     let answer = answerer.create_answer(None).expect("create answer");

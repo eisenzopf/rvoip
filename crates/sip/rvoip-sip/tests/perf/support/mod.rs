@@ -5,8 +5,7 @@
 //! - [`ports`]: process-wide UDP port allocator so parallel `cargo test`
 //!   runs don't collide.
 //! - [`env`]: collects host info (CPU model, RAM, rustc, git rev) and
-//!   asserts release-mode at startup. Scenario tests are `#[ignore]`d in
-//!   debug builds; one forced to run there with `--ignored` fails loudly.
+//!   asserts release-mode at startup; debug builds fail loudly.
 //! - [`histogram`]: hdrhistogram wrapper exposing
 //!   `record(nanos) → p50/p95/p99/p99.9/max` with a JSON-serialisable
 //!   shape.

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// W3C WebRTC Statistics API. It provides information about the underlying
 /// transport, including ICE connectivity, DTLS security, and packet counters.
 ///
-/// # Specification
+/// # W3C Reference
 ///
 /// See [RTCTransportStats](https://www.w3.org/TR/webrtc-stats/#transportstats-dict*)
 #[derive(Debug, Serialize, Deserialize)]

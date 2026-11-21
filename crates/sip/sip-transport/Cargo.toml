@@ -45,7 +45,7 @@ rustls-pemfile = { version = "2.0", optional = true }
 # Client cert verification: prefer system trust store, fall back to a
 # bundled root set. Both pinned to versions compatible with rustls 0.23.
 rustls-native-certs = { version = "0.8", optional = true }
-webpki-roots = { version = "1.0", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 # WebSocket support
 tokio-tungstenite = { workspace = true, optional = true }
@@ -58,10 +58,6 @@ fastrand = { workspace = true, optional = true }
 
 # Add futures-util dependency
 futures-util = "0.3"
-
-# SO_EXCLUSIVEADDRUSE for SIP UDP binds on Windows (see transport/udp/socket.rs).
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winsock2", "ws2def"] }
 
 [features]
 default = ["udp", "tcp", "tls", "ws", "wss"]
@@ -91,9 +87,6 @@ tracing-subscriber = { workspace = true }
 criterion = { workspace = true }
 # Generate self-signed certs in TLS handshake tests.
 rcgen = "0.14"
-# Link rustls's aws-lc-rs provider next to ring in tests, so rustls cannot
-# infer a process-level provider: TLS configuration must name its own.
-rustls = { workspace = true, features = ["aws_lc_rs"] }
 tempfile = "3"
 # Authoritative DNS fixture for the RFC 3263 end-to-end test.
 hickory-server = "0.26.1"

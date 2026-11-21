@@ -1,7 +1,6 @@
 // Parser for Expires header (RFC 3261 Section 20.19)
 // Expires = "Expires" HCOLON delta-seconds
 
-use nom::Parser;
 use nom::{bytes::complete::tag_no_case, combinator::opt};
 
 // Import delta_seconds parser and other utilities
@@ -14,7 +13,7 @@ use crate::parser::ParseResult;
 // Note: HCOLON handled elsewhere
 pub fn parse_expires(input: &[u8]) -> ParseResult<'_, u32> {
     // Handle optional leading whitespace
-    let (input, _) = opt(owsp).parse(input)?;
+    let (input, _) = opt(owsp)(input)?;
 
     // Parse the actual value
     let (input, value) = delta_seconds(input)?;
@@ -26,7 +25,7 @@ pub fn parse_expires(input: &[u8]) -> ParseResult<'_, u32> {
 /// Full parser for the Expires header, including header name and whitespace handling
 pub fn parse_full_expires(input: &[u8]) -> ParseResult<'_, u32> {
     // Parse the header name (case-insensitive)
-    let (input, _) = tag_no_case(&b"Expires"[..])(input)?;
+    let (input, _) = tag_no_case(b"Expires")(input)?;
 
     // Parse the colon
     let (input, _) = hcolon(input)?;

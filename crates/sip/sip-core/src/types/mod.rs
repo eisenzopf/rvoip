@@ -124,9 +124,7 @@
 //! let uri = Uri {
 //!     scheme: Scheme::Sips,
 //!     user: Some("bob".to_string()),
-//!     user_wire: None,
 //!     password: None,
-//!     password_wire: None,
 //!     host: Host::from_str("biloxi.example.org").unwrap(),
 //!     port: Some(5061),
 //!     parameters: vec![],

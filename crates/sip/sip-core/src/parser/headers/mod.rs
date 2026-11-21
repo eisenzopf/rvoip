@@ -140,7 +140,7 @@ mod tests {
     use crate::types::event::ParamValue;
 
     use crate::types::MinSE; // For the new test
-    use nom_language::error::VerboseError;
+    use nom::error::VerboseError;
 
     /// Test to verify that exported parser functions are correctly accessible
     #[test]

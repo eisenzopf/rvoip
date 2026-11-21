@@ -10,12 +10,14 @@ use std::io::Cursor;
 
 /// Decode and XML-entity-unescape a text event's content.
 ///
-/// quick-xml 0.42 events are already decoded `str`: `xml10_content()`
-/// applies XML 1.0 end-of-line normalisation and `escape::unescape`
-/// resolves any entity references left in the text.
+/// Replaces `BytesText::unescape`, removed in quick-xml 0.37+: `decode()`
+/// handles the byte->str decoding and `escape::unescape` resolves entity
+/// references (`&amp;` etc.), matching the old method's behaviour.
 fn decode_text(e: &BytesText) -> Result<String> {
-    let content = e.xml10_content();
-    let unescaped = quick_xml::escape::unescape(&content)
+    let decoded = e
+        .decode()
+        .map_err(|err| RegistrarError::PidfError(err.to_string()))?;
+    let unescaped = quick_xml::escape::unescape(&decoded)
         .map_err(|err| RegistrarError::PidfError(err.to_string()))?;
     Ok(unescaped.into_owned())
 }
@@ -204,19 +206,19 @@ impl PidfGenerator {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref e)) => {
                     match e.name().as_ref() {
-                        "presence" => {
+                        b"presence" => {
                             // Extract entity attribute
                             for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == "entity" {
-                                    let entity = attr.value.as_ref();
+                                if attr.key.as_ref() == b"entity" {
+                                    let entity = String::from_utf8_lossy(&attr.value);
                                     presence.user_id =
-                                        entity.strip_prefix("sip:").unwrap_or(entity).to_string();
+                                        entity.strip_prefix("sip:").unwrap_or(&entity).to_string();
                                 }
                             }
                         }
-                        "basic" => in_basic = true,
-                        "note" => in_note = true,
-                        "dm:activities" => in_activities = true,
+                        b"basic" => in_basic = true,
+                        b"note" => in_note = true,
+                        b"dm:activities" => in_activities = true,
                         _ => {}
                     }
                 }
@@ -238,17 +240,19 @@ impl PidfGenerator {
                     // Parse activity elements
                     let activity = e.name();
                     presence.extended_status = Some(match activity.as_ref() {
-                        "dm:available" => ExtendedStatus::Available,
-                        "dm:away" => ExtendedStatus::Away,
-                        "dm:busy" => ExtendedStatus::Busy,
-                        "dm:do-not-disturb" => ExtendedStatus::DoNotDisturb,
-                        "dm:on-the-phone" => ExtendedStatus::OnThePhone,
-                        "dm:in-meeting" => ExtendedStatus::InMeeting,
-                        "dm:offline" => ExtendedStatus::Offline,
-                        other => ExtendedStatus::Custom(other.to_string()),
+                        b"dm:available" => ExtendedStatus::Available,
+                        b"dm:away" => ExtendedStatus::Away,
+                        b"dm:busy" => ExtendedStatus::Busy,
+                        b"dm:do-not-disturb" => ExtendedStatus::DoNotDisturb,
+                        b"dm:on-the-phone" => ExtendedStatus::OnThePhone,
+                        b"dm:in-meeting" => ExtendedStatus::InMeeting,
+                        b"dm:offline" => ExtendedStatus::Offline,
+                        _ => ExtendedStatus::Custom(
+                            String::from_utf8_lossy(activity.as_ref()).to_string(),
+                        ),
                     });
                 }
-                Ok(Event::End(ref e)) if e.name().as_ref() == "dm:activities" => {
+                Ok(Event::End(ref e)) if e.name().as_ref() == b"dm:activities" => {
                     in_activities = false;
                 }
                 Ok(Event::End(_)) => {}

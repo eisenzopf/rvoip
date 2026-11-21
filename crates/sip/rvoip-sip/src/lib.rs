@@ -514,8 +514,6 @@ mod sip_data_message;
 pub mod state_machine;
 #[doc(hidden)]
 pub mod state_table;
-#[cfg(test)]
-pub(crate) mod test_ports;
 #[doc(hidden)]
 pub mod types;
 
@@ -625,15 +623,15 @@ pub use api::lifecycle::{
 
 // Configuration & registration
 pub use api::unified::{
-    AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaExecutorConfig, MediaExecutorMode,
-    MediaLanes, MediaRuntimeConfig, MediaSessionControllerConfig, Registration, RelUsage,
+    AudioSource, BridgeError, BridgeHandle, MediaExecutorConfig, MediaExecutorMode, MediaLanes,
+    MediaRuntimeConfig, MediaSessionControllerConfig, Registration, RelUsage,
     RtpSessionBufferConfig, RtpTransportBufferConfig, SessionCleanupConfig, SipNatConfig,
     SipRuntimeConfig, SymmetricRtpPolicy,
 };
 pub use api::{
-    Config, DtlsActpassAnswerRole, DtlsSetupRole, MediaMode, RegistrationHandle, RegistrationInfo,
-    RegistrationStatus, SdesBase64Mode, SipContactMode, SipTlsMode, SrtpKeyingMode,
-    SrtpSuitePolicy, UnifiedCoordinator,
+    Config, DtlsSetupRole, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+    SdesBase64Mode, SipContactMode, SipTlsMode, SrtpKeyingMode, SrtpSuitePolicy,
+    UnifiedCoordinator,
 };
 
 // Events
@@ -642,12 +640,11 @@ pub use api::dialog_package::{
 };
 pub use api::dialog_subscription::DialogSubscriptionHandle;
 pub use api::events::{
-    CallAuthRetryDetails, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityFailure,
-    MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, RenegotiationFailure,
-    SdesNegotiationFailure, SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState,
-    TransferKind, TransferTargetEvidence,
+    CallAuthRetryDetails, DiagnosticEvent, Event, MediaQualityStats, MediaSecurityKeying,
+    MediaSecurityProfile, MediaSecurityState, RenegotiationFailure, SdesNegotiationFailure,
+    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
+    TransferTargetEvidence,
 };
-pub use api::lifecycle::NegotiatedMedia;
 
 // Errors
 pub use errors::{
@@ -677,21 +674,21 @@ pub mod prelude {
         CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
         CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, Config,
         DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,
-        DialogSubscriptionHandle, DtlsActpassAnswerRole, DtlsSetupRole, EndReason, Endpoint,
-        EndpointAccount, EndpointAccountConfig, EndpointAudio, EndpointAudioFrame,
-        EndpointAudioReceiver, EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId,
-        EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
-        EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
-        EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
-        EndpointTransport, Event, EventReceiver, HeaderName, IncomingCall, IncomingCallGuard,
-        MediaMode, MediaPoolConfig, MediaSecurityFailure, MediaSecurityKeying,
-        MediaSecurityProfile, MediaSecurityState, MediaSessionControllerConfig, NegotiatedMedia,
-        PeerControl, PerformanceConfig, PerformanceRecipeBook, ProfiledSipAdapter, Registration,
-        RegistrationHandle, RegistrationInfo, RegistrationStatus, Result, RtpSessionBufferConfig,
-        RtpTransportBufferConfig, SdesBase64Mode, SdesBase64Padding, SdesNegotiationDiagnostic,
-        SdesNegotiationFailureClass, SdesNegotiationStage, SessionError, SessionHandle, SipAccount,
-        SipAuthDecision, SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth,
-        SipContactMode, SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
+        DialogSubscriptionHandle, DtlsSetupRole, EndReason, Endpoint, EndpointAccount,
+        EndpointAccountConfig, EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver,
+        EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig,
+        EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
+        EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
+        EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
+        EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaPoolConfig,
+        MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
+        MediaSessionControllerConfig, PeerControl, PerformanceConfig, PerformanceRecipeBook,
+        ProfiledSipAdapter, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+        Result, RtpSessionBufferConfig, RtpTransportBufferConfig, SdesBase64Mode,
+        SdesBase64Padding, SdesNegotiationDiagnostic, SdesNegotiationFailureClass,
+        SdesNegotiationStage, SessionError, SessionHandle, SipAccount, SipAuthDecision,
+        SipAuthScheme, SipAuthService, SipAuthSource, SipClientAuth, SipContactMode,
+        SipDigestAuthService, SipEgressProfilePolicy, SipEgressProfileRegistration,
         SipInitialHeaders, SipOriginateContext, SipProfileRevision, SipProfileSrtpPolicy,
         SipReason, SipRuntimeConfig, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection,
         SrtpKeyingMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,

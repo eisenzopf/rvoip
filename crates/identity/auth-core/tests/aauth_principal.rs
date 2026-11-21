@@ -25,7 +25,7 @@ fn mint(secret: &[u8], claims: &Claims<'_>) -> String {
     encode(
         &Header::default(),
         claims,
-        &EncodingKey::from_secret(secret).unwrap(),
+        &EncodingKey::from_secret(secret),
     )
     .expect("mint AAuth test token")
 }
@@ -64,9 +64,9 @@ async fn combined_principal_uses_subject_ownership_and_earliest_expiry() {
     );
 
     let subject: Arc<dyn BearerValidator> =
-        Arc::new(JwtValidator::from_hmac_secret(SUBJECT_SECRET).unwrap());
+        Arc::new(JwtValidator::from_hmac_secret(SUBJECT_SECRET));
     let actor: Arc<dyn ActorTokenValidator> =
-        Arc::new(JwtValidator::from_hmac_secret(ACTOR_SECRET).unwrap());
+        Arc::new(JwtValidator::from_hmac_secret(ACTOR_SECRET));
     let validator = AAuthValidator::new(subject, actor);
 
     let principal = validator

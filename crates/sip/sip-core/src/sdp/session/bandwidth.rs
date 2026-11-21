@@ -5,7 +5,6 @@
 use crate::error::{Error, Result};
 use crate::sdp::session::utils::parse_token;
 use crate::types::sdp::ParsedAttribute;
-use nom::Parser;
 use nom::{
     bytes::complete::tag,
     character::complete::{char, digit1},
@@ -17,13 +16,12 @@ use nom::{
 /// Parse bandwidth type and value using nom
 fn parse_bandwidth_nom(input: &str) -> IResult<&str, (String, u64)> {
     // Format: <bwtype>:<bandwidth>
-    let (input, _) = opt(tag("b=")).parse(input)?;
+    let (input, _) = opt(tag("b="))(input)?;
     let (input, (bwtype, bandwidth)) = separated_pair(
         parse_token,
         char(':'),
         map_res(digit1, |s: &str| s.parse::<u64>()),
-    )
-    .parse(input)?;
+    )(input)?;
 
     Ok((input, (bwtype.to_string(), bandwidth)))
 }

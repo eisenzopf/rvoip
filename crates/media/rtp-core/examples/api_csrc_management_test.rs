@@ -35,7 +35,7 @@
 //! This API approach ensures that CSRC management functionality is properly exposed
 //! through the high-level API interfaces rather than requiring direct use of core components.
 
-use rand::RngExt;
+use rand::Rng;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,11 +63,11 @@ struct ConferenceMixer {
 
 impl ConferenceMixer {
     fn new() -> Self {
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
         Self {
-            ssrc: rng.random(),
-            sequence: rng.random(),
-            timestamp: rng.random(),
+            ssrc: rng.gen(),
+            sequence: rng.gen(),
+            timestamp: rng.gen(),
             active_sources: Vec::new(),
         }
     }
@@ -82,11 +82,11 @@ impl ConferenceMixer {
 
     fn create_mixed_frame(&mut self) -> MediaFrame {
         // Generate sample data (in a real mixer, this would be mixed audio)
-        let mut rng = rand::rng();
+        let mut rng = rand::thread_rng();
         let mut data = Vec::with_capacity(160);
         for _ in 0..80 {
-            data.push(rng.random::<u8>());
-            data.push(rng.random::<u8>());
+            data.push(rng.gen::<u8>());
+            data.push(rng.gen::<u8>());
         }
 
         // Create frame with mixer SSRC
@@ -161,21 +161,21 @@ async fn run_test() -> Result<(), Box<dyn std::error::Error>> {
     info!("Client connect() call completed");
 
     // Send a simple audio frame from client to server to establish the connection
-    let mut rng = rand::rng();
+    let mut rng = rand::thread_rng();
     let client_ssrc = rand::random::<u32>();
 
     // Create and send dummy frame
     let mut dummy_data = Vec::with_capacity(160);
     for _ in 0..80 {
-        dummy_data.push(rng.random::<u8>());
-        dummy_data.push(rng.random::<u8>());
+        dummy_data.push(rng.gen::<u8>());
+        dummy_data.push(rng.gen::<u8>());
     }
 
     let dummy_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
         data: dummy_data.into(),
-        timestamp: rng.random(),
-        sequence: rng.random(),
+        timestamp: rng.gen(),
+        sequence: rng.gen(),
         marker: false,
         payload_type: 0,
         ssrc: client_ssrc,

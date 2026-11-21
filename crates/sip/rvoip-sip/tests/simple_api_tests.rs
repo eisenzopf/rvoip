@@ -24,10 +24,7 @@ fn test_config(base_port: u16) -> Config {
 #[tokio::test]
 #[serial]
 async fn test_create_peer() {
-    // Use a unique port, not `StreamPeer::new`'s default 5060: `#[serial]`
-    // does not serialize across nextest's per-test processes, so the default
-    // port collides with any other test binding it at the same time.
-    let peer = StreamPeer::with_config(test_config(15121)).await;
+    let peer = StreamPeer::new("alice").await;
     assert!(peer.is_ok());
 }
 

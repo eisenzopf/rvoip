@@ -5,7 +5,7 @@
 //! or other password verification paths where LDAP/AD owns the credential.
 
 use async_trait::async_trait;
-use ldap3::{LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
+use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use rvoip_auth_core::{CredentialAuthError, PasswordVerifier};
 use rvoip_core_traits::identity::IdentityAssurance;
 use rvoip_core_traits::ids::IdentityId;
@@ -224,7 +224,7 @@ impl LdapPasswordVerifier {
     }
 
     async fn find_user_dn(&self, username: &str) -> Result<String, CredentialAuthError> {
-        let (conn, mut ldap) = LdapConnAsync::with_settings(ldap_conn_settings(), &self.config.url)
+        let (conn, mut ldap) = LdapConnAsync::new(&self.config.url)
             .await
             .map_ldap_unavailable()?;
         ldap3::drive!(conn);
@@ -270,34 +270,6 @@ impl LdapPasswordVerifier {
     }
 }
 
-/// Connection settings carrying an explicit rustls client configuration.
-///
-/// Left to itself, ldap3 builds its `ldaps`/StartTLS configuration on the
-/// process-level rustls default, which rustls cannot infer when a dependency
-/// graph compiles both its `ring` and `aws-lc-rs` providers. This builds the
-/// same configuration ldap3 would (the platform's native roots) on the ring
-/// provider, named explicitly; nothing reads or installs the process default.
-fn ldap_conn_settings() -> LdapConnSettings {
-    static CONFIG: std::sync::OnceLock<std::sync::Arc<rustls::ClientConfig>> =
-        std::sync::OnceLock::new();
-    let config = CONFIG.get_or_init(|| {
-        let mut roots = rustls::RootCertStore::empty();
-        for certificate in rustls_native_certs::load_native_certs().certs {
-            let _ = roots.add(certificate);
-        }
-        std::sync::Arc::new(
-            rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-                rustls::crypto::ring::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()
-            .expect("the ring provider supports rustls's default protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth(),
-        )
-    });
-    LdapConnSettings::new().set_config(config.clone())
-}
-
 #[async_trait]
 impl PasswordVerifier for LdapPasswordVerifier {
     async fn verify_password(
@@ -310,7 +282,7 @@ impl PasswordVerifier for LdapPasswordVerifier {
         }
 
         let user_dn = self.find_user_dn(username).await?;
-        let (conn, mut ldap) = LdapConnAsync::with_settings(ldap_conn_settings(), &self.config.url)
+        let (conn, mut ldap) = LdapConnAsync::new(&self.config.url)
             .await
             .map_ldap_unavailable()?;
         ldap3::drive!(conn);

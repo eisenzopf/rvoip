@@ -5,7 +5,6 @@
 
 use super::RTCStats;
 use crate::data_channel::RTCDataChannelState;
-use sctp::StreamId;
 use serde::{Deserialize, Serialize};
 
 /// Statistics for a data channel.
@@ -14,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// W3C WebRTC Statistics API. It provides information about a data channel,
 /// including message and byte counters.
 ///
-/// # Specification
+/// # W3C Reference
 ///
 /// See [RTCDataChannelStats](https://www.w3.org/TR/webrtc-stats/#dcstats-dict*)
 #[derive(Debug, Serialize, Deserialize)]
@@ -26,10 +25,8 @@ pub struct RTCDataChannelStats {
 
     /// The data channel identifier.
     ///
-    /// This is the SCTP stream ID used for this data channel. It is 0 while the channel has
-    /// not been assigned one, which per RFC 8832 section 6 cannot happen before the DTLS role
-    /// is resolved.
-    pub data_channel_identifier: StreamId,
+    /// This is the SCTP stream ID used for this data channel.
+    pub data_channel_identifier: u16,
 
     /// The label assigned to the data channel.
     ///

@@ -641,8 +641,11 @@ cargo test -p rvoip-sip-core --test parser_tests
 The test suite includes special tests for RFC compliance:
 
 ```bash
-# RFC 4475 / RFC 5118 torture tests (both parse modes)
-cargo test -p rvoip-sip-core --test lib rfc_compliance::torture_test
+# Run with lenient parsing for real-world compatibility
+cargo test -p rvoip-sip-core --features="lenient_parsing"
+
+# Run strict RFC compliance tests 
+cargo test -p rvoip-sip-core --test torture_tests::test_malformed_messages --features="lenient_parsing"
 ```
 
 ### Writing Your Own Tests

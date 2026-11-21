@@ -12,29 +12,8 @@ pub struct PostgresVconStore {
     pool: PgPool,
 }
 
-/// Install ring as rustls's process-level `CryptoProvider` if none is installed.
-///
-/// sqlx builds part of its Postgres TLS configuration (the `verify-ca`
-/// hostname-skipping verifier) on rustls's process-level default.
-/// rustls cannot pick a process-level provider when a dependency graph
-/// compiles both of its providers (`ring` and `aws-lc-rs`), and that path
-/// would panic. Upstream limitation: sqlx offers no way to hand that verifier a
-/// `CryptoProvider`.
-///
-/// This is the only place this crate touches the process default. It never
-/// replaces an installed provider: an application that installs its own at
-/// startup always wins, and one that installs nothing still works. An `Err`
-/// from `install_default` means a concurrent caller installed one first,
-/// which is kept.
-pub(crate) fn ensure_process_crypto_provider() {
-    if rustls::crypto::CryptoProvider::get_default().is_none() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    }
-}
-
 impl PostgresVconStore {
     pub fn new(pool: PgPool) -> Self {
-        ensure_process_crypto_provider();
         Self { pool }
     }
 
@@ -43,7 +22,6 @@ impl PostgresVconStore {
     }
 
     pub async fn connect(database_url: &str) -> Result<Self, VconStoreError> {
-        ensure_process_crypto_provider();
         let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(database_url)

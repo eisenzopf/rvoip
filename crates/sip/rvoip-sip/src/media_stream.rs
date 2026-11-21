@@ -698,12 +698,6 @@ impl SipMediaStream {
         Ok(stream)
     }
 
-    /// Hold the lifecycle gate so a bind cannot start until the guard drops.
-    #[cfg(test)]
-    pub(crate) async fn pause_bind_for_test(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.inner.lifecycle_gate.lock().await
-    }
-
     /// Bind this dormant stream to one SIP session exactly once.
     ///
     /// The first caller starts a retained driver. Dropping that caller does not

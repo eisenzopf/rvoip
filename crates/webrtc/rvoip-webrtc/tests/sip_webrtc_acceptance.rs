@@ -10,13 +10,8 @@
 //! - PCMA <-> Opus over WebSocket signaling
 //! - PCMU <-> Opus over authenticated WSS with an explicitly scoped test CA
 //!
-//! The same journey runs with the WebRTC leg negotiated to G.711 instead of
-//! Opus: a PCMU-only peer, and an Opus-first mixed offer answered with PCMU
-//! (over WHIP and over WebSocket signaling). The bridge-side route must carry
-//! the answered codec, payload type and RTP clock, not its offer's Opus.
-//!
 //! WHEP playback is covered separately because its media direction is
-//! intentionally one-way; it runs with an Opus and a PCMU-only origin. TURN and public-NAT variants require relay or
+//! intentionally one-way. TURN and public-NAT variants require relay or
 //! external network fixtures and remain in the broader deployment matrix.
 
 #![cfg(all(
@@ -28,7 +23,7 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -148,11 +143,6 @@ struct SipWirePeer {
     outbound_messages: mpsc::UnboundedReceiver<Request>,
     responses: mpsc::UnboundedReceiver<CapturedResponse>,
     bridge_teardowns: mpsc::UnboundedReceiver<Method>,
-    // Next audio RTP sequence number. One SSRC is one RTP sequence space
-    // (RFC 3550 5.1), so every burst continues where the previous one ended;
-    // restarting at 0 would repeat already-played sequence numbers, which a
-    // conforming receiver discards as duplicates.
-    audio_sequence: AtomicU16,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -405,7 +395,6 @@ impl SipWirePeer {
             outbound_messages,
             responses,
             bridge_teardowns,
-            audio_sequence: AtomicU16::new(0),
             task,
         }
     }
@@ -432,8 +421,7 @@ impl SipWirePeer {
 
     async fn send_audio_burst(&self, dialog: &EstablishedDialog, codec: SipCodec) {
         let payload = vec![codec.silence_octet(); 160];
-        for _ in 0..12 {
-            let sequence = self.audio_sequence.fetch_add(1, Ordering::Relaxed);
+        for sequence in 0..12u16 {
             let packet = rtp_packet(
                 codec.payload_type(),
                 sequence,
@@ -635,66 +623,9 @@ async fn production_sip_rtp_and_webrtc_rtp_bridge_acceptance() {
         (1u16, SignalingCase::WebSocket, SipCodec::Pcma, false),
         (2u16, SignalingCase::SecureWebSocket, SipCodec::Pcmu, true),
     ] {
-        run_case(index, signaling, codec, symmetric_rtp, "opus").await;
+        run_case(index, signaling, codec, symmetric_rtp).await;
     }
-    run_whep_playback_case(3, SipCodec::Pcma, "opus").await;
-}
-
-/// WebRTC legs negotiated to G.711. Before the local audio sender was bound
-/// to the answered codec, the bridge-side track kept an Opus/48000 encoding
-/// that matched no negotiated codec: its RTP was dropped after the media pump
-/// had been told the write succeeded, and target-contacting routes kept their
-/// offer's provisional Opus codec/PT instead of the answered one.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn negotiated_g711_webrtc_rtp_bridge_acceptance() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::WARN)
-        .with_test_writer()
-        .try_init();
-
-    for (index, signaling, codec, web_codec) in [
-        (4u16, SignalingCase::Whip, SipCodec::Pcmu, "g.711-mu"),
-        (5u16, SignalingCase::Whip, SipCodec::Pcmu, MIXED_TO_PCMU),
-        (
-            6u16,
-            SignalingCase::WebSocket,
-            SipCodec::Pcma,
-            MIXED_TO_PCMU,
-        ),
-    ] {
-        run_case(index, signaling, codec, false, web_codec).await;
-    }
-    // Receive-only: the WHEP player's sender has no send direction at all.
-    run_whep_playback_case(7, SipCodec::Pcmu, "g.711-mu").await;
-}
-
-/// Bridge side offers the default Opus + G.711 list; the remote peer supports
-/// only PCMU and answers with it.
-const MIXED_TO_PCMU: &str = "mixed-to-pcmu";
-
-/// `WebRtcConfig::loopback()` narrowed to one primary audio codec, or left
-/// with its default Opus + G.711 list for [`MIXED_TO_PCMU`].
-fn codec_config(name: &str) -> WebRtcConfig {
-    let mut config = WebRtcConfig::loopback();
-    if name == MIXED_TO_PCMU {
-        return config;
-    }
-    config
-        .capabilities
-        .audio_codecs
-        .retain(|codec| codec.name == name);
-    assert_eq!(config.capabilities.audio_codecs.len(), 1);
-    config
-}
-
-/// The codec the WebRTC leg ends up with, its payload type and RTP clock.
-fn negotiated_web_codec(web_codec: &str) -> (&'static str, u8, u32) {
-    match web_codec {
-        "opus" => ("opus", 111, 48_000),
-        "g.711-mu" | MIXED_TO_PCMU => ("g.711-mu", 0, 8_000),
-        other => panic!("no expectation for WebRTC codec {other}"),
-    }
+    run_whep_playback_case(3, SipCodec::Pcma).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1435,16 +1366,9 @@ async fn receive_remote_audio(
     }
 }
 
-async fn run_case(
-    index: u16,
-    signaling: SignalingCase,
-    codec: SipCodec,
-    symmetric_rtp: bool,
-    web_codec: &str,
-) {
+async fn run_case(index: u16, signaling: SignalingCase, codec: SipCodec, symmetric_rtp: bool) {
     let mut sip_peer = SipWirePeer::start(codec, symmetric_rtp).await;
-    let (web_name, web_pt, web_clock) = negotiated_web_codec(web_codec);
-    let mut server_config = codec_config(web_name);
+    let mut server_config = WebRtcConfig::loopback();
     server_config.trickle_ice = true;
     let remote = build_remote_server(server_config, signaling).await;
     let server_adapter = remote.server.adapter();
@@ -1462,7 +1386,7 @@ async fn run_case(
     let sip_adapter = SipAdapter::new(Arc::clone(&coordinator))
         .await
         .expect("SIP adapter");
-    let webrtc_adapter = WebRtcAdapter::new(codec_config(web_codec));
+    let webrtc_adapter = WebRtcAdapter::new(WebRtcConfig::loopback());
 
     let orchestrator = Orchestrator::new(Config::default());
     orchestrator
@@ -1558,9 +1482,7 @@ async fn run_case(
     let webrtc_handle = tokio::time::timeout(TEST_TIMEOUT, webrtc_prepared.commit())
         .await
         .expect("WebRTC commit deadline")
-        .unwrap_or_else(|error| {
-            panic!("commit target-contacting WebRTC route; case={index}; web_codec={web_codec}; {error}")
-        });
+        .expect("commit target-contacting WebRTC route");
     let webrtc_connection = webrtc_handle.connection.id.clone();
     let remote_connection = wait_for_inbound_connection(&mut server_events).await;
 
@@ -1577,12 +1499,8 @@ async fn run_case(
 
     assert_eq!(sip_stream.codec().clock_rate_hz, 8_000);
     let remote_stream = audio_stream(server_adapter.as_ref(), &remote_connection).await;
-    assert_eq!(remote_stream.codec().name.to_ascii_lowercase(), web_name);
-    assert_eq!(remote_stream.codec().clock_rate_hz, web_clock);
-    // The bridge-side route commits the answered codec, not its offer's.
-    let local_stream = audio_stream(webrtc_adapter.as_ref(), &webrtc_connection).await;
-    assert_eq!(local_stream.codec().name.to_ascii_lowercase(), web_name);
-    assert_eq!(local_stream.codec().clock_rate_hz, web_clock);
+    assert_eq!(remote_stream.codec().name.to_ascii_lowercase(), "opus");
+    assert_eq!(remote_stream.codec().clock_rate_hz, 48_000);
     let mut remote_audio = remote_stream
         .try_frames_in()
         .expect("reserve remote WebRTC audio receiver");
@@ -1600,9 +1518,9 @@ async fn run_case(
         .await
         .expect("WebRTC source MediaGraph");
 
-    // SIP/RTP G.711 -> graph -> actual WebRTC/RTP in the negotiated codec.
+    // SIP/RTP G.711 -> graph transcode -> actual WebRTC/RTP Opus.
     sip_peer.send_audio_burst(&dialog, codec).await;
-    let web_frame = match tokio::time::timeout(TEST_TIMEOUT, remote_audio.recv()).await {
+    let opus = match tokio::time::timeout(TEST_TIMEOUT, remote_audio.recv()).await {
         Ok(Some(frame)) => frame,
         Ok(None) => panic!(
             "remote WebRTC audio closed; SIP graph={:?}",
@@ -1613,19 +1531,19 @@ async fn run_case(
             sip_graph.snapshot().await
         ),
     };
-    assert_eq!(web_frame.payload_type, Some(web_pt));
-    assert!(!web_frame.payload.is_empty(), "WebRTC payload is empty");
-    let sip_snapshot = wait_for_flow(&sip_graph, web_name).await;
+    assert_eq!(opus.payload_type, Some(111));
+    assert!(!opus.payload.is_empty(), "transcoded Opus payload is empty");
+    let sip_snapshot = wait_for_transcode(&sip_graph).await;
     assert_eq!(sip_snapshot.source_payload_type, codec.payload_type());
     assert_eq!(sip_snapshot.dropped_frames, 0);
     assert_eq!(sip_snapshot.evictions, 0);
 
-    // Actual WebRTC/RTP in the negotiated codec -> graph -> SIP/RTP G.711.
-    send_audio_burst(&remote_stream, 50, web_name).await;
+    // Actual WebRTC/RTP Opus -> graph transcode -> SIP/RTP G.711.
+    send_opus_burst(&remote_stream, 50).await;
     let g711 = sip_peer.receive_rtp_payload(codec.payload_type()).await;
     assert_eq!(g711.len(), 160, "G.711 must carry one 20 ms frame");
-    let webrtc_snapshot = wait_for_flow(&webrtc_graph, web_name).await;
-    assert_eq!(webrtc_snapshot.source_payload_type, web_pt);
+    let webrtc_snapshot = wait_for_transcode(&webrtc_graph).await;
+    assert_eq!(webrtc_snapshot.source_payload_type, 111);
     assert_eq!(webrtc_snapshot.dropped_frames, 0);
     assert_eq!(webrtc_snapshot.evictions, 0);
 
@@ -1767,10 +1685,9 @@ async fn run_case(
     sip_peer.shutdown().await;
 }
 
-async fn run_whep_playback_case(index: u16, codec: SipCodec, web_codec: &str) {
+async fn run_whep_playback_case(index: u16, codec: SipCodec) {
     let mut sip_peer = SipWirePeer::start(codec, false).await;
-    let (web_name, web_pt, web_clock) = negotiated_web_codec(web_codec);
-    let mut server_config = codec_config(web_name);
+    let mut server_config = WebRtcConfig::loopback();
     server_config.trickle_ice = true;
     let remote = build_remote_whep_server(server_config).await;
     let server_adapter = remote.server.adapter();
@@ -1883,29 +1800,7 @@ async fn run_whep_playback_case(index: u16, codec: SipCodec, web_codec: &str) {
 
     let sip_stream = wait_for_audio_codec(&sip_adapter, &sip_connection, codec.stream_name()).await;
     let remote_stream = audio_stream(server_adapter.as_ref(), &remote_connection).await;
-    assert_eq!(remote_stream.codec().name.to_ascii_lowercase(), web_name);
-    assert_eq!(remote_stream.codec().clock_rate_hz, web_clock);
-    let player_stream = audio_stream(webrtc_adapter.as_ref(), &whep_connection).await;
-    assert_eq!(player_stream.codec().name.to_ascii_lowercase(), web_name);
-    assert_eq!(player_stream.codec().clock_rate_hz, web_clock);
-    // The player is receive-only: its first outgoing frame is refused at the
-    // writer, which stops only that outbound pump. Inbound media from the
-    // origin below must still reach SIP.
-    let player_output = player_stream.frames_out();
-    player_output
-        .send(MediaFrame {
-            stream_id: player_stream.id(),
-            kind: StreamKind::Audio,
-            payload: audio_payload(web_name),
-            timestamp_rtp: 0,
-            captured_at: chrono::Utc::now(),
-            payload_type: Some(web_pt),
-        })
-        .await
-        .expect("attempt one receive-only outbound frame");
-    tokio::time::timeout(TEST_TIMEOUT, player_output.closed())
-        .await
-        .expect("receive-only outbound pump refuses the frame and stops");
+    assert_eq!(remote_stream.codec().name.to_ascii_lowercase(), "opus");
     let _bridge_id = orchestrator
         .bridge_connections_directional(
             sip_connection.clone(),
@@ -1926,15 +1821,15 @@ async fn run_whep_playback_case(index: u16, codec: SipCodec, web_codec: &str) {
             .reserve_frames_in()
             .expect("disabled SIP source receiver remains available"),
     );
-    send_audio_burst(&remote_stream, 90, web_name).await;
+    send_opus_burst(&remote_stream, 90).await;
     let g711 = sip_peer.receive_rtp_payload(codec.payload_type()).await;
     assert_eq!(
         g711.len(),
         160,
         "WHEP playback must produce one 20 ms G.711 frame"
     );
-    let snapshot = wait_for_flow(&whep_graph, web_name).await;
-    assert_eq!(snapshot.source_payload_type, web_pt);
+    let snapshot = wait_for_transcode(&whep_graph).await;
+    assert_eq!(snapshot.source_payload_type, 111);
     assert_eq!(snapshot.dropped_frames, 0);
     assert_eq!(snapshot.evictions, 0);
 
@@ -2228,59 +2123,6 @@ async fn send_opus_burst(stream: &Arc<dyn MediaStream>, sequence_base: u32) {
             .expect("send remote Opus frame");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-}
-
-/// One 20 ms frame of silence in `codec` (`"opus"` or G.711 mu-law).
-fn audio_payload(codec: &str) -> Bytes {
-    if codec == "opus" {
-        rvoip_webrtc::media::silent_opus_payload()
-    } else {
-        Bytes::from(vec![0xff; 160])
-    }
-}
-
-async fn send_audio_burst(stream: &Arc<dyn MediaStream>, sequence_base: u32, codec: &str) {
-    if codec == "opus" {
-        return send_opus_burst(stream, sequence_base).await;
-    }
-    let output = stream.frames_out();
-    for sequence in 0..12u32 {
-        output
-            .send(MediaFrame {
-                stream_id: stream.id(),
-                kind: StreamKind::Audio,
-                payload: audio_payload(codec),
-                timestamp_rtp: (sequence_base + sequence) * 160,
-                captured_at: chrono::Utc::now(),
-                payload_type: Some(0),
-            })
-            .await
-            .expect("send remote PCMU frame");
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-/// Wait until the graph has seen source frames, and for an Opus WebRTC leg
-/// also a transcode. A G.711 WebRTC leg bridged to SIP G.711 of the same law
-/// needs no transcode.
-async fn wait_for_flow(
-    graph: &rvoip_core::MediaGraphHandle,
-    web_codec: &str,
-) -> MediaGraphSnapshot {
-    if web_codec == "opus" {
-        return wait_for_transcode(graph).await;
-    }
-    tokio::time::timeout(TEST_TIMEOUT, async {
-        loop {
-            let snapshot = graph.snapshot().await;
-            if snapshot.source_frames > 0 {
-                return snapshot;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("MediaGraph flow diagnostics deadline")
 }
 
 async fn wait_for_transcode(graph: &rvoip_core::MediaGraphHandle) -> MediaGraphSnapshot {

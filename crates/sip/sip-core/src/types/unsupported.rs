@@ -36,7 +36,6 @@
 //! assert!(unsupported.has_option_tag("100rel"));
 //! ```
 
-use nom::Parser;
 use std::fmt;
 use std::str::FromStr;
 
@@ -471,8 +470,7 @@ impl TypedHeaderTrait for Unsupported {
         };
 
         // Parse the header value
-        let option_tags = all_consuming(parse_unsupported)
-            .parse(bytes)
+        let option_tags = all_consuming(parse_unsupported)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
 

@@ -1,4 +1,3 @@
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while1, take_while_m_n},
@@ -28,19 +27,19 @@ fn is_param_unreserved(c: u8) -> bool {
 // paramchar = param-unreserved / unreserved / escaped
 // Returns raw bytes
 pub fn paramchar(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    alt((take_while1(is_param_unreserved), unreserved, escaped)).parse(input)
+    alt((take_while1(is_param_unreserved), unreserved, escaped))(input)
 }
 
 // pname = 1*paramchar
 // Returns raw bytes, unescaping happens in other_param
 pub fn pname(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(many1(paramchar)).parse(input)
+    recognize(many1(paramchar))(input)
 }
 
 // pvalue = 1*paramchar
 // Returns raw bytes, unescaping happens in other_param
 pub fn pvalue(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    recognize(many1(paramchar)).parse(input)
+    recognize(many1(paramchar))(input)
 }
 
 // other-param = pname [ "=" pvalue ]
@@ -72,39 +71,34 @@ fn other_param(input: &[u8]) -> ParseResult<'_, Param> {
             // This loses the Host/Token/Quoted distinction from generic_param
             Ok(Param::Other(name, value_opt.map(GenericValue::Token)))
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // transport-param = "transport=" ( "udp" / "tcp" / "sctp" / "tls" / other-transport)
 // other-transport = token
 // RFC 3261 specifies parameter names are case-insensitive
 fn transport_param(input: &[u8]) -> ParseResult<'_, Param> {
-    map_res(
-        preceded(tag_no_case(&b"transport="[..]), token),
-        |t_bytes| str::from_utf8(t_bytes).map(|s| Param::Transport(s.to_string())),
-    )
-    .parse(input)
+    map_res(preceded(tag_no_case(b"transport="), token), |t_bytes| {
+        str::from_utf8(t_bytes).map(|s| Param::Transport(s.to_string()))
+    })(input)
 }
 
 // user-param = "user=" ( "phone" / "ip" / other-user)
 // other-user = token
 // RFC 3261 specifies parameter names are case-insensitive
 fn user_param(input: &[u8]) -> ParseResult<'_, Param> {
-    map_res(preceded(tag_no_case(&b"user="[..]), token), |u_bytes| {
+    map_res(preceded(tag_no_case(b"user="), token), |u_bytes| {
         str::from_utf8(u_bytes).map(|s| Param::User(s.to_string()))
-    })
-    .parse(input)
+    })(input)
 }
 
 // method-param = "method=" Method (Method from request line)
 // For URI context, Method is just a token.
 // RFC 3261 specifies parameter names are case-insensitive
 fn method_param(input: &[u8]) -> ParseResult<'_, Param> {
-    map_res(preceded(tag_no_case(&b"method="[..]), token), |m_bytes| {
+    map_res(preceded(tag_no_case(b"method="), token), |m_bytes| {
         str::from_utf8(m_bytes).map(|s| Param::Method(s.to_string()))
-    })
-    .parse(input)
+    })(input)
 }
 
 // ttl-param = "ttl=" ttl (1*3 DIGIT)
@@ -115,10 +109,9 @@ fn ttl_param(input: &[u8]) -> ParseResult<'_, Param> {
 
     // First check for exactly 1-3 digits after "ttl="
     let (rem, digits) = preceded(
-        tag_no_case(&b"ttl="[..]),
+        tag_no_case(b"ttl="),
         take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
-    )
-    .parse(input)?;
+    )(input)?;
 
     // Check if there might be more digits following
     if !rem.is_empty() && rem[0].is_ascii_digit() {
@@ -152,7 +145,7 @@ fn ttl_param(input: &[u8]) -> ParseResult<'_, Param> {
 // Need to handle invalid hosts by propagating errors
 fn maddr_param(input: &[u8]) -> ParseResult<'_, Param> {
     // Parse "maddr=" prefix (case-insensitive)
-    let (remaining, _) = tag_no_case(&b"maddr="[..])(input)?;
+    let (remaining, _) = tag_no_case(b"maddr=")(input)?;
 
     // Explicitly try to parse a valid host, allowing host() to do validation
     match host(remaining) {
@@ -183,7 +176,7 @@ fn maddr_param(input: &[u8]) -> ParseResult<'_, Param> {
 // lr-param = "lr"
 // RFC 3261 specifies parameter names are case-insensitive
 fn lr_param(input: &[u8]) -> ParseResult<'_, Param> {
-    map(tag_no_case(&b"lr"[..]), |_| Param::Lr).parse(input)
+    map(tag_no_case(b"lr"), |_| Param::Lr)(input)
 }
 
 // uri-parameter = transport-param / user-param / method-param / ttl-param / maddr-param / lr-param / other-param
@@ -197,13 +190,12 @@ fn uri_parameter(input: &[u8]) -> ParseResult<'_, Param> {
         maddr_param,
         lr_param,
         other_param, // Must be last
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // uri-parameters = *( ";" uri-parameter)
 pub fn uri_parameters(input: &[u8]) -> ParseResult<'_, Vec<Param>> {
-    many0(preceded(semi, uri_parameter)).parse(input)
+    many0(preceded(semi, uri_parameter))(input)
 }
 
 #[cfg(test)]

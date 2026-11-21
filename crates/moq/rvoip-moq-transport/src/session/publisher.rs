@@ -34,7 +34,7 @@ use crate::message::RequestErrorCode;
 enum PublishRequestStreamEvent {
     Response(Result<Option<Message>, SessionError>),
     Command(Option<BidiCommand>),
-    SendStopped(Result<Option<u32>, SessionError>),
+    SendStopped(Result<Option<u8>, SessionError>),
 }
 
 struct SubscribedNamespaceRegistry<T> {

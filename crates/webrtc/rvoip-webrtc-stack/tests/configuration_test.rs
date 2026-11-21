@@ -7,7 +7,7 @@ use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::peer_connection::*;
 use webrtc::peer_connection::{
     MediaEngine, RTCBundlePolicy, RTCConfigurationBuilder, RTCIceServer, RTCIceTransportPolicy,
-    RTCRtcpMuxPolicy, SettingEngineBuilder,
+    RTCRtcpMuxPolicy, SettingEngine,
 };
 use webrtc::runtime::block_on;
 
@@ -63,14 +63,14 @@ fn test_setting_engine_ice_timeouts() {
             .register_default_codecs()
             .expect("Failed to register codecs");
 
-        let setting_engine = SettingEngineBuilder::new()
-            // Configure ICE timeouts
-            .with_ice_timeouts(
-                Some(Duration::from_secs(5)),  // disconnect timeout
-                Some(Duration::from_secs(10)), // failed timeout
-                Some(Duration::from_secs(1)),  // keepalive interval
-            )
-            .build();
+        let mut setting_engine = SettingEngine::default();
+
+        // Configure ICE timeouts
+        setting_engine.set_ice_timeouts(
+            Some(Duration::from_secs(5)),  // disconnect timeout
+            Some(Duration::from_secs(10)), // failed timeout
+            Some(Duration::from_secs(1)),  // keepalive interval
+        );
 
         let config = RTCConfigurationBuilder::new().build();
 
@@ -100,11 +100,11 @@ fn test_setting_engine_replay_protection() {
             .register_default_codecs()
             .expect("Failed to register codecs");
 
-        let setting_engine = SettingEngineBuilder::new()
-            // Configure replay protection window sizes
-            .with_srtp_replay_protection_window(128)
-            .with_srtcp_replay_protection_window(64)
-            .build();
+        let mut setting_engine = SettingEngine::default();
+
+        // Configure replay protection window sizes
+        setting_engine.set_srtp_replay_protection_window(128);
+        setting_engine.set_srtcp_replay_protection_window(64);
 
         let config = RTCConfigurationBuilder::new().build();
 
@@ -133,14 +133,13 @@ fn test_combined_configuration() {
             .register_default_codecs()
             .expect("Failed to register codecs");
 
-        let setting_engine = SettingEngineBuilder::new()
-            .with_ice_timeouts(
-                Some(Duration::from_secs(7)),
-                Some(Duration::from_secs(15)),
-                Some(Duration::from_secs(2)),
-            )
-            .with_srtp_replay_protection_window(256)
-            .build();
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_ice_timeouts(
+            Some(Duration::from_secs(7)),
+            Some(Duration::from_secs(15)),
+            Some(Duration::from_secs(2)),
+        );
+        setting_engine.set_srtp_replay_protection_window(256);
 
         let config = RTCConfigurationBuilder::new().build();
 
@@ -183,21 +182,19 @@ fn test_peer_connection_with_full_configuration() {
             .register_default_codecs()
             .expect("Failed to register codecs");
 
-        let setting_engine_a = SettingEngineBuilder::new()
-            .with_ice_timeouts(
-                Some(Duration::from_secs(5)),
-                Some(Duration::from_secs(10)),
-                Some(Duration::from_secs(1)),
-            )
-            .build();
+        let mut setting_engine_a = SettingEngine::default();
+        setting_engine_a.set_ice_timeouts(
+            Some(Duration::from_secs(5)),
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(1)),
+        );
 
-        let setting_engine_b = SettingEngineBuilder::new()
-            .with_ice_timeouts(
-                Some(Duration::from_secs(5)),
-                Some(Duration::from_secs(10)),
-                Some(Duration::from_secs(1)),
-            )
-            .build();
+        let mut setting_engine_b = SettingEngine::default();
+        setting_engine_b.set_ice_timeouts(
+            Some(Duration::from_secs(5)),
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(1)),
+        );
 
         let config_a = RTCConfigurationBuilder::new().build();
 
@@ -350,14 +347,7 @@ fn test_ice_transport_policy() {
             .with_ice_transport_policy(RTCIceTransportPolicy::All)
             .build();
 
-        // A relay-only policy needs a TURN server to relay through; without one
-        // the core rejects the configuration when the peer connection is built.
         let config_relay = RTCConfigurationBuilder::new()
-            .with_ice_servers(vec![RTCIceServer {
-                urls: vec!["turn:127.0.0.1:3478".to_owned()],
-                username: "rvoip".to_owned(),
-                credential: "rvoip".to_owned(),
-            }])
             .with_ice_transport_policy(RTCIceTransportPolicy::Relay)
             .build();
 
@@ -528,13 +518,12 @@ fn test_all_configuration_options_combined() {
             .register_default_codecs()
             .expect("Failed to register codecs");
 
-        let setting_engine = SettingEngineBuilder::new()
-            .with_ice_timeouts(
-                Some(Duration::from_secs(5)),
-                Some(Duration::from_secs(10)),
-                Some(Duration::from_secs(1)),
-            )
-            .build();
+        let mut setting_engine = SettingEngine::default();
+        setting_engine.set_ice_timeouts(
+            Some(Duration::from_secs(5)),
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(1)),
+        );
 
         let ice_servers = vec![RTCIceServer {
             urls: vec!["stun:stun.l.google.com:19302".to_string()],

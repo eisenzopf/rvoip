@@ -2,7 +2,6 @@
 // Call-ID = ( "Call-ID" / "i" ) HCOLON callid
 // callid = word [ "@" word ]
 
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case},
@@ -21,7 +20,7 @@ use std::str; // Import the specific type
 // Returns String representation
 pub fn callid(input: &[u8]) -> ParseResult<'_, String> {
     map_res(
-        pair(word, opt(preceded(tag(&b"@"[..]), word))),
+        pair(word, opt(preceded(tag(b"@"), word))),
         |(word1, opt_word2)| {
             let s1 = str::from_utf8(word1)?;
             if let Some(word2) = opt_word2 {
@@ -31,21 +30,16 @@ pub fn callid(input: &[u8]) -> ParseResult<'_, String> {
                 Ok::<String, std::str::Utf8Error>(s1.to_string())
             }
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 // Call-ID = ( "Call-ID" / "i" ) HCOLON callid
 pub fn parse_call_id(input: &[u8]) -> ParseResult<'_, CallId> {
     // Return CallId
     preceded(
-        pair(
-            alt((tag_no_case(&b"Call-ID"[..]), tag_no_case(&b"i"[..]))),
-            hcolon,
-        ),
+        pair(alt((tag_no_case(b"Call-ID"), tag_no_case(b"i"))), hcolon),
         map(callid, |call_id_str| CallId(call_id_str)),
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]
