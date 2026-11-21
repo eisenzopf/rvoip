@@ -27,7 +27,6 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = "3.14"
-tower = { version = "0.5", features = ["util"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [lints]

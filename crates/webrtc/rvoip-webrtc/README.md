@@ -4,11 +4,10 @@ WebRTC **interop adapter** for [`rvoip-core`](../../foundation/rvoip-core): term
 (ICE/DTLS-SRTP, SDP offer/answer) and exposes voip-3 `Connection`s with channel-based
 `MediaStream` flows.
 
-Built on the workspace's attributed forks of [webrtc-rs](https://webrtc.rs):
-[`rvoip-webrtc-stack`](../rvoip-webrtc-stack) (the async `webrtc` crate,
-**`0.20.0-alpha.1`**, with the `PeerConnectionBuilder` /
-`PeerConnectionEventHandler` API) and [`rvoip-rtc`](../rvoip-rtc) (the Sans-I/O
-`rtc` core, **`0.21.1`**).
+Built on the workspace's attributed forks of [webrtc-rs](https://webrtc.rs)
+**`0.20.0-alpha.1`**: [`rvoip-webrtc-stack`](../rvoip-webrtc-stack) (the async
+`webrtc` crate with the `PeerConnectionBuilder` / `PeerConnectionEventHandler`
+API) and [`rvoip-rtc`](../rvoip-rtc) (the Sans-I/O `rtc` core).
 
 ## Scope
 

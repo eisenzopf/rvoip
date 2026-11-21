@@ -8,20 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
-/// Derive the base64url RSA public modulus and exponent from a PKCS#8 or
-/// PKCS#1 private-key PEM. JWT verification and JWKS publication both need
-/// the public key; the private PEM is not a usable verification key.
-fn rsa_public_components(signing_key: &str) -> Result<(String, String)> {
-    let private_key = rsa::PrivateKey::from_pkcs8_pem(signing_key)
-        .or_else(|_| rsa::PrivateKey::from_pkcs1_pem(signing_key))
-        .map_err(|err| Error::Config(format!("invalid RSA signing key: {err}")))?;
-    let public_key = private_key.to_public_key();
-    Ok((
-        URL_SAFE_NO_PAD.encode(public_key.n().to_be_bytes_trimmed_vartime()),
-        URL_SAFE_NO_PAD.encode(public_key.e().to_be_bytes_trimmed_vartime()),
-    ))
-}
-
 /// JWT issuer
 pub struct JwtIssuer {
     pub(crate) config: JwtConfig,
@@ -274,8 +260,7 @@ impl JwtIssuer {
         let encoding_key = match config.algorithm.as_str() {
             "RS256" => EncodingKey::from_rsa_pem(signing_key.as_bytes())
                 .map_err(|e| Error::Config(format!("Invalid RSA key: {}", e)))?,
-            "HS256" => EncodingKey::from_secret(signing_key.as_bytes())
-                .map_err(|e| Error::Config(format!("Invalid HS256 signing key: {}", e)))?,
+            "HS256" => EncodingKey::from_secret(signing_key.as_bytes()),
             _ => {
                 return Err(Error::Config(format!(
                     "Unsupported algorithm: {}",
@@ -285,15 +270,9 @@ impl JwtIssuer {
         };
 
         let decoding_key = match config.algorithm.as_str() {
-            // `DecodingKey::from_rsa_pem` accepts the private PEM but cannot
-            // verify with it, so every issued token would be rejected.
-            "RS256" => {
-                let (modulus, exponent) = rsa_public_components(signing_key)?;
-                DecodingKey::from_rsa_components(&modulus, &exponent)
-                    .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?
-            }
-            "HS256" => DecodingKey::from_secret(signing_key.as_bytes())
-                .map_err(|e| Error::Config(format!("Invalid HS256 signing key: {}", e)))?,
+            "RS256" => DecodingKey::from_rsa_pem(signing_key.as_bytes())
+                .map_err(|e| Error::Config(format!("Invalid RSA verification key: {}", e)))?,
+            "HS256" => DecodingKey::from_secret(signing_key.as_bytes()),
             _ => unreachable!(),
         };
 
@@ -429,15 +408,18 @@ impl JwtIssuer {
         let signing_key = self.config.signing_key.as_ref().ok_or_else(|| {
             Error::Config("RS256 public JWK requires the configured signing key".to_string())
         })?;
-        let (modulus, exponent) = rsa_public_components(signing_key)?;
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(signing_key)
+            .or_else(|_| rsa::RsaPrivateKey::from_pkcs1_pem(signing_key))
+            .map_err(|err| Error::Config(format!("invalid RSA signing key for JWK: {err}")))?;
+        let public_key = private_key.to_public_key();
 
         Ok(serde_json::json!({
             "kty": "RSA",
             "use": "sig",
             "kid": self.header.kid.as_ref().unwrap(),
             "alg": self.config.algorithm,
-            "n": modulus,
-            "e": exponent,
+            "n": URL_SAFE_NO_PAD.encode(public_key.n().to_bytes_be()),
+            "e": URL_SAFE_NO_PAD.encode(public_key.e().to_bytes_be()),
         }))
     }
 
@@ -463,10 +445,10 @@ impl JwtIssuer {
 
     fn generate_hs256_secret() -> String {
         use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        use rand::{rand_core::UnwrapErr, rngs::SysRng, Rng};
+        use rand::{rngs::OsRng, RngCore};
 
         let mut secret = [0u8; 32];
-        UnwrapErr(SysRng).fill_bytes(&mut secret);
+        OsRng.fill_bytes(&mut secret);
         URL_SAFE_NO_PAD.encode(secret)
     }
 }
@@ -502,15 +484,6 @@ mod tests {
             updated_at: now,
             last_login: None,
         }
-    }
-
-    #[test]
-    fn empty_hs256_signing_key_is_a_config_error() {
-        let result = JwtIssuer::new(JwtConfig {
-            signing_key: Some(String::new()),
-            ..JwtConfig::default()
-        });
-        assert!(matches!(result, Err(Error::Config(msg)) if msg.contains("HS256 signing key")));
     }
 
     #[test]

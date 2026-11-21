@@ -24,13 +24,13 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
+use rtc::interceptor::Registry;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::{
     CandidateConfig, CandidateHostConfig, RTCDtlsRole, RTCIceCandidate,
@@ -50,8 +50,6 @@ use webrtc::peer_connection::sdp::session_description::RTCSessionDescription as 
 use webrtc::rtp_transceiver::rtp_codec::RTCRtpCodecCapability;
 use webrtc::track::track_local::track_local_static_rtp::TrackLocalStaticRTP;
 use webrtc::track::track_local::{TrackLocal, TrackLocalWriter};
-
-mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
@@ -83,10 +81,10 @@ async fn create_webrtc_peer_video_only() -> Result<Arc<WebrtcPeerConnection>> {
 
 /// Create sansio RTC peer configuration with video-only codec support
 /// Audio codecs are NOT registered, so audio tracks will be rejected
-fn create_rtc_peer_config_video_only() -> Result<RTCPeerConnection> {
-    let setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Client)
-        .build();
+fn create_rtc_peer_config_video_only()
+-> Result<RTCPeerConnection<impl rtc::interceptor::Interceptor>> {
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
 
     // Only register video codec - no audio!
     let mut media_engine = MediaEngine::default();
@@ -103,7 +101,7 @@ fn create_rtc_peer_config_video_only() -> Result<RTCPeerConnection> {
     media_engine.register_codec(video_codec, RtpCodecKind::Video)?;
     // Note: Audio codec is NOT registered, so audio will be rejected
 
-    let registry = RtcRegistry::new();
+    let registry = Registry::new();
     let registry = register_default_interceptors(registry, &mut media_engine)?;
 
     let config = RTCConfigurationBuilder::new().build();
@@ -113,7 +111,7 @@ fn create_rtc_peer_config_video_only() -> Result<RTCPeerConnection> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build(Instant::now())?;
+        .build()?;
 
     Ok(pc)
 }
@@ -130,7 +128,6 @@ fn create_rtc_peer_config_video_only() -> Result<RTCPeerConnection> {
 /// - Video RTP packets are received successfully
 #[tokio::test]
 async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
-    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -178,12 +175,12 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
     // Set remote description (offer) on RTC - use offer without candidates (trickle ICE)
     let offer_sdp = offer.sdp.clone();
     let rtc_offer = rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp)?;
-    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
+    rtc_pc.set_remote_description(rtc_offer)?;
     log::info!("RTC set remote description (offer with video)");
 
     // Create and set answer
     let answer = rtc_pc.create_answer(None)?;
-    rtc_pc.set_local_description(Instant::now(), answer.clone())?;
+    rtc_pc.set_local_description(answer.clone())?;
     log::info!("RTC created answer");
 
     // Set answer on webrtc
@@ -333,7 +330,7 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
         }
 
         // Process reads
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             if let RTCMessage::RtpPacket(_track_id, rtp_packet) = message {
                 video_packets_received += 1;
                 if video_packets_received == 1 || video_packets_received.is_multiple_of(10) {
@@ -418,7 +415,6 @@ async fn test_video_only_webrtc_offerer_rtc_answerer() -> Result<()> {
 /// sansio RTC correctly rejects audio (port=0) while accepting video.
 #[tokio::test]
 async fn test_sdp_answer_rejects_audio_correctly() -> Result<()> {
-    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -466,7 +462,7 @@ a=ssrc:22222 cname:test
 
     // Set remote description (offer with video + audio)
     let rtc_offer = rtc::peer_connection::sdp::RTCSessionDescription::offer(offer_sdp.to_string())?;
-    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
+    rtc_pc.set_remote_description(rtc_offer)?;
 
     // Add a dummy local candidate
     let socket = UdpSocket::bind("127.0.0.1:0").await?;

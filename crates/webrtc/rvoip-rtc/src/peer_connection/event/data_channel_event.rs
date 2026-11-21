@@ -81,7 +81,6 @@ use crate::data_channel::RTCDataChannelId;
 /// - [W3C RTCDataChannel](https://www.w3.org/TR/webrtc/#rtcdatachannel)
 #[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum RTCDataChannelEvent {
     /// Data channel has opened and is ready to send/receive data.
     ///

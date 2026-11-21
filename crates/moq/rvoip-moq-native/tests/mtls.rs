@@ -7,8 +7,8 @@ use anyhow::Context as _;
 use moq_native_ietf::{quic, tls};
 use moq_transport::session::SessionTarget;
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, KeyPair,
+    KeyUsagePurpose,
 };
 use tempfile::TempDir;
 use time::{OffsetDateTime, Time};
@@ -38,36 +38,40 @@ struct TestPki {
 impl TestPki {
     fn new() -> anyhow::Result<Self> {
         let directory = tempfile::tempdir()?;
-        let (trusted_ca, trusted_issuer) = certificate_authority()?;
-        let (_untrusted_ca, untrusted_issuer) = certificate_authority()?;
+        let (trusted_ca, trusted_key) = certificate_authority()?;
+        let (untrusted_ca, untrusted_key) = certificate_authority()?;
         let trusted_ca_path = directory.path().join("trusted-ca.pem");
         fs::write(&trusted_ca_path, trusted_ca.pem())?;
 
         let valid = client_identity(
             directory.path(),
             "valid",
-            &trusted_issuer,
+            &trusted_ca,
+            &trusted_key,
             Validity::Current,
             ExtendedKeyUsagePurpose::ClientAuth,
         )?;
         let untrusted = client_identity(
             directory.path(),
             "untrusted",
-            &untrusted_issuer,
+            &untrusted_ca,
+            &untrusted_key,
             Validity::Current,
             ExtendedKeyUsagePurpose::ClientAuth,
         )?;
         let expired = client_identity(
             directory.path(),
             "expired",
-            &trusted_issuer,
+            &trusted_ca,
+            &trusted_key,
             Validity::Expired,
             ExtendedKeyUsagePurpose::ClientAuth,
         )?;
         let wrong_usage = client_identity(
             directory.path(),
             "wrong-usage",
-            &trusted_issuer,
+            &trusted_ca,
+            &trusted_key,
             Validity::Current,
             ExtendedKeyUsagePurpose::ServerAuth,
         )?;
@@ -88,7 +92,7 @@ enum Validity {
     Expired,
 }
 
-fn certificate_authority() -> anyhow::Result<(Certificate, Issuer<'static, KeyPair>)> {
+fn certificate_authority() -> anyhow::Result<(Certificate, KeyPair)> {
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![
@@ -100,13 +104,14 @@ fn certificate_authority() -> anyhow::Result<(Certificate, Issuer<'static, KeyPa
     params.not_after = OffsetDateTime::now_utc() + time::Duration::days(365);
     let key = KeyPair::generate()?;
     let certificate = params.self_signed(&key)?;
-    Ok((certificate, Issuer::new(params, key)))
+    Ok((certificate, key))
 }
 
 fn client_identity(
     directory: &std::path::Path,
     name: &str,
-    issuer: &Issuer<'_, KeyPair>,
+    ca: &Certificate,
+    ca_key: &KeyPair,
     validity: Validity,
     usage: ExtendedKeyUsagePurpose,
 ) -> anyhow::Result<IdentityFiles> {
@@ -124,7 +129,7 @@ fn client_identity(
         }
     }
     let key = KeyPair::generate()?;
-    let certificate = params.signed_by(&key, issuer)?;
+    let certificate = params.signed_by(&key, ca, ca_key)?;
     let cert = directory.join(format!("{name}-cert.pem"));
     let key_path = directory.join(format!("{name}-key.pem"));
     fs::write(&cert, certificate.pem())?;

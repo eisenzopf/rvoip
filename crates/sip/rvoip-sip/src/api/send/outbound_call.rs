@@ -105,10 +105,6 @@ pub struct OutboundCallOptionsSnapshot {
     pub supported_100rel: bool,
     /// Application-staged extra headers appended after stack-managed ones.
     pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    /// Offer plain RTP (`RTP/AVP`) for this call instead of the endpoint's
-    /// configured secure/WebRTC profile. See
-    /// [`OutboundCallBuilder::with_plain_rtp`].
-    pub plain_rtp: bool,
     /// When true, the outbound INVITE applies SBC topology hiding:
     /// stack-managed Via headers below the top entry are stripped
     /// and Record-Route entries not pointing at this SBC are
@@ -179,7 +175,6 @@ pub struct OutboundCallBuilder {
     supported_100rel: bool,
     state: BuilderHeaderState,
     topology_hiding: bool,
-    plain_rtp: bool,
     registered_flow_routes: Vec<rvoip_sip_transport::TransportRoute>,
     session_id: Option<CallId>,
 }
@@ -208,7 +203,6 @@ impl OutboundCallBuilder {
             supported_100rel: false,
             state: BuilderHeaderState::default(),
             topology_hiding: false,
-            plain_rtp: false,
             registered_flow_routes: Vec::new(),
             session_id: None,
         }
@@ -360,28 +354,6 @@ impl OutboundCallBuilder {
         self
     }
 
-    /// Offer plain RTP (`RTP/AVP`) for this call instead of the endpoint's
-    /// configured secure/WebRTC profile (ICE, DTLS-SRTP, SDES, RTCP mux).
-    ///
-    /// This is a per-call switch: other calls on the same endpoint keep the
-    /// configured profile. Use it for a leg that terminates on a plain RTP
-    /// peer (a SIP carrier trunk, a legacy PBX) while the endpoint itself
-    /// stays configured for WebRTC/SRTP.
-    ///
-    /// The answer is validated against the plain offer, so a plain SDP answer
-    /// is accepted even when the endpoint requires SRTP/RTCP mux for secure
-    /// calls. The offer still names a separate RTCP port (`a=rtcp:`, RFC 3605)
-    /// when the call has one.
-    ///
-    /// One RFC 3264 relaxation applies to such a call only: an answer that
-    /// adds an RFC 4733 `telephone-event` format the offer did not list (as
-    /// some carrier trunks do) is accepted, and that format is ignored. Any
-    /// other unoffered format still fails the answer.
-    pub fn with_plain_rtp(mut self, enabled: bool) -> Self {
-        self.plain_rtp = enabled;
-        self
-    }
-
     /// Use a caller-reserved Session identity for this INVITE.
     ///
     /// This crate-private seam lets the core adapter install its Connection ID
@@ -475,7 +447,6 @@ impl OutboundCallBuilder {
             transfer_leg: self.transfer_leg,
             supported_100rel: self.supported_100rel,
             extra_headers,
-            plain_rtp: self.plain_rtp,
             topology_hiding: self.topology_hiding,
             registered_flow_routes: self.registered_flow_routes,
         });
@@ -601,7 +572,6 @@ mod tests {
                 HeaderValue::Raw(SECRET.as_bytes().to_vec()),
             )],
             topology_hiding: true,
-            plain_rtp: false,
             registered_flow_routes: Vec::new(),
         };
 

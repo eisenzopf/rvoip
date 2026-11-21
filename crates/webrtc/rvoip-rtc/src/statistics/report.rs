@@ -24,7 +24,6 @@ use std::collections::HashMap;
 ///
 /// Each variant corresponds to a different W3C WebRTC stats dictionary type.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum RTCStatsReportEntry {
     /// Peer connection level statistics.
     PeerConnection(RTCPeerConnectionStats),
@@ -115,15 +114,11 @@ impl RTCStatsReportEntry {
 /// This type implements the W3C RTCStatsReport interface, providing
 /// map-like access to statistics objects keyed by their unique IDs.
 ///
-/// # Examples
+/// # Example
 ///
-/// ```
-/// use rtc::peer_connection::RTCPeerConnection;
+/// ```ignore
 /// use rtc::statistics::StatsSelector;
-/// use rtc::statistics::stats::RTCStatsType;
-/// use std::time::Instant;
 ///
-/// # fn example(peer_connection: &mut RTCPeerConnection) {
 /// let report = peer_connection.get_stats(Instant::now(), StatsSelector::None);
 ///
 /// // Iterate over all stats
@@ -140,7 +135,6 @@ impl RTCStatsReportEntry {
 /// for inbound in report.iter_by_type(RTCStatsType::InboundRTP) {
 ///     println!("Inbound RTP: {:?}", inbound.id());
 /// }
-/// # }
 /// ```
 #[derive(Debug, Default)]
 pub struct RTCStatsReport {

@@ -52,10 +52,6 @@ rvoip-harness      = { workspace = true, optional = true }
 
 # Vapi bidirectional WebSocket agent adapter — `vapi` feature.
 rvoip-vapi         = { workspace = true, optional = true }
-rvoip-amazon-a2a   = { workspace = true, optional = true }
-# Webex Contact Center BYOVA adapter — `webex-byova` feature. Enables only the
-# crate's default, proto-free surface; its `grpc` feature stays opt-in.
-rvoip-webex-byova  = { workspace = true, optional = true }
 
 # Client SDK — `client` feature.
 rvoip-client       = { workspace = true, optional = true }
@@ -80,8 +76,6 @@ sip      = ["dep:rvoip-sip"]
 webrtc   = ["dep:rvoip-webrtc", "dep:rvoip-auth-core"]
 uctp     = ["dep:rvoip-uctp", "dep:rvoip-quic", "dep:rvoip-webtransport", "dep:rvoip-websocket"]
 vapi     = ["dep:rvoip-vapi"]
-amazon-a2a = ["dep:rvoip-amazon-a2a"]
-webex-byova = ["dep:rvoip-webex-byova"]
 
 # ── SIP media add-ons ──
 dtls-srtp = ["sip", "rvoip-sip/dtls-srtp"]
@@ -127,7 +121,7 @@ app = [
 # The pure-Rust codecs are included; `opus` is not, because libopus must be
 # present on the build host and `full` should not turn a missing system
 # package into a build failure. Use `all-codecs` (or `opus`) to add it.
-full = ["voip-3", "vapi", "amazon-a2a", "webex-byova", "sip-stir-shaken", "client", "app", "dtls-srtp", "g729", "amr"]
+full = ["voip-3", "vapi", "sip-stir-shaken", "client", "app", "dtls-srtp", "g729", "amr"]
 
 # ── Deployment-oriented bundles ──
 # Existing leaf and meta-features remain valid. These additive bundles provide
@@ -200,6 +194,3 @@ anyhow             = { workspace = true }
 serial_test        = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
-# Parses this crate's own manifest so the bundle contract tests can check
-# each bundle's declared feature closure (see `feature_bundle_contract_tests`).
-toml               = { workspace = true, features = ["std", "parse", "serde"] }

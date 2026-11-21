@@ -5,9 +5,7 @@
 
 // Current active modules
 pub mod macro_builder_tests;
-pub mod rfc3261_updates_test; // grammar of the RFCs that update RFC 3261
-pub mod torture_element_test; // RFC 4475 element responses (validator)
-pub mod torture_test; // RFC 4475 and RFC 5118 torture tests
+pub mod torture_test; // RFC 4475 torture tests // Tests for macro builder roundtrip conversion
 
 // Future modules - uncomment when implemented
 // pub mod rfc3261_examples; // Examples from core SIP spec RFC 3261

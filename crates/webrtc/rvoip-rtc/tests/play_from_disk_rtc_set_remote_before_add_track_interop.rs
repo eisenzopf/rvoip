@@ -15,7 +15,6 @@ use tokio::sync::mpsc::{Sender, channel};
 use tokio::sync::{Mutex, Notify};
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
 use rtc::media::io::ivf_reader::IVFReader;
 use rtc::media::io::ogg_reader::OggReader;
 use rtc::media_stream::MediaStreamTrack;
@@ -24,7 +23,7 @@ use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{
     MIME_TYPE_OPUS, MIME_TYPE_VP8, MediaEngine,
 };
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::state::RTCIceConnectionState;
 use rtc::peer_connection::state::RTCPeerConnectionState;
@@ -54,8 +53,6 @@ use webrtc::rtp_transceiver::rtp_codec::RTPCodecType;
 use webrtc::rtp_transceiver::rtp_transceiver_direction::RTCRtpTransceiverDirection;
 use webrtc::track::track_remote::TrackRemote;
 
-mod common;
-
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 const OGG_PAGE_DURATION: Duration = Duration::from_millis(20);
 const RTP_OUTBOUND_MTU: usize = 1200;
@@ -63,7 +60,6 @@ const RTP_OUTBOUND_MTU: usize = 1200;
 /// Test webrtc as RecvOnly offerer, rtc as answerer streaming from disk
 #[tokio::test]
 async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
-    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -75,8 +71,8 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
     );
 
     // Determine test data paths
-    let video_file = "../examples/test-data/output_vp8.ivf";
-    let audio_file = "../examples/test-data/output.ogg";
+    let video_file = "../examples/examples/test-data/output_vp8.ivf";
+    let audio_file = "../examples/examples/test-data/output.ogg";
 
     // Check if test files exist
     if !Path::new(video_file).exists() {
@@ -186,9 +182,8 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Client)
-        .build();
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
 
     // Create a MediaEngine object to configure the supported codec
     let mut media_engine = MediaEngine::default();
@@ -218,7 +213,7 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
     media_engine.register_codec(audio_codec.clone(), RtpCodecKind::Audio)?;
     media_engine.register_codec(video_codec.clone(), RtpCodecKind::Video)?;
 
-    let registry = RtcRegistry::new();
+    let registry = interceptor::Registry::new();
 
     // Use the default set of Interceptors
     let registry =
@@ -239,11 +234,11 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created RTC peer connection");
 
     // Set remote description first (the offer from webrtc)
-    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
+    rtc_pc.set_remote_description(rtc_offer)?;
     log::info!("RTC set remote description");
 
     // Now add tracks for streaming
@@ -299,7 +294,7 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
     log::info!("RTC created answer");
 
     // Set local description on rtc peer
-    rtc_pc.set_local_description(Instant::now(), answer.clone())?;
+    rtc_pc.set_local_description(answer.clone())?;
     log::info!("RTC set local description");
 
     // Convert rtc answer to webrtc SDP
@@ -431,18 +426,8 @@ async fn test_play_from_disk_rtc_set_remote_before_add_track() -> Result<()> {
                 .ssrcs()
                 .last()
                 .ok_or(Error::ErrSenderWithNoSSRCs)?;
-            // The disk file was packetized with a fixed local payload type, but write_rtp
-            // now requires the packet's PT to match one of the sender's negotiated codecs.
-            // Each sender carries a single media codec, so stamp its negotiated PT here.
-            packet.header.payload_type = rtp_sender
-                .get_parameters()
-                .rtp_parameters
-                .codecs
-                .first()
-                .map(|codec| codec.payload_type)
-                .ok_or(Error::ErrRTPTransceiverCodecUnsupported)?;
             log::trace!("sending rtp packet with ssrc={}", packet.header.ssrc);
-            rtp_sender.write_rtp(Instant::now(), packet)?;
+            rtp_sender.write_rtp(packet)?;
         }
 
         // Check if we've received enough packets
@@ -545,7 +530,6 @@ async fn stream_video(
     log::info!("play video from disk file {video_file_name}");
 
     let mut packetizer = rtp::packetizer::new_packetizer(
-        Instant::now(),
         RTP_OUTBOUND_MTU,
         codec.payload_type,
         ssrc,
@@ -574,7 +558,7 @@ async fn stream_video(
 
         let sample_duration = Duration::from_millis(40);
         let samples = (sample_duration.as_secs_f64() * codec.rtp_codec.clock_rate as f64) as u32;
-        let packets = packetizer.packetize(Instant::now(), &frame.freeze(), samples)?;
+        let packets = packetizer.packetize(&frame.freeze(), samples)?;
         for packet in packets {
             video_message_tx.send((video_sender_id, packet)).await?;
         }
@@ -621,7 +605,6 @@ async fn stream_audio(
     log::info!("play audio from disk file {audio_file_name}");
 
     let mut packetizer = rtp::packetizer::new_packetizer(
-        Instant::now(),
         RTP_OUTBOUND_MTU,
         codec.payload_type,
         ssrc,
@@ -645,7 +628,7 @@ async fn stream_audio(
         let sample_duration = Duration::from_millis(sample_count * 1000 / 48000);
 
         let samples = (sample_duration.as_secs_f64() * codec.rtp_codec.clock_rate as f64) as u32;
-        let packets = packetizer.packetize(Instant::now(), &page_data.freeze(), samples)?;
+        let packets = packetizer.packetize(&page_data.freeze(), samples)?;
         for packet in packets {
             audio_message_tx.send((audio_sender_id, packet)).await?;
         }

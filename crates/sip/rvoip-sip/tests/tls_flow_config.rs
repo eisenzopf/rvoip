@@ -1,21 +1,23 @@
-//! `Config::sip_tls_flow` reaches the SIP TLS listener, and
-//! `Config::with_sip_bind_outbound_to_local_ip` sets the TCP and TLS flows.
-use rvoip_sip::api::unified::{Config, SipTlsMode};
+//! `Config::sip_tls_flow` reaches the SIP TLS listener.
+use rvoip_sip::api::unified::{Config, SipTlsMode, UnifiedCoordinator};
 use rvoip_sip_core::builder::SimpleResponseBuilder;
 use rvoip_sip_core::{Message, StatusCode};
 use rvoip_sip_transport::{
-    IngressAdmissionHook, IngressVerdict, TcpFlowConfig, TlsFlowConfig,
-    TlsReceiveBackpressurePolicy,
+    IngressAdmissionHook, IngressVerdict, TlsFlowConfig, TlsReceiveBackpressurePolicy,
 };
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
-#[path = "support/free_port.rs"]
-mod free_port;
-
-use free_port::{probe_udp_port, start_with_tls_connection};
+fn port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
 
 #[test]
 fn sip_tls_flow_defaults_to_pause_with_nodelay_and_is_configurable() {
@@ -42,31 +44,6 @@ fn sip_tls_flow_defaults_to_pause_with_nodelay_and_is_configurable() {
     );
     assert!(!tuned.sip_tls_flow.tcp_nodelay);
     assert!(format!("{tuned:?}").contains("sip_tls_flow"));
-}
-
-#[test]
-fn outbound_source_bind_is_off_by_default_and_set_for_tcp_and_tls_together() {
-    let config = Config::local("alice", 5060);
-    assert!(!config.sip_tls_flow.bind_outbound_to_local_ip);
-    assert!(!config.sip_tcp_flow.bind_outbound_to_local_ip);
-
-    let bound = Config::local("alice", 5060)
-        .with_sip_tls_flow(TlsFlowConfig::default().with_tcp_nodelay(false))
-        .with_sip_bind_outbound_to_local_ip(true);
-    assert!(bound.sip_tls_flow.bind_outbound_to_local_ip);
-    assert!(bound.sip_tcp_flow.bind_outbound_to_local_ip);
-    // The convenience setter keeps the flows' other settings.
-    assert!(!bound.sip_tls_flow.tcp_nodelay);
-    assert!(format!("{bound:?}").contains("sip_tcp_flow"));
-
-    let cleared = bound.with_sip_bind_outbound_to_local_ip(false);
-    assert!(!cleared.sip_tls_flow.bind_outbound_to_local_ip);
-    assert!(!cleared.sip_tcp_flow.bind_outbound_to_local_ip);
-
-    let tcp_only = Config::local("alice", 5060)
-        .with_sip_tcp_flow(TcpFlowConfig::default().with_bind_outbound_to_local_ip(true));
-    assert!(tcp_only.sip_tcp_flow.bind_outbound_to_local_ip);
-    assert!(!tcp_only.sip_tls_flow.bind_outbound_to_local_ip);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -97,16 +74,32 @@ async fn sip_tls_flow_ingress_hook_answers_on_the_tls_listener() {
     });
     let flow = TlsFlowConfig::default().with_ingress_admission(hook);
 
-    let (coordinator, mut stream, tls_port) =
-        start_with_tls_connection("TLS appliance", identity.cert.der().clone(), |tls_port| {
-            let mut config = Config::local("appliance", probe_udp_port());
-            config.sip_tls_mode = SipTlsMode::ClientAndServer;
-            config.tls_bind_addr = Some(([127, 0, 0, 1], tls_port).into());
-            config.tls_cert_path = Some(cert.clone());
-            config.tls_key_path = Some(key.clone());
-            config.with_sip_tls_flow(flow.clone())
-        })
-        .await;
+    let tls_port = port();
+    let mut config = Config::local("appliance", port());
+    config.sip_tls_mode = SipTlsMode::ClientAndServer;
+    config.tls_bind_addr = Some(([127, 0, 0, 1], tls_port).into());
+    config.tls_cert_path = Some(cert);
+    config.tls_key_path = Some(key);
+    let config = config.with_sip_tls_flow(flow.clone());
+    let coordinator = Box::pin(UnifiedCoordinator::new(config)).await.unwrap();
+
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(identity.cert.der().clone()).unwrap();
+    let client = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let stream = TcpStream::connect(("127.0.0.1", tls_port)).await.unwrap();
+    let mut stream = tokio_rustls::TlsConnector::from(Arc::new(client))
+        .connect(
+            rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+            stream,
+        )
+        .await
+        .unwrap();
 
     let call_id = format!("tls-flow-{tls_port}");
     let options = format!(

@@ -920,25 +920,16 @@ fn is_missing_credentials_for_auth_error(
     )
 }
 
-#[cfg(test)]
 fn is_session_lifecycle_capacity_exhaustion(
     error: &(dyn std::error::Error + Send + Sync + 'static),
 ) -> bool {
-    session_lifecycle_capacity_exhaustion_kind(error).is_some()
-}
-
-/// Which lifecycle bound rejected an admission: `"active"` concurrent calls,
-/// or `"retained"` lifetimes (live calls plus anti-reuse fences of ended
-/// calls). Both are answered with a SIP overload, but they have different
-/// remedies, so they are reported separately.
-fn session_lifecycle_capacity_exhaustion_kind(
-    error: &(dyn std::error::Error + Send + Sync + 'static),
-) -> Option<&'static str> {
-    match error.downcast_ref::<SessionAdmissionError>() {
-        Some(SessionAdmissionError::CapacityExhausted) => Some("active"),
-        Some(SessionAdmissionError::RetainedCapacityExhausted) => Some("retained"),
-        _ => None,
-    }
+    matches!(
+        error.downcast_ref::<SessionAdmissionError>(),
+        Some(
+            SessionAdmissionError::CapacityExhausted
+                | SessionAdmissionError::RetainedCapacityExhausted
+        )
+    )
 }
 
 fn safe_auth_method_label(method: &str) -> &'static str {
@@ -4217,7 +4208,7 @@ impl SessionCrossCrateEventHandler {
         sdp: Option<String>,
         headers: &std::collections::HashMap<String, String>,
         transaction_id: &str,
-        source_addr: &str,
+        _source_addr: &str,
         raw_request: Option<bytes::Bytes>,
         transport: Option<rvoip_infra_common::events::cross_crate::SipTransportContext>,
     ) -> Result<()> {
@@ -4340,13 +4331,10 @@ impl SessionCrossCrateEventHandler {
             transaction: pending_transaction,
             remote_sdp: sdp.clone(),
         };
-        // Dialog-core mints a random UUID session identifier for every new
-        // inbound INVITE and never reuses it, so its anti-reuse fence is
-        // reclaimed when the finished call is removed from the store.
         let create_result = self
             .state_machine
             .store
-            .create_session_initialized_unique(
+            .create_session_initialized(
                 session_id.clone(),
                 Role::UAS,
                 self.inbound_session_history,
@@ -4359,25 +4347,13 @@ impl SessionCrossCrateEventHandler {
         let created_session = match create_result {
             Ok(session) => session,
             Err(error) => {
-                if let Some(exhausted_capacity) =
-                    session_lifecycle_capacity_exhaustion_kind(error.as_ref())
-                {
+                if is_session_lifecycle_capacity_exhaustion(error.as_ref()) {
                     let observed_sessions = self.state_machine.store.sessions.len();
-                    if exhausted_capacity == "retained" {
-                        warn!(
-                            observed_sessions,
-                            exhausted_capacity,
-                            configured_admission_limit = ?self.server_call_admission_limit,
-                            "Session lifecycle capacity rejected inbound INVITE (retained lifetimes incl. anti-reuse fences); returning SIP overload"
-                        );
-                    } else {
-                        warn!(
-                            observed_sessions,
-                            exhausted_capacity,
-                            configured_admission_limit = ?self.server_call_admission_limit,
-                            "Session lifecycle capacity rejected inbound INVITE; returning SIP overload"
-                        );
-                    }
+                    warn!(
+                        observed_sessions,
+                        configured_admission_limit = ?self.server_call_admission_limit,
+                        "Session lifecycle capacity rejected inbound INVITE; returning SIP overload"
+                    );
                     self.reject_and_cleanup_incoming_call_for_overload(
                         transaction_id,
                         incoming_dialog_id.as_ref(),
@@ -4543,12 +4519,6 @@ impl SessionCrossCrateEventHandler {
                 coordinator.notify_inbound_invite_observers(
                     crate::api::unified::InboundInviteObservation {
                         session_id: session_id.clone(),
-                        // The transport event's socket source, not anything
-                        // the request itself claims.
-                        observed_peer_address: source_addr
-                            .parse::<std::net::SocketAddr>()
-                            .ok()
-                            .map(|address| address.ip()),
                         request: observed_request.clone(),
                         principal: authenticated_principal.clone(),
                     },
@@ -5566,13 +5536,12 @@ impl SessionCrossCrateEventHandler {
             "Committing exact outbound BYE lifecycle completion"
         );
 
-        let (state_before_completion, local_end_reason) = self
+        let state_before_completion = self
             .state_machine
             .store
             .get_session_snapshot_exact(&handle)
             .ok()
-            .map(|snapshot| (Some(snapshot.call_state), snapshot.local_end_reason.clone()))
-            .unwrap_or((None, None));
+            .map(|snapshot| snapshot.call_state);
         let lifecycle = crate::api::unified::commit_local_bye_lifecycle_exact(
             Arc::clone(&self.state_machine),
             &handle,
@@ -5587,17 +5556,14 @@ impl SessionCrossCrateEventHandler {
                 }
             }
             crate::api::unified::LocalByeLifecycleCommit::Ended => {
-                let reason = local_end_reason.unwrap_or_else(|| {
-                    if matches!(state_before_completion, Some(CallState::Terminating)) {
-                        "Local hangup"
-                    } else {
-                        "Local BYE"
-                    }
-                    .to_string()
-                });
+                let reason = if matches!(state_before_completion, Some(CallState::Terminating)) {
+                    "Local hangup"
+                } else {
+                    "Local BYE"
+                };
                 crate::api::events::Event::CallEnded {
                     call_id: handle.session_id().clone(),
-                    reason,
+                    reason: reason.to_string(),
                 }
             }
         };
@@ -7393,16 +7359,16 @@ mod tests {
         media_observation_session_id, parse_sipfrag_status_line, queued_dialog_lifetime_is_current,
         refer_default_is_pending_exact, registry_has_exact_dialog,
         remove_quiesced_failed_inbound_store_lifetime, safe_auth_method_label,
-        session_lifecycle_capacity_exhaustion_kind, shutdown_change_requests_stop,
-        sip_trace_owner_matches, spawn_retained_exact_response_completion,
-        spawn_retained_failed_inbound_cleanup, spawn_retained_register_processing,
-        stale_dialog_dispatch_result, validated_inbound_info_event_transaction,
-        AbortStateMachineTaskOnDrop, CallFailureDiagnostics, CallFailureReason,
-        CausalDialogToSessionIngress, CommittedCallFailure, CommittedDialog200,
-        CommittedDialogTermination, DeferredReplayDelivery, DialogToSessionDirectRouter,
-        ExactFinalResponseOutcome, InboundInviteInitialState, OutboundAuthTerminalClass,
-        QueuedDialogPayload, QueuedDialogToSessionEvent, SessionRegistryHandle,
-        StateMachineProcessResult, STATE_MACHINE_DISPATCH_JOIN_FAILURE,
+        shutdown_change_requests_stop, sip_trace_owner_matches,
+        spawn_retained_exact_response_completion, spawn_retained_failed_inbound_cleanup,
+        spawn_retained_register_processing, stale_dialog_dispatch_result,
+        validated_inbound_info_event_transaction, AbortStateMachineTaskOnDrop,
+        CallFailureDiagnostics, CallFailureReason, CausalDialogToSessionIngress,
+        CommittedCallFailure, CommittedDialog200, CommittedDialogTermination,
+        DeferredReplayDelivery, DialogToSessionDirectRouter, ExactFinalResponseOutcome,
+        InboundInviteInitialState, OutboundAuthTerminalClass, QueuedDialogPayload,
+        QueuedDialogToSessionEvent, SessionRegistryHandle, StateMachineProcessResult,
+        STATE_MACHINE_DISPATCH_JOIN_FAILURE,
     };
     use crate::adapters::outbound_request_tracker::{
         DeferredTrackedRequestEvent, ExactTransactionLookup, OutboundInDialogRequestTracker,
@@ -8039,18 +8005,23 @@ Content-Length: 0\r\n\r\n";
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn inbound_invite_observers_get_the_server_transactions_request() {
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
+        let uas_port = reservation
+            .local_addr()
+            .expect("reserved UAS address")
+            .port();
+        drop(reservation);
         let client = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind raw SIP client");
         let client_port = client.local_addr().expect("raw client address").port();
 
-        let (coordinator, uas_port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
-            let mut config = crate::api::unified::Config::local("invite-handoff-uas", port)
-                .with_auto_180_ringing(false);
-            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-            config
-        })
-        .await;
+        let mut config = crate::api::unified::Config::local("invite-handoff-uas", uas_port)
+            .with_auto_180_ringing(false);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
+            .await
+            .expect("start UAS");
         let observed = Arc::new(std::sync::Mutex::new(None));
         let sink = Arc::clone(&observed);
         coordinator
@@ -8159,23 +8130,28 @@ Content-Length: {}\r\n\r\n\
             .expect("timed out waiting for SIP response")
         }
 
+        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").expect("reserve UAS port");
+        let uas_port = reservation
+            .local_addr()
+            .expect("reserved UAS address")
+            .port();
+        drop(reservation);
         let client = UdpSocket::bind("127.0.0.1:0")
             .await
             .expect("bind raw SIP client");
         let client_port = client.local_addr().expect("raw client address").port();
 
-        let (coordinator, uas_port) = crate::test_ports::coordinator_on_free_udp_port(|port| {
-            let mut config = crate::api::unified::Config::local("sdes-update-uas", port)
-                .with_auto_180_ringing(false)
-                .with_fast_auto_accept_incoming_calls(true);
-            config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
-            config.offer_srtp = true;
-            config.srtp_required = false;
-            config.srtp_offered_suites =
-                vec![rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80];
-            config
-        })
-        .await;
+        let mut config = crate::api::unified::Config::local("sdes-update-uas", uas_port)
+            .with_auto_180_ringing(false)
+            .with_fast_auto_accept_incoming_calls(true);
+        config.media_mode = crate::api::unified::MediaMode::SignalingOnly { sdp_rtp_port: 9 };
+        config.offer_srtp = true;
+        config.srtp_required = false;
+        config.srtp_offered_suites =
+            vec![rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80];
+        let coordinator = crate::api::unified::UnifiedCoordinator::new(config)
+            .await
+            .expect("start SDES UAS");
         let mut diagnostics = coordinator.subscribe_diagnostics();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -8423,7 +8399,7 @@ Content-Length: {}\r\n\r\n\
             .expect("media port admission check");
         assert!(handler.contains("if free_port_slots == Some(0) {"));
         let create = handler
-            .find("create_session_initialized_unique(")
+            .find("create_session_initialized(")
             .expect("session creation");
         assert!(port_check < create);
         assert!(handler.contains("reject_incoming_call_for_media_ports("));
@@ -9074,22 +9050,7 @@ Content-Length: {}\r\n\r\n\
               CSeq: 3 UPDATE\r\n\
               Content-Length: 0\r\n\r\n",
         );
-        // Without the magic cookie the request is from an RFC 2543 client;
-        // its server transaction is the one RFC 2543 matching identifies
-        // (RFC 3261 §17.2.3).
-        let rfc2543 = match rvoip_sip_core::parse_message(no_branch.as_ref()) {
-            Ok(rvoip_sip_core::Message::Request(request)) => request,
-            other => panic!("not a request: {other:?}"),
-        };
-        let rfc2543_key = rvoip_sip_dialog::transaction::TransactionKey::from_request(&rfc2543)
-            .expect("RFC 2543 transaction");
-        assert_eq!(
-            derive_inbound_response_state_input("UPDATE", Some(&no_branch))
-                .expect("derive RFC 2543 UPDATE response authority")
-                .transaction_id()
-                .expect("unconsumed authority"),
-            &rfc2543_key
-        );
+        assert!(derive_inbound_response_state_input("UPDATE", Some(&no_branch)).is_err());
     }
 
     #[test]
@@ -9265,7 +9226,7 @@ Content-Length: {}\r\n\r\n\
             .find("let pending_transaction")
             .expect("transaction is parsed before admission and creation");
         let create = handler
-            .find(".create_session_initialized_unique(")
+            .find(".create_session_initialized(")
             .expect("atomic initialized session creation");
         let dialog_commit = handler
             .find(".commit_exact_inbound_dialog(")
@@ -9627,16 +9588,6 @@ Content-Length: {}\r\n\r\n\
         ] {
             assert!(is_session_lifecycle_capacity_exhaustion(&error));
         }
-        assert_eq!(
-            session_lifecycle_capacity_exhaustion_kind(&SessionAdmissionError::CapacityExhausted),
-            Some("active")
-        );
-        assert_eq!(
-            session_lifecycle_capacity_exhaustion_kind(
-                &SessionAdmissionError::RetainedCapacityExhausted
-            ),
-            Some("retained")
-        );
 
         assert!(!is_session_lifecycle_capacity_exhaustion(
             &SessionAdmissionError::AlreadyActive

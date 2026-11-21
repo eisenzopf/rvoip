@@ -21,7 +21,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{
     fs::{File, OpenOptions},
     io::{BufReader, Write},
@@ -519,7 +519,7 @@ async fn write_video_to_track(
             .write_sample(&Sample {
                 data: frame.freeze(),
                 duration: Duration::from_secs(1),
-                ..Sample::new(Instant::now())
+                ..Default::default()
             })
             .await?;
 

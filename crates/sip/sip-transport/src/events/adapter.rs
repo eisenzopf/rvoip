@@ -227,9 +227,6 @@ impl TransportEventAdapter {
                 }
             }
 
-            // Answered by the transaction layer; not a cross-crate event.
-            TransportEvent::MalformedRequest { .. } => None,
-
             TransportEvent::Error { error } => Some(RvoipCrossCrateEvent::TransportToDialog(
                 TransportToDialogEvent::TransportError {
                     error: error.clone(),

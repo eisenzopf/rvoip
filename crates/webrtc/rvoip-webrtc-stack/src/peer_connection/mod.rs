@@ -46,10 +46,8 @@ pub use rtc::peer_connection::{
     certificate::RTCCertificate,
     configuration::{
         RTCBundlePolicy, RTCConfiguration, RTCConfigurationBuilder, RTCIceServer,
-        RTCIceTransportPolicy, RTCRtcpMuxPolicy,
-        interceptor_registry::*,
-        media_engine::MediaEngine,
-        setting_engine::{SettingEngine, SettingEngineBuilder},
+        RTCIceTransportPolicy, RTCRtcpMuxPolicy, interceptor_registry::*,
+        media_engine::MediaEngine, setting_engine::SettingEngine,
     },
     event::{
         RTCDataChannelEvent, RTCPeerConnectionEvent, RTCPeerConnectionIceErrorEvent,
@@ -157,8 +155,11 @@ pub trait PeerConnectionEventHandler: Send + Sync + 'static {
     async fn on_track(&self, _track: Arc<dyn TrackRemote>) {}
 }
 
-pub struct PeerConnectionBuilder<A: ToSocketAddrs> {
-    builder: RTCPeerConnectionBuilder,
+pub struct PeerConnectionBuilder<A: ToSocketAddrs, I = NoopInterceptor>
+where
+    I: Interceptor,
+{
+    builder: RTCPeerConnectionBuilder<I>,
     runtime: Option<Arc<dyn Runtime>>,
     handler: Option<Arc<dyn PeerConnectionEventHandler>>,
     udp_addrs: Vec<A>,
@@ -172,7 +173,7 @@ struct UdpSocketDriverOptions {
     allocated_sockets: Option<Arc<AtomicUsize>>,
 }
 
-impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A> {
+impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A, NoopInterceptor> {
     fn default() -> Self {
         Self {
             builder: RTCPeerConnectionBuilder::new(),
@@ -186,13 +187,16 @@ impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A> {
     }
 }
 
-impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
+impl<A: ToSocketAddrs> PeerConnectionBuilder<A, NoopInterceptor> {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
+impl<A: ToSocketAddrs, I> PeerConnectionBuilder<A, I>
+where
+    I: Interceptor,
+{
     pub fn with_configuration(mut self, configuration: RTCConfiguration) -> Self {
         self.builder = self.builder.with_configuration(configuration);
         self
@@ -208,9 +212,22 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
         self
     }
 
-    pub fn with_interceptor_registry(mut self, interceptor_registry: Registry) -> Self {
-        self.builder = self.builder.with_interceptor_registry(interceptor_registry);
-        self
+    pub fn with_interceptor_registry<P>(
+        self,
+        interceptor_registry: Registry<P>,
+    ) -> PeerConnectionBuilder<A, P>
+    where
+        P: Interceptor,
+    {
+        PeerConnectionBuilder {
+            builder: self.builder.with_interceptor_registry(interceptor_registry),
+            runtime: self.runtime,
+            handler: self.handler,
+            udp_addrs: self.udp_addrs,
+            tcp_addrs: self.tcp_addrs,
+            udp_advertised_ip: self.udp_advertised_ip,
+            allocated_udp_sockets: self.allocated_udp_sockets,
+        }
     }
 
     pub fn with_runtime(mut self, runtime: Arc<dyn Runtime>) -> Self {
@@ -255,7 +272,7 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
             default_runtime().ok_or_else(|| std::io::Error::other("no async runtime found"))?
         };
 
-        let core = self.builder.build(Instant::now())?;
+        let core = self.builder.build()?;
         let configuration = core.get_configuration();
 
         let opts = RTCIceGatherOptions {
@@ -294,7 +311,7 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
         } else {
             default_runtime().ok_or_else(|| std::io::Error::other("no async runtime found"))?
         };
-        let core = self.builder.build(Instant::now())?;
+        let core = self.builder.build()?;
         let configuration = core.get_configuration();
         let opts = RTCIceGatherOptions {
             ice_servers: configuration.ice_servers().to_vec(),
@@ -417,20 +434,26 @@ pub trait PeerConnection: Send + Sync + 'static {
 /// Concrete async peer connection implementation (generic over interceptor type).
 ///
 /// Not exposed directly — obtained as `Arc<dyn PeerConnection>` from `PeerConnectionBuilder::build()`.
-pub(crate) struct PeerConnectionImpl {
-    inner: Arc<PeerConnectionRef>,
+pub(crate) struct PeerConnectionImpl<I = NoopInterceptor>
+where
+    I: Interceptor,
+{
+    inner: Arc<PeerConnectionRef<I>>,
     driver_handle: Mutex<Option<JoinHandle>>,
 }
 
-pub(crate) struct PeerConnectionRef {
-    /// The sans-I/O peer connection core
-    pub(crate) core: Mutex<RTCPeerConnection>,
+pub(crate) struct PeerConnectionRef<I = NoopInterceptor>
+where
+    I: Interceptor,
+{
+    /// The sans-I/O peer connection core (uses default NoopInterceptor)
+    pub(crate) core: Mutex<RTCPeerConnection<I>>,
     /// Runtime for async operations
     pub(crate) runtime: Arc<dyn Runtime>,
     /// Event handler
     pub(crate) handler: Arc<dyn PeerConnectionEventHandler>,
     /// RTP Transceivers
-    pub(crate) rtp_transceivers: Mutex<HashMap<RTCRtpTransceiverId, Arc<RtpTransceiverImpl>>>,
+    pub(crate) rtp_transceivers: Mutex<HashMap<RTCRtpTransceiverId, Arc<RtpTransceiverImpl<I>>>>,
     /// Unified channel for all outgoing driver events
     pub(crate) driver_event_tx: Sender<PeerConnectionDriverEvent>,
     /// Channels for incoming data channel events
@@ -441,10 +464,13 @@ pub(crate) struct PeerConnectionRef {
         Mutex<HashMap<MediaStreamTrackId, (Sender<TrackRemoteEvent>, Arc<dyn TrackRemote>)>>,
 }
 
-impl PeerConnectionImpl {
+impl<I> PeerConnectionImpl<I>
+where
+    I: Interceptor,
+{
     /// Create a new peer connection with a custom runtime
     async fn new<A: ToSocketAddrs>(
-        core: RTCPeerConnection,
+        core: RTCPeerConnection<I>,
         runtime: Arc<dyn Runtime>,
         handler: Arc<dyn PeerConnectionEventHandler>,
         opts: RTCIceGatherOptions,
@@ -508,7 +534,7 @@ impl PeerConnectionImpl {
     }
 
     async fn new_with_udp_socket<A: ToSocketAddrs>(
-        core: RTCPeerConnection,
+        core: RTCPeerConnection<I>,
         runtime: Arc<dyn Runtime>,
         handler: Arc<dyn PeerConnectionEventHandler>,
         opts: RTCIceGatherOptions,
@@ -584,7 +610,10 @@ impl Drop for AllocatedUdpSocketGuard {
 }
 
 #[async_trait::async_trait]
-impl PeerConnection for PeerConnectionImpl {
+impl<I> PeerConnection for PeerConnectionImpl<I>
+where
+    I: Interceptor + 'static,
+{
     async fn close(&self) -> Result<()> {
         {
             let mut core = self.inner.core.lock().await;
@@ -624,7 +653,7 @@ impl PeerConnection for PeerConnectionImpl {
     async fn set_local_description(&self, desc: RTCSessionDescription) -> Result<()> {
         {
             let mut core = self.inner.core.lock().await;
-            core.set_local_description(Instant::now(), desc)?;
+            core.set_local_description(desc)?;
         }
 
         // Wake the driver with MessageInner::IceGathering. Without this
@@ -660,7 +689,7 @@ impl PeerConnection for PeerConnectionImpl {
     async fn set_remote_description(&self, desc: RTCSessionDescription) -> Result<()> {
         {
             let mut core = self.inner.core.lock().await;
-            core.set_remote_description(Instant::now(), desc)?;
+            core.set_remote_description(desc)?;
         }
         // Wake the driver so it re-polls its timeout. When both local and remote
         // descriptions are set, set_remote_description triggers start_transports
@@ -734,14 +763,6 @@ impl PeerConnection for PeerConnectionImpl {
             let mut data_channels = self.inner.data_channel_events_tx.lock().await;
             data_channels.insert(channel_id, evt_tx);
         }
-
-        // A channel created on an established association is dialed at once
-        // and its DCEP OPEN waits in the core's outbound queue; wake the driver
-        // so it is written now rather than at the next protocol timeout.
-        let _ = self
-            .inner
-            .driver_event_tx
-            .try_send(PeerConnectionDriverEvent::WriteNotify);
 
         Ok(Arc::new(DataChannelImpl::new(
             channel_id,

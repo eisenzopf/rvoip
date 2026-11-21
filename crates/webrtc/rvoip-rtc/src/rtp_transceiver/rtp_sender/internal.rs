@@ -16,6 +16,7 @@ use crate::rtp_transceiver::rtp_sender::set_parameter_options::RTCSetParameterOp
 use interceptor::Interceptor;
 use shared::error::{Error, Result};
 use shared::util::math_rand_alpha;
+use std::marker::PhantomData;
 
 /// Internal RTP sender implementation.
 ///
@@ -28,9 +29,12 @@ use shared::util::math_rand_alpha;
 /// * [W3C]
 ///
 /// [MDN]: https://developer.mozilla.org/en-US/docs/Web/API/RTCRtpSender
-/// [W3C]: https://www.w3.org/TR/webrtc/#rtcrtpsender-interface
+/// [W3C]: https://w3c.github.io/webrtc-pc/#rtcrtpsender-interface
 #[derive(Default, Debug, Clone)]
-pub(crate) struct RTCRtpSenderInternal {
+pub(crate) struct RTCRtpSenderInternal<I>
+where
+    I: Interceptor,
+{
     /// The codec kind (audio or video) for this sender
     kind: RtpCodecKind,
     /// The media track being sent
@@ -48,9 +52,14 @@ pub(crate) struct RTCRtpSenderInternal {
     /// Whether SDP negotiation has occurred for this sender
     negotiated: bool,
     sent: bool,
+
+    _phantom: PhantomData<I>,
 }
 
-impl RTCRtpSenderInternal {
+impl<I> RTCRtpSenderInternal<I>
+where
+    I: Interceptor,
+{
     /// Creates a new RTP sender internal state.
     ///
     /// # Parameters
@@ -81,6 +90,8 @@ impl RTCRtpSenderInternal {
             last_returned_parameters: None,
             negotiated: false,
             sent: false,
+
+            _phantom: PhantomData,
         }
     }
 
@@ -187,7 +198,12 @@ impl RTCRtpSenderInternal {
                 }
             }
 
-            if self.kind() == RtpCodecKind::Video {
+            if self.kind() == RtpCodecKind::Audio {
+                parameters.encodings.retain(|encoding| {
+                    encoding.scale_resolution_down_by.is_none() && encoding.max_framerate.is_none()
+                });
+            } else {
+                // Video
                 parameters.encodings.iter_mut().for_each(|encoding| {
                     encoding.scale_resolution_down_by.get_or_insert(1.0);
                 });
@@ -201,11 +217,6 @@ impl RTCRtpSenderInternal {
                         "scaleResolutionDownBy must be >= 1.0".to_string(),
                     ));
                 }
-            } else {
-                // Audio and Application have no resolution/framerate to scale.
-                parameters.encodings.retain(|encoding| {
-                    encoding.scale_resolution_down_by.is_none() && encoding.max_framerate.is_none()
-                });
             }
         }
 
@@ -315,11 +326,7 @@ impl RTCRtpSenderInternal {
     }
 
     /// Stops the sender (placeholder for future implementation).
-    pub(crate) fn stop(
-        &mut self,
-        media_engine: &MediaEngine,
-        interceptor: &mut dyn Interceptor,
-    ) -> Result<()> {
+    pub(crate) fn stop(&mut self, media_engine: &MediaEngine, interceptor: &mut I) -> Result<()> {
         if self.has_sent() && !self.track().codings().is_empty() {
             self.interceptor_local_streams_op(media_engine, interceptor, false);
         }
@@ -360,7 +367,7 @@ impl RTCRtpSenderInternal {
     pub(crate) fn interceptor_local_streams_op(
         &mut self,
         media_engine: &MediaEngine,
-        interceptor: &mut dyn Interceptor,
+        interceptor: &mut I,
         is_binding: bool,
     ) {
         let parameters = self.get_parameters(media_engine).clone();
@@ -411,59 +418,26 @@ mod tests {
         RTCRtpCodec, RTCRtpCodecParameters, RTCRtpCodingParameters, RTCRtpEncodingParameters,
         RtpCodecKind,
     };
-    use interceptor::{Interceptor, NoopInterceptor, StreamInfo, TaggedPacket};
-    use sansio::Protocol;
+    use interceptor::{Interceptor, NoopInterceptor, StreamInfo, TaggedPacket, interceptor};
     use shared::error::Error;
-    use std::time::Instant;
+    use std::sync::{Arc, Mutex};
 
-    /// Records the local streams bound through it and otherwise behaves as the
-    /// terminal `NoopInterceptor`.
-    #[derive(Default)]
-    struct RecordingInterceptor {
-        inner: NoopInterceptor,
-        bound_local: Vec<StreamInfo>,
+    #[derive(Interceptor)]
+    struct RecordingInterceptor<P: Interceptor> {
+        #[next]
+        inner: P,
+        bound_local: Arc<Mutex<Vec<StreamInfo>>>,
     }
 
-    impl Protocol<TaggedPacket, TaggedPacket, ()> for RecordingInterceptor {
-        type Rout = TaggedPacket;
-        type Wout = TaggedPacket;
-        type Eout = ();
-        type Error = Error;
-        type Time = Instant;
-
-        fn handle_read(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-            self.inner.handle_read(msg)
-        }
-
-        fn poll_read(&mut self) -> Option<Self::Rout> {
-            self.inner.poll_read()
-        }
-
-        fn handle_write(&mut self, msg: TaggedPacket) -> Result<(), Self::Error> {
-            self.inner.handle_write(msg)
-        }
-
-        fn poll_write(&mut self) -> Option<Self::Wout> {
-            self.inner.poll_write()
-        }
-    }
-
-    impl Interceptor for RecordingInterceptor {
+    #[interceptor]
+    impl<P: Interceptor> RecordingInterceptor<P> {
+        #[overrides]
         fn bind_local_stream(&mut self, info: &StreamInfo) {
-            self.bound_local.push(info.clone());
+            self.bound_local
+                .lock()
+                .expect("recording interceptor mutex")
+                .push(info.clone());
             self.inner.bind_local_stream(info);
-        }
-
-        fn unbind_local_stream(&mut self, info: &StreamInfo) {
-            self.inner.unbind_local_stream(info);
-        }
-
-        fn bind_remote_stream(&mut self, info: &StreamInfo) {
-            self.inner.bind_remote_stream(info);
-        }
-
-        fn unbind_remote_stream(&mut self, info: &StreamInfo) {
-            self.inner.unbind_remote_stream(info);
         }
     }
 
@@ -516,17 +490,26 @@ mod tests {
             RtpCodecKind::Audio,
             codings.clone(),
         );
-        let mut sender = RTCRtpSenderInternal::new(RtpCodecKind::Audio, track, vec![], codings);
+        let mut sender = RTCRtpSenderInternal::<RecordingInterceptor<NoopInterceptor>>::new(
+            RtpCodecKind::Audio,
+            track,
+            vec![],
+            codings,
+        );
         sender.set_codec_preferences(vec![
             codec_parameters(111, opus),
             codec_parameters(101, codec(MIME_TYPE_TELEPHONE_EVENT, 8_000, 1)),
             codec_parameters(110, telephone_event_48khz),
         ]);
 
-        let mut interceptor = RecordingInterceptor::default();
+        let bound_local = Arc::new(Mutex::new(Vec::new()));
+        let mut interceptor = RecordingInterceptor {
+            inner: NoopInterceptor::new(),
+            bound_local: Arc::clone(&bound_local),
+        };
         sender.interceptor_local_streams_op(&MediaEngine::default(), &mut interceptor, true);
 
-        let bound = &interceptor.bound_local;
+        let bound = bound_local.lock().expect("bound stream records");
         assert_eq!(bound.len(), 2, "both SSRC encodings must bind");
         let opus_info = bound
             .iter()

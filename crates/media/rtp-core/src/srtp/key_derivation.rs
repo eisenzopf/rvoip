@@ -2,7 +2,7 @@ use super::crypto::SrtpCryptoKey;
 use crate::error::Error;
 use crate::Result;
 use aes::{
-    cipher::{Array, BlockCipherEncrypt, KeyInit},
+    cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit},
     Aes128, Aes256,
 };
 
@@ -97,7 +97,7 @@ pub fn srtp_kdf(
                 iv[14] = ((i >> 8) & 0xFF) as u8;
                 iv[15] = (i & 0xFF) as u8;
 
-                let mut block = Array::from(iv);
+                let mut block = GenericArray::clone_from_slice(&iv);
                 cipher.encrypt_block(&mut block);
                 key_material.extend_from_slice(&block);
             }
@@ -111,7 +111,7 @@ pub fn srtp_kdf(
                 iv[14] = ((i >> 8) & 0xFF) as u8;
                 iv[15] = (i & 0xFF) as u8;
 
-                let mut block = Array::from(iv);
+                let mut block = GenericArray::clone_from_slice(&iv);
                 cipher.encrypt_block(&mut block);
                 key_material.extend_from_slice(&block);
             }
