@@ -61,13 +61,9 @@ pub fn dev_client_config_trusting(
     roots
         .add(cert.clone().into_owned())
         .map_err(|e| SubstrateError::Tls(rustls::Error::General(format!("trust anchor: {}", e))))?;
-    let cfg = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(SubstrateError::Tls)?
-    .with_root_certificates(roots)
-    .with_no_client_auth();
+    let cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
     Ok(cfg)
 }
 
@@ -117,9 +113,7 @@ pub fn dangerous_no_verify() -> rustls::ClientConfig {
         }
     }
 
-    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .expect("the ring provider supports rustls's default protocol versions")
+    rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(NoVerify))
         .with_no_client_auth()

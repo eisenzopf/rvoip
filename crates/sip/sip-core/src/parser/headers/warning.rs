@@ -7,7 +7,6 @@
 
 #[cfg(test)]
 use crate::types::uri::Host;
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::take_while_m_n,
@@ -15,7 +14,7 @@ use nom::{
     combinator::{map, map_res},
     error::{Error as NomError, ErrorKind, ParseError}, // Import NomError
     multi::separated_list1,
-    sequence::preceded,
+    sequence::{preceded, tuple},
 };
 use std::str;
 
@@ -36,14 +35,12 @@ use crate::types::warning::{WarnAgent, WarningValue}; // Import types
 fn warn_code(input: &[u8]) -> ParseResult<'_, u16> {
     // Return u16 directly
     map_res(take_while_m_n(3, 3, |c: u8| c.is_ascii_digit()), |bytes| {
-        let s = str::from_utf8(bytes).map_err(|_| {
-            nom::Err::<_>::Failure(NomError::from_error_kind(bytes, ErrorKind::Char))
-        })?;
+        let s = str::from_utf8(bytes)
+            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Char)))?;
         s.parse::<u16>()
             .map_err(|_| nom::Err::Failure(NomError::from_error_kind(bytes, ErrorKind::Digit)))
         // Removed Ok(WarnCode(code)) -> Just return the parsed u16
-    })
-    .parse(input)
+    })(input)
 }
 
 // warn-agent = hostport / pseudonym (token)
@@ -55,12 +52,9 @@ fn warn_agent(input: &[u8]) -> ParseResult<'_, WarnAgent> {
         map_res(token, |t| {
             str::from_utf8(t)
                 .map(|s| WarnAgent::Pseudonym(s.to_string()))
-                .map_err(|_| {
-                    nom::Err::<_>::Error(NomError::from_error_kind(t, ErrorKind::AlphaNumeric))
-                })
+                .map_err(|_| nom::Err::Error(NomError::from_error_kind(t, ErrorKind::AlphaNumeric)))
         }),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 // warn-text = quoted-string
@@ -72,11 +66,11 @@ fn warn_text(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // Changed return type to ParseResult<'_, WarningValue>
 fn warning_value(input: &[u8]) -> ParseResult<'_, WarningValue> {
     map(
-        (
+        tuple((
             warn_code,
             preceded(space1, warn_agent),
             preceded(space1, warn_text),
-        ),
+        )),
         |(code, agent, text_b)| {
             WarningValue {
                 code,
@@ -84,15 +78,14 @@ fn warning_value(input: &[u8]) -> ParseResult<'_, WarningValue> {
                 text: text_b.to_vec(),
             } // Convert &[u8] to Vec<u8>
         },
-    )
-    .parse(input)
+    )(input)
 }
 
 /// Parses a Warning header value (list of warning-values).
 // Warning = "Warning" HCOLON warning-value *(COMMA warning-value)
 // Note: HCOLON handled elsewhere if parsing just the value part
 pub fn parse_warning_value_list(input: &[u8]) -> ParseResult<'_, Vec<WarningValue>> {
-    separated_list1(comma, warning_value).parse(input)
+    separated_list1(comma, warning_value)(input)
 }
 
 #[cfg(test)]
@@ -108,9 +101,7 @@ mod tests {
         let (rem, val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(val.code, 307);
-        // warn-agent = hostport / pseudonym; "isi.edu" is a hostport (RFC 3261
-        // §20.43 uses this very example for the host).
-        assert!(matches!(val.agent, WarnAgent::HostPort(Host::Domain(d), None) if d == "isi.edu"));
+        assert!(matches!(val.agent, WarnAgent::Pseudonym(d) if d == "isi.edu"));
         assert_eq!(val.text, b"Session parameter 'foo' not understood".to_vec());
         // Compare Vec<u8>
     }
@@ -123,9 +114,7 @@ mod tests {
         let (rem, val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(val.code, 399);
-        assert!(
-            matches!(val.agent, WarnAgent::HostPort(Host::Domain(d), None) if d == "p1.example.net")
-        );
+        assert!(matches!(val.agent, WarnAgent::Pseudonym(d) if d == "p1.example.net"));
         assert_eq!(val.text, b"Response too large".to_vec()); // Compare Vec<u8>
     }
 

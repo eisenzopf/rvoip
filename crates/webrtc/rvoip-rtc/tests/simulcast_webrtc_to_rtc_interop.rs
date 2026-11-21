@@ -25,13 +25,12 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc::channel};
 use tokio::time::timeout;
 
-use rtc::interceptor::Registry as RtcRegistry;
 use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::media_engine::{MIME_TYPE_VP8, MediaEngine};
-use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
+use rtc::peer_connection::configuration::setting_engine::SettingEngine;
 use rtc::peer_connection::event::{RTCPeerConnectionEvent, RTCTrackEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
+use rtc::peer_connection::message::RTCMessage;
 use rtc::peer_connection::state::{RTCIceConnectionState, RTCPeerConnectionState};
 use rtc::peer_connection::transport::RTCDtlsRole;
 use rtc::peer_connection::transport::RTCIceServer;
@@ -56,8 +55,6 @@ use webrtc::rtp_transceiver::rtp_codec::{
 };
 use webrtc::track::track_local::TrackLocal;
 use webrtc::track::track_local::track_local_static_sample::TrackLocalStaticSample;
-
-mod common;
 
 const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 
@@ -95,7 +92,6 @@ const DEFAULT_TIMEOUT_DURATION: Duration = Duration::from_secs(30);
 #[tokio::test]
 #[ignore]
 async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
-    common::install_crypto_provider();
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
         .is_test(true)
@@ -200,9 +196,8 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
     let local_addr = socket.local_addr()?;
     log::info!("RTC peer bound to {}", local_addr);
 
-    let setting_engine = SettingEngineBuilder::new()
-        .with_answering_dtls_role(RTCDtlsRole::Client)
-        .build();
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_answering_dtls_role(RTCDtlsRole::Client)?;
 
     // Create a MediaEngine object to configure the supported codec
     let mut media_engine = MediaEngine::default();
@@ -235,7 +230,7 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
         )?;
     }
 
-    let registry = RtcRegistry::new();
+    let registry = rtc::interceptor::Registry::new();
 
     // Use the default set of Interceptors
     let registry =
@@ -256,12 +251,12 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
         .with_setting_engine(setting_engine)
         .with_media_engine(media_engine)
         .with_interceptor_registry(registry)
-        .build(Instant::now())?;
+        .build()?;
     log::info!("Created RTC peer connection");
 
     // Set the remote description (offer from webrtc)
     log::info!("RTC set remote description offer {}", rtc_offer);
-    rtc_pc.set_remote_description(Instant::now(), rtc_offer)?;
+    rtc_pc.set_remote_description(rtc_offer)?;
 
     // Add local candidate
     let candidate = CandidateHostConfig {
@@ -284,7 +279,7 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
     log::info!("RTC created answer {}", answer);
 
     // Set the local description
-    rtc_pc.set_local_description(Instant::now(), answer)?;
+    rtc_pc.set_local_description(answer)?;
 
     // Get the answer to send back to webrtc
     let rtc_answer = rtc_pc
@@ -339,7 +334,7 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
             "Starting to send samples on all simulcast layers (webrtc will add RID extensions)"
         );
 
-        let start_time = std::time::SystemTime::now(); // Exemption: usage in #test code
+        let start_time = std::time::SystemTime::now();
 
         for i in 0..30u32 {
             let timestamp = start_time + Duration::from_millis(i as u64 * 33); // ~30fps
@@ -465,7 +460,7 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
         }
 
         // Poll read - receive application messages
-        while let Some(TaggedRTCMessage { message, .. }) = rtc_pc.poll_read() {
+        while let Some(message) = rtc_pc.poll_read() {
             match message {
                 RTCMessage::RtpPacket(track_id, rtp_packet) => {
                     // Get the receiver for this track
@@ -502,7 +497,6 @@ async fn test_simulcast_webrtc_to_rtc() -> Result<()> {
                     // RTCP packets are handled internally
                 }
                 RTCMessage::DataChannelMessage(_, _) => {}
-                _ => {}
             }
         }
 

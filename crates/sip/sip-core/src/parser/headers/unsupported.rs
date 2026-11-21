@@ -4,7 +4,6 @@
 
 #[cfg(test)]
 use nom::combinator::all_consuming;
-use nom::Parser;
 use nom::{
     bytes::complete::tag_no_case,
     error::{make_error, ErrorKind}, // Unsupported needs at least one tag
@@ -97,10 +96,9 @@ pub fn parse_unsupported(input: &[u8]) -> ParseResult<'_, Vec<String>> {
 /// ```
 pub fn unsupported_header(input: &[u8]) -> IResult<&[u8], Vec<String>> {
     preceded(
-        terminated(tag_no_case(&b"Unsupported"[..]), hcolon),
+        terminated(tag_no_case(b"Unsupported"), hcolon),
         parse_unsupported,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]
@@ -215,7 +213,7 @@ mod tests {
     #[test]
     fn test_parse_unsupported_all_consuming() {
         // The all_consuming combinator should reject input with trailing data
-        let result = all_consuming(parse_unsupported).parse(b"timer, path extra");
+        let result = all_consuming(parse_unsupported)(b"timer, path extra");
         assert!(result.is_err());
     }
 }

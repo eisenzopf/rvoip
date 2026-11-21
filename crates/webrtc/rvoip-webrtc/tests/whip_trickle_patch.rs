@@ -33,7 +33,7 @@ async fn whip_patch_trickle_sdpfrag_accepts_candidate() {
     client.add_local_audio_track().await.expect("audio");
     let offer = client.create_offer_and_gather().await.expect("offer");
 
-    let http = ring_reqwest_builder()
+    let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
         .expect("http");
@@ -168,11 +168,4 @@ async fn whip_patch_trickle_sdpfrag_accepts_candidate() {
     assert_eq!(deleted.status(), reqwest::StatusCode::OK);
 
     server.abort();
-}
-
-/// reqwest is built with `rustls-no-provider`: install the workspace's ring
-/// provider as the process default before building a client.
-fn ring_reqwest_builder() -> reqwest::ClientBuilder {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    reqwest::Client::builder()
 }

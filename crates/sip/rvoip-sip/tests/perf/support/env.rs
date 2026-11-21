@@ -2,11 +2,9 @@
 //! carries the context needed to compare runs across machines.
 //!
 //! The block also enforces release-mode at startup. Debug-build perf
-//! numbers are not citable. Each scenario test carries
-//! `#[cfg_attr(debug_assertions, ignore = "requires --release")]`, so a
-//! debug `cargo test` reports it as ignored; this guard is the safety net
-//! for a debug run that forces it with `--ignored` / `--include-ignored`:
-//! [`EnvironmentBlock::capture`] panics if `cfg!(debug_assertions)` is true.
+//! numbers are not citable, so a debug run is treated as a programming
+//! error: [`EnvironmentBlock::capture`] panics if `cfg!(debug_assertions)`
+//! is true.
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -62,7 +60,7 @@ impl EnvironmentBlock {
             panic!("perf tests must be run with --release; debug-build numbers are not citable");
         }
 
-        let mut sys = System::new().expect("initialise sysinfo");
+        let mut sys = System::new();
         sys.refresh_memory();
         sys.refresh_cpu_all();
 
@@ -73,13 +71,13 @@ impl EnvironmentBlock {
             .unwrap_or_else(|| "unknown".to_string());
 
         let cpu_count_logical = sys.cpus().len();
-        let cpu_count_physical = System::physical_core_count().unwrap_or(cpu_count_logical);
+        let cpu_count_physical = sys.physical_core_count().unwrap_or(cpu_count_logical);
         let total_ram_gb = (sys.total_memory() as f64) / (1024.0 * 1024.0 * 1024.0);
 
         let os = format!(
             "{} {}",
-            System::name().unwrap_or_else(|_| "unknown".to_string()),
-            System::os_version().unwrap_or_else(|_| "?".to_string())
+            System::name().unwrap_or_else(|| "unknown".to_string()),
+            System::os_version().unwrap_or_else(|| "?".to_string())
         );
 
         let rustc = rustc_version();
@@ -192,7 +190,7 @@ fn capture_source_provenance() -> SourceProvenance {
         git_commit,
         git_rev,
         git_dirty: !status.is_empty(),
-        source_fingerprint_sha256: hex::encode(fingerprint.finalize()),
+        source_fingerprint_sha256: format!("{:x}", fingerprint.finalize()),
     }
 }
 

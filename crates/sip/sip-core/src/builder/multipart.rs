@@ -3,8 +3,8 @@ use crate::types::multipart::{MimePart, MultipartBody};
 #[cfg(test)]
 use crate::types::TypedHeader;
 use bytes::Bytes;
-use rand::distr::Alphanumeric;
-use rand::RngExt;
+use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::iter;
 
 /// # Multipart MIME Builder for SIP Messages
@@ -605,7 +605,7 @@ impl MultipartBodyBuilder {
         }
 
         let random_suffix: String = iter::repeat(())
-            .map(|()| rand::rng().sample(Alphanumeric))
+            .map(|()| thread_rng().sample(Alphanumeric))
             .map(char::from)
             .take(16)
             .collect();
@@ -1461,7 +1461,7 @@ impl MultipartBuilder {
     pub fn body(&self) -> String {
         let boundary = self.boundary.clone().unwrap_or_else(|| {
             let random_suffix: String = iter::repeat(())
-                .map(|()| rand::rng().sample(Alphanumeric))
+                .map(|()| thread_rng().sample(Alphanumeric))
                 .map(char::from)
                 .take(16)
                 .collect();
@@ -1512,7 +1512,7 @@ impl MultipartBuilder {
     pub fn build(self) -> MultipartBuilt {
         let boundary = self.boundary.unwrap_or_else(|| {
             let random_suffix: String = iter::repeat(())
-                .map(|()| rand::rng().sample(Alphanumeric))
+                .map(|()| thread_rng().sample(Alphanumeric))
                 .map(char::from)
                 .take(16)
                 .collect();

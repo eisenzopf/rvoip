@@ -299,15 +299,10 @@ pub enum Transport {
 
 /// Transport substrate plus the protocol identifier actually negotiated by
 /// TLS ALPN or WebTransport's WT-Protocol response.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NegotiatedTransport {
     pub substrate: Transport,
     pub protocol: &'static str,
-    /// The `moqt://` URL a raw-QUIC session was dialed (client) or accepted
-    /// on (server, carrying the TLS server name). Raw QUIC has no CONNECT
-    /// request, so the session itself carries no URL; WebTransport sessions
-    /// do, and leave this `None`.
-    pub raw_quic_url: Option<url::Url>,
 }
 
 impl NegotiatedTransport {
@@ -315,16 +310,6 @@ impl NegotiatedTransport {
         Self {
             substrate,
             protocol,
-            raw_quic_url: None,
-        }
-    }
-
-    /// A raw-QUIC session dialed or accepted on `url` (`moqt://host[:port]`).
-    pub fn raw_quic(protocol: &'static str, url: url::Url) -> Self {
-        Self {
-            substrate: Transport::RawQuic,
-            protocol,
-            raw_quic_url: Some(url),
         }
     }
 }
@@ -555,7 +540,7 @@ impl Session {
 
     fn target_from_client_setup(
         session_url: &url::Url,
-        negotiated: &NegotiatedTransport,
+        negotiated: NegotiatedTransport,
         params: &KeyValuePairs,
     ) -> Result<SessionTarget, SessionError> {
         let path = Self::setup_bytes(params, setup::ParameterType::Path)
@@ -619,27 +604,9 @@ impl Session {
         Ok(())
     }
 
-    /// The URL that names this session's MOQT target: the WebTransport
-    /// CONNECT URL, or the raw-QUIC URL the caller supplied.
-    fn session_url(
-        session: &web_transport::Session,
-        negotiated: &NegotiatedTransport,
-    ) -> Result<url::Url, SessionError> {
-        match negotiated.substrate {
-            Transport::WebTransport => session.url().cloned().ok_or_else(|| {
-                SessionError::ProtocolViolation("WebTransport session has no CONNECT URL".into())
-            }),
-            Transport::RawQuic => negotiated.raw_quic_url.clone().ok_or_else(|| {
-                SessionError::ProtocolViolation(
-                    "raw QUIC session needs its moqt:// URL (NegotiatedTransport::raw_quic)".into(),
-                )
-            }),
-        }
-    }
-
     fn validate_negotiated_transport(
         session: &web_transport::Session,
-        negotiated: &NegotiatedTransport,
+        negotiated: NegotiatedTransport,
     ) -> Result<(), SessionError> {
         if !setup::SUPPORTED_ALPNS.contains(&negotiated.protocol) {
             return Err(SessionError::ProtocolViolation(format!(
@@ -666,7 +633,7 @@ impl Session {
 
     /// Returns the actual substrate and MOQT protocol selected by the peer.
     pub fn negotiated_transport(&self) -> NegotiatedTransport {
-        self.negotiated.clone()
+        self.negotiated
     }
 
     /// Returns the canonical `moqt://` session target.
@@ -1003,8 +970,8 @@ impl Session {
         authorization: Option<SetupAuthorization>,
         request_capacity: &RequestCapacity,
     ) -> Result<(Session, Publisher, Subscriber), SessionError> {
-        Self::validate_negotiated_transport(&session, &negotiated)?;
-        let url = Self::session_url(&session, &negotiated)?;
+        Self::validate_negotiated_transport(&session, negotiated)?;
+        let url = session.url().clone();
         let target = match negotiated.substrate {
             Transport::RawQuic => {
                 SessionTarget::try_from_url(url).map_err(Self::map_target_error)?
@@ -1116,7 +1083,7 @@ impl Session {
         negotiated: NegotiatedTransport,
         request_capacity: &RequestCapacity,
     ) -> Result<(Session, Option<Publisher>, Option<Subscriber>), SessionError> {
-        Self::validate_negotiated_transport(&session, &negotiated)?;
+        Self::validate_negotiated_transport(&session, negotiated)?;
         let mut mlog = mlog_path.and_then(|p| {
             mlog::MlogWriter::new(p)
                 .map_err(|e| tracing::warn!("Failed to create mlog: {}", e))
@@ -1140,8 +1107,7 @@ impl Session {
             "MoQT framed message"
         );
 
-        let session_url = Self::session_url(&session, &negotiated)?;
-        let target = Self::target_from_client_setup(&session_url, &negotiated, &client.params)?;
+        let target = Self::target_from_client_setup(session.url(), negotiated, &client.params)?;
         let setup_authorizations = Self::setup_authorizations(&client.params)?;
 
         if target.routing_path().is_some() {
@@ -2547,7 +2513,7 @@ mod tests {
 
         let mut params = KeyValuePairs::default();
         params.set_bytesvalue(setup::ParameterType::Path.into(), b"/other".to_vec());
-        let error = Session::target_from_client_setup(&url, &negotiated, &params).unwrap_err();
+        let error = Session::target_from_client_setup(&url, negotiated, &params).unwrap_err();
         assert!(matches!(error, SessionError::InvalidPath(_)));
         assert_eq!(error.code(), 0x8);
 
@@ -2556,7 +2522,7 @@ mod tests {
             setup::ParameterType::Authority.into(),
             b"relay.example".to_vec(),
         );
-        let error = Session::target_from_client_setup(&url, &negotiated, &params).unwrap_err();
+        let error = Session::target_from_client_setup(&url, negotiated, &params).unwrap_err();
         assert!(matches!(error, SessionError::InvalidAuthority(_)));
         assert_eq!(error.code(), 0x19);
     }
@@ -2567,7 +2533,7 @@ mod tests {
         let negotiated = NegotiatedTransport::new(Transport::RawQuic, setup::SUPPORTED_ALPNS[0]);
 
         let missing =
-            Session::target_from_client_setup(&url, &negotiated, &KeyValuePairs::default())
+            Session::target_from_client_setup(&url, negotiated, &KeyValuePairs::default())
                 .unwrap_err();
         assert!(matches!(missing, SessionError::MalformedAuthority(_)));
 
@@ -2578,7 +2544,7 @@ mod tests {
             b"relay.example".to_vec(),
         );
         assert!(matches!(
-            Session::target_from_client_setup(&url, &negotiated, &malformed_path),
+            Session::target_from_client_setup(&url, negotiated, &malformed_path),
             Err(SessionError::MalformedPath(_))
         ));
 
@@ -2586,7 +2552,7 @@ mod tests {
         malformed_authority.set_bytesvalue(setup::ParameterType::Path.into(), b"/live".to_vec());
         malformed_authority.set_intvalue(setup::ParameterType::Authority.into(), 1);
         assert!(matches!(
-            Session::target_from_client_setup(&url, &negotiated, &malformed_authority),
+            Session::target_from_client_setup(&url, negotiated, &malformed_authority),
             Err(SessionError::MalformedAuthority(_))
         ));
 
@@ -2597,7 +2563,7 @@ mod tests {
             b"user:password@relay.example".to_vec(),
         );
         let error =
-            Session::target_from_client_setup(&url, &negotiated, &userinfo_authority).unwrap_err();
+            Session::target_from_client_setup(&url, negotiated, &userinfo_authority).unwrap_err();
         assert!(matches!(error, SessionError::MalformedAuthority(_)));
         let diagnostic = format!("{error:?} {error}");
         assert!(!diagnostic.contains("user"));
@@ -2625,7 +2591,7 @@ mod tests {
             b"/a%2Fb?token=x%2Fy".to_vec(),
         );
 
-        let target = Session::target_from_client_setup(&url, &negotiated, &params).unwrap();
+        let target = Session::target_from_client_setup(&url, negotiated, &params).unwrap();
         assert_eq!(
             target.canonical_url().as_str(),
             "moqt://relay.example:4443/a%2Fb?token=x%2Fy"
@@ -2635,7 +2601,7 @@ mod tests {
             setup::ParameterType::Authority.into(),
             b"other.example".to_vec(),
         );
-        let error = Session::target_from_client_setup(&url, &negotiated, &params).unwrap_err();
+        let error = Session::target_from_client_setup(&url, negotiated, &params).unwrap_err();
         assert!(matches!(error, SessionError::InvalidAuthority(_)));
         assert_eq!(error.code(), 0x19);
     }

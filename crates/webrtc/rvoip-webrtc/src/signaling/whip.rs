@@ -300,13 +300,7 @@ pub async fn serve_tls_with_auth_mode_and_shutdown(
         shutdown.await;
         handle_for_shutdown.shutdown();
     });
-    // axum-server 0.8 hands the listener to tokio as-is; 0.7 switched it to
-    // non-blocking itself. Keep accepting callers' blocking listeners.
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| WebRtcError::Signaling(format!("WHIPS set_nonblocking: {e}")))?;
     axum_server::from_tcp_rustls(listener, tls.axum)
-        .map_err(|e| WebRtcError::Signaling(format!("WHIPS listener: {e}")))?
         .handle(handle)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
@@ -317,14 +311,14 @@ pub async fn serve_tls_with_auth_mode_and_shutdown(
 fn build_router(state: WhipState, adapter: &Arc<WebRtcAdapter>) -> Router {
     let mut app = Router::new()
         .route(
-            "/whip/{id}",
+            "/whip/:id",
             post(whip_post)
                 .patch(whip_patch)
                 .delete(whip_delete)
                 .options(whip_options),
         )
         .route(
-            "/whep/{id}",
+            "/whep/:id",
             post(whep_post)
                 .get(whep_get)
                 .patch(whep_patch)

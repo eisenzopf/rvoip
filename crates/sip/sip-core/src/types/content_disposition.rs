@@ -43,7 +43,6 @@ use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::GenericValue;
 use crate::types::param::Param;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -303,11 +302,7 @@ impl fmt::Display for ContentDisposition {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.disposition_type)?;
-        // Parameter order carries no meaning; name order keeps the
-        // rendering deterministic.
-        let mut sorted: Vec<_> = self.params.iter().collect();
-        sorted.sort();
-        for (key, value) in sorted {
+        for (key, value) in &self.params {
             // Remove internal quote escaping for now
             if value.chars().any(|c| {
                 !c.is_ascii_alphanumeric()
@@ -378,8 +373,7 @@ impl FromStr for ContentDisposition {
         use crate::parser::headers::content_disposition::parse_content_disposition;
         use nom::combinator::all_consuming;
 
-        all_consuming(parse_content_disposition)
-            .parse(s.as_bytes())
+        all_consuming(parse_content_disposition)(s.as_bytes())
             .map_err(Error::from)
             .and_then(|(_, (dtype_bytes, params_vec))| {
                 // String is already a String type, so we don't need to_vec()
@@ -447,11 +441,7 @@ impl TypedHeaderTrait for ContentDisposition {
 
         // Convert the HashMap of parameters to a list of Param structs
         let mut params = Vec::new();
-        // Parameter order carries no meaning; name order keeps the
-        // rendering deterministic.
-        let mut sorted: Vec<_> = self.params.iter().collect();
-        sorted.sort();
-        for (name, value) in sorted {
+        for (name, value) in &self.params {
             if value.is_empty() {
                 params.push(Param::Other(name.clone(), None));
             } else {

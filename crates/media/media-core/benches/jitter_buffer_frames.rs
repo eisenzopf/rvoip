@@ -20,10 +20,9 @@
 //! Depth sweep: {0, 10, 100, 1000}.
 
 use bytes::Bytes;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_media_core::buffer::{JitterBuffer, JitterBufferConfig};
 use rvoip_media_core::types::{AudioFrame, MediaPacket};
-use std::hint::black_box;
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder;
 

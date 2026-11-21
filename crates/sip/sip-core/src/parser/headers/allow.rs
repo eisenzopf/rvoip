@@ -2,7 +2,6 @@
 // Allow = "Allow" HCOLON [Method *(COMMA Method)]
 // Method = token
 
-use nom::Parser;
 use nom::{error::Error, multi::separated_list0, sequence::delimited};
 
 // Import from new modules
@@ -23,8 +22,7 @@ fn parse_method_token(input: &[u8]) -> ParseResult<'_, Method> {
         sws,   // Handle optional whitespace before
         token, // Parse the method token
         sws,   // Handle optional whitespace after
-    )
-    .parse(input)?;
+    )(input)?;
 
     // Convert to string and ensure it's a valid method
     // We need to handle potential errors in conversion or parsing
@@ -130,7 +128,7 @@ fn parse_methods(input: &[u8]) -> ParseResult<'_, Vec<Method>> {
     }
 
     // If we passed all explicit checks, use the regular parser
-    separated_list0(delimited(sws, comma, sws), parse_method_token).parse(input)
+    separated_list0(delimited(sws, comma, sws), parse_method_token)(input)
 }
 
 // Validate no trailing comma or other invalid syntax

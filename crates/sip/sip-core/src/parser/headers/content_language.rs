@@ -9,7 +9,6 @@
 // - The parser should normalize to lowercase
 // - Underscores are NOT allowed per RFC 5646
 
-use nom::Parser;
 use nom::{
     bytes::complete::{tag, take_while1},
     error::ErrorKind,
@@ -52,11 +51,8 @@ fn parse_language_tag(input: &[u8]) -> IResult<&[u8], LanguageTag> {
     }
 
     // We need to handle byte input correctly for nom
-    let (input, parts) = separated_list1(
-        tag(&b"-"[..]),
-        take_while1(|c: u8| c.is_ascii_alphanumeric()),
-    )
-    .parse(input)?;
+    let (input, parts) =
+        separated_list1(tag(b"-"), take_while1(|c: u8| c.is_ascii_alphanumeric()))(input)?;
 
     if parts.is_empty() {
         return Err(Err::Error(nom::error::Error::new(input, ErrorKind::Alpha)));

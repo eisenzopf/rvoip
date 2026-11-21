@@ -17,7 +17,7 @@ use rtc::rtp_transceiver::rtp_sender::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use std::{
     fs,
     fs::{File, OpenOptions},
@@ -291,7 +291,7 @@ async fn stream_video(
             .write_sample(&Sample {
                 data: frame.freeze(),
                 duration: frame_duration,
-                ..Sample::new(Instant::now())
+                ..Default::default()
             })
             .await?;
 

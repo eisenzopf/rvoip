@@ -30,7 +30,6 @@
 //! ```
 
 use nom::combinator::all_consuming;
-use nom::Parser;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
@@ -73,9 +72,7 @@ impl FromStr for SipETag {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        let (_, etag) = all_consuming(parse_sip_etag)
-            .parse(s.as_bytes())
-            .map_err(Error::from)?;
+        let (_, etag) = all_consuming(parse_sip_etag)(s.as_bytes()).map_err(Error::from)?;
         Ok(etag)
     }
 }

@@ -1,9 +1,8 @@
-use nom::Parser;
 use nom::{
     bytes::complete::take_till,
     character::complete::{digit1, space1},
     combinator::map_res,
-    sequence::terminated,
+    sequence::{terminated, tuple},
 };
 use std::str;
 // Keep Result for FromStr impls if needed elsewhere
@@ -28,8 +27,7 @@ pub fn status_code(input: &[u8]) -> ParseResult<'_, StatusCode> {
             .map_err(|e| Error::ParseError(format!("Invalid status code digit: {}", e)))?;
 
         StatusCode::from_u16(code).map_err(|_| Error::InvalidStatusCode(code))
-    })
-    .parse(input)
+    })(input)
 }
 
 // Reason-Phrase = *(reserved / unreserved / escaped / UTF8-NONASCII / UTF8-CONT / SP / HTAB)
@@ -42,14 +40,13 @@ pub fn reason_phrase(input: &[u8]) -> ParseResult<'_, &[u8]> {
 // Status-Line = SIP-Version SP Status-Code SP Reason-Phrase CRLF
 pub fn parse_status_line(input: &[u8]) -> ParseResult<'_, (Version, StatusCode, &[u8])> {
     terminated(
-        (
+        tuple((
             terminated(sip_version, space1),
             terminated(status_code, space1),
             reason_phrase,
-        ),
+        )),
         crlf,
-    )
-    .parse(input)
+    )(input)
 }
 
 #[cfg(test)]

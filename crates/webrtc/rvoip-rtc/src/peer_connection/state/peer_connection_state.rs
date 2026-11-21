@@ -134,15 +134,14 @@ use std::fmt;
 /// # }
 /// ```
 ///
-/// # Specification
+/// # Specifications
 ///
 /// - [W3C RTCPeerConnection.connectionState]
 /// - [MDN RTCPeerConnection.connectionState]
 ///
-/// [W3C RTCPeerConnection.connectionState]: https://www.w3.org/TR/webrtc/#dom-peerconnection-connection-state
+/// [W3C RTCPeerConnection.connectionState]: https://w3c.github.io/webrtc-pc/#dom-peerconnection-connection-state
 /// [MDN RTCPeerConnection.connectionState]: https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/connectionState
 #[derive(Default, Debug, Copy, Clone, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum RTCPeerConnectionState {
     /// State not specified. This should not occur in normal operation.
     #[default]
