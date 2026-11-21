@@ -1305,9 +1305,7 @@ impl UdpRtpTransport {
             refused_rtp_datagrams: AtomicU64::new(0),
             srtp_send: Arc::new(parking_lot::Mutex::new(None)),
             srtp_recv: Arc::new(SrtpRecvShared::new()),
-            dtmf_seen: Arc::new(DashMap::with_shard_amount(
-                crate::session::PER_SESSION_MAP_SHARDS,
-            )),
+            dtmf_seen: Arc::new(DashMap::new()),
             #[cfg(feature = "dtls-webrtc")]
             dtls_tx: Arc::new(parking_lot::Mutex::new(None)),
             #[cfg(feature = "dtls-webrtc")]
