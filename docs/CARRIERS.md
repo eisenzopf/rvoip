@@ -362,7 +362,7 @@ frames delivered).
 
 | Evidence | Gate / source | What it shows |
 |---|---|---|
-| One-hour split soak, 500 active calls | `perf.soak-candidate` (`perf_soak_split.sh`; `RVOIP_PERF_SOAK_ACTIVE_CALLS=500`, hold 10–360 s, 3,600 s, `RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15`) | `perf_soak_caller`: 9,904/9,904 calls, ASR 1.0, setup p99 166.986 ms, peak RSS 169.45 MB, active-tail RSS growth 8.41 MB/h; `perf_soak_receiver`: peak RSS 183.79 MB, growth 5.69 MB/h |
+| Split soak, 500 active calls (one hour in 0.4.0; two hours from 0.5) | `perf.soak-candidate` (`perf_soak_split.sh`; `RVOIP_PERF_SOAK_ACTIVE_CALLS=500`, hold 10–360 s, 3,600 s in 0.4.0, 7,200 s from 0.5, `RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15`) | `perf_soak_caller`: 9,904/9,904 calls, ASR 1.0, setup p99 166.986 ms, peak RSS 169.45 MB, active-tail RSS growth 8.41 MB/h; `perf_soak_receiver`: peak RSS 183.79 MB, growth 5.69 MB/h |
 | One-hour monolithic soak, 30 active calls | `perf.monolithic-soak` | `perf_soak_30min`: 587/587, ASR 1.0, p99 15.032 ms, peak RSS 119.53 MB, active-tail RSS growth 9.54 MB/h |
 | Mass teardown | `perf.mass-teardown` (500 calls torn down together, 160 s retention drain) | Peak RSS 271.93 MB; 0 retained |
 | Session churn leak | `perf.session-churn` | 250/250, peak RSS 98.5 MB |
@@ -519,7 +519,7 @@ reading them side by side will notice):
 | SIPp comparison | `crates/sip/rvoip-sip/tests/perf/sipp_scenarios/run_comparison.sh 127.0.0.1 35060 rvoip` with `RVOIP_PERF_CPS="30 100 300 1000 2000" RVOIP_PERF_MIN_SUCCESS_PCT=99.9` | gate `interop.sipp-matrix` |
 | Canonical 2,000 CPS three-pass evaluation | `RVOIP_CANONICAL_EVAL_OUTPUT=<dir> crates/sip/rvoip-sip/scripts/canonical_2k_release_eval.sh` | [BENCHMARKING.md](../crates/sip/rvoip-sip/docs/BENCHMARKING.md) |
 | Burst matrix with host drop deltas | `RVOIP_PERF_BURST_SCENARIOS=all crates/sip/rvoip-sip/scripts/perf_burst_matrix.sh` | [CARRIER_BURST_TUNING.md](../crates/sip/rvoip-sip/docs/CARRIER_BURST_TUNING.md) |
-| One-hour split soak | `RVOIP_PERF_SOAK_DURATION_SECS=3600 RVOIP_PERF_SOAK_ACTIVE_CALLS=500 RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15 crates/sip/rvoip-sip/scripts/perf_soak_split.sh` | gate `perf.soak-candidate` |
+| Two-hour split soak | `RVOIP_PERF_SOAK_DURATION_SECS=7200 RVOIP_PERF_SOAK_ACTIVE_CALLS=500 RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15 crates/sip/rvoip-sip/scripts/perf_soak_split.sh` | gate `perf.soak-candidate` |
 | Claim-to-evidence static check | `cargo test -p rvoip-sip --test beta_release_docs` | [RFC_COMPLIANCE_MATRIX.md](../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) |
 | Generated RFC validity suites (feature-gated; a bare `cargo test` skips them) | `cargo test -p rvoip-sip --features generated-validation --test generated_sip_compliance`; `cargo test -p rvoip-sip-core --test rfc_compliance` | [docs/sip/SIP_RFC_COMPLIANCE.md](sip/SIP_RFC_COMPLIANCE.md) |
 | Hosted qualification | `.github/workflows/release-qualify.yml` with `profile` = `remote-preflight` (capacity probe), `remote-diagnostic` (up to 20 named gates), `remote-core` (hosted-runner dry run, 104 gates), `remote-release` (full 214 gates on real workers) | [RELEASING.md](RELEASING.md), [`gates.json`](../scripts/release/gates.json) `profiles` |

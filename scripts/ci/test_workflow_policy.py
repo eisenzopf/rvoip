@@ -633,6 +633,18 @@ class WorkflowPolicyTests(unittest.TestCase):
             {"perf.rfc7502-release", "perf.rfc7502-minor"} & set(catalog["profiles"]["remote-release"])
         )
 
+    def test_controller_job_outlasts_its_prebuild_and_evidence_deadline(self) -> None:
+        # The gate-aws controller runs the performance prebuild (budgeted at up
+        # to 90 min) and then waits up to its 340 x 30 s evidence deadline. Its
+        # job timeout must cover both, or GitHub cancels a run whose two-hour
+        # soak worker is still within every budget.
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        controller = workflow.split("\n  gate-aws:\n", 1)[1].split("\n  cleanup-aws:\n", 1)[0]
+        timeout = int(re.search(r"\n    timeout-minutes: (\d+)\n", controller).group(1))
+        polls = int(re.search(r"\(poll \$\{attempt\}/(\d+)\)", controller).group(1))
+        self.assertIn("sleep 30", controller)
+        self.assertGreaterEqual(timeout, 90 + polls * 30 // 60 + 5)
+
     def test_bench_jobs_keep_setup_and_teardown_headroom(self) -> None:
         # A bench job spends its time outside run_lane's --max-wall on checkout,
         # the toolchain, packages, a cold DUT build and up to 5 min of teardown.

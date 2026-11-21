@@ -60,9 +60,13 @@ Each worker keeps 16 vCPUs because three lanes compile on the worker. Each
 long-soak
 worker owns one long gate: the canonical 2,000-CPS evaluation, the monolithic
 soak, or the soak candidate. Packed two to a worker, the two hour-long soaks
-ran back to back for about 2 h 20 min, leaving the three-hour controller job,
-which also covers the prebuild, about ten minutes of slack, and starting the
-second soak on a machine the first had just loaded. Peak
+ran back to back for about 2 h 20 min, leaving the then three-hour controller
+job, which also covers the prebuild, about ten minutes of slack, and starting
+the second soak on a machine the first had just loaded. From 0.5 the soak
+candidate runs two hours (7,200 s; about 124 min with drain), so its worker is
+the fleet's last, finishing about 178 min into a full run after a 49 min
+prebuild. The controller job's timeout is 270 min: the prebuild budget (90 min)
+plus the 170-minute evidence deadline plus teardown. Peak
 demand is therefore 272 On-Demand Standard vCPUs against the account's
 1,152-vCPU quota in `us-west-2`.
 

@@ -158,6 +158,18 @@ MEASURED_EC2_SECONDS = {
     "interop.freeswitch-up": 433,
     "interop.remote-libsrtp": 1663,
     "interop.strict-ua": 392,
+    # The two-hour soak (ENV_ASSIGNMENT_OVERRIDES) on m5.4xlarge.
+    "perf.soak-candidate": 7449,
+}
+# Environment assignments that differ from the frozen historical record.
+# perf.soak-candidate soaks for two hours from 0.5. Its heap warms up for
+# about an hour before it plateaus (qualification diagnostic 44943247665:
+# receiver about 168 MB from 80 to 120 min, active-tail growth -0.52 MB/h),
+# so the gate's unchanged last-20-minute window and 15 MB/h limit now
+# measure the plateau instead of the warm-up. The record's duration keeps
+# timeout_minutes at 152, which holds the measured 7,449 s gate.
+ENV_ASSIGNMENT_OVERRIDES = {
+    "perf.soak-candidate": {"RVOIP_PERF_SOAK_DURATION_SECS": "7200"},
 }
 REVIEWED_PERF_BASELINE_ID = "20260929T224805Z"
 COMMAND_OVERRIDES = {
@@ -406,6 +418,32 @@ def insert_locked(argv: list[str]) -> list[str]:
     return argv
 
 
+def with_env_assignment_overrides(gate_id: str, argv: list[str] | None) -> list[str] | None:
+    overrides = ENV_ASSIGNMENT_OVERRIDES.get(gate_id)
+    if not overrides or argv is None:
+        return argv
+    result = list(argv)
+    for name, value in overrides.items():
+        hits = [i for i, arg in enumerate(result) if arg.startswith(f"{name}=")]
+        if len(hits) != 1:
+            raise RuntimeError(f"{gate_id}: expected one {name}= assignment, found {len(hits)}")
+        result[hits[0]] = f"{name}={value}"
+    return result
+
+
+def with_env_assignment_overrides_text(gate_id: str, text: str | None) -> str | None:
+    overrides = ENV_ASSIGNMENT_OVERRIDES.get(gate_id)
+    if not overrides or text is None:
+        return text
+    words = text.split(" ")
+    for name, value in overrides.items():
+        hits = [i for i, word in enumerate(words) if word.startswith(f"{name}=")]
+        if len(hits) != 1:
+            raise RuntimeError(f"{gate_id}: expected one {name}= in its display command")
+        words[hits[0]] = f"{name}={value}"
+    return " ".join(words)
+
+
 def normalized_command(record: dict[str, Any]) -> list[str] | None:
     gate_id = record["id"]
     if gate_id in COMMAND_OVERRIDES:
@@ -571,6 +609,10 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         # unit, which is far longer than a debug build. The SIPp listener's
         # first AWS build overran the 20-minute floor above.
         timeout_minutes = max(timeout_minutes, 45)
+    command = with_env_assignment_overrides(record["id"], command)
+    display_command = with_env_assignment_overrides_text(
+        record["id"], record.get("sanitized_argv")
+    )
     expected_outputs = ["receipt.json", "command.log"]
     if record["id"] == "report.performance-metrics":
         expected_outputs.extend(
@@ -587,7 +629,7 @@ def legacy_gate(record: dict[str, Any], records: list[dict[str, Any]], packages:
         "kind": record["kind"],
         "executor": executor,
         "command": command,
-        "display_command": record.get("sanitized_argv"),
+        "display_command": display_command,
         "working_directory": ".",
         "dependencies": dependencies(record, records),
         "resource_class": resource_class(record),
