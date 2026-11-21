@@ -15,8 +15,7 @@ use rtc::shared::error::Error;
 use rtc::shared::{FourTuple, TaggedBytesMut, TransportProtocol};
 use rtc::stun::{
     client::Client as StunClient, client::ClientBuilder as StunClientBuilder,
-    client::TaggedMessage, message::BINDING_REQUEST, message::Message as StunMessage,
-    message::TransactionId,
+    message::BINDING_REQUEST, message::Message as StunMessage, message::TransactionId,
 };
 /*use rtc::turn::client::{
     Client as TurnClient, ClientConfig as TurnClientConfig, Event as TurnEvent,
@@ -212,22 +211,15 @@ impl RTCIceGatherer {
         debug!("STUN client bound to {}", local_addr);
 
         // Create STUN client using the sans-I/O pattern
-        let mut stun_client = StunClientBuilder::new().build(
-            Instant::now(),
-            local_addr,
-            stun_server_addr,
-            TransportProtocol::UDP,
-        )?;
+        let mut stun_client =
+            StunClientBuilder::new().build(local_addr, stun_server_addr, TransportProtocol::UDP)?;
 
         // Create STUN binding request
         let mut msg = StunMessage::new();
         msg.build(&[Box::<TransactionId>::default(), Box::new(BINDING_REQUEST)])?;
 
         // Send the request
-        stun_client.handle_write(TaggedMessage {
-            now: Instant::now(),
-            message: msg,
-        })?;
+        stun_client.handle_write(msg)?;
 
         Ok(stun_client)
     }

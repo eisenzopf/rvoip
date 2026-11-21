@@ -949,11 +949,8 @@ impl fmt::Display for ViaHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ", self.sent_protocol)?;
 
-        // sent-by = host [ COLON port ]; an IPv6 host is an IPv6reference.
-        match &self.sent_by_host {
-            Host::Address(std::net::IpAddr::V6(address)) => write!(f, "[{address}]")?,
-            host => write!(f, "{host}")?,
-        }
+        // Format sent-by (host:port or host)
+        write!(f, "{}", self.sent_by_host)?;
         if let Some(port) = self.sent_by_port {
             write!(f, ":{}", port)?;
         }

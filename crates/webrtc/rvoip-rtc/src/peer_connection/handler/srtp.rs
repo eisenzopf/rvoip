@@ -1,4 +1,4 @@
-use crate::peer_connection::event::{RTCEventInternal, TaggedRTCEventInternal};
+use crate::peer_connection::event::RTCEventInternal;
 use crate::peer_connection::message::internal::{
     RTCMessageInternal, RTPMessage, TaggedRTCMessageInternal,
 };
@@ -19,7 +19,7 @@ pub(crate) struct SrtpHandlerContext {
 
     pub(crate) read_outs: VecDeque<TaggedRTCMessageInternal>,
     pub(crate) write_outs: VecDeque<TaggedRTCMessageInternal>,
-    pub(crate) event_outs: VecDeque<TaggedRTCEventInternal>,
+    pub(crate) event_outs: VecDeque<RTCEventInternal>,
 }
 
 /// SrtpHandler implements SRTP/RTP/RTCP Protocols handling
@@ -37,13 +37,12 @@ impl<'a> SrtpHandler<'a> {
     }
 }
 
-impl<'a>
-    sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, TaggedRTCEventInternal>
+impl<'a> sansio::Protocol<TaggedRTCMessageInternal, TaggedRTCMessageInternal, RTCEventInternal>
     for SrtpHandler<'a>
 {
     type Rout = TaggedRTCMessageInternal;
     type Wout = TaggedRTCMessageInternal;
-    type Eout = TaggedRTCEventInternal;
+    type Eout = RTCEventInternal;
     type Error = Error;
     type Time = Instant;
 
@@ -144,11 +143,6 @@ impl<'a>
                         "application level track message should never reach here".to_string(),
                     ));
                 }
-                RTPMessage::Packet(_) => {
-                    return Err(Error::Other(
-                        "unsupported packet kind for srtp write".to_string(),
-                    ));
-                }
             };
 
             self.ctx.write_outs.push_back(TaggedRTCMessageInternal {
@@ -168,9 +162,9 @@ impl<'a>
         self.ctx.write_outs.pop_front()
     }
 
-    fn handle_event(&mut self, mut evt: TaggedRTCEventInternal) -> Result<()> {
+    fn handle_event(&mut self, mut evt: RTCEventInternal) -> Result<()> {
         if let RTCEventInternal::DTLSHandshakeComplete(local_srtp_context, remote_srtp_context) =
-            &mut evt.event
+            &mut evt
         {
             debug!("srtp recv dtls handshake complete");
 

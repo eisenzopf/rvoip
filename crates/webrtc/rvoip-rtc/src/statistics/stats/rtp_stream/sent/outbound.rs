@@ -14,7 +14,7 @@ use std::collections::HashMap;
 /// W3C WebRTC Statistics API. It provides comprehensive statistics about media
 /// sent to a remote peer, including encoding, quality, and bandwidth metrics.
 ///
-/// # Specification
+/// # W3C Reference
 ///
 /// See [RTCOutboundRtpStreamStats](https://www.w3.org/TR/webrtc-stats/#outboundrtpstats-dict*)
 #[derive(Debug, Serialize, Deserialize)]

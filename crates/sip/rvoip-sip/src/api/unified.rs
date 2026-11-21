@@ -90,15 +90,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 pub use rvoip_media_core::relay::controller::{
-    AudioSource, BridgeError, BridgeHandle, BridgeMode, MediaSessionControllerConfig,
+    AudioSource, BridgeError, BridgeHandle, MediaSessionControllerConfig,
 };
 pub use rvoip_rtp_core::executor::{MediaExecutorConfig, MediaExecutorMode};
 pub use rvoip_rtp_core::task_runtime::{MediaLanes, MediaRuntimeConfig};
 pub use rvoip_rtp_core::transport::SymmetricRtpPolicy;
 pub use rvoip_rtp_core::{RtpSessionBufferConfig, RtpTransportBufferConfig};
-pub use rvoip_sip_core::validation::UasCapabilities;
 pub use rvoip_sip_dialog::api::RelUsage;
-pub use rvoip_sip_dialog::api::SipTlsProxyFlowPolicy;
 
 const MAX_INBOUND_INVITE_OBSERVERS: usize = 16;
 const OUTBOUND_DISPATCH_JOIN_FAILURE: &str = "SIP outbound dispatch task failed (class=join)";
@@ -288,9 +286,6 @@ impl Drop for AbortOutboundDispatchTaskOnDrop {
 #[derive(Clone)]
 pub(crate) struct InboundInviteObservation {
     pub(crate) session_id: SessionId,
-    /// Source IP of the transport flow or datagram that carried the INVITE,
-    /// taken from the transport event, never from a SIP header.
-    pub(crate) observed_peer_address: Option<std::net::IpAddr>,
     pub(crate) request: Option<Arc<Request>>,
     pub(crate) principal: Option<rvoip_core_traits::identity::AuthenticatedPrincipal>,
 }
@@ -342,18 +337,6 @@ pub enum SrtpKeyingMode {
     #[default]
     Sdes,
     /// DTLS-SRTP with SDP fingerprint binding (RFC 5763/5764).
-    ///
-    /// Keys come from a DTLS handshake on the media port after the
-    /// offer/answer commits. If that handshake fails (it times out after
-    /// 10 s, the peer presents a certificate its `a=fingerprint` does not
-    /// name, or it fails otherwise), the call cannot carry secure media and
-    /// rvoip ends it: [`Event::MediaSecurityFailed`](crate::Event::MediaSecurityFailed)
-    /// first, then BYE once answered, CANCEL before an outbound call is
-    /// answered, or `488 Not Acceptable Here` before an inbound call is
-    /// answered, each with `Reason: SIP;cause=488;text="DTLS-SRTP handshake
-    /// failed"` (RFC 3326), then the usual terminal event. A failed handshake
-    /// on a separate RTCP port ([`Config::rtcp_non_mux`]) only leaves the
-    /// call without RTCP.
     DtlsSrtp,
 }
 
@@ -383,28 +366,6 @@ impl DtlsSetupRole {
             Self::Passive => "passive",
         }
     }
-}
-
-/// DTLS role this stack takes when it answers an SDP offer of
-/// `a=setup:actpass`, which leaves the choice to the answerer.
-///
-/// [`DtlsActpassAnswerRole::Active`] is the default: RFC 5763 §5 and JSEP
-/// (RFC 8829 §5.3.1) recommend it, because the answerer can send its
-/// ClientHello as soon as it answers, and because an answerer behind NAT
-/// opens its own media path by sending first.
-/// [`DtlsActpassAnswerRole::Passive`] makes this stack wait for the offerer's
-/// ClientHello instead; use it only for a peer that cannot act as the DTLS
-/// server. A passive answerer whose media address the offerer cannot reach
-/// first (NAT without ICE) waits for a ClientHello that never arrives, and
-/// the call fails its DTLS handshake.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DtlsActpassAnswerRole {
-    /// Answer `a=setup:active` and initiate DTLS as the client.
-    #[default]
-    Active,
-    /// Answer `a=setup:passive` and wait for the offerer to initiate DTLS.
-    Passive,
 }
 
 /// Named SRTP suite offer policies for common PBX/carrier interop.
@@ -683,21 +644,6 @@ impl SipRuntimeConfig {
 enum SetupTeardownTimeoutTerminal {
     Cancelled,
     Failed,
-}
-
-/// Established-dialog states whose `HangupCall` row sends BYE (RFC 3261
-/// §15.1). A hangup from any of them joins the exact BYE transaction before
-/// it reports success, exactly as from `Active`.
-fn local_hangup_sends_bye(state: CallState) -> bool {
-    matches!(
-        state,
-        CallState::Active
-            | CallState::HoldPending
-            | CallState::OnHold
-            | CallState::Resuming
-            | CallState::Muted
-            | CallState::Bridged
-    )
 }
 
 /// The watchdog a local hangup arms once its transition has committed.
@@ -2380,14 +2326,6 @@ pub struct Config {
     #[doc(hidden)]
     pub session_timer_allow_short_intervals_for_testing: bool,
 
-    /// Test-only: present a certificate other than the advertised one on
-    /// the RTP component's DTLS-SRTP handshake, so the peer's
-    /// `a=fingerprint` check fails. Exists only with the `test-hooks`
-    /// feature. Default: `false`.
-    #[cfg(feature = "test-hooks")]
-    #[doc(hidden)]
-    pub dtls_present_unadvertised_rtp_certificate_for_testing: bool,
-
     /// Default Digest credentials for UAC 401/407 retry.
     ///
     /// This is the Digest shorthand. When a supported outbound request is
@@ -2553,46 +2491,10 @@ pub struct Config {
     pub sip_contact_mode: SipContactMode,
 
     /// Opt-in compatibility for explicit SIP TLS Contacts on inbound SIPS calls.
-    /// Requires an observed TLS transaction. The peer's `sip:...;transport=tls`
-    /// Contact (exactly one transport parameter, `tls`) is kept unchanged as
-    /// the remote target, so in-dialog requests stay on TLS.
+    /// Requires an observed TLS transaction and preserves SIPS remote routing.
     /// Defaults to `false`. This field is the only switch: the library reads no
     /// environment variable for it, so embedders map deployment settings here.
     pub sip_allow_tls_contact_on_sips: bool,
-
-    /// Trusted record-routing TLS proxies whose accepted connection carries
-    /// the in-dialog requests (BYE, re-INVITE, UPDATE, ...) of the calls they
-    /// deliver, instead of a new connection dialled to the Record-Route.
-    ///
-    /// Empty by default, which leaves routing unchanged. A policy applies to
-    /// an inbound call only when its INVITE was admitted by the listener
-    /// auth policy (for example [`crate::SipListenerAuthPolicy::with_trusted_cidr`])
-    /// with a principal whose issuer, tenant and subject equal the policy's,
-    /// arrived over TLS from the policy's proxy address, and record-routes
-    /// through exactly the policy's loose-routing TLS proxy URI. At most
-    /// 64 entries; [`Config::validate`] checks each with
-    /// [`SipTlsProxyFlowPolicy::validate`]. See [`SipTlsProxyFlowPolicy`].
-    pub sip_tls_proxy_flow_policies: Vec<SipTlsProxyFlowPolicy>,
-
-    /// Keep the in-dialog requests of a call this endpoint placed over SIP
-    /// TLS on the certificate-verified connection its INVITE used, while
-    /// their next hop is the same route (or Contact) at the same address.
-    /// This covers peers that are dialled by DNS name but record-route with
-    /// an IP address their certificate does not name. A closed connection
-    /// then makes the request fail instead of being redialled. Defaults to
-    /// `false` (normal routing).
-    pub sip_retain_outbound_tls_flow: bool,
-
-    /// What this endpoint implements as a UAS. Inbound requests are checked
-    /// against it before they are processed (RFC 3261 §8.2: 405/501 with
-    /// Allow, 416, 420 with Unsupported, 415 with Accept, 406), and the
-    /// automatic OPTIONS response advertises it in Allow, Supported and
-    /// Accept (RFC 3261 §11.2). The default lists what rvoip implements.
-    /// Add an option tag only when the application implements that
-    /// extension, for example `replaces` (RFC 3891) for an application that
-    /// performs call replacement itself. `100rel` is withdrawn automatically
-    /// when [`Config::use_100rel`] is [`RelUsage::NotSupported`].
-    pub uas_capabilities: UasCapabilities,
 
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
@@ -2655,27 +2557,7 @@ pub struct Config {
     /// 600 s instead of closing a shared flow, sets `TCP_NODELAY`, and
     /// installs no hook. Keep a clone to read
     /// [`TlsFlowConfig::stats`](rvoip_sip_transport::TlsFlowConfig::stats).
-    ///
-    /// Set
-    /// [`bind_outbound_to_local_ip`](rvoip_sip_transport::TlsFlowConfig::bind_outbound_to_local_ip)
-    /// to make dialed TLS connections leave from the TLS listener's IP
-    /// address; [`Config::with_sip_bind_outbound_to_local_ip`] sets it
-    /// together with the TCP equivalent in [`Config::sip_tcp_flow`].
     pub sip_tls_flow: rvoip_sip_transport::TlsFlowConfig,
-
-    /// Outbound behaviour of the SIP TCP transport.
-    ///
-    /// With
-    /// [`bind_outbound_to_local_ip`](rvoip_sip_transport::TcpFlowConfig::bind_outbound_to_local_ip)
-    /// set, every TCP connection this endpoint dials is bound to the IP
-    /// address of [`Config::bind_addr`] before it connects, so the flow
-    /// leaves from that address rather than the one the kernel's routing
-    /// table picks. Use it when one host runs several endpoints, each bound
-    /// to its own address (for example a multi-source load generator). It
-    /// has no effect when the bind address is unspecified (`0.0.0.0` /
-    /// `::`). Default: [`TcpFlowConfig::default`](rvoip_sip_transport::TcpFlowConfig),
-    /// the kernel picks the source address.
-    pub sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig,
 
     /// **Dev only.** When `true`, server certs are accepted without
     /// identity verification. Required for self-signed test certs. The
@@ -2850,21 +2732,9 @@ pub struct Config {
     ///   close-time BYE go from our RTCP port to the peer's `a=rtcp:`
     ///   address, or its RTP port + 1 when it names none. Reports arriving
     ///   on our RTCP port are accepted only from the call's peer, and
-    ///   SRTCP protects them whenever SRTP is in use.
+    ///   SRTCP protects them whenever SDES-SRTP is in use.
     /// - When the peer accepts mux, RTCP shares the RTP port as usual and
     ///   the RTCP port is released as soon as the negotiation commits.
-    ///
-    /// # With SRTP
-    ///
-    /// SDES-SRTP (`a=crypto`) keys both ports from the one negotiated key.
-    /// DTLS-SRTP ([`SrtpKeyingMode::DtlsSrtp`]) runs a second DTLS handshake
-    /// on the RTCP port, as RFC 5764 §4.1 requires when RTP and RTCP are not
-    /// multiplexed: same `a=setup` role, same certificate and
-    /// `a=fingerprint`, its own SRTCP keys. The two handshakes run at the
-    /// same time once the answer commits. Until the RTCP handshake finishes
-    /// the RTCP port sends nothing and drops everything it receives. If it
-    /// fails (timeout, or a certificate the SDP did not name), the call
-    /// keeps its SRTP media and simply has no RTCP; a warning is logged.
     ///
     /// Behind NAT, a peer's RTCP is learned from the source it actually
     /// arrives from (symmetric RTCP, following the symmetric-RTP policy in
@@ -2878,9 +2748,10 @@ pub struct Config {
     /// range filled with such calls holds half as many calls (size
     /// [`Config::media_port_start`]..=[`Config::media_port_end`]
     /// accordingly). Ignored, and no port reserved, when ICE is enabled
-    /// (ICE here negotiates RTP's component only), in strict
-    /// [`Config::rtcp_mux_required`] mode, and in signalling-only media
-    /// mode.
+    /// (ICE here negotiates RTP's component only), with DTLS-SRTP keying
+    /// (RFC 5764 §4.1 would need a second DTLS handshake on the RTCP port),
+    /// in strict [`Config::rtcp_mux_required`] mode, and in signalling-only
+    /// media mode.
     ///
     /// Default: `false` — RTCP flows only to peers that multiplex.
     pub rtcp_non_mux: bool,
@@ -2914,8 +2785,7 @@ pub struct Config {
     /// Select how SRTP keys are established when [`Config::offer_srtp`] is
     /// enabled. SDES remains the compatibility default. DTLS-SRTP requires
     /// the `dtls-srtp` Cargo feature and full media mode; configuration fails
-    /// closed when either requirement is missing. A call whose DTLS-SRTP
-    /// handshake fails is ended; see [`SrtpKeyingMode::DtlsSrtp`].
+    /// closed when either requirement is missing.
     pub srtp_keying: SrtpKeyingMode,
 
     /// DTLS role to advertise on outgoing offers when
@@ -2925,16 +2795,6 @@ pub struct Config {
     /// [`DtlsSetupRole::Active`] for a client behind NAT that must open the
     /// media path by sending the first DTLS packet.
     pub dtls_setup_role: DtlsSetupRole,
-
-    /// DTLS role to answer with when an incoming offer says
-    /// `a=setup:actpass`, when [`Config::srtp_keying`] is
-    /// [`SrtpKeyingMode::DtlsSrtp`].
-    ///
-    /// The default is [`DtlsActpassAnswerRole::Active`] (RFC 5763 §5,
-    /// RFC 8829 §5.3.1). See [`DtlsActpassAnswerRole`] for the NAT trade-off
-    /// of [`DtlsActpassAnswerRole::Passive`]. Offers of `active` or `passive`
-    /// always get the complementary answer.
-    pub dtls_actpass_answer_role: DtlsActpassAnswerRole,
 
     /// Inbound jitter buffer: playout smoothing and packet-loss concealment
     /// for received audio.
@@ -3711,15 +3571,6 @@ impl std::fmt::Debug for Config {
             )
             .field("sip_tls_mode", &self.sip_tls_mode)
             .field("sip_contact_mode", &self.sip_contact_mode)
-            .field(
-                "sip_tls_proxy_flow_policy_count",
-                &self.sip_tls_proxy_flow_policies.len(),
-            )
-            .field(
-                "sip_retain_outbound_tls_flow",
-                &self.sip_retain_outbound_tls_flow,
-            )
-            .field("uas_capabilities", &self.uas_capabilities)
             .field("tls_bind_configured", &self.tls_bind_addr.is_some())
             .field(
                 "tls_advertised_configured",
@@ -3742,14 +3593,12 @@ impl std::fmt::Debug for Config {
                 &self.tls_server_client_auth.mode,
             )
             .field("sip_tls_flow", &self.sip_tls_flow)
-            .field("sip_tcp_flow", &self.sip_tcp_flow)
             .field("offer_srtp", &self.offer_srtp)
             .field("offer_rtcp_mux", &self.offer_rtcp_mux)
             .field("rtcp_mux_required", &self.rtcp_mux_required)
             .field("rtcp_non_mux", &self.rtcp_non_mux)
             .field("srtp_keying", &self.srtp_keying)
             .field("dtls_setup_role", &self.dtls_setup_role)
-            .field("dtls_actpass_answer_role", &self.dtls_actpass_answer_role)
             .field("ice", &self.ice)
             .field("srtp_required", &self.srtp_required)
             .field("amr_dtx", &self.amr_dtx)
@@ -3832,15 +3681,6 @@ impl std::fmt::Debug for Config {
     }
 }
 
-/// The `sip:<name>@<hostport>` address of record for a local endpoint.
-///
-/// `SocketAddr` displays the RFC 3261 §25.1 `hostport`, so an IPv6 address
-/// is written as an `IPv6reference` (`sip:alice@[::1]:5060`, RFC 5118 §4.1)
-/// rather than as bare colons that would read as a port.
-pub(crate) fn local_sip_uri(name: &str, ip: IpAddr, port: u16) -> String {
-    format!("sip:{}@{}", name, SocketAddr::new(ip, port))
-}
-
 impl Config {
     /// Default RTP media port range start.
     pub const DEFAULT_MEDIA_PORT_START: u16 = DEFAULT_RTP_PORT_RANGE_START;
@@ -3919,7 +3759,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
-            local_uri: local_sip_uri(name, ip, port),
+            local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
             auto_100_trying: true,
@@ -3932,8 +3772,6 @@ impl Config {
             session_timer_min_se: 90,
             #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
-            #[cfg(feature = "test-hooks")]
-            dtls_present_unadvertised_rtp_certificate_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -3951,9 +3789,6 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
-            sip_tls_proxy_flow_policies: Vec::new(),
-            sip_retain_outbound_tls_flow: false,
-            uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -3965,7 +3800,6 @@ impl Config {
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
-            sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -3977,7 +3811,6 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
-            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4070,7 +3903,7 @@ impl Config {
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
-            local_uri: local_sip_uri(name, ip, port),
+            local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
             auto_100_trying: true,
@@ -4083,8 +3916,6 @@ impl Config {
             session_timer_min_se: 90,
             #[cfg(feature = "test-hooks")]
             session_timer_allow_short_intervals_for_testing: false,
-            #[cfg(feature = "test-hooks")]
-            dtls_present_unadvertised_rtp_certificate_for_testing: false,
             credentials: None,
             auth: None,
             pai_uri: None,
@@ -4102,9 +3933,6 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             sip_allow_tls_contact_on_sips: false,
-            sip_tls_proxy_flow_policies: Vec::new(),
-            sip_retain_outbound_tls_flow: false,
-            uas_capabilities: UasCapabilities::default(),
             tls_bind_addr: None,
             tls_advertised_addr: None,
             contact_uri: None,
@@ -4116,7 +3944,6 @@ impl Config {
             tls_server_client_auth:
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             sip_tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
-            sip_tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
             offer_srtp: false,
@@ -4128,7 +3955,6 @@ impl Config {
             rtcp_reduced_minimum_interval: false,
             srtp_keying: SrtpKeyingMode::Sdes,
             dtls_setup_role: DtlsSetupRole::Actpass,
-            dtls_actpass_answer_role: DtlsActpassAnswerRole::Active,
             srtp_required: false,
             amr_dtx: false,
             amr_auto_cmr: false,
@@ -4798,13 +4624,6 @@ impl Config {
     /// Select the DTLS role advertised by outgoing SIP SDP offers.
     pub fn with_dtls_setup_role(mut self, role: DtlsSetupRole) -> Self {
         self.dtls_setup_role = role;
-        self
-    }
-
-    /// Select the DTLS role answered to an incoming `a=setup:actpass` offer.
-    /// See [`Config::dtls_actpass_answer_role`].
-    pub fn with_dtls_actpass_answer_role(mut self, role: DtlsActpassAnswerRole) -> Self {
-        self.dtls_actpass_answer_role = role;
         self
     }
 
@@ -5747,45 +5566,6 @@ impl Config {
         self
     }
 
-    /// Configure the SIP TCP transport's outbound behaviour. See
-    /// [`Config::sip_tcp_flow`].
-    pub fn with_sip_tcp_flow(mut self, flow: rvoip_sip_transport::TcpFlowConfig) -> Self {
-        self.sip_tcp_flow = flow;
-        self
-    }
-
-    /// Bind every SIP TCP and TLS connection this endpoint dials to the
-    /// local IP address of the transport that dials it, instead of letting
-    /// the kernel pick the source address. TCP uses the IP of
-    /// [`Config::bind_addr`]; TLS uses the IP of the TLS listener
-    /// ([`Config::tls_bind_addr`], or `bind_addr` when it is unset). Has no
-    /// effect for an unspecified address (`0.0.0.0` / `::`). Sets
-    /// `bind_outbound_to_local_ip` on both [`Config::sip_tcp_flow`] and
-    /// [`Config::sip_tls_flow`], keeping their other settings. Default:
-    /// off.
-    pub fn with_sip_bind_outbound_to_local_ip(mut self, enabled: bool) -> Self {
-        self.sip_tcp_flow = self.sip_tcp_flow.with_bind_outbound_to_local_ip(enabled);
-        self.sip_tls_flow = self.sip_tls_flow.with_bind_outbound_to_local_ip(enabled);
-        self
-    }
-
-    /// Set the trusted record-routing TLS proxies whose accepted connection
-    /// carries in-dialog requests. See [`Config::sip_tls_proxy_flow_policies`].
-    pub fn with_sip_tls_proxy_flow_policies(
-        mut self,
-        policies: impl IntoIterator<Item = SipTlsProxyFlowPolicy>,
-    ) -> Self {
-        self.sip_tls_proxy_flow_policies = policies.into_iter().collect();
-        self
-    }
-
-    /// Keep in-dialog requests of calls placed over SIP TLS on the INVITE's
-    /// verified connection. See [`Config::sip_retain_outbound_tls_flow`].
-    pub fn with_sip_retain_outbound_tls_flow(mut self, retain: bool) -> Self {
-        self.sip_retain_outbound_tls_flow = retain;
-        self
-    }
-
     /// Require every inbound SIP TLS peer to present a certificate chaining
     /// to `client_ca_path`.
     pub fn require_tls_client_certificate(
@@ -5855,63 +5635,6 @@ impl Config {
         self
     }
 
-    /// Reject address settings this release cannot honour: mixed address
-    /// families and IPv6 zone identifiers.
-    ///
-    /// Every SIP and media address of one endpoint must belong to one
-    /// family. The SIP and RTP sockets are bound to one address each, and a
-    /// socket of one family cannot reach the other, so a Via sent-by, a
-    /// Contact, or an SDP `c=` of the other family would advertise an
-    /// address the endpoint does not listen on. Dual-stack operation
-    /// (separate IPv4 and IPv6 listeners) is not supported yet.
-    ///
-    /// A `SocketAddrV6` with a nonzero scope id (a link-local zone such as
-    /// `fe80::1%eth0`) is rejected: the SIP `host` grammar (RFC 3261 §25.1,
-    /// RFC 5118) has no zone-identifier syntax — RFC 6874 extends only the
-    /// generic URI grammar — so the zone could not be advertised in a Via,
-    /// Contact or SIP URI, and SDP (RFC 8866 §5.7) cannot carry it either.
-    fn validate_address_family(&self) -> Result<()> {
-        let addresses = [
-            ("bind_addr", Some(self.bind_addr)),
-            ("sip_advertised_addr", self.sip_advertised_addr),
-            ("tls_bind_addr", self.tls_bind_addr),
-            ("tls_advertised_addr", self.tls_advertised_addr),
-            ("media_public_addr", self.media_public_addr),
-        ];
-        let family_name = |ip: IpAddr| if ip.is_ipv4() { "IPv4" } else { "IPv6" };
-        let local_family = family_name(self.local_ip);
-        for (name, address) in addresses {
-            let Some(address) = address else {
-                continue;
-            };
-            if matches!(address, SocketAddr::V6(v6) if v6.scope_id() != 0) {
-                return Err(SessionError::ConfigError(format!(
-                    "{name} must not carry an IPv6 zone identifier: SIP hosts (RFC 3261 §25.1, RFC 5118) and SDP addresses (RFC 8866 §5.7) have no zone syntax"
-                )));
-            }
-            let family = family_name(address.ip());
-            if family != local_family {
-                return Err(SessionError::ConfigError(format!(
-                    "{name} is {family} but local_ip is {local_family}: every SIP and media address of an endpoint must use one address family (dual-stack is not supported)"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    /// [`Config::uas_capabilities`] as the dialog layer applies it: without
-    /// `100rel` when [`Config::use_100rel`] is [`RelUsage::NotSupported`], so
-    /// a request that requires it gets 420 (RFC 3262 §4).
-    pub(crate) fn effective_uas_capabilities(&self) -> UasCapabilities {
-        let mut capabilities = self.uas_capabilities.clone();
-        if matches!(self.use_100rel, RelUsage::NotSupported) {
-            capabilities
-                .supported_extensions
-                .retain(|tag| !tag.eq_ignore_ascii_case("100rel"));
-        }
-        capabilities
-    }
-
     /// Validate the SIP TLS/contact-mode configuration.
     ///
     /// # Examples
@@ -5923,20 +5646,6 @@ impl Config {
     /// ```
     pub fn validate(&self) -> Result<()> {
         let effective_tls_mode = self.effective_tls_mode();
-
-        self.validate_address_family()?;
-
-        if self.sip_tls_proxy_flow_policies.len()
-            > rvoip_sip_dialog::api::config::MAX_TLS_PROXY_FLOW_POLICIES
-        {
-            return Err(SessionError::ConfigError(format!(
-                "sip_tls_proxy_flow_policies accepts at most {} entries",
-                rvoip_sip_dialog::api::config::MAX_TLS_PROXY_FLOW_POLICIES
-            )));
-        }
-        for policy in &self.sip_tls_proxy_flow_policies {
-            policy.validate().map_err(SessionError::ConfigError)?;
-        }
 
         if let Some(address) = self.sip_advertised_addr {
             if address.ip().is_unspecified() || address.port() == 0 {
@@ -8764,15 +8473,6 @@ mod config_tests {
         };
         exact_terminal_completion_result(completion)
             .expect("firing watchdog exact release must complete");
-        // The changed-state deadline falls due together with the firing
-        // one. The runner disarms it on its own pass, which can trail the
-        // firing lifetime's release on a starved runtime.
-        let drain_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-        while coordinator.setup_teardown_scheduler.len() != 0
-            && tokio::time::Instant::now() < drain_deadline
-        {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
         assert_eq!(coordinator.setup_teardown_scheduler.len(), 0);
         assert!(
             store.lifecycle_handle(&firing).is_none(),
@@ -11541,10 +11241,6 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_offer_rtcp_mux(config.offer_rtcp_mux);
         media_adapter_inner.set_rtcp_mux_required(config.rtcp_mux_required);
         media_adapter_inner.set_rtcp_non_mux(config.rtcp_non_mux);
-        #[cfg(all(feature = "test-hooks", feature = "dtls-srtp"))]
-        media_adapter_inner.set_dtls_wrong_rtp_certificate_for_testing(
-            config.dtls_present_unadvertised_rtp_certificate_for_testing,
-        );
         media_adapter_inner.set_rtcp_reporting_policy(
             config.rtcp_xr_voip_metrics,
             config.rtcp_reduced_minimum_interval,
@@ -11560,7 +11256,6 @@ impl UnifiedCoordinator {
             config.offer_srtp && config.srtp_keying == SrtpKeyingMode::DtlsSrtp,
         );
         media_adapter_inner.set_dtls_setup_role(config.dtls_setup_role);
-        media_adapter_inner.set_dtls_actpass_answer_role(config.dtls_actpass_answer_role);
         media_adapter_inner.set_sdes_base64_mode(sdes_base64_mode);
         // Sprint 3 C1 — propagate Comfort Noise opt-in.
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
@@ -11700,29 +11395,6 @@ impl UnifiedCoordinator {
             .setup_teardown_scheduler
             .attach_session_store(&store);
         let _ = coordinator.self_weak.set(Arc::downgrade(&coordinator));
-        {
-            // A failed RTP-component DTLS handshake ends its call. The handler
-            // holds only a weak reference so it cannot keep a shut-down
-            // coordinator alive.
-            let weak = Arc::downgrade(&coordinator);
-            coordinator
-                .media_adapter
-                .set_media_security_failure_handler(Arc::new(move |handle, failure| {
-                    let Some(coordinator) = weak.upgrade() else {
-                        return;
-                    };
-                    let task_coordinator = Arc::downgrade(&coordinator);
-                    let _ = coordinator
-                        .setup_teardown_scheduler
-                        .spawn_lifecycle_task(async move {
-                            if let Some(coordinator) = task_coordinator.upgrade() {
-                                coordinator
-                                    .end_call_after_media_security_failure(handle, failure)
-                                    .await;
-                            }
-                        });
-                }));
-        }
         let mut construction_guard = CoordinatorConstructionGuard::new(Arc::clone(&coordinator));
         let setup_teardown_scheduler = Arc::clone(&coordinator.setup_teardown_scheduler);
         let setup_teardown_tasks = Arc::clone(&setup_teardown_scheduler.tasks);
@@ -12373,24 +12045,17 @@ impl UnifiedCoordinator {
     }
 
     pub(crate) async fn lifecycle_snapshot(&self, id: &SessionId) -> CallLifecycleSnapshot {
-        let (state, media_security, media) = self
+        let (state, media_security) = self
             .helpers
             .state_machine
             .store
             .with_session(id, |session| {
-                (
-                    Some(session.call_state),
-                    session.media_security.clone(),
-                    Self::negotiated_media_from_session(session),
-                )
+                (Some(session.call_state), session.media_security.clone())
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None));
         let mut snapshot = self.lifecycle.snapshot(id, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
-        }
-        if snapshot.media.is_none() {
-            snapshot.media = media;
         }
         snapshot
     }
@@ -12413,21 +12078,14 @@ impl UnifiedCoordinator {
         let media_security = current
             .as_ref()
             .and_then(|session| session.media_security.clone());
-        let media = current
-            .as_ref()
-            .and_then(|snapshot| Self::negotiated_media_from_session(snapshot.state()));
         let mut snapshot = self.lifecycle.snapshot_exact(handle, state);
         if snapshot.media_security.is_none() {
             snapshot.media_security = media_security;
-        }
-        if snapshot.media.is_none() {
-            snapshot.media = media;
         }
         let has_exact_evidence = current.is_some()
             || !snapshot.progress.is_empty()
             || snapshot.answered.is_some()
             || snapshot.media_security.is_some()
-            || snapshot.media.is_some()
             || snapshot.terminal.is_some()
             || snapshot.latest_transfer_outcome.is_some();
         has_exact_evidence.then_some(snapshot).ok_or_else(|| {
@@ -12629,115 +12287,6 @@ impl UnifiedCoordinator {
         self.hangup_exact_with_reason(handle, "Local hangup").await
     }
 
-    /// Publish [`Event::MediaSecurityFailed`] for a call whose RTP-component
-    /// key agreement failed, then end the call with an RFC 3326 `Reason`
-    /// naming the failure.
-    ///
-    /// The teardown follows the call's state, through the same exact
-    /// authorities as an application hangup or rejection: BYE for an
-    /// answered call (an inbound call still waiting for its ACK sends BYE
-    /// once the ACK arrives), CANCEL for an outbound call that is not
-    /// answered yet, and `488 Not Acceptable Here` for an inbound call that
-    /// is not answered yet. A call that is already being torn down is left
-    /// alone, so this never races a second teardown.
-    async fn end_call_after_media_security_failure(
-        &self,
-        handle: SessionRegistryHandle,
-        failure: crate::api::events::MediaSecurityFailure,
-    ) {
-        const REASON_TEXT: &str = "DTLS-SRTP handshake failed";
-        let store = &self.helpers.state_machine.store;
-        let Ok(snapshot) = store.get_session_snapshot_exact(&handle) else {
-            return;
-        };
-        let (role, call_state) = {
-            let state = snapshot.state();
-            (state.role, state.call_state)
-        };
-        if matches!(
-            call_state,
-            CallState::Idle
-                | CallState::CancelPending
-                | CallState::Cancelling
-                | CallState::AnsweringHangupPending
-                | CallState::Terminating
-                | CallState::Terminated
-                | CallState::Cancelled
-                | CallState::Failed(_)
-        ) {
-            return;
-        }
-
-        self.app_event_publisher.publish_exact(
-            &handle,
-            crate::api::events::Event::MediaSecurityFailed {
-                call_id: handle.session_id().clone(),
-                keying: crate::api::events::MediaSecurityKeying::DtlsSrtp,
-                reason: failure,
-            },
-        );
-        let reason_header = || {
-            rvoip_sip_core::types::TypedHeader::Reason(rvoip_sip_core::types::reason::Reason::new(
-                "SIP",
-                488,
-                Some(REASON_TEXT.to_string()),
-            ))
-        };
-
-        let unanswered_inbound =
-            role == Role::UAS && matches!(call_state, CallState::Ringing | CallState::EarlyMedia);
-        let result = if unanswered_inbound {
-            self.reject_incoming_with_extras_exact(
-                &handle,
-                488,
-                "Not Acceptable Here",
-                vec![reason_header()],
-            )
-            .await
-        } else {
-            // Stage the Reason for whichever request the hangup sends: BYE
-            // (also after a 2xx that races a CANCEL) and CANCEL.
-            let unanswered_outbound = role == Role::UAC
-                && matches!(
-                    call_state,
-                    CallState::Initiating | CallState::Ringing | CallState::EarlyMedia
-                );
-            let mut cancel_headers = self.dialog_adapter.auto_emit_extra_headers.clone();
-            cancel_headers.push(reason_header());
-            let staged = match store.state_machine_lane_exact(&handle) {
-                Some(lane) => {
-                    let _guard = lane.lock_owned().await;
-                    store
-                        .update_session_exact_now(&handle, |session| {
-                            session.pending_bye_reason =
-                                Some(("SIP".to_string(), 488, Some(REASON_TEXT.to_string())));
-                            session.local_end_reason = Some(REASON_TEXT.to_string());
-                            if unanswered_outbound && session.pending_cancel_options.is_none() {
-                                session.pending_cancel_options = Some(Arc::new(
-                                    rvoip_sip_dialog::api::unified::CancelRequestOptions {
-                                        reason: None,
-                                        extra_headers: cancel_headers,
-                                    },
-                                ));
-                            }
-                        })
-                        .is_ok()
-                }
-                None => false,
-            };
-            if !staged {
-                return;
-            }
-            self.hangup_exact_with_reason(&handle, REASON_TEXT).await
-        };
-        if let Err(error) = result {
-            tracing::warn!(
-                session = %handle.session_id().0,
-                "ending the call after a DTLS-SRTP failure did not complete: {error}"
-            );
-        }
-    }
-
     /// Join the one exact hangup authority while supplying the terminal reason
     /// used by its eventual committed release. Automatic lifecycle owners use
     /// this same path as public hangup so BYE dispatch, final-response
@@ -12876,8 +12425,7 @@ impl UnifiedCoordinator {
             let _ = dispatched.send(*transitioned);
         }
         let dispatch = dispatch.map(|_| ());
-        let established_dialog = initial_state.is_some_and(local_hangup_sends_bye);
-        let retained_new_bye = established_dialog
+        let retained_new_bye = matches!(initial_state, Some(CallState::Active))
             && self
                 .dialog_adapter
                 .has_outgoing_bye_after_exact(handle, bye_generation_before_dispatch);
@@ -12901,7 +12449,7 @@ impl UnifiedCoordinator {
         // the dialog (the ordinary simultaneous-BYE race). The confirmation
         // helper always performs exact local reclamation on any other
         // timeout/non-2xx while preserving that wire failure for the caller.
-        if established_dialog && !hangup_was_noop {
+        if matches!(initial_state, Some(CallState::Active)) && !hangup_was_noop {
             return complete_established_bye_dispatch(
                 dispatch,
                 retained_new_bye,
@@ -13713,42 +13261,11 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
         reason: impl Into<String>,
     ) -> Result<()> {
-        use crate::adapters::dialog_adapter::{
-            outgoing_bye_cleanup_interrupted_error, OutgoingByeWait,
-        };
         let reason = reason.into();
-        let confirmation = match self
+        let confirmation = self
             .dialog_adapter
-            .wait_for_outgoing_bye_outcome_exact(handle)
-            .await
-        {
-            Ok(OutgoingByeWait::Confirmed) => Ok(()),
-            // The lifetime's terminal release removed this BYE's receipt
-            // before its final response was recorded. That release publishes
-            // its terminal fact first, and this hangup has not recorded one
-            // yet, so a normal end here was committed by another path: the
-            // peer's own BYE crossing ours (the simultaneous-BYE race of RFC
-            // 3261 §15.1.1). The call ended as the hangup asked; only the
-            // confirmation of the redundant BYE was lost. Any other terminal,
-            // or none, keeps the interrupted confirmation as a failure.
-            Ok(OutgoingByeWait::CleanupInterrupted) => {
-                let peer_ended =
-                    self.lifecycle_snapshot_exact(handle)
-                        .await
-                        .is_ok_and(|snapshot| {
-                            matches!(
-                                snapshot.terminal,
-                                Some(crate::api::lifecycle::CallTerminalInfo::Ended { .. })
-                            )
-                        });
-                if peer_ended {
-                    Ok(())
-                } else {
-                    Err(outgoing_bye_cleanup_interrupted_error())
-                }
-            }
-            Err(error) => Err(error),
-        };
+            .wait_for_outgoing_bye_final_response_exact(handle)
+            .await;
         let lifecycle_commit =
             commit_local_bye_lifecycle_exact(Arc::clone(&self.helpers.state_machine), handle).await;
         let finalization = match lifecycle_commit {
@@ -13926,26 +13443,8 @@ impl UnifiedCoordinator {
         session_a: &SessionId,
         session_b: &SessionId,
     ) -> std::result::Result<BridgeHandle, BridgeError> {
-        self.bridge_with_mode(session_a, session_b, BridgeMode::Relay)
-            .await
-    }
-
-    /// Bridge two calls, choosing relay vs per-direction transcoding.
-    ///
-    /// [`BridgeMode::Relay`] is the historical [`Self::bridge`] behaviour and
-    /// requires both legs to share an interchangeable payload type.
-    /// [`BridgeMode::Transcode`] decodes and re-encodes per direction with each
-    /// leg's SIP-negotiated codec, so calls whose legs negotiated different
-    /// codecs still exchange audio. Both codecs must be compiled into the
-    /// media layer (feature-gated codecs such as Opus need their feature).
-    pub async fn bridge_with_mode(
-        &self,
-        session_a: &SessionId,
-        session_b: &SessionId,
-        mode: BridgeMode,
-    ) -> std::result::Result<BridgeHandle, BridgeError> {
         self.media_adapter
-            .bridge_rtp_sessions_with_mode(session_a, session_b, mode)
+            .bridge_rtp_sessions(session_a, session_b)
             .await
     }
 
@@ -14749,22 +14248,6 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// The SIP-negotiated media format recorded on one session, or `None`
-    /// until SDP negotiation has produced a codec and payload type.
-    fn negotiated_media_from_session(
-        session: &crate::session_store::state::SessionState,
-    ) -> Option<crate::api::lifecycle::NegotiatedMedia> {
-        let config = session.negotiated_config.as_ref()?;
-        let payload_type = session.negotiated_payload_type()?;
-        Some(crate::api::lifecycle::NegotiatedMedia {
-            codec: config.codec.clone(),
-            payload_type,
-            clock_rate: config.sample_rate,
-            channels: config.channels,
-            fmtp: config.fmtp.clone(),
-        })
-    }
-
     /// Resolve the exact SDP-negotiated media format for one exact live
     /// session lifetime.
     ///
@@ -14775,34 +14258,6 @@ impl UnifiedCoordinator {
         handle: &SessionRegistryHandle,
     ) -> Result<Option<(crate::session_store::state::NegotiatedConfig, u8)>> {
         self.helpers.negotiated_media_config_exact(handle).await
-    }
-
-    /// The SIP-negotiated media format for one call, or `None` until SDP
-    /// negotiation has committed.
-    ///
-    /// This is the codec/rate/channel shape the answer actually selected, read
-    /// from the session store — the same value the media layer encodes with.
-    /// Re-INVITE renegotiation replaces it.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// if let Some(media) = coordinator.negotiated_media(&call).await? {
-    ///     println!("{} at {} Hz, {} ch (PT {})", media.codec, media.clock_rate, media.channels, media.payload_type);
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn negotiated_media(
-        &self,
-        session: &SessionId,
-    ) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
-        Ok(self
-            .helpers
-            .state_machine
-            .store
-            .with_session(session, Self::negotiated_media_from_session)?)
     }
 
     /// Exact number of range-backed RTP/RTCP ports currently leased by SIP
@@ -14916,8 +14371,22 @@ impl UnifiedCoordinator {
             return Ok(None);
         };
 
-        Ok(Some(
-            crate::api::incoming::IncomingCall::from_event_captured(
+        let pending = lifecycle_handle
+            .as_ref()
+            .and_then(|handle| self.pending_incoming_bundle_for_handle_exact(handle));
+        let parsed = pending.as_ref().and_then(|bundle| bundle.request.clone());
+        let transport = pending.and_then(|bundle| bundle.transport);
+        let incoming = match parsed {
+            Some(req) => crate::api::incoming::IncomingCall::with_request_captured(
+                call_id,
+                from,
+                to,
+                sdp,
+                self.clone(),
+                req,
+                lifecycle_handle,
+            ),
+            None => crate::api::incoming::IncomingCall::new_captured(
                 call_id,
                 from,
                 to,
@@ -14925,7 +14394,14 @@ impl UnifiedCoordinator {
                 self.clone(),
                 lifecycle_handle,
             ),
-        ))
+        }
+        .with_transport_context(
+            transport
+                .as_deref()
+                .cloned()
+                .unwrap_or_else(crate::auth::SipTransportSecurityContext::unknown),
+        );
+        Ok(Some(incoming))
     }
 
     pub(crate) fn pending_incoming_bundle_for_handle_exact(
@@ -15159,7 +14635,6 @@ impl UnifiedCoordinator {
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_server_client_auth: config.tls_server_client_auth.clone(),
             tls_flow: config.sip_tls_flow.clone(),
-            tcp_flow: config.sip_tcp_flow.clone(),
             new_call_admission: config.sip_new_call_admission,
             tls_extra_ca_path: config
                 .tls_extra_ca_path
@@ -15278,9 +14753,6 @@ impl UnifiedCoordinator {
                 dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.allow_tls_contact_on_sips = config.sip_allow_tls_contact_on_sips;
-                dialog.tls_proxy_flow_policies = config.sip_tls_proxy_flow_policies.clone();
-                dialog.retain_outbound_tls_flow = config.sip_retain_outbound_tls_flow;
-                dialog.uas_capabilities = config.effective_uas_capabilities();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());

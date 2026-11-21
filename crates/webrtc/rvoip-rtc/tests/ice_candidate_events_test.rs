@@ -9,7 +9,6 @@ use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::event::RTCPeerConnectionEvent;
 use rtc::peer_connection::transport::RTCIceCandidateInit;
 use rtc::sansio::Protocol;
-use std::time::Instant;
 
 #[test]
 fn test_host_candidate_event_emission() {
@@ -17,7 +16,7 @@ fn test_host_candidate_event_emission() {
     let config = RTCConfigurationBuilder::new().build();
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .build(Instant::now())
+        .build()
         .expect("Failed to create peer connection");
 
     // Create a host candidate
@@ -75,7 +74,7 @@ fn test_srflx_candidate_event_emission() {
     let config = RTCConfigurationBuilder::new().build();
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .build(Instant::now())
+        .build()
         .expect("Failed to create peer connection");
 
     // Create an srflx candidate (server reflexive)
@@ -135,7 +134,7 @@ fn test_multiple_candidates_events() {
     let config = RTCConfigurationBuilder::new().build();
     let mut pc = RTCPeerConnectionBuilder::new()
         .with_configuration(config)
-        .build(Instant::now())
+        .build()
         .expect("Failed to create peer connection");
 
     // Add multiple candidates

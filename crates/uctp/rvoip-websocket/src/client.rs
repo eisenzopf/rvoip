@@ -14,27 +14,6 @@ use url::Url;
 
 use crate::errors::{Result, UctpWsError};
 
-/// A `wss` connector trusting the WebPKI roots, built on the ring rustls
-/// provider explicitly.
-///
-/// Without an explicit connector tungstenite builds one on the process-level
-/// rustls default, which rustls cannot infer when a dependency graph compiles
-/// both its `ring` and `aws-lc-rs` providers (the AWS SDK brings `aws-lc-rs`).
-/// Nothing here reads or installs the process default.
-#[cfg(feature = "wss")]
-fn ring_websocket_connector() -> tokio_tungstenite::Connector {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("the ring provider supports rustls's default protocol versions")
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(config))
-}
-
 pub struct UctpWsClient {
     out_tx: mpsc::Sender<UctpEnvelope>,
     in_rx: parking_lot::Mutex<Option<mpsc::Receiver<UctpEnvelope>>>,
@@ -42,17 +21,6 @@ pub struct UctpWsClient {
 
 impl UctpWsClient {
     pub async fn connect(url: &Url) -> Result<Arc<Self>> {
-        // With `wss`, hand tungstenite an explicit connector so a `wss://`
-        // URL never falls back to the process-level rustls default.
-        #[cfg(feature = "wss")]
-        let (ws, _resp) = tokio_tungstenite::connect_async_tls_with_config(
-            url.as_str(),
-            None,
-            false,
-            Some(ring_websocket_connector()),
-        )
-        .await?;
-        #[cfg(not(feature = "wss"))]
         let (ws, _resp) = tokio_tungstenite::connect_async(url.as_str()).await?;
         let (sink, stream) = ws.split();
         Ok(Self::spawn_pumps(sink, stream))

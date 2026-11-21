@@ -99,10 +99,6 @@ pub struct TransportManagerConfig {
     /// reads while the transaction layer catches up, `TCP_NODELAY` on, no
     /// hook.
     pub tls_flow: rvoip_sip_transport::TlsFlowConfig,
-    /// Outbound behaviour of every TCP transport this manager creates.
-    /// Defaults to [`TcpFlowConfig::default`](rvoip_sip_transport::TcpFlowConfig):
-    /// the kernel picks the source address of dialed connections.
-    pub tcp_flow: rvoip_sip_transport::TcpFlowConfig,
     /// Initial configuration of the new-call admission gate shared with the
     /// transaction manager built from this transport manager. Default:
     /// [`AdmissionMode::Off`](crate::transaction::AdmissionMode::Off).
@@ -152,7 +148,6 @@ impl Default for TransportManagerConfig {
                 rvoip_sip_transport::transport::tls::TlsServerClientAuthConfig::default(),
             tls_insecure_skip_verify: false,
             tls_flow: rvoip_sip_transport::TlsFlowConfig::default(),
-            tcp_flow: rvoip_sip_transport::TcpFlowConfig::default(),
             new_call_admission: crate::transaction::overload::NewCallAdmissionConfig::default(),
         }
     }
@@ -174,7 +169,6 @@ fn transport_event_dispatch_queue_capacity(
 fn transport_event_class(event: &TransportEvent) -> &'static str {
     match event {
         TransportEvent::MessageReceived { .. } => "message_received",
-        TransportEvent::MalformedRequest { .. } => "malformed_request",
         TransportEvent::Error { .. } => "error",
         TransportEvent::Closed => "closed",
         TransportEvent::KeepAlivePongReceived { .. } => "keepalive_pong_received",
@@ -764,12 +758,11 @@ impl TransportManager {
             let arc: Arc<dyn Transport> = Arc::new(transport);
             (arc, format!("tls:{}", actual))
         } else {
-            let (transport, rx) = TcpTransport::bind_with_flow_config(
+            let (transport, rx) = TcpTransport::bind_with_control_sender(
                 bind_addr,
                 Some(self.config.default_channel_capacity),
                 None,
                 Some(self.control_event_tx.clone()),
-                self.config.tcp_flow.clone(),
             )
             .await
             .map_err(|e| {
@@ -1368,8 +1361,6 @@ mod tests {
         );
         assert!(config.tls_flow.tcp_nodelay);
         assert!(config.tls_flow.ingress_admission.is_none());
-        assert!(!config.tls_flow.bind_outbound_to_local_ip);
-        assert!(!config.tcp_flow.bind_outbound_to_local_ip);
 
         let tuned = TransportManagerConfig {
             tls_flow: TlsFlowConfig::default()

@@ -5,7 +5,6 @@
 
 use crate::error::Result;
 use crate::sdp::attributes::common::to_result;
-use nom::Parser;
 use nom::{branch::alt, bytes::complete::tag, combinator::map, IResult};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -42,8 +41,7 @@ fn direction_parser(input: &str) -> IResult<&str, MediaDirection> {
         map(tag("sendonly"), |_| MediaDirection::SendOnly),
         map(tag("recvonly"), |_| MediaDirection::RecvOnly),
         map(tag("inactive"), |_| MediaDirection::Inactive),
-    ))
-    .parse(input)
+    ))(input)
 }
 
 /// Parses direction attributes (sendrecv, sendonly, recvonly, inactive)

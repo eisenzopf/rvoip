@@ -1,22 +1,16 @@
 # rvoip-sip Beta Topology Profiles
 
-Date: 2026-10-12
+Date: 2026-09-05
 
 This document defines which deployment shapes beta is allowed to claim and
 which shapes remain post-beta or advanced tuning work.
 
-Current published reference: [protected 0.4.0 qualification](BETA_RELEASE_REPORT.md),
-`remote-release` run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080),
-generated from clean tested commit `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`
-(tag `v0.4.0`). Its performance rows ran fresh on 16-vCPU AWS `m5.4xlarge`
-workers.
+Previous published reference: [protected 0.3.9 qualification](BETA_RELEASE_REPORT.md),
+run `33969263241`, generated from clean tested commit
+`8cab44b10f872d21b304c02111d5d203ee8226da`.
 
-The `0.4.0` deployment profile constructors (`Config::public_server`,
-`carrier_trunk_udp`, `behind_nat`, `tls_direct_routing`) are covered by
-rvoip-sip tests only (`deployment_profiles.rs`,
-`tls_direct_routing_integration.rs`); no release gate runs a profile against an
-independent peer, so they do not widen the profiles below.
+For `0.4.0`, the signed protected qualification artifact is authoritative
+until the generated reports are copied into the repository after publication.
 
 ## Beta-Supported Profiles
 
@@ -27,7 +21,7 @@ independent peer, so they do not widen the profiles below.
 | Basic SIP server | Supported | `CallbackPeer` inbound call, reject/accept, DTMF, BYE cleanup. |
 | Asterisk PBX | Interop tested | UDP/TLS registration and calls, digest auth, SDES-SRTP where claimed. |
 | FreeSWITCH PBX | Interop tested | Mirrors the Asterisk matrix where feasible. |
-| Jambonz OSS SBC/B2BUA | Required for 0.4.0 | Latest stable OSS line (currently 0.9.15), pinned per run; authenticated registration, SIP dialog/control, anchored RTP/audio, carrier admission, and cleanup evidence over UDP. |
+| Jambonz OSS SBC/B2BUA | Required for 0.4.0 | Latest stable OSS line (currently 0.9.14), pinned per run; authenticated registration, SIP dialog/control, anchored RTP/audio, carrier admission, and cleanup evidence over UDP. |
 | Kamailio transaction-stateful proxy | `0.4.0` release gate | Real-process UDP/TCP/TLS, routing, CANCEL, forking, ACK, response, and cleanup matrix. |
 | OpenSIPS transaction-stateful proxy | `0.4.0` release gate | Independent real-process execution of the same proxy matrix. |
 | SIPp UAC/UAS | Release gate | Standalone load matrix at 30, 100, 300, 1,000, and 2,000 CPS. |

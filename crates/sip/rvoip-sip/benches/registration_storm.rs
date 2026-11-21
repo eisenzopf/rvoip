@@ -6,10 +6,9 @@
 //! varying client fan-out — the classic "all phones come back after a
 //! WAN outage" scenario.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_sip::{Config, StreamPeer, UnifiedCoordinator};
 use std::collections::HashMap;
-use std::hint::black_box;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 

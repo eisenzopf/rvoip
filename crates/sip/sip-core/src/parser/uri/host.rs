@@ -1,4 +1,3 @@
-use nom::Parser;
 use nom::{
     branch::alt,
     bytes::complete::tag,
@@ -17,7 +16,7 @@ use super::ipv6::ipv6_reference;
 // host = hostname / IPv4address / IPv6reference
 pub fn host(input: &[u8]) -> ParseResult<'_, Host> {
     // Order is important: try hostname first as IP addresses might contain valid domain chars
-    alt((hostname, ipv4_address, ipv6_reference)).parse(input)
+    alt((hostname, ipv4_address, ipv6_reference))(input)
 }
 
 // port = 1*DIGIT
@@ -71,7 +70,7 @@ pub fn port(input: &[u8]) -> ParseResult<'_, u16> {
 
 // hostport = host [ ":" port ]
 pub fn hostport(input: &[u8]) -> ParseResult<'_, (Host, Option<u16>)> {
-    pair(host, opt(preceded(tag(&b":"[..]), port))).parse(input)
+    pair(host, opt(preceded(tag(b":"), port)))(input)
 }
 
 #[cfg(test)]
@@ -314,12 +313,15 @@ mod tests {
 
     #[test]
     fn test_numeric_hostname() {
-        // Not an IPv4 address, and not a hostname either: the top label must
-        // start with ALPHA (RFC 3261 §25.1).
-        assert!(host(b"999.888.777.666").is_err());
+        // Numeric hostnames that are not valid IPv4 addresses
+        let (rem, host_val) = host(b"999.888.777.666").unwrap();
+        assert!(rem.is_empty());
+        assert!(matches!(host_val, Host::Domain(domain) if domain == "999.888.777.666"));
 
-        // Octets above 255: not an IPv4 address, and not a hostname.
-        assert!(host(b"333.444.555.666").is_err());
+        // This looks like an IPv4 address but has numbers > 255
+        let (rem, host_val) = host(b"333.444.555.666").unwrap();
+        assert!(rem.is_empty());
+        assert!(matches!(host_val, Host::Domain(domain) if domain == "333.444.555.666"));
     }
 
     #[test]

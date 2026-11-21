@@ -5,7 +5,6 @@ use crate::statistics::stats::media::audio_source::RTCAudioSourceStats;
 use crate::statistics::stats::media::media_source::RTCMediaSourceStats;
 use crate::statistics::stats::media::video_source::RTCVideoSourceStats;
 use crate::statistics::stats::{RTCStats, RTCStatsType};
-use shared::time::SystemInstant;
 use std::time::Instant;
 
 /// Accumulated media source statistics.
@@ -47,7 +46,7 @@ impl MediaSourceStatsAccumulator {
     pub fn snapshot(&self, now: Instant, id: &str) -> RTCMediaSourceStats {
         RTCMediaSourceStats {
             stats: RTCStats {
-                timestamp: SystemInstant::now(now),
+                timestamp: now,
                 typ: RTCStatsType::MediaSource,
                 id: id.to_string(),
             },
