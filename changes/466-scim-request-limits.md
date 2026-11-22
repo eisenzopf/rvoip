@@ -18,8 +18,14 @@ replaces a Group, or when a PATCH replaces `members`. Over the cap, the router
 returns a `400` SCIM error with `scimType` `invalidValue`, and the service
 methods return the new `ScimError::InvalidValue`.
 
-Migration: if you provision groups with more than 10,000 members in one
-request, raise `ScimConfig::with_max_group_members_per_request`. The adapter's
-PATCH supports only `replace` of `members`, which carries the whole membership,
-so splitting a group across PATCH requests does not get past the cap. An
-exhaustive `match` on `ScimError` needs an arm for `InvalidValue`.
+Breaking changes and migration:
+
+- If you mounted the SCIM router with `DefaultBodyLimit::disable()` (or a
+  limit above 2 MiB) and accepted SCIM bodies over 2 MiB, they now get `413`.
+  Raise `ScimConfig::with_max_request_body_bytes` to the size you accept; your
+  mount already lifts axum's 2 MiB extractor limit.
+- If you provision groups with more than 10,000 members in one request, raise
+  `ScimConfig::with_max_group_members_per_request`. The adapter's PATCH
+  supports only `replace` of `members`, which carries the whole membership, so
+  splitting a group across PATCH requests does not get past the cap.
+- An exhaustive `match` on `ScimError` needs an arm for `InvalidValue`.
