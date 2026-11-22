@@ -21,11 +21,18 @@ setter.
 | `max_request_body_bytes` | 2 MiB | `with_max_request_body_bytes` |
 | `max_group_members_per_request` | 10,000 | `with_max_group_members_per_request` |
 
-`max_request_body_bytes` caps every request body the SCIM router reads. The
-router applies it as its innermost layer, so it holds for SCIM routes whatever
-`DefaultBodyLimit` the application sets where it mounts the router: disabling
-or raising the outer limit does not widen it, and lowering the outer limit does
-not narrow it. A larger body gets `413 Payload Too Large`.
+`max_request_body_bytes` caps every request body sent to the SCIM router. The
+router wraps each body in this limit (`tower_http`'s `RequestBodyLimitLayer`).
+That stacks with any limit the application sets where it mounts the router, so
+the smallest wins and SCIM's limit only ever tightens:
+
+- disabling or raising `DefaultBodyLimit` at the mount does not widen it;
+- a smaller `DefaultBodyLimit` at the mount still applies;
+- axum's own extractor limit (2 MiB unless the application changes it) still
+  applies, so to accept SCIM bodies over 2 MiB, raise `max_request_body_bytes`
+  *and* raise or disable `DefaultBodyLimit` where the router is mounted.
+
+A larger body gets `413 Payload Too Large`.
 
 `max_group_members_per_request` caps the `members` one request may carry:
 POST and PUT of a Group, and a PATCH that replaces `members`. It applies to the

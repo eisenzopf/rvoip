@@ -12,12 +12,17 @@
 //! default roles, and two request limits:
 //!
 //! - [`ScimConfig::max_request_body_bytes`] (default 2 MiB) caps the size of
-//!   any request body the SCIM router reads. [`ScimService::router`] applies
-//!   it as its innermost layer, so it holds for SCIM routes whatever body
-//!   limit the application sets where it mounts the router: an outer
-//!   `DefaultBodyLimit::disable()` or a larger outer limit does not widen it,
-//!   and a smaller outer `DefaultBodyLimit` does not narrow it either. Set it
-//!   with [`ScimConfig::with_max_request_body_bytes`]. A larger body gets
+//!   any request body sent to the SCIM router. [`ScimService::router`] wraps
+//!   each request body in a length limit (`tower_http`'s
+//!   `RequestBodyLimitLayer`), which stacks with any limit the application
+//!   sets where it mounts the router, so the smallest limit wins. SCIM's limit
+//!   only ever tightens: an outer `DefaultBodyLimit::disable()` or a larger
+//!   outer limit does not widen it, and a smaller outer `DefaultBodyLimit`
+//!   still applies. axum's own extractor limit (2 MiB unless the application
+//!   changes it with `DefaultBodyLimit`) also still applies, so to accept SCIM
+//!   bodies over 2 MiB, raise this value *and* raise or disable
+//!   `DefaultBodyLimit` where the router is mounted. Set it with
+//!   [`ScimConfig::with_max_request_body_bytes`]. A larger body gets
 //!   `413 Payload Too Large`.
 //! - [`ScimConfig::max_group_members_per_request`] (default 10,000) caps the
 //!   number of `members` one request may carry: POST and PUT of a Group, and
@@ -32,7 +37,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -44,6 +49,7 @@ use rvoip_auth_core::{BearerAuthError, BearerValidator};
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tower_http::limit::RequestBodyLimitLayer;
 use users_core::{
     AuthenticationService, CreateUserRequest, Error as UsersError, ExternalIdentity,
     TokenIssueContext, UpdateUserRequest, UpsertExternalIdentityRequest, User, UserFilter,
@@ -96,12 +102,16 @@ pub struct ScimConfig {
     /// Roles assigned to provisioned users when SCIM groups do not map to
     /// users-core's built-in role set.
     pub default_roles: Vec<String>,
-    /// Largest request body, in bytes, that the SCIM router reads. Default
+    /// Largest request body, in bytes, that the SCIM router accepts. Default
     /// [`DEFAULT_MAX_REQUEST_BODY_BYTES`] (2 MiB).
     ///
-    /// [`ScimService::router`] applies it as its innermost layer, so an outer
-    /// `DefaultBodyLimit` where the router is mounted (disabled, larger, or
-    /// smaller) does not change it for SCIM routes. A larger body gets
+    /// [`ScimService::router`] wraps each request body in this limit. It
+    /// stacks with the application's own limits, so the smallest wins: an
+    /// outer `DefaultBodyLimit::disable()` or larger limit does not widen it,
+    /// and a smaller outer `DefaultBodyLimit` still applies. axum's extractor
+    /// limit (2 MiB by default) still applies too, so a value above 2 MiB
+    /// takes effect only if the application also raises or disables
+    /// `DefaultBodyLimit` where it mounts the router. A larger body gets
     /// `413 Payload Too Large`.
     pub max_request_body_bytes: usize,
     /// Most Group `members` one request may carry. Default
@@ -196,9 +206,10 @@ impl ScimService {
 
     /// Return an Axum router for SCIM service metadata, Users, and Groups.
     ///
-    /// The router enforces [`ScimConfig::max_request_body_bytes`] as its
-    /// innermost layer, so the limit holds whatever `DefaultBodyLimit` the
-    /// application applies where it mounts the router.
+    /// The router wraps every request body in
+    /// [`ScimConfig::max_request_body_bytes`]. The wrapper stacks with any
+    /// limit the application applies where it mounts the router, so the
+    /// smallest limit wins and nothing outside can widen SCIM's.
     pub fn router(self: Arc<Self>) -> Router {
         let max_request_body_bytes = self.config.max_request_body_bytes;
         Router::new()
@@ -229,10 +240,12 @@ impl ScimService {
                     .patch(patch_group_handler)
                     .delete(delete_group_handler),
             )
-            // Innermost: DefaultBodyLimit sets a request extension, and the
-            // layer nearest the handler writes it last, so an outer
-            // `DefaultBodyLimit` cannot change the SCIM limit.
-            .layer(DefaultBodyLimit::max(max_request_body_bytes))
+            // Wrap the body rather than set `DefaultBodyLimit`: that sets a
+            // request extension the innermost layer overwrites, so it would
+            // replace a smaller limit set where the router is mounted. Body
+            // wrappers stack, so the outer limit, axum's extractor limit and
+            // this one all apply and the smallest wins.
+            .layer(RequestBodyLimitLayer::new(max_request_body_bytes))
             .with_state(self)
     }
 
@@ -1191,6 +1204,7 @@ fn scim_schemas() -> Vec<serde_json::Value> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use axum::extract::DefaultBodyLimit;
     use rvoip_core_traits::ids::IdentityId;
     use users_core::config::{PasswordConfig, TlsSettings};
     use users_core::jwt::JwtConfig;
@@ -1303,21 +1317,33 @@ mod tests {
         uri: &str,
         body: Vec<u8>,
     ) -> (StatusCode, Option<String>, Vec<u8>) {
+        send_with_length(app, method, uri, body, false).await
+    }
+
+    /// Send a request, with a `Content-Length` header when `content_length`
+    /// is set (as real clients do) or as a body of unannounced length.
+    async fn send_with_length(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Vec<u8>,
+        content_length: bool,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
 
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", "Bearer admin-token")
+            .header("content-type", "application/json");
+        if content_length {
+            request = request.header("content-length", body.len());
+        }
         let response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .header("authorization", "Bearer admin-token")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body))
-                    .unwrap(),
-            )
+            .oneshot(request.body(Body::from(body)).unwrap())
             .await
             .unwrap();
         let status = response.status();
@@ -1370,65 +1396,144 @@ mod tests {
         assert_eq!(config.max_group_members_per_request, 3);
     }
 
-    /// The SCIM body limit is the router's innermost layer, so an application
-    /// that disables or raises axum's body limit where it mounts the router
-    /// cannot widen it.
-    #[tokio::test]
-    async fn body_limit_holds_under_an_outer_router_that_disables_or_raises_it() {
-        const LIMIT: usize = 4 * 1024;
-        let (_temp, service) = test_service_with_config(
+    /// The SCIM router under an outer router, with `outer` applied where it is
+    /// mounted (`None`: the application sets no `DefaultBodyLimit`).
+    async fn mounted_scim_router(
+        scim_limit: usize,
+        outer: Option<DefaultBodyLimit>,
+    ) -> (tempfile::TempDir, Router) {
+        let (temp, service) = test_service_with_config(
             vec!["scim.write"],
-            ScimConfig::new("okta").with_max_request_body_bytes(LIMIT),
+            ScimConfig::new("okta").with_max_request_body_bytes(scim_limit),
         )
         .await;
-        let scim = Arc::new(service).router();
-        let oversized_name = "x".repeat(2 * LIMIT);
-        let oversized_group = serde_json::to_vec(&group_json("g-1", &oversized_name, 0)).unwrap();
-        let oversized_patch = serde_json::to_vec(&serde_json::json!({
-            "Operations": [{"op": "replace", "path": "displayName", "value": oversized_name}],
+        let app = Router::new().nest("/scim", Arc::new(service).router());
+        let app = match outer {
+            Some(outer) => app.layer(outer),
+            None => app,
+        };
+        (temp, app)
+    }
+
+    fn group_body(display_name_len: usize) -> Vec<u8> {
+        serde_json::to_vec(&group_json("g-1", &"x".repeat(display_name_len), 0)).unwrap()
+    }
+
+    fn display_name_patch_body(display_name_len: usize) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "Operations": [{
+                "op": "replace",
+                "path": "displayName",
+                "value": "x".repeat(display_name_len),
+            }],
         }))
-        .unwrap();
-        assert!(oversized_group.len() > LIMIT && oversized_patch.len() > LIMIT);
-        let group = serde_json::to_vec(&group_json("g-1", "supervisors", 1)).unwrap();
-        let patch = serde_json::to_vec(&serde_json::json!({
-            "Operations": [{"op": "replace", "path": "displayName", "value": "agents"}],
-        }))
-        .unwrap();
+        .unwrap()
+    }
 
-        for (outer_name, outer_limit) in [
-            ("disabled", DefaultBodyLimit::disable()),
-            ("raised to 64 MiB", DefaultBodyLimit::max(64 * 1024 * 1024)),
-        ] {
-            let app = Router::new().nest("/scim", scim.clone()).layer(outer_limit);
-
-            let (status, _, _) = send(&app, "POST", "/scim/Groups", oversized_group.clone()).await;
+    /// Send POST /Groups then PATCH /Groups/g-1, each with and without a
+    /// `Content-Length`, and expect `expected` for all four.
+    async fn assert_group_writes(
+        app: &Router,
+        display_name_len: usize,
+        expected: StatusCode,
+        case: &str,
+    ) {
+        for content_length in [false, true] {
+            let (status, _, _) = send_with_length(
+                app,
+                "POST",
+                "/scim/Groups",
+                group_body(display_name_len),
+                content_length,
+            )
+            .await;
             assert_eq!(
-                status,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "POST /Groups, outer limit {outer_name}"
+                status, expected,
+                "{case}: POST /Groups, content-length {content_length}"
             );
-            let (status, _, _) =
-                send(&app, "PATCH", "/scim/Groups/g-1", oversized_patch.clone()).await;
+            let (status, _, _) = send_with_length(
+                app,
+                "PATCH",
+                "/scim/Groups/g-1",
+                display_name_patch_body(display_name_len),
+                content_length,
+            )
+            .await;
             assert_eq!(
-                status,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "PATCH /Groups/{{id}}, outer limit {outer_name}"
-            );
-
-            // Bodies within the limit still reach the handlers.
-            let (status, _, _) = send(&app, "POST", "/scim/Groups", group.clone()).await;
-            assert_eq!(
-                status,
-                StatusCode::OK,
-                "POST /Groups, outer limit {outer_name}"
-            );
-            let (status, _, _) = send(&app, "PATCH", "/scim/Groups/g-1", patch.clone()).await;
-            assert_eq!(
-                status,
-                StatusCode::OK,
-                "PATCH /Groups/{{id}}, outer limit {outer_name}"
+                status, expected,
+                "{case}: PATCH /Groups/{{id}}, content-length {content_length}"
             );
         }
+    }
+
+    /// SCIM's body limit only ever tightens. It wraps the body, so it stacks
+    /// with whatever `DefaultBodyLimit` the application sets where it mounts
+    /// the router, and the smallest limit wins.
+    #[tokio::test]
+    async fn body_limit_stacks_with_the_mount_point_limit_and_the_smallest_wins() {
+        const KIB: usize = 1024;
+        const MIB: usize = 1024 * KIB;
+
+        // (a) An outer router that disables axum's limit cannot widen SCIM's.
+        let (_temp, app) = mounted_scim_router(4 * KIB, Some(DefaultBodyLimit::disable())).await;
+        assert_group_writes(&app, KIB, StatusCode::OK, "(a) under both limits").await;
+        assert_group_writes(
+            &app,
+            8 * KIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "(a) outer disabled",
+        )
+        .await;
+
+        // (b) Nor can an outer router that raises it.
+        let (_temp, app) =
+            mounted_scim_router(4 * KIB, Some(DefaultBodyLimit::max(64 * MIB))).await;
+        assert_group_writes(&app, KIB, StatusCode::OK, "(b) under both limits").await;
+        assert_group_writes(
+            &app,
+            8 * KIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "(b) outer 64 MiB",
+        )
+        .await;
+
+        // (c) An outer limit smaller than SCIM's (here the 2 MiB default)
+        // still applies: only the outer limit can reject an 8 KiB body.
+        let (_temp, app) = mounted_scim_router(
+            DEFAULT_MAX_REQUEST_BODY_BYTES,
+            Some(DefaultBodyLimit::max(4 * KIB)),
+        )
+        .await;
+        assert_group_writes(&app, KIB, StatusCode::OK, "(c) under both limits").await;
+        assert_group_writes(
+            &app,
+            8 * KIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "(c) outer 4 KiB",
+        )
+        .await;
+
+        // With no outer `DefaultBodyLimit`, axum's 2 MiB extractor default
+        // still applies on top of a larger SCIM limit...
+        let (_temp, app) = mounted_scim_router(4 * MIB, None).await;
+        assert_group_writes(
+            &app,
+            3 * MIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "no outer limit",
+        )
+        .await;
+        // ...so a SCIM limit above 2 MiB takes effect once the application
+        // disables (or raises) axum's limit where it mounts the router.
+        let (_temp, app) = mounted_scim_router(4 * MIB, Some(DefaultBodyLimit::disable())).await;
+        assert_group_writes(&app, 3 * MIB, StatusCode::OK, "outer disabled, SCIM 4 MiB").await;
+        assert_group_writes(
+            &app,
+            5 * MIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "outer disabled, SCIM 4 MiB",
+        )
+        .await;
     }
 
     #[tokio::test]
