@@ -23,6 +23,9 @@ rvoip-users-core.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+# `limit` wraps SCIM request bodies; the version matches users-core and
+# rvoip-webrtc so no new crate version enters Cargo.lock.
+tower-http = { version = "0.7", features = ["limit"] }
 uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]

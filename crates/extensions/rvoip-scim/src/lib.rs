@@ -5,6 +5,33 @@
 //! and external identity links. Authentication is intentionally provider-based:
 //! pass an `rvoip-auth-core::BearerValidator` for admin tokens from users-core,
 //! Keycloak/OIDC, OAuth2 introspection, or a custom enterprise service.
+//!
+//! # Configuration
+//!
+//! [`ScimConfig`] carries the provider id, the read and write scopes, the
+//! default roles, and two request limits:
+//!
+//! - [`ScimConfig::max_request_body_bytes`] (default 2 MiB) caps the size of
+//!   any request body sent to the SCIM router. [`ScimService::router`] wraps
+//!   each request body in a length limit (`tower_http`'s
+//!   `RequestBodyLimitLayer`), which stacks with any limit the application
+//!   sets where it mounts the router, so the smallest limit wins. SCIM's limit
+//!   only ever tightens: an outer `DefaultBodyLimit::disable()` or a larger
+//!   outer limit does not widen it, and a smaller outer `DefaultBodyLimit`
+//!   still applies. axum's own extractor limit (2 MiB unless the application
+//!   changes it with `DefaultBodyLimit`) also still applies, so to accept SCIM
+//!   bodies over 2 MiB, raise this value *and* raise or disable
+//!   `DefaultBodyLimit` where the router is mounted. Set it with
+//!   [`ScimConfig::with_max_request_body_bytes`]. A larger body gets
+//!   `413 Payload Too Large`.
+//! - [`ScimConfig::max_group_members_per_request`] (default 10,000) caps the
+//!   number of `members` one request may carry: POST and PUT of a Group, and
+//!   a PATCH that replaces `members`. Set it with
+//!   [`ScimConfig::with_max_group_members_per_request`]. Over the cap, the
+//!   service returns [`ScimError::InvalidValue`], which the router sends as a
+//!   `400` SCIM error with `scimType` `invalidValue` (RFC 7644 §3.12). The
+//!   adapter's PATCH supports only `replace` of `members`, which carries the
+//!   whole membership, so a larger group needs a larger cap.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -12,6 +39,7 @@ use std::sync::Arc;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Json, Router,
 };
@@ -21,6 +49,7 @@ use rvoip_auth_core::{BearerAuthError, BearerValidator};
 use rvoip_core_traits::identity::IdentityAssurance;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tower_http::limit::RequestBodyLimitLayer;
 use users_core::{
     AuthenticationService, CreateUserRequest, Error as UsersError, ExternalIdentity,
     TokenIssueContext, UpdateUserRequest, UpsertExternalIdentityRequest, User, UserFilter,
@@ -29,6 +58,14 @@ use uuid::Uuid;
 
 const SCIM_USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
 const SCIM_GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
+const SCIM_ERROR_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
+
+/// Default for [`ScimConfig::max_request_body_bytes`]: 2 MiB, the same as
+/// axum's own default body limit.
+pub const DEFAULT_MAX_REQUEST_BODY_BYTES: usize = 2 * 1024 * 1024;
+
+/// Default for [`ScimConfig::max_group_members_per_request`].
+pub const DEFAULT_MAX_GROUP_MEMBERS_PER_REQUEST: usize = 10_000;
 
 /// SCIM adapter error.
 #[derive(Debug, Error)]
@@ -41,6 +78,12 @@ pub enum ScimError {
     NotFound,
     #[error("SCIM conflict: {0}")]
     Conflict(String),
+    /// A request value is outside what the service accepts, such as a Group
+    /// carrying more members than
+    /// [`ScimConfig::max_group_members_per_request`]. The router sends it as
+    /// a `400` SCIM error with `scimType` `invalidValue`.
+    #[error("SCIM invalid value: {0}")]
+    InvalidValue(String),
     #[error("users-core error: {0}")]
     Users(#[from] UsersError),
 }
@@ -59,6 +102,25 @@ pub struct ScimConfig {
     /// Roles assigned to provisioned users when SCIM groups do not map to
     /// users-core's built-in role set.
     pub default_roles: Vec<String>,
+    /// Largest request body, in bytes, that the SCIM router accepts. Default
+    /// [`DEFAULT_MAX_REQUEST_BODY_BYTES`] (2 MiB).
+    ///
+    /// [`ScimService::router`] wraps each request body in this limit. It
+    /// stacks with the application's own limits, so the smallest wins: an
+    /// outer `DefaultBodyLimit::disable()` or larger limit does not widen it,
+    /// and a smaller outer `DefaultBodyLimit` still applies. axum's extractor
+    /// limit (2 MiB by default) still applies too, so a value above 2 MiB
+    /// takes effect only if the application also raises or disables
+    /// `DefaultBodyLimit` where it mounts the router. A larger body gets
+    /// `413 Payload Too Large`.
+    pub max_request_body_bytes: usize,
+    /// Most Group `members` one request may carry. Default
+    /// [`DEFAULT_MAX_GROUP_MEMBERS_PER_REQUEST`] (10,000).
+    ///
+    /// Applies to creating and replacing a Group and to a PATCH that replaces
+    /// `members`, through the router and the direct service methods alike.
+    /// Over the cap, the request fails with [`ScimError::InvalidValue`].
+    pub max_group_members_per_request: usize,
 }
 
 impl ScimConfig {
@@ -68,6 +130,8 @@ impl ScimConfig {
             read_scope: "scim.read".to_string(),
             write_scope: "scim.write".to_string(),
             default_roles: vec!["user".to_string()],
+            max_request_body_bytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+            max_group_members_per_request: DEFAULT_MAX_GROUP_MEMBERS_PER_REQUEST,
         }
     }
 
@@ -86,6 +150,18 @@ impl ScimConfig {
         roles: impl IntoIterator<Item = impl Into<String>>,
     ) -> Self {
         self.default_roles = roles.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set [`ScimConfig::max_request_body_bytes`].
+    pub fn with_max_request_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_request_body_bytes = bytes;
+        self
+    }
+
+    /// Set [`ScimConfig::max_group_members_per_request`].
+    pub fn with_max_group_members_per_request(mut self, members: usize) -> Self {
+        self.max_group_members_per_request = members;
         self
     }
 }
@@ -129,7 +205,13 @@ impl ScimService {
     }
 
     /// Return an Axum router for SCIM service metadata, Users, and Groups.
+    ///
+    /// The router wraps every request body in
+    /// [`ScimConfig::max_request_body_bytes`]. The wrapper stacks with any
+    /// limit the application applies where it mounts the router, so the
+    /// smallest limit wins and nothing outside can widen SCIM's.
     pub fn router(self: Arc<Self>) -> Router {
+        let max_request_body_bytes = self.config.max_request_body_bytes;
         Router::new()
             .route(
                 "/ServiceProviderConfig",
@@ -158,6 +240,12 @@ impl ScimService {
                     .patch(patch_group_handler)
                     .delete(delete_group_handler),
             )
+            // Wrap the body rather than set `DefaultBodyLimit`: that sets a
+            // request extension the innermost layer overwrites, so it would
+            // replace a smaller limit set where the router is mounted. Body
+            // wrappers stack, so the outer limit, axum's extractor limit and
+            // this one all apply and the smallest wins.
+            .layer(RequestBodyLimitLayer::new(max_request_body_bytes))
             .with_state(self)
     }
 
@@ -418,12 +506,16 @@ impl ScimService {
     /// users-core currently models authorization groups as roles; this adapter
     /// keeps SCIM group resources in memory and maps group display names to
     /// users-core roles when users are provisioned.
+    ///
+    /// Fails with [`ScimError::InvalidValue`] when the group carries more than
+    /// [`ScimConfig::max_group_members_per_request`] members.
     pub async fn create_or_update_group(&self, mut group: ScimGroup) -> Result<ScimGroup> {
         if group.display_name.trim().is_empty() {
             return Err(ScimError::Config(
                 "SCIM group displayName is required".to_string(),
             ));
         }
+        self.check_group_member_count(group.members.len())?;
         let id = group
             .id
             .clone()
@@ -474,6 +566,11 @@ impl ScimService {
         })
     }
 
+    /// Apply a SCIM PATCH to a group without performing Bearer auth.
+    ///
+    /// Fails with [`ScimError::InvalidValue`] when a `replace` of `members`
+    /// carries more than [`ScimConfig::max_group_members_per_request`]
+    /// members.
     pub async fn patch_group(&self, id: &str, patch: ScimPatchRequest) -> Result<ScimGroup> {
         let mut group = self.get_group(id).await?;
         for operation in patch.operations {
@@ -492,9 +589,12 @@ impl ScimService {
                     }
                 }
                 Some("members") => {
-                    group.members = serde_json::from_value(operation.value).map_err(|err| {
-                        ScimError::Config(format!("invalid SCIM group members: {err}"))
-                    })?;
+                    let members: Vec<ScimGroupRef> = serde_json::from_value(operation.value)
+                        .map_err(|err| {
+                            ScimError::Config(format!("invalid SCIM group members: {err}"))
+                        })?;
+                    self.check_group_member_count(members.len())?;
+                    group.members = members;
                 }
                 _ => {}
             }
@@ -532,6 +632,16 @@ impl ScimService {
                 ),
             )
             .await?)
+    }
+
+    fn check_group_member_count(&self, members: usize) -> Result<()> {
+        let max = self.config.max_group_members_per_request;
+        if members > max {
+            return Err(ScimError::InvalidValue(format!(
+                "a request may carry at most {max} group members; this one carries {members}"
+            )));
+        }
+        Ok(())
     }
 
     fn enterprise_store(&self) -> Result<&Arc<dyn users_core::EnterpriseIdentityStore>> {
@@ -652,8 +762,11 @@ fn provisioning_password() -> String {
     password
 }
 
-type JsonHandlerResult<T> = std::result::Result<Json<T>, (StatusCode, String)>;
-type EmptyHandlerResult = std::result::Result<StatusCode, (StatusCode, String)>;
+// Handler errors are full responses: most are the `(StatusCode, String)`
+// plain-text bodies the router has always sent, and `InvalidValue` is a SCIM
+// JSON error (RFC 7644 §3.12).
+type JsonHandlerResult<T> = std::result::Result<Json<T>, Response>;
+type EmptyHandlerResult = std::result::Result<StatusCode, Response>;
 
 async fn create_user_handler(
     State(service): State<Arc<ScimService>>,
@@ -815,24 +928,45 @@ async fn delete_group_handler(
         .map_err(scim_http_error)
 }
 
-fn authorization_header(headers: &HeaderMap) -> std::result::Result<&str, (StatusCode, String)> {
+fn authorization_header(headers: &HeaderMap) -> std::result::Result<&str, Response> {
     headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .ok_or((
-            StatusCode::UNAUTHORIZED,
-            "Authorization Bearer token is required".to_string(),
-        ))
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "Authorization Bearer token is required".to_string(),
+            )
+                .into_response()
+        })
 }
 
-fn scim_http_error(err: ScimError) -> (StatusCode, String) {
+fn scim_http_error(err: ScimError) -> Response {
     let status = match err {
+        ScimError::InvalidValue(detail) => {
+            return scim_error_response(StatusCode::BAD_REQUEST, "invalidValue", detail);
+        }
         ScimError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
         ScimError::NotFound => StatusCode::NOT_FOUND,
         ScimError::Conflict(_) => StatusCode::CONFLICT,
         ScimError::Config(_) | ScimError::Users(_) => StatusCode::BAD_REQUEST,
     };
-    (status, err.to_string())
+    (status, err.to_string()).into_response()
+}
+
+/// A SCIM error response body (RFC 7644 §3.12), sent as JSON like the rest of
+/// the router's responses.
+fn scim_error_response(status: StatusCode, scim_type: &str, detail: String) -> Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "schemas": [SCIM_ERROR_SCHEMA],
+            "scimType": scim_type,
+            "detail": detail,
+            "status": status.as_u16().to_string(),
+        })),
+    )
+        .into_response()
 }
 
 /// SCIM User resource subset used by the adapter.
@@ -1070,6 +1204,7 @@ fn scim_schemas() -> Vec<serde_json::Value> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use axum::extract::DefaultBodyLimit;
     use rvoip_core_traits::ids::IdentityId;
     use users_core::config::{PasswordConfig, TlsSettings};
     use users_core::jwt::JwtConfig;
@@ -1127,6 +1262,13 @@ mod tests {
     }
 
     async fn test_service(scopes: Vec<&str>) -> (tempfile::TempDir, ScimService) {
+        test_service_with_config(scopes, ScimConfig::new("okta")).await
+    }
+
+    async fn test_service_with_config(
+        scopes: Vec<&str>,
+        config: ScimConfig,
+    ) -> (tempfile::TempDir, ScimService) {
         let temp = tempfile::tempdir().unwrap();
         let db_url = format!(
             "sqlite://{}?mode=rwc",
@@ -1136,8 +1278,387 @@ mod tests {
         let bearer = Arc::new(StaticBearer {
             scopes: scopes.into_iter().map(str::to_string).collect(),
         });
-        let service = ScimService::new(auth, bearer, ScimConfig::new("okta")).unwrap();
+        let service = ScimService::new(auth, bearer, config).unwrap();
         (temp, service)
+    }
+
+    fn members(count: usize) -> Vec<ScimGroupRef> {
+        (0..count)
+            .map(|index| ScimGroupRef {
+                value: format!("user-{index}"),
+                display: None,
+            })
+            .collect()
+    }
+
+    fn group_json(id: &str, display_name: &str, member_count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "schemas": [SCIM_GROUP_SCHEMA],
+            "id": id,
+            "displayName": display_name,
+            "members": members(member_count),
+        })
+    }
+
+    fn members_patch_json(member_count: usize) -> serde_json::Value {
+        serde_json::json!({
+            "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+            "Operations": [{
+                "op": "replace",
+                "path": "members",
+                "value": members(member_count),
+            }],
+        })
+    }
+
+    async fn send(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Vec<u8>,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
+        send_with_length(app, method, uri, body, false).await
+    }
+
+    /// Send a request, with a `Content-Length` header when `content_length`
+    /// is set (as real clients do) or as a body of unannounced length.
+    async fn send_with_length(
+        app: &Router,
+        method: &str,
+        uri: &str,
+        body: Vec<u8>,
+        content_length: bool,
+    ) -> (StatusCode, Option<String>, Vec<u8>) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", "Bearer admin-token")
+            .header("content-type", "application/json");
+        if content_length {
+            request = request.header("content-length", body.len());
+        }
+        let response = app
+            .clone()
+            .oneshot(request.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|value| value.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec();
+        (status, content_type, body)
+    }
+
+    fn assert_invalid_value(
+        what: &str,
+        (status, content_type, body): (StatusCode, Option<String>, Vec<u8>),
+    ) {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{what}");
+        assert_eq!(content_type.as_deref(), Some("application/json"), "{what}");
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body["schemas"],
+            serde_json::json!([SCIM_ERROR_SCHEMA]),
+            "{what}"
+        );
+        assert_eq!(body["scimType"], "invalidValue", "{what}");
+        assert_eq!(body["status"], "400", "{what}");
+        assert_eq!(
+            body["detail"], "a request may carry at most 3 group members; this one carries 4",
+            "{what}"
+        );
+    }
+
+    #[test]
+    fn config_defaults_limit_bodies_to_two_mib_and_groups_to_ten_thousand_members() {
+        let config = ScimConfig::new("okta");
+        assert_eq!(config.max_request_body_bytes, 2 * 1024 * 1024);
+        assert_eq!(config.max_group_members_per_request, 10_000);
+        assert_eq!(
+            ScimConfig::default().max_request_body_bytes,
+            2 * 1024 * 1024
+        );
+        assert_eq!(ScimConfig::default().max_group_members_per_request, 10_000);
+
+        let config = ScimConfig::new("okta")
+            .with_max_request_body_bytes(4096)
+            .with_max_group_members_per_request(3);
+        assert_eq!(config.max_request_body_bytes, 4096);
+        assert_eq!(config.max_group_members_per_request, 3);
+    }
+
+    /// The SCIM router under an outer router, with `outer` applied where it is
+    /// mounted (`None`: the application sets no `DefaultBodyLimit`).
+    async fn mounted_scim_router(
+        scim_limit: usize,
+        outer: Option<DefaultBodyLimit>,
+    ) -> (tempfile::TempDir, Router) {
+        let (temp, service) = test_service_with_config(
+            vec!["scim.write"],
+            ScimConfig::new("okta").with_max_request_body_bytes(scim_limit),
+        )
+        .await;
+        let app = Router::new().nest("/scim", Arc::new(service).router());
+        let app = match outer {
+            Some(outer) => app.layer(outer),
+            None => app,
+        };
+        (temp, app)
+    }
+
+    fn group_body(display_name_len: usize) -> Vec<u8> {
+        serde_json::to_vec(&group_json("g-1", &"x".repeat(display_name_len), 0)).unwrap()
+    }
+
+    fn display_name_patch_body(display_name_len: usize) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "Operations": [{
+                "op": "replace",
+                "path": "displayName",
+                "value": "x".repeat(display_name_len),
+            }],
+        }))
+        .unwrap()
+    }
+
+    /// Send POST /Groups then PATCH /Groups/g-1, each with and without a
+    /// `Content-Length`, and expect `expected` for all four.
+    async fn assert_group_writes(
+        app: &Router,
+        display_name_len: usize,
+        expected: StatusCode,
+        case: &str,
+    ) {
+        for content_length in [false, true] {
+            let (status, _, _) = send_with_length(
+                app,
+                "POST",
+                "/scim/Groups",
+                group_body(display_name_len),
+                content_length,
+            )
+            .await;
+            assert_eq!(
+                status, expected,
+                "{case}: POST /Groups, content-length {content_length}"
+            );
+            let (status, _, _) = send_with_length(
+                app,
+                "PATCH",
+                "/scim/Groups/g-1",
+                display_name_patch_body(display_name_len),
+                content_length,
+            )
+            .await;
+            assert_eq!(
+                status, expected,
+                "{case}: PATCH /Groups/{{id}}, content-length {content_length}"
+            );
+        }
+    }
+
+    /// SCIM's body limit only ever tightens. It wraps the body, so it stacks
+    /// with whatever `DefaultBodyLimit` the application sets where it mounts
+    /// the router, and the smallest limit wins.
+    #[tokio::test]
+    async fn body_limit_stacks_with_the_mount_point_limit_and_the_smallest_wins() {
+        const KIB: usize = 1024;
+        const MIB: usize = 1024 * KIB;
+
+        // (a) An outer router that disables axum's limit cannot widen SCIM's.
+        let (_temp, app) = mounted_scim_router(4 * KIB, Some(DefaultBodyLimit::disable())).await;
+        assert_group_writes(&app, KIB, StatusCode::OK, "(a) under both limits").await;
+        assert_group_writes(
+            &app,
+            8 * KIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "(a) outer disabled",
+        )
+        .await;
+
+        // (b) Nor can an outer router that raises it.
+        let (_temp, app) =
+            mounted_scim_router(4 * KIB, Some(DefaultBodyLimit::max(64 * MIB))).await;
+        assert_group_writes(&app, KIB, StatusCode::OK, "(b) under both limits").await;
+        assert_group_writes(
+            &app,
+            8 * KIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "(b) outer 64 MiB",
+        )
+        .await;
+
+        // (c) An outer limit smaller than SCIM's (here the 2 MiB default)
+        // still applies: only the outer limit can reject an 8 KiB body.
+        let (_temp, app) = mounted_scim_router(
+            DEFAULT_MAX_REQUEST_BODY_BYTES,
+            Some(DefaultBodyLimit::max(4 * KIB)),
+        )
+        .await;
+        assert_group_writes(&app, KIB, StatusCode::OK, "(c) under both limits").await;
+        assert_group_writes(
+            &app,
+            8 * KIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "(c) outer 4 KiB",
+        )
+        .await;
+
+        // With no outer `DefaultBodyLimit`, axum's 2 MiB extractor default
+        // still applies on top of a larger SCIM limit...
+        let (_temp, app) = mounted_scim_router(4 * MIB, None).await;
+        assert_group_writes(
+            &app,
+            3 * MIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "no outer limit",
+        )
+        .await;
+        // ...so a SCIM limit above 2 MiB takes effect once the application
+        // disables (or raises) axum's limit where it mounts the router.
+        let (_temp, app) = mounted_scim_router(4 * MIB, Some(DefaultBodyLimit::disable())).await;
+        assert_group_writes(&app, 3 * MIB, StatusCode::OK, "outer disabled, SCIM 4 MiB").await;
+        assert_group_writes(
+            &app,
+            5 * MIB,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "outer disabled, SCIM 4 MiB",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn group_member_cap_rejects_create_replace_and_patch_over_the_cap() {
+        let (_temp, service) = test_service_with_config(
+            vec!["scim.write"],
+            ScimConfig::new("okta").with_max_group_members_per_request(3),
+        )
+        .await;
+        let app = Arc::new(service).router();
+        let body = |value: serde_json::Value| serde_json::to_vec(&value).unwrap();
+
+        assert_invalid_value(
+            "POST /Groups",
+            send(
+                &app,
+                "POST",
+                "/Groups",
+                body(group_json("g-1", "agents", 4)),
+            )
+            .await,
+        );
+        let (status, _, _) = send(
+            &app,
+            "POST",
+            "/Groups",
+            body(group_json("g-1", "agents", 3)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "POST /Groups at the cap");
+
+        assert_invalid_value(
+            "PUT /Groups/{id}",
+            send(
+                &app,
+                "PUT",
+                "/Groups/g-1",
+                body(group_json("g-1", "agents", 4)),
+            )
+            .await,
+        );
+        let (status, _, _) = send(
+            &app,
+            "PUT",
+            "/Groups/g-1",
+            body(group_json("g-1", "agents", 3)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "PUT /Groups/{{id}} at the cap");
+
+        assert_invalid_value(
+            "PATCH /Groups/{id}",
+            send(&app, "PATCH", "/Groups/g-1", body(members_patch_json(4))).await,
+        );
+        let (status, _, response) =
+            send(&app, "PATCH", "/Groups/g-1", body(members_patch_json(3))).await;
+        assert_eq!(status, StatusCode::OK, "PATCH /Groups/{{id}} at the cap");
+        let group: serde_json::Value = serde_json::from_slice(&response).unwrap();
+        assert_eq!(group["members"].as_array().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn group_member_cap_applies_to_direct_service_calls() {
+        let (_temp, service) = test_service_with_config(
+            vec!["scim.write"],
+            ScimConfig::new("okta").with_max_group_members_per_request(3),
+        )
+        .await;
+        let group = |member_count| ScimGroup {
+            schemas: vec![],
+            id: Some("g-1".to_string()),
+            external_id: None,
+            display_name: "agents".to_string(),
+            members: members(member_count),
+        };
+        let replace_members = |member_count| ScimPatchRequest {
+            operations: vec![ScimPatchOperation {
+                op: "replace".to_string(),
+                path: Some("members".to_string()),
+                value: serde_json::to_value(members(member_count)).unwrap(),
+            }],
+        };
+
+        assert!(matches!(
+            service
+                .create_group_authorized("Bearer admin-token", group(4))
+                .await,
+            Err(ScimError::InvalidValue(_))
+        ));
+        assert!(matches!(
+            service.create_or_update_group(group(4)).await,
+            Err(ScimError::InvalidValue(_))
+        ));
+        service
+            .create_group_authorized("Bearer admin-token", group(3))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            service
+                .patch_group_authorized("Bearer admin-token", "g-1", replace_members(4))
+                .await,
+            Err(ScimError::InvalidValue(_))
+        ));
+        assert!(matches!(
+            service.patch_group("g-1", replace_members(4)).await,
+            Err(ScimError::InvalidValue(_))
+        ));
+        let patched = service
+            .patch_group("g-1", replace_members(2))
+            .await
+            .unwrap();
+        assert_eq!(patched.members.len(), 2);
+    }
+
+    /// Errors other than `InvalidValue` keep the plain-text bodies the router
+    /// has always sent.
+    #[tokio::test]
+    async fn other_http_errors_keep_their_plain_text_bodies() {
+        let (_temp, service) = test_service(vec!["scim.write"]).await;
+        let app = Arc::new(service).router();
+        let (status, content_type, body) = send(&app, "GET", "/Groups/missing", Vec::new()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(content_type.as_deref(), Some("text/plain; charset=utf-8"));
+        assert_eq!(body, b"SCIM resource was not found");
     }
 
     /// axum 0.8 changed path parameters from `/:id` to `/{id}`; the old

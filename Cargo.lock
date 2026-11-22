@@ -8046,6 +8046,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tower",
+ "tower-http 0.7.1",
  "uuid",
 ]
 
@@ -9995,6 +9996,7 @@ dependencies = [
  "bytes",
  "http 1.5.0",
  "http-body 1.1.0",
+ "http-body-util",
  "percent-encoding",
  "pin-project-lite",
  "tower-layer",
