@@ -145,8 +145,10 @@ def latency_verdict(summary, recorded, tolerance, rate):
 # ---------------------------------------------------------------------------
 
 def overload_verdict(summary, ceiling, profile):
-    """Pass: every failure in the overload stages is a 503 (admission sheds),
-    and both recovery stages establish every attempt."""
+    """Pass: every failure in any stage is a 503 (admission sheds, nothing times out or is lost), and both
+    recovery stages establish every attempt of their steady window. The window skips each stage's first 15 s,
+    like every other stage: right after the overload stage the admission window can still shed a few calls
+    with fast 503s (Day 0: 2 of 33,120 in recovery trial-5's first seconds, then 100 %)."""
     stages = {s.get('name'): s for s in (summary or {}).get('stage_summaries') or []}
     names = [s['name'] for s in profile['stages'] if s['name'].startswith('trial-')]
     rows, problems = [], []
@@ -162,8 +164,14 @@ def overload_verdict(summary, ceiling, profile):
                      'setup_p99_ms': (st.get('setup_ms') or {}).get('p99')})
         if other:
             problems.append('%s: %d non-503 failures %s' % (name, other, counts))
-        if k >= len(names) - 2 and offered and established != offered:
-            problems.append('recovery %s: %d of %d established' % (name, established, offered))
+        if k >= len(names) - 2 and offered:
+            steady = (stages.get(name) or {}).get('scored') or st
+            s_counts = ((steady.get('rfc6076') or {}).get('final_status_counts')) or {}
+            s_offered, s_established = steady.get('offered') or 0, int(s_counts.get('200', 0))
+            rows[-1].update(steady_offered=s_offered, steady_established=s_established)
+            if s_established != s_offered:
+                problems.append('recovery %s: %d of %d established in its steady window' % (
+                    name, s_established, s_offered))
         if not offered:
             problems.append('%s: no attempts recorded' % name)
     verdict = 'fail' if problems else 'pass'

@@ -538,6 +538,18 @@ def trial_stage_rows(summary):
     return [row for row in summary.get('stage_summaries') or [] if str(row.get('name', '')).startswith('trial-')]
 
 
+# A trial stage whose median session setup delay (caller side, established calls) exceeds this is a DUT that
+# has stopped keeping up: it queues instead of answering (baseline-0.5 Day 0: R1 p50 2 ms at 8348 sps, 2,009 ms
+# at 9180). The caller's in-flight bound then fills and it skips scheduled calls; that shortfall is the DUT's.
+SETUP_COLLAPSE_MS = 500.0
+
+
+def setup_delay_collapse(whole):
+    """The highest trial-stage median setup delay (ms) when it is above SETUP_COLLAPSE_MS, else None."""
+    worst = max((((w.get('setup_ms') or {}).get('p50')) or 0 for w in whole), default=0)
+    return worst if worst > SETUP_COLLAPSE_MS else None
+
+
 def evaluate_trial(summary, criterion='rfc'):
     """(attempted, succeeded, valid, detail) for the trial-* stages of one trial's merged summary.json.
     Attempted = every call scheduled in the trial stages (RFC 7501 §3.1.6: the EA counts the attempts it
@@ -578,8 +590,18 @@ def evaluate_trial(summary, criterion='rfc'):
         # A DUT answering many INVITEs with 503 slows the caller's write path (schedule-to-write p99 > 5 ms)
         # while it still sent every scheduled attempt: those 503s are Session Attempt Failures, not tester evidence.
         dispatch_kinds += ('caller check schedule_to_write_p99_at_most_5ms failed',)
-    if reasons and sent_failures > 0 and all(any(kind in reason for kind in dispatch_kinds) for reason in reasons):
+    # The same shortfall without failed sends: the DUT still answered every INVITE it got, but its setup delay
+    # collapsed (it queued them for seconds), so the caller's in-flight bound filled and it skipped calls. That is
+    # the DUT not sustaining the offered rate (RFC 7501 §3.1.6: attempts the EA could not send are not
+    # established), not tester evidence. A caller limited by its own CPU, threads or kernel receive path fails
+    # other checks, which are never dispatch kinds, and stays invalid.
+    collapse = setup_delay_collapse(whole)
+    if reasons and (sent_failures > 0 or collapse) and all(any(kind in reason for kind in dispatch_kinds)
+                                                           for reason in reasons):
         dut_shortfall, reasons = reasons, []
+        if collapse and not sent_failures:
+            dut_shortfall.append('DUT setup delay collapsed: median %.0f ms > %.0f ms, so the caller\'s in-flight '
+                                 'bound filled' % (collapse, SETUP_COLLAPSE_MS))
     else:
         dut_shortfall = None
     # Incomplete wire records (a dropped trace event) are reported, never a reason to repeat a trial:

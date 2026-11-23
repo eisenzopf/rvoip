@@ -1873,6 +1873,13 @@ class LiteReleaseTests(LaneCase):
         self.assertIn('§6.1 baseline', ' '.join(receipt['reasons']))
         self.assertEqual(self.bed.alive(), [])
 
+    def test_a_search_seeds_r0_from_the_recorded_r(self):
+        self.write_rates({'R1': {'r': 3600, 'tester_cap': 6000, 'srd_ms': None, 'sdd_ms': None}})
+        code, receipt, log = self.bed.run('minor-lite', 'lite-seed', '--rows', 'R1',
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(self.rows(receipt)['R1']['search']['parameters']['r0'], 3600)
+
     def test_minor_lite_on_demand(self):
         code, receipt, log = self.bed.run('minor-lite', 'lite-1', '--r0', 'R1=3000', '--r0', 'R2=1000',
                                           world=world_for(tester_capacity=TESTER))

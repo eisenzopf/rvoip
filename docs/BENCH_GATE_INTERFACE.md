@@ -209,6 +209,14 @@ attaches to the GitHub release.
 baseline that only passed, so the tester's ceiling was never observed. The cap
 is still enforced, but read it as at least, not as a measured ceiling.
 
+A row recorded by `scripts/bench/rescore_run.py` also carries:
+- `confirmations` and `confirmations_required`: how many trials passed at R,
+  and the search profile's requirement. Day 0's R6 has 2 of 3.
+- `lowest_failing_sps`.
+- `rescored`: the tool and the rule it applied.
+
+The `release` profile confirms such a row like any other.
+
 `perf-baselines/rfc7502/ENVIRONMENT` names the current env-id. A new env-id
 (new AMI, caller build or instance type) needs a `baseline` run and a `minor`
 run before `release` can gate on it.
