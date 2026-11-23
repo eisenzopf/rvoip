@@ -156,6 +156,35 @@ def load_catalog(root: Path, path: Path) -> dict[str, Any]:
     return catalog
 
 
+SOAK_EVALUATION_GATES = ("perf.monolithic-soak", "perf.soak-candidate")
+
+
+def soak_evaluation_settings(root: Path) -> dict[str, dict[str, str]]:
+    """The soak duration and concurrency the evaluation must find, from the catalog.
+
+    The performance evaluation checks each soak ran exactly as its gate
+    command configured it. Reading the values from the gate commands keeps
+    the two from drifting: a 3600 s expectation once failed a release whose
+    split soak had moved to 7200 s.
+    """
+
+    gates = gate_map(load_json(root / DEFAULT_CATALOG, "gate catalog"))
+    settings: dict[str, dict[str, str]] = {}
+    for gate_id in SOAK_EVALUATION_GATES:
+        command = gates[gate_id].get("command") or []
+        values: dict[str, str] = {}
+        for key, name in (
+            ("duration_secs", "RVOIP_PERF_SOAK_DURATION_SECS"),
+            ("active_calls", "RVOIP_PERF_SOAK_ACTIVE_CALLS"),
+        ):
+            found = [arg.split("=", 1)[1] for arg in command if arg.startswith(f"{name}=")]
+            if len(found) != 1 or not found[0].isdigit():
+                raise GateError(f"{gate_id}: the catalog command must set {name} once, as an integer")
+            values[key] = found[0]
+        settings[gate_id] = values
+    return settings
+
+
 def gate_map(catalog: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {gate["id"]: gate for gate in catalog["gates"]}
 
@@ -1654,6 +1683,7 @@ def reconcile_performance_metrics(
     )
     output_json = artifact / "current-performance-evaluation.json"
     output_markdown = artifact / "current-performance-evaluation.md"
+    soak = soak_evaluation_settings(root)
     completed = run(
         [
             "python3",
@@ -1675,13 +1705,13 @@ def reconcile_performance_metrics(
             "--rss-limit-mb-per-hr",
             "15",
             "--monolithic-duration-secs",
-            "3600",
+            soak["perf.monolithic-soak"]["duration_secs"],
             "--monolithic-active-calls",
-            "30",
+            soak["perf.monolithic-soak"]["active_calls"],
             "--split-duration-secs",
-            "3600",
+            soak["perf.soak-candidate"]["duration_secs"],
             "--split-active-calls",
-            "500",
+            soak["perf.soak-candidate"]["active_calls"],
             "--require-high-density",
             "--require-monolithic",
             "--require-split",
