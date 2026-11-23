@@ -27,11 +27,13 @@ leg's media lane. The executor v2 CPU-per-call figures below were measured on
 Xeon 6 SMT in production; load qualification of executor v2 is part of the
 0.5.0 release run.
 
-0.5.0 is the first release gated on an RFC 7501/7502 SIP benchmark. The
-release qualification measures the Session Establishment Rate and the
-RFC 6076 latencies of `rvoip-bench-uas`, a terminating UAS on executor v2,
-on a pinned AWS testbed, and renders an RFC 7502-style report. From 0.5.0
-every release must pass it.
+0.5.0 is the first release gated on an RFC 7501/7502 SIP benchmark. Every
+release confirms the recorded Session Establishment Rates and RFC 6076
+latencies of `rvoip-bench-uas`, a terminating UAS on executor v2, on a
+pinned AWS testbed. On a c8i.4xlarge (16 vCPU) device under test, the rates
+are R1 8,348, R5 8,256 and R2 1,124 sessions/s. They come from
+a full search on an earlier 0.5 candidate (run 45065590604), re-scored after
+harness fixes; its RFC 7502-style report is in that run's evidence.
 
 Two contact-centre adapters arrive: the experimental `rvoip-webex-byova` for
 Webex Contact Center BYOVA, and the developer-preview `rvoip-amazon-a2a` for

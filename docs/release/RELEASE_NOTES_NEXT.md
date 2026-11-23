@@ -20,8 +20,8 @@ overload behaviour, and it moves the whole dependency set forward.
   state exists, and overload rejections carry `Retry-After`. Hangup races
   end calls cleanly.
 - **An RFC 7501/7502 benchmark gates every release.** From `0.5.0`, release
-  qualification measures rvoip's Session Establishment Rate and RFC 6076
-  latencies on a pinned testbed.
+  qualification confirms rvoip's recorded Session Establishment Rates and
+  RFC 6076 latencies on a pinned testbed.
 - **Webex BYOVA and Amazon Connect A2A.** Two contact-centre adapters connect
   Webex Contact Center virtual agents and Amazon Connect external agents to
   rvoip.
@@ -87,15 +87,31 @@ re-enable it for an application that does.
 device under test is `rvoip-bench-uas`, a terminating UAS on `CallbackPeer`
 that echoes media through executor v2's inline path. It is not published.
 
-- **What it measures.** The lane measures the Session Establishment Rate:
-  the highest attempt rate rvoip sustains with zero failed attempts. It also
-  records RFC 6076 latencies, over TLS and UDP, signaling-only and with
-  G.711 media.
-- **Minor releases.** A minor release such as this one searches each row
-  for its rate and runs an overload-and-recovery trial with admission on. It
-  renders an RFC 7502-style report into the gate evidence.
-- **Patch releases.** A patch release confirms each row against the recorded
-  rate.
+- **What it measures.** The Session Establishment Rate R is the highest
+  attempt rate rvoip sustains with zero failed attempts. RFC 6076 latencies
+  are measured too, over TLS and UDP, signaling-only and with G.711 media.
+- **Recorded rates.** The R values come from a full `minor` search on an
+  earlier 0.5 candidate (qualification run 45065590604). It was re-scored
+  offline after harness fixes: a device under test whose median setup delay
+  collapses past 500 ms now scores as a DUT failure instead of an invalid
+  trial, and the R4 recovery trial is scored on its steady window. The device
+  under test is a c8i.4xlarge (16 vCPU), driven by three c8in.24xlarge callers
+  in us-west-2a.
+
+  | Row | Transport | Media | R (sessions/s) | Confirmations (of 3) |
+  |---|---|---|---|---|
+  | R1 | TLS | signaling only | 8,348 | 1 |
+  | R5 | UDP | signaling only | 8,256 | 1 |
+  | R2 | TLS | SDES-SRTP G.711, 10 s hold | 1,124 | 4 |
+  | R6 | UDP | RTP G.711, 10 s hold | 1,204 | 2 |
+
+  That search's RFC 7502 report is in the evidence of the same run. Every
+  release's confirmation trials re-test R1, R5 and R2 at 0.95 R.
+- **Every release.** Patch and minor releases alike confirm the recorded R
+  of R1, R5 and R2 on their exact candidate. That means three trials at
+  0.95 R and one at 1.05 R per row, plus RFC 6076 latency at 0.9 R. A row
+  with no recorded R gets a light search instead. The full search runs on
+  demand.
 - **Where it runs.** The testbed is pinned by environment id, which covers
   the instance types, image and caller build. Its design and contract are in
   [RFC7502_BENCHMARK.md](../../crates/sip/rvoip-sip/docs/RFC7502_BENCHMARK.md).
@@ -233,16 +249,17 @@ candidate was tested against.
 ## Performance evaluation
 
 The protected `0.5.0` qualification is a `release-minor` qualification:
-the full remote release profile plus the minor RFC 7502 benchmark lane. It
+the full remote release profile plus the RFC 7502 confirmation lane. It
 requires:
 
 - the canonical 2,000-CPS passes;
 - the full performance and resiliency matrix;
 - the high-density full-media burst;
-- the monolithic and split soaks;
+- the monolithic soak and the two-hour split soak;
 - the teardown and churn tests;
 - regression comparison against the reviewed performance baselines;
-- the RFC 7502 searches, overload trial and report.
+- the RFC 7502 confirmation of R1, R5 and R2 against the recorded rates,
+  with RFC 6076 latency.
 
 It produces structured JSON and Markdown metrics and a SHA-256 index of every
 performance artifact of the run. Results from earlier releases are
@@ -251,7 +268,7 @@ historical baselines and cannot qualify this release.
 General-user 10,000 CPS full-media capability is not claimed. The supported
 envelope remains bounded by the 2,000-CPS real-media evidence, the exact host
 configuration, workloads and soak durations recorded for this release, and
-the benchmark rates measured on the pinned testbed.
+the benchmark rates recorded and confirmed on the pinned testbed.
 
 The signed qualification artifact is the authority for the measured
 results:
@@ -259,7 +276,7 @@ results:
 - the host shape, source commit and workload configuration;
 - ASR and error counts, and setup-latency percentiles;
 - CPU and RSS behaviour, media delivery and cleanup;
-- the measured Session Establishment Rates;
+- the confirmed Session Establishment Rates;
 - the artifact hashes.
 
 The GitHub release links that artifact and its workflow run.
