@@ -19,7 +19,7 @@ ledger](docs/BETA_GATE_REPORT.md), and [performance
 report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
 proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
 [immutable qualification history](docs/releases/qualification/README.md)
-retains prior releases and the detailed 0.5.0 performance evaluation.
+retains prior releases and the detailed 0.4.0 performance evaluation.
 
 What changed in this release: the [release notes](../../../docs/release/RELEASE_NOTES_NEXT.md)
 and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
@@ -342,13 +342,13 @@ do not imply carrier certification or untested peer-version/topology coverage.
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## Current 0.5.0 release evidence
+## Current 0.4.0 release evidence
 
 Protected run
 [`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080)
 qualified the exact published commit
 `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, tagged
-[`v0.5.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.5.0) and
+[`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0) and
 published by run
 [`38204650077`](https://github.com/eisenzopf/rvoip/actions/runs/38204650077):
 **214/214 gates passed** and all 108 legacy release requirements were covered.

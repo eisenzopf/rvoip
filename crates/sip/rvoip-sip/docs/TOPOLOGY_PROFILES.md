@@ -5,14 +5,14 @@ Date: 2026-10-12
 This document defines which deployment shapes beta is allowed to claim and
 which shapes remain post-beta or advanced tuning work.
 
-Current published reference: [protected 0.5.0 qualification](BETA_RELEASE_REPORT.md),
+Current published reference: [protected 0.4.0 qualification](BETA_RELEASE_REPORT.md),
 `remote-release` run
 [`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080),
 generated from clean tested commit `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`
-(tag `v0.5.0`). Its performance rows ran fresh on 16-vCPU AWS `m5.4xlarge`
+(tag `v0.4.0`). Its performance rows ran fresh on 16-vCPU AWS `m5.4xlarge`
 workers.
 
-The `0.5.0` deployment profile constructors (`Config::public_server`,
+The `0.4.0` deployment profile constructors (`Config::public_server`,
 `carrier_trunk_udp`, `behind_nat`, `tls_direct_routing`) are covered by
 rvoip-sip tests only (`deployment_profiles.rs`,
 `tls_direct_routing_integration.rs`); no release gate runs a profile against an
