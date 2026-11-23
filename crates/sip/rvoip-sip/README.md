@@ -1,7 +1,7 @@
 # rvoip-sip
 
-[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?release=0.4.0)](https://crates.io/crates/rvoip-sip/0.4.0)
-[![docs.rs](https://img.shields.io/docsrs/rvoip-sip/0.4.0?label=docs)](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)
+[![Crates.io](https://img.shields.io/crates/v/rvoip-sip.svg?release=0.5.0)](https://crates.io/crates/rvoip-sip/0.5.0)
+[![docs.rs](https://img.shields.io/docsrs/rvoip-sip/0.5.0?label=docs)](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/eisenzopf/rvoip/blob/main/LICENSE)
 [![Repository](https://img.shields.io/badge/github-eisenzopf%2Frvoip-24292f.svg)](https://github.com/eisenzopf/rvoip)
@@ -13,7 +13,7 @@ DTMF, hold/resume, custom SIP headers, and app-visible events so Rust
 applications can behave like programmable SIP endpoints without owning SIP
 transaction or RTP details directly.
 
-The published `0.4.0` release came from a strict, exact-source qualification.
+The published `0.5.0` release came from a strict, exact-source qualification.
 Its generated [release report](docs/BETA_RELEASE_REPORT.md), [gate
 ledger](docs/BETA_GATE_REPORT.md), and [performance
 report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
@@ -31,11 +31,11 @@ the RTCP defaults.
 
 | Need | Start with |
 | --- | --- |
-| Make calls from a softphone or PBX account | [`Endpoint`](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/api/endpoint/struct.Endpoint.html) |
-| Write a sequential client, script, or test | [`StreamPeer`](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/api/stream_peer/struct.StreamPeer.html) |
-| Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/api/callback_peer/struct.CallbackPeer.html) |
-| Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/api/unified/struct.UnifiedCoordinator.html) |
-| Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/api/handle/struct.SessionHandle.html) |
+| Make calls from a softphone or PBX account | [`Endpoint`](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/api/endpoint/struct.Endpoint.html) |
+| Write a sequential client, script, or test | [`StreamPeer`](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/api/stream_peer/struct.StreamPeer.html) |
+| Build a reactive server, IVR, router, or queue | [`CallbackPeer`](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/api/callback_peer/struct.CallbackPeer.html) |
+| Compose multiple call legs or a B2BUA | [`UnifiedCoordinator`](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/api/unified/struct.UnifiedCoordinator.html) |
+| Control an active call | [`SessionHandle`](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/api/handle/struct.SessionHandle.html) |
 | Check Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS status | [Interoperability status](#interoperability-status) |
 | Bridge a SIP caller to a native Vapi WebSocket agent | [`rvoip-vapi`](#extensions-and-native-vapi-websocket-agents) |
 
@@ -51,7 +51,7 @@ is **Rust 1.95**.
 
 ```toml
 [dependencies]
-rvoip-sip = "0.4.0"
+rvoip-sip = "0.5.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -284,7 +284,7 @@ adjacency orders (peer-first and rvoip-first) over UDP, TCP, and TLS
 (`interop.remote-proxies.*`) plus the registrar-proxy matrix through an
 rtpengine media relay (`interop.proxy-pbx.*`). The generated
 [gate ledger](docs/BETA_GATE_REPORT.md) is the exact record for that commit;
-publication of `0.4.0` requires a new complete matrix PASS.
+publication of `0.5.0` requires a new complete matrix PASS.
 
 | Peer/tool | Status | Executed scope |
 | --- | --- | --- |
@@ -441,7 +441,7 @@ third-party telephony intermediary is required between rvoip and Vapi.
 Enable the facade integration with:
 
 ```toml
-rvoip = { version = "0.4.0", features = ["sip", "vapi"] }
+rvoip = { version = "0.5.0", features = ["sip", "vapi"] }
 ```
 
 See the complete [`rvoip-vapi` README](../../extensions/rvoip-vapi/README.md),
@@ -527,7 +527,7 @@ Operational references:
   topologies are not claimed.
 - WebRTC/browser interop, TURN, and WSS outbound remain outside the SIP beta
   claim unless separately completed and tested. SIP DTLS-SRTP is a distinct
-  feature-gated 0.4.0 capability whose claim is bounded by fresh protected
+  feature-gated 0.5.0 capability whose claim is bounded by fresh protected
   release evidence.
 - The default full-media performance claim is bounded to the documented
   beta release profiles and artifacts. Higher tuned-profile results need

@@ -27,10 +27,10 @@ failure rather than a skip.
 | SIPp | Deterministic UAC/UAS and load generator | Required release gate. |
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
-| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.4.0 release gate; currently component line 0.9.15. |
+| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.5.0 release gate; currently component line 0.9.15. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
-| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |
-| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |
+| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.5.0` proxy release gate. |
+| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.5.0` proxy release gate. |
 
 ## Current Automation Status
 
@@ -152,7 +152,7 @@ the latest stable open-source component line. It then freezes the exact
 revisions, tarball hashes, and container digests for the run.
 
 The shared RVoIP PBX matrix covers all three public SIP APIs over the
-Jambonz 0.4.0 profile's UDP/plain-RTP boundary: authenticated registration,
+Jambonz 0.5.0 profile's UDP/plain-RTP boundary: authenticated registration,
 INVITE/provisional/answer/ACK, PCMU/PCMA and optional codec negotiation,
 bidirectional audio, RFC 4733, CANCEL/487, rejection, hold/resume,
 REFER/NOTIFY transfer, BYE from either side, and allocation cleanup. Dedicated
@@ -175,7 +175,7 @@ Asterisk/FreeSWITCH lifecycle pattern: it owns startup, readiness, isolated
 configuration, packet capture, logs, exact version/image provenance, teardown,
 and restoration of any process that was running before the gate.
 
-| Scenario | Required for `0.4.0` |
+| Scenario | Required for `0.5.0` |
 |----------|----------------------|
 | UDP, TCP, and TLS/SIPS forwarding | Yes |
 | Matched and unmatched CANCEL | Yes |
