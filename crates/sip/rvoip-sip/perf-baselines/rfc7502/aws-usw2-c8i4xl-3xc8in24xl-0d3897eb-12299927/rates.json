@@ -31,8 +31,99 @@
   }
  },
  "env_id": "aws-usw2-c8i4xl-3xc8in24xl-0d3897eb-12299927",
- "recorded_at": "2026-11-19T07:24:30Z",
- "rows": {},
+ "recorded_at": "2026-11-23T05:26:17Z",
+ "rows": {
+  "R1": {
+   "candidate_sha": "b089eeb5d4b2b201036afa20301f2ef346e4d591",
+   "confirmations": 1,
+   "confirmations_required": 3,
+   "latency_rate": null,
+   "lowest_failing_sps": 9180,
+   "r": 8348,
+   "recorded_at": "2026-11-23T05:26:17Z",
+   "rescored": {
+    "rule": "R = the highest rate with a passing trial and no failing trial at or below it; trials re-scored with the current rfc7502.trial_verdict (a DUT setup-delay collapse is a DUT fail, not tester-invalid)",
+    "tool": "scripts/bench/rescore_run.py"
+   },
+   "sdd_ms": null,
+   "source_run": "s3://rvoip-release-evidence-225478700523/bench/bench-minor-b089eeb5d4b2-45065590604/",
+   "srd_ms": null,
+   "tester_cap": 9492,
+   "tester_cap_lower_bound": false,
+   "tester_limited": false
+  },
+  "R2": {
+   "candidate_sha": "b089eeb5d4b2b201036afa20301f2ef346e4d591",
+   "confirmations": 4,
+   "confirmations_required": 3,
+   "latency_rate": 1008,
+   "lowest_failing_sps": 1136,
+   "r": 1124,
+   "recorded_at": "2026-11-23T05:26:17Z",
+   "rescored": {
+    "rule": "R = the highest rate with a passing trial and no failing trial at or below it; trials re-scored with the current rfc7502.trial_verdict (a DUT setup-delay collapse is a DUT fail, not tester-invalid)",
+    "tool": "scripts/bench/rescore_run.py"
+   },
+   "sdd_ms": {
+    "count": 181440,
+    "max": 44.0,
+    "p50": 1.0,
+    "p95": 1.0,
+    "p99": 2.0,
+    "p99_9": 7.0
+   },
+   "source_run": "s3://rvoip-release-evidence-225478700523/bench/bench-minor-b089eeb5d4b2-45065590604/",
+   "srd_ms": {
+    "count": 181440,
+    "max": 45.0,
+    "p50": 1.0,
+    "p95": 2.0,
+    "p99": 4.0,
+    "p99_9": 9.0
+   },
+   "tester_cap": 3124,
+   "tester_cap_lower_bound": false,
+   "tester_limited": false
+  },
+  "R5": {
+   "candidate_sha": "b089eeb5d4b2b201036afa20301f2ef346e4d591",
+   "confirmations": 1,
+   "confirmations_required": 3,
+   "latency_rate": null,
+   "lowest_failing_sps": 9080,
+   "r": 8256,
+   "recorded_at": "2026-11-23T05:26:17Z",
+   "rescored": {
+    "rule": "R = the highest rate with a passing trial and no failing trial at or below it; trials re-scored with the current rfc7502.trial_verdict (a DUT setup-delay collapse is a DUT fail, not tester-invalid)",
+    "tool": "scripts/bench/rescore_run.py"
+   },
+   "sdd_ms": null,
+   "source_run": "s3://rvoip-release-evidence-225478700523/bench/bench-minor-b089eeb5d4b2-45065590604/",
+   "srd_ms": null,
+   "tester_cap": 9388,
+   "tester_cap_lower_bound": false,
+   "tester_limited": false
+  },
+  "R6": {
+   "candidate_sha": "b089eeb5d4b2b201036afa20301f2ef346e4d591",
+   "confirmations": 2,
+   "confirmations_required": 3,
+   "latency_rate": null,
+   "lowest_failing_sps": 1220,
+   "r": 1204,
+   "recorded_at": "2026-11-23T05:26:17Z",
+   "rescored": {
+    "rule": "R = the highest rate with a passing trial and no failing trial at or below it; trials re-scored with the current rfc7502.trial_verdict (a DUT setup-delay collapse is a DUT fail, not tester-invalid)",
+    "tool": "scripts/bench/rescore_run.py"
+   },
+   "sdd_ms": null,
+   "source_run": "s3://rvoip-release-evidence-225478700523/bench/bench-minor-b089eeb5d4b2-45065590604/",
+   "srd_ms": null,
+   "tester_cap": 3432,
+   "tester_cap_lower_bound": true,
+   "tester_limited": false
+  }
+ },
  "schema": "rvoip-rfc7502-rates-v1",
  "tester_caps": {
   "R1": 9492,
