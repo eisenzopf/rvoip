@@ -1758,6 +1758,24 @@ version = "{version}"
                     (gate_dir / "bench-receipt.json").write_text(json.dumps({**bench, key: value}))
                     self.assertEqual(gates.collect(plan=plan, evidence_root=root, output=output), 1)
 
+    def test_performance_evaluation_expects_the_catalog_soak_settings(self) -> None:
+        # The evaluation's expected soak duration and concurrency come from the
+        # gate commands, so a catalog change cannot leave it expecting the old
+        # value (the 0.5.0 candidate 424c6189d failed on exactly that).
+        settings = gates.soak_evaluation_settings(ROOT)
+        self.assertEqual(
+            settings,
+            {
+                "perf.monolithic-soak": {"duration_secs": "3600", "active_calls": "30"},
+                "perf.soak-candidate": {"duration_secs": "7200", "active_calls": "500"},
+            },
+        )
+        source = (ROOT / "scripts/release/gates.py").read_text()
+        call = source.split('"crates/sip/rvoip-sip/scripts/beta_performance_gate_metrics.py",', 1)[1].split("root=root", 1)[0]
+        for flag in ("--monolithic-duration-secs", "--monolithic-active-calls", "--split-duration-secs", "--split-active-calls"):
+            following = call.split(f'"{flag}",', 1)[1].lstrip().split("\n", 1)[0]
+            self.assertTrue(following.startswith("soak["), f"{flag} must come from the catalog, not a literal: {following}")
+
     def test_soak_candidate_runs_two_hours_with_the_same_limit(self) -> None:
         catalog = json.loads((ROOT / "scripts/release/gates.json").read_text())
         gates_by_id = {gate["id"]: gate for gate in catalog["gates"]}
