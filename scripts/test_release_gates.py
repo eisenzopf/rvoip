@@ -1798,7 +1798,12 @@ version = "{version}"
         self.assertIn("--record", command)
         args.profile = "release"
         args.receipt = Path("/e/perf.rfc7502-release/bench-receipt.json")
-        self.assertNotIn("--record", bench.lane_command(args, Path("/t/dut"), "4242"))
+        # A release lane records the rows it measured (those without a recorded R).
+        command = bench.lane_command(args, Path("/t/dut"), "4242")
+        self.assertIn("--record", command)
+        self.assertEqual(
+            command[command.index("--record-out") + 1], "/e/perf.rfc7502-release/rates.json"
+        )
 
     def test_bench_gate_fails_closed_until_the_bench_environment_is_pinned(self) -> None:
         bench = load_module("release_bench_gate", ROOT / "scripts/release/bench_gate.py")
@@ -1880,10 +1885,12 @@ version = "{version}"
             set(profiles["release-patch"]) - set(profiles["remote-release"]),
             {"perf.rfc7502-release"},
         )
+        # Every release confirms the recorded R; the full search is on demand (bench-minor).
         self.assertEqual(
             set(profiles["release-minor"]) - set(profiles["remote-release"]),
-            {"perf.rfc7502-minor"},
+            {"perf.rfc7502-release"},
         )
+        self.assertEqual(profiles["bench-minor"], ["perf.rfc7502-minor", "source.remote-clean"])
         for gate_id, profile in (("perf.rfc7502-release", "release"), ("perf.rfc7502-minor", "minor")):
             gate = by_id[gate_id]
             with self.subTest(gate=gate_id):

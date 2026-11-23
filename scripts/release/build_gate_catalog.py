@@ -130,8 +130,14 @@ INTEROP_LANE_OF = {gate_id: lane for lane, gate_ids in INTEROP_LANES.items() for
 # `remote-release` profile, and the bump commit reuses their receipts through
 # version-normalized input digests.
 BENCH_LANE_GATES = {
-    "perf.rfc7502-release": ("release", "patch-release RFC 7502 confirmation trials", 4 * 3600),
-    "perf.rfc7502-minor": ("minor", "minor-release RFC 7502 search and overload report", 12 * 3600),
+    # Every release, patch or minor: confirm each row's recorded R; a row with none yet gets a light search.
+    "perf.rfc7502-release": (
+        "release",
+        "release RFC 7502 confirmation trials (a minor-lite search for rows without a recorded R)",
+        4 * 3600,
+    ),
+    # On demand only (the bench-minor profile): the full bisect searches of every row.
+    "perf.rfc7502-minor": ("minor", "on-demand RFC 7502 search of every row and overload report", 12 * 3600),
 }
 BENCH_LANE_PATHS = [
     "Cargo.lock",
@@ -1639,7 +1645,9 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             "bench-release": ["perf.rfc7502-release", "source.remote-clean"],
             "bench-minor": ["perf.rfc7502-minor", "source.remote-clean"],
             "release-patch": sorted(set(remote_release) | {"perf.rfc7502-release"}),
-            "release-minor": sorted(set(remote_release) | {"perf.rfc7502-minor"}),
+            # A minor release confirms the recorded R like a patch release; the full search
+            # (bench-minor) runs on demand.
+            "release-minor": sorted(set(remote_release) | {"perf.rfc7502-release"}),
         },
         "remote_release_legacy_coverage": {
             "required_legacy_count": len(records),

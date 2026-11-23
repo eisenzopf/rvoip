@@ -839,7 +839,7 @@ class ChainTests(LaneCase):
         self.assertEqual(self.rows(receipt)['R4']['verdict'], 'pass') if 'R4' in self.rows(receipt) else None
 
     def test_record_is_refused_where_nothing_is_recorded(self):
-        for profile in ('release', 'smoke'):
+        for profile in ('smoke', 'diag'):
             code, receipt, log = self.bed.run(profile, 'rec-%s' % profile, '--record', world=world_for())
             self.assertEqual(code, 2, log)
         self.assertEqual(self.bed.alive(), [])
@@ -1793,6 +1793,100 @@ class CiLaneConfigTests(LaneCase):
                                   'dut_launch_template': 'rvoip-bench-dut', 'subnet_id': 'subnet-b',
                                   'dut_launch_template_id': 'lt-1', 'caller_launch_template_id': 'lt-2',
                                   'release_public_subnet_ids': ['subnet-a', 'subnet-c']})
+
+
+
+class LiteReleaseTests(LaneCase):
+    """Every release runs the `release` profile: it confirms rows with a recorded R and measures rows without one
+    with the minor-lite search, in the same lane, recording only the rows it measured."""
+
+    def setUp(self):
+        self.bed = Bed()
+        self.env_id = self.bed.env_id()
+        (self.bed.baselines / self.env_id).mkdir(parents=True)
+
+    def tearDown(self):
+        self.bed.close()
+
+    def write_rates(self, rows):
+        path = self.bed.baselines / self.env_id / 'rates.json'
+        path.write_text(json.dumps({
+            'schema': 'rvoip-rfc7502-rates-v1', 'env_id': self.env_id, 'rows': rows,
+            'tester_caps': {'R1': 6000, 'R5': 6000, 'R2': 2000, 'R6': 2000},
+            'baseline_sps': {r: {'r': 9000, 'tester_limited': True, 'lower_bound': False} for r in ('R1', 'R5')}}))
+        return path
+
+    def test_first_release_on_an_env_searches_every_row_and_records_them(self):
+        self.write_rates({})
+        out = self.bed.tmp / 'gate' / 'rates.json'
+        code, receipt, log = self.bed.run('release', 'rel-first', '--record', '--record-out', str(out),
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        rows = self.rows(receipt)
+        for row_id in ('R1', 'R5', 'R2'):
+            self.assertTrue(rows[row_id]['searched'], row_id)
+            self.assertEqual(rows[row_id]['search_profile'], 'minor-lite')
+            self.assertEqual(rows[row_id]['search']['parameters']['confirmations'], 1)
+            self.assertLessEqual(len(rows[row_id]['trials']), 9 + 1, 'max_trials 9 (+ the latency trial)')
+            self.assertIn('no recorded R', log)
+        self.assertIn('R4', rows, 'the lite search measured R2, so the overload trial ran')
+        self.assertIsNotNone(receipt['evidence']['report'], 'the lite search renders the report')
+        recorded = json.loads(out.read_text())['rows']
+        self.assertEqual(sorted(recorded), ['R1', 'R2', 'R5'], 'the measured rows (R4 records no R)')
+        for row_id in ('R1', 'R5', 'R2'):
+            self.assertEqual(recorded[row_id]['r'], rows[row_id]['r'])
+
+    def test_a_release_confirms_recorded_rows_and_searches_only_the_rest(self):
+        self.write_rates({'R1': {'r': DUT['R1'], 'tester_cap': 6000, 'srd_ms': None, 'sdd_ms': None}})
+        out = self.bed.tmp / 'gate' / 'rates.json'
+        code, receipt, log = self.bed.run('release', 'rel-mixed', '--record', '--record-out', str(out),
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        rows = self.rows(receipt)
+        self.assertNotIn('searched', rows['R1'])
+        self.assertEqual([t['kind'] for t in rows['R1']['trials']][:3], ['confirm'] * 3)
+        self.assertTrue(rows['R5']['searched'] and rows['R2']['searched'])
+        recorded = json.loads(out.read_text())['rows']
+        self.assertEqual(recorded['R1']['r'], DUT['R1'], 'a confirmed row keeps its recorded R')
+        self.assertIn('R5', recorded)
+        self.assertIn('R2', recorded)
+
+    def test_a_fully_recorded_release_only_confirms(self):
+        self.write_rates({row: {'r': r, 'tester_cap': 6000, 'srd_ms': None, 'sdd_ms': None}
+                          for row, r in DUT.items() if row in ('R1', 'R5', 'R2')})
+        out = self.bed.tmp / 'gate' / 'rates.json'
+        code, receipt, log = self.bed.run('release', 'rel-confirm', '--record', '--record-out', str(out),
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        rows = self.rows(receipt)
+        self.assertFalse(any(r.get('searched') for r in rows.values()))
+        self.assertNotIn('R4', rows)
+        self.assertIn('nothing new to record', log)
+        self.assertFalse(out.exists())
+
+    def test_a_release_without_a_baseline_is_a_usage_error(self):
+        path = self.bed.baselines / self.env_id / 'rates.json'
+        path.write_text(json.dumps({'schema': 'rvoip-rfc7502-rates-v1', 'env_id': self.env_id, 'rows': {},
+                                    'tester_caps': {}, 'baseline_sps': {}}))
+        code, receipt, log = self.bed.run('release', 'rel-nobase', world=world_for(tester_capacity=TESTER))
+        self.assertEqual(code, 2, log)
+        self.assertIn('§6.1 baseline', ' '.join(receipt['reasons']))
+        self.assertEqual(self.bed.alive(), [])
+
+    def test_a_search_seeds_r0_from_the_recorded_r(self):
+        self.write_rates({'R1': {'r': 3600, 'tester_cap': 6000, 'srd_ms': None, 'sdd_ms': None}})
+        code, receipt, log = self.bed.run('minor-lite', 'lite-seed', '--rows', 'R1',
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        self.assertEqual(self.rows(receipt)['R1']['search']['parameters']['r0'], 3600)
+
+    def test_minor_lite_on_demand(self):
+        code, receipt, log = self.bed.run('minor-lite', 'lite-1', '--r0', 'R1=3000', '--r0', 'R2=1000',
+                                          world=world_for(tester_capacity=TESTER))
+        self.check(code, receipt, log, 0, 'PASS')
+        rows = self.rows(receipt)
+        self.assertEqual(sorted(rows), ['R1', 'R2', 'R4'])
+        self.assertEqual(rows['R1']['search']['parameters']['confirmations'], 1)
 
 
 if __name__ == '__main__':

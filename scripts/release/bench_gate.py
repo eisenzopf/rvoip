@@ -15,12 +15,14 @@ through `gates.py run-shard`, so the gate receipt is always the gate
 executor's, and run_lane, finding the lane complete, only rewrites its
 receipt.
 
-The minor lane also records: `--record --record-out <artifact dir>/rates.json`
-makes run_lane write the env-id's rates.json (the in-tree tester caps plus
-this run's measured R per row, each row's source_run and candidate_sha naming
-this run) into the gate's evidence instead of the checkout. The release ships
-the measured commit unchanged, and that file goes to main in a rates-only PR
-after the tag, for the next patch release's `release` lane to gate on.
+Every lane records: `--record --record-out <artifact dir>/rates.json` makes
+run_lane write the env-id's rates.json (the in-tree tester caps plus the R of
+each row this run measured, each row's source_run and candidate_sha naming
+this run) into the gate's evidence instead of the checkout. A `release` lane
+measures only the rows that have no recorded R yet (a light `minor-lite`
+search), so it records nothing when it only confirmed. The release ships the
+measured commit unchanged, and that file goes to main in a rates-only PR after
+the tag, for the next release's `release` lane to confirm.
 
 Before it builds anything the wrapper checks that the lane can run: the
 orchestrator, the device-under-test package, and a pinned bench environment
@@ -102,7 +104,7 @@ def dut_binary(root: Path) -> Path:
 def lane_command(args: argparse.Namespace, dut: Path, run: str) -> list[str]:
     record = (
         ["--record", "--record-out", str(args.receipt.parent / RECORDED_RATES)]
-        if args.profile == "minor"
+        if args.profile in ("minor", "release")
         else []
     )
     return [

@@ -11278,7 +11278,7 @@
       "kind": "benchmark",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "patch-release RFC 7502 confirmation trials",
+      "name": "release RFC 7502 confirmation trials (a minor-lite search for rows without a recorded R)",
       "resource_class": "bench-lane",
       "retry_on_exit_codes": [
         3,
@@ -11327,7 +11327,7 @@
       "kind": "benchmark",
       "legacy": null,
       "max_infrastructure_retries": 1,
-      "name": "minor-release RFC 7502 search and overload report",
+      "name": "on-demand RFC 7502 search of every row and overload report",
       "resource_class": "bench-lane",
       "retry_on_exit_codes": [
         3,
@@ -11635,7 +11635,7 @@
       "perf.registrar-scale",
       "perf.registration",
       "perf.resiliency-all",
-      "perf.rfc7502-minor",
+      "perf.rfc7502-release",
       "perf.rtp-steady-state",
       "perf.session-churn",
       "perf.sipp-parity",

@@ -71,6 +71,22 @@ EA -> DUT, media terminates on the DUT). Registration benchmarks do not apply.
 - **Failure classes**: a 503 is a DUT failure (never a tester fault); a non-2xx
   (for example 481) to the caller's BYE is a *disconnect failure*, counted and
   reported, not a Session Attempt Failure.
+- **DUT that queues**: a DUT can still answer every INVITE while its median
+  setup delay collapses (Day 0's R1 went from 2 ms at 8348 sps to 2,009 ms at
+  9180). The caller's in-flight bound then fills and it skips scheduled calls.
+  When a trial stage's median setup delay is above 500 ms
+  (`rfc7502.SETUP_COLLAPSE_MS`) and the caller's only failed checks are dispatch
+  checks, the shortfall is the DUT's: the trial fails, it is not
+  tester-invalid. A caller whose own CPU, threads or kernel receive path ran
+  out fails other checks and stays invalid.
+- **Overload recovery (R4)**: every failure in every stage must be a 503
+  (nothing times out or is lost), and both recovery stages must establish
+  every call of their steady window. That window skips each stage's first
+  15 s, like every other stage, because the admission window can still shed a
+  few calls with fast 503s right after the overload stage.
+- **Search start**: a search starts at the row's recorded R when there is one
+  (`--r0` overrides it). Otherwise it starts at the profile's r0 or
+  0.8 x the tester cap.
 - **Ops guards**: disk guard (refuse a trial under 20 GiB free on any host;
   about 8 GiB of evidence per 180 s trial), port reservations
   (`ip_local_reserved_ports` covers SIP and RTP ranges), and a media-plane
@@ -302,11 +318,19 @@ conntrack 4M, `ip_local_reserved_ports`, THP `always`, file limits.
 
 | Profile | Rows | Method | Wall clock | Cost |
 |---|---|---|---|---|
-| `release` | R1, R5, R2 | 3 x 0.95 R + 1 x 1.05 R per row; RFC 6076 latency at 0.9 R | ~3.5 h | ~$50 |
-| `minor` | R1, R2, R5, R6 bisect; R4 overload | bisect (w/d steps, 2 % resolution, 3 confirmations); renders the IETF report | ~11 h | ~$150 |
+| `release` (every release) | R1, R5, R2 | 3 x 0.95 R + 1 x 1.05 R per row; RFC 6076 latency at 0.9 R; a row without a recorded R gets the `minor-lite` search instead | ~3.5 h (up to ~4 h with searches) | ~$50-80 |
+| `minor-lite` | R1, R2 on demand (in a release lane: its rows without R); R4 overload | bisect, 5 % resolution, 1 confirmation, at most 9 trials; renders the report | ~3-4 h | ~$60-80 |
+| `minor` (on demand) | R1, R2, R5, R6 bisect; R4 overload | bisect (w/d steps, 2 % resolution, 3 confirmations); renders the IETF report | ~11 h | ~$150 |
 | `full` | as minor with exact §4.10 | quarterly | ~2-3 days | ~$1k |
 | `baseline` | R1, R2, R5, R6 against `ea-uas` | §4.10 EA-to-EA; sets r_max | ~2 h | ~$30 |
 
 Recorded R values live in
 `crates/sip/rvoip-sip/perf-baselines/rfc7502/<env-id>/rates.json`, keyed by
 the environment id (instance types, AMI id, caller build sha256).
+`scripts/bench/rescore_run.py --receipt <receipt> [--record]` re-scores a
+finished DUT search from its stored evidence with the current rules and can
+record the result, so a scoring fix doesn't require re-running a lane. It
+takes R as the highest rate with a passing trial and no failing trial at or
+below it. A row records its `confirmations` against the profile's
+`confirmations_required`, never claiming more than it has. The 0.5 rows come
+from Day 0's bench-minor run 45065590604 re-scored this way.
