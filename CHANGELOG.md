@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-11-23
+
 ### Highlights
 
 0.5.0 is a breaking minor release about carrier-scale throughput and overload

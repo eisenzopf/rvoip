@@ -7,10 +7,10 @@
 
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
-[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.4.0)](https://crates.io/crates/rvoip/0.4.0)
-[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.4.0)](https://crates.io/crates/rvoip-sip/0.4.0)
-[![Facade API](https://img.shields.io/docsrs/rvoip/0.4.0?label=Facade%20API)](https://docs.rs/rvoip/0.4.0/rvoip/)
-[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.4.0?label=SIP%20API)](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)
+[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.5.0)](https://crates.io/crates/rvoip/0.5.0)
+[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.5.0)](https://crates.io/crates/rvoip-sip/0.5.0)
+[![Facade API](https://img.shields.io/docsrs/rvoip/0.5.0?label=Facade%20API)](https://docs.rs/rvoip/0.5.0/rvoip/)
+[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.5.0?label=SIP%20API)](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/)
 
 [**Five-minute start**](#five-minute-start) · [**For carriers**](docs/CARRIERS.md) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md) · [**Upgrading from 0.3**](docs/MIGRATING_0.4.md)
 
@@ -35,7 +35,7 @@ performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 
 ```toml
 [dependencies]
-rvoip-sip = "0.4.0"
+rvoip-sip = "0.5.0"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -215,7 +215,7 @@ and Opus behind Cargo features. The full surface is documented in the
 runs SIP, WebRTC, and UCTP listeners on the shared `Orchestrator`:
 
 ```toml
-rvoip = { version = "0.4.0", features = ["app"] }
+rvoip = { version = "0.5.0", features = ["app"] }
 ```
 
 ```rust,no_run
@@ -407,7 +407,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.4.0`. They stay optional so protocol
+All 14 extension crates ship at `0.5.0`. They stay optional so protocol
 crates depend on provider contracts, never on a deployment backend.
 
 | Group | Extensions | Available capability |
@@ -423,10 +423,10 @@ identity surface; `vapi` and `sip-stir-shaken` are their own facade features;
 everything else is a direct dependency.
 
 ```toml
-rvoip = { version = "0.4.0", features = ["sip", "vapi", "sip-stir-shaken"] }
-rvoip-keycloak = "0.4.0"
-rvoip-redis = "0.4.0"
-rvoip-audit = "0.4.0"
+rvoip = { version = "0.5.0", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip-keycloak = "0.5.0"
+rvoip-redis = "0.5.0"
+rvoip-audit = "0.5.0"
 ```
 
 The contracts they implement live in
@@ -550,6 +550,6 @@ Licensed under the [MIT License](LICENSE).
 
 ---
 
-**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.4.0/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
+**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.5.0/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
 
 </div>

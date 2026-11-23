@@ -27,10 +27,10 @@ failure rather than a skip.
 | SIPp | Deterministic UAC/UAS and load generator | Required release gate. |
 | Asterisk `res_pjsip` | PBX interop | Required release gate. |
 | FreeSWITCH Sofia | PBX/B2BUA interop | Required release gate. |
-| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.4.0 release gate; currently component line 0.9.15. |
+| Latest stable Jambonz OSS | SBC/B2BUA, registrar, and anchored-media interop | Required 0.5.0 release gate; currently component line 0.9.15. |
 | PJSIP or baresip | Strict SIP user agent | Required release gate. |
-| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |
-| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |
+| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.5.0` proxy release gate. |
+| OpenSIPS | Independent transaction-stateful proxy interoperability peer | Required for the `0.5.0` proxy release gate. |
 
 ## Current Automation Status
 
@@ -112,9 +112,9 @@ Run the same functional suite through `Endpoint`, `StreamPeer`, and
 | Blind transfer | Yes |
 | REFER/NOTIFY progress | Yes |
 | PRACK | Yes if peer profile enables it |
-| RFC 4028 session timers | Yes after 0.4.0: `session_timer` on dedicated `timers = yes` endpoints (2301/2302, 90 s); rvoip refreshes its UAC leg, Asterisk refreshes the leg toward rvoip |
-| RTCP over mux (RFC 5761) | Yes after 0.4.0: `rtcp_mux` on dedicated `rtcp_mux = yes` endpoints (x101/x102), UDP and SDES-SRTP |
-| RTCP on a separate port (RFC 3605) | Yes after 0.4.0: `rtcp_non_mux` on dedicated `rtcp_mux = no` endpoints (x201/x202), UDP and SDES-SRTP; `rtcp_mux_declined` proves nothing is sent without `Config::rtcp_non_mux` |
+| RFC 4028 session timers | Yes after 0.5.0: `session_timer` on dedicated `timers = yes` endpoints (2301/2302, 90 s); rvoip refreshes its UAC leg, Asterisk refreshes the leg toward rvoip |
+| RTCP over mux (RFC 5761) | Yes after 0.5.0: `rtcp_mux` on dedicated `rtcp_mux = yes` endpoints (x101/x102), UDP and SDES-SRTP |
+| RTCP on a separate port (RFC 3605) | Yes after 0.5.0: `rtcp_non_mux` on dedicated `rtcp_mux = no` endpoints (x201/x202), UDP and SDES-SRTP; `rtcp_mux_declined` proves nothing is sent without `Config::rtcp_non_mux` |
 | DTMF | Yes |
 | SDES-SRTP | Yes where claimed |
 
@@ -129,7 +129,7 @@ both Asterisk and FreeSWITCH. The G.711 baseline remains the analyzer-enforced
 `basic_call` scenario. Override `BETA_PBX_G729_PROFILES` only for targeted
 reruns.
 
-After 0.4.0 the FreeSWITCH gate also runs `rtcp_mux` and `session_timer`
+After 0.5.0 the FreeSWITCH gate also runs `rtcp_mux` and `session_timer`
 (UDP) against the dedicated `rvoip_udp_rtcp_timer` profile on port 5069:
 `rtcp-audio-interval-msec=5000`, so FreeSWITCH answers rvoip's mux offer and
 reports, and `session-timeout`/`minimum-session-expires` 120, so rvoip's 90 s
@@ -139,7 +139,7 @@ Asterisk's; FreeSWITCH TLS RTCP is not a row.
 The RTCP and session-timer cells (issue #318) record a third matrix row per
 cell, role `pbx`, which is the PBX's own verdict from its RTCP/RTP/SIP debug
 output, CLI snapshot and (FreeSWITCH) `RECV_RTCP_MESSAGE` events, checked by
-`examples/pbx/pbx_evidence.sh`. These rows are release-gated after 0.4.0; no
+`examples/pbx/pbx_evidence.sh`. These rows are release-gated after 0.5.0; no
 protected qualification has recorded them yet. They add about four minutes
 to the Asterisk gate and two to the FreeSWITCH gate.
 
@@ -152,7 +152,7 @@ the latest stable open-source component line. It then freezes the exact
 revisions, tarball hashes, and container digests for the run.
 
 The shared RVoIP PBX matrix covers all three public SIP APIs over the
-Jambonz 0.4.0 profile's UDP/plain-RTP boundary: authenticated registration,
+Jambonz 0.5.0 profile's UDP/plain-RTP boundary: authenticated registration,
 INVITE/provisional/answer/ACK, PCMU/PCMA and optional codec negotiation,
 bidirectional audio, RFC 4733, CANCEL/487, rejection, hold/resume,
 REFER/NOTIFY transfer, BYE from either side, and allocation cleanup. Dedicated
@@ -175,7 +175,7 @@ Asterisk/FreeSWITCH lifecycle pattern: it owns startup, readiness, isolated
 configuration, packet capture, logs, exact version/image provenance, teardown,
 and restoration of any process that was running before the gate.
 
-| Scenario | Required for `0.4.0` |
+| Scenario | Required for `0.5.0` |
 |----------|----------------------|
 | UDP, TCP, and TLS/SIPS forwarding | Yes |
 | Matched and unmatched CANCEL | Yes |
@@ -209,7 +209,7 @@ Each interop run should store:
 
 - A failure in SIPp, Asterisk, FreeSWITCH, Jambonz, Kamailio, or OpenSIPS
   blocks the applicable release. Jambonz was not part of the mandatory 0.3.9
-  matrix and becomes mandatory in 0.4.0.
+  matrix and becomes mandatory in 0.5.0.
 - The proxy matrix must contain exactly both pinned peers, both adjacency
   orders, and UDP/TCP/verified-TLS rows. Its global scenario inventory and
   per-row core scenario set are validated independently while generating the
