@@ -18,8 +18,10 @@ release day:
 1. Pick a `main` commit `C`. Dispatch **Release qualification** on `C` twice,
    at the same time: `profile=remote-release` (with
    `prior_run_id=<the previous release's qualification run>`, so gates whose
-   exact inputs did not change are reused) and `profile=bench-release` (or
-   `bench-minor` for a minor release).
+   exact inputs did not change are reused) and `profile=bench-release`, for a
+   patch or a minor release alike. It confirms the recorded R of each row and
+   runs a light `minor-lite` search only for rows without one. The full
+   `bench-minor` search is on demand.
 2. When the `remote-release` run is green, dispatch **Prepare release PR**
    with `candidate=C` and `qualification_run_id=<that run>`.
 3. The bump PR's PR Gate starts by itself (with the release App; without it,
@@ -157,9 +159,10 @@ resets without weakening any test or evidence requirement.
 
 Use `remote-core` for a hosted-runner dry run and `remote-release` for the
 complete nightly profile. The release profiles `release-patch` and
-`release-minor` are `remote-release` plus the release-only RFC 7502 benchmark
-gate (see `docs/release/BENCH_GATE_INTERFACE.md`); from 0.5.0 publication
-accepts only those. The candidate may be any commit on `main`, not only its
+`release-minor` are both `remote-release` plus the release-only RFC 7502
+confirmation gate `perf.rfc7502-release` (see
+`docs/release/BENCH_GATE_INTERFACE.md`); from 0.5.0 publication accepts only
+those. `perf.rfc7502-minor` (profile `bench-minor`) runs on demand. The candidate may be any commit on `main`, not only its
 head, so a merge during qualification does not restart it. Do not start the full profile unless the exact
 release machinery has a recent successful preflight. The first candidate
 should set `first_candidate=true`; after a fix, provide the prior qualification

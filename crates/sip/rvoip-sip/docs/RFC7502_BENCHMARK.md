@@ -302,8 +302,9 @@ conntrack 4M, `ip_local_reserved_ports`, THP `always`, file limits.
 
 | Profile | Rows | Method | Wall clock | Cost |
 |---|---|---|---|---|
-| `release` | R1, R5, R2 | 3 x 0.95 R + 1 x 1.05 R per row; RFC 6076 latency at 0.9 R | ~3.5 h | ~$50 |
-| `minor` | R1, R2, R5, R6 bisect; R4 overload | bisect (w/d steps, 2 % resolution, 3 confirmations); renders the IETF report | ~11 h | ~$150 |
+| `release` (every release) | R1, R5, R2 | 3 x 0.95 R + 1 x 1.05 R per row; RFC 6076 latency at 0.9 R; a row without a recorded R gets the `minor-lite` search instead | ~3.5 h (up to ~4 h with searches) | ~$50-80 |
+| `minor-lite` | R1, R2 on demand (in a release lane: its rows without R); R4 overload | bisect, 5 % resolution, 1 confirmation, at most 9 trials; renders the report | ~3-4 h | ~$60-80 |
+| `minor` (on demand) | R1, R2, R5, R6 bisect; R4 overload | bisect (w/d steps, 2 % resolution, 3 confirmations); renders the IETF report | ~11 h | ~$150 |
 | `full` | as minor with exact §4.10 | quarterly | ~2-3 days | ~$1k |
 | `baseline` | R1, R2, R5, R6 against `ea-uas` | §4.10 EA-to-EA; sets r_max | ~2 h | ~$30 |
 

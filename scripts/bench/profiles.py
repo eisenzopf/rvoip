@@ -28,11 +28,18 @@ TRIAL = {
 }
 
 PROFILES = {
-    # Every patch release: confirm the recorded R, check RFC 6076 latency.
+    # Every release, patch or minor: confirm each row's recorded R and check RFC 6076 latency. A row with no
+    # recorded R on the env-id yet (its first release there, or after a re-pin) is measured instead with the
+    # `search_missing` profile, in the same lane; --record writes its R for the next release to confirm.
     'release': {'rows': ['R1', 'R5', 'R2'], 'method': 'confirm',
                 'confirm': [0.95, 0.95, 0.95], 'probe_up': 1.05, 'latency_at': 0.90,
-                'latency_tolerance': {'relative': 0.25, 'floor_ms': 10.0}, 'budget_hours': 4.5},
-    # Every minor release: bisect searches, overload, the IETF report.
+                'latency_tolerance': {'relative': 0.25, 'floor_ms': 10.0}, 'budget_hours': 4.5,
+                'search_missing': 'minor-lite'},
+    # A light search: what a release runs for rows without a recorded R, or on demand (rows R1 and R2).
+    'minor-lite': {'rows': ['R1', 'R2'], 'method': 'search', 'algorithm': 'bisect', 'confirmations': 1,
+                   'resolution': 0.05, 'overload': True, 'latency_at': 0.90, 'report': True, 'budget_hours': 4,
+                   'max_trials': 9, 'reserve_capacity': True},
+    # On demand (manual dispatch): bisect searches of every row, overload, the IETF report.
     'minor': {'rows': ['R1', 'R2', 'R5', 'R6'], 'method': 'search', 'algorithm': 'bisect',
               'confirmations': 3, 'resolution': 0.02, 'overload': True, 'latency_at': 0.90,
               'report': True, 'budget_hours': 13, 'max_trials': 16, 'reserve_capacity': True},

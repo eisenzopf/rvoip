@@ -12,8 +12,17 @@ This file is only the contract between the gate executor in
 
 | Gate id | Profile | When |
 |---|---|---|
-| `perf.rfc7502-release` | `release` | every patch release candidate |
-| `perf.rfc7502-minor` | `minor` | every minor release candidate (replaces `-release`) |
+| `perf.rfc7502-release` | `release` | every release candidate, patch or minor |
+| `perf.rfc7502-minor` | `minor` | on demand only (`bench-minor`), no longer required |
+
+The `release` profile confirms each row's recorded R (3 × 0.95 R, 1 × 1.05 R,
+RFC 6076 latency at 0.9 R). A row with no recorded R on the env-id (its first
+release there, or after a re-pin) gets a `minor-lite` search in the same lane
+instead: bisect, 5 % resolution, 1 confirmation, at most 9 trials, the R4
+overload trial when R2 was measured, and the report. The gate records the R of
+the rows it measured (`--record-out`), and the rates-only PR after the tag
+lets the next release confirm them. `minor` and `full` remain for manual
+dispatch.
 
 Both are release-only (never in the nightly profile). The version-bump commit
 reuses the candidate's receipt through version-normalized hashing.

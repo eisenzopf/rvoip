@@ -910,9 +910,10 @@ def baseline_lower_bound(search_outcome):
     return None
 
 
-def run_search_row(ctx, row_id, recorded, caps):
-    """minor/full/baseline: bisect or exact §4.10 search of one row (scripts/bench/search.py)."""
-    p = profiles.PROFILES[ctx.args.profile]
+def run_search_row(ctx, row_id, recorded, caps, profile_name=None):
+    """minor/minor-lite/full/baseline: bisect or exact §4.10 search of one row (scripts/bench/search.py);
+    `profile_name` searches with another profile's parameters (a release lane's rows without a recorded R)."""
+    p = profiles.PROFILES[profile_name or ctx.args.profile]
     row = profiles.ROWS[row_id]
     hosts = len(ctx.lane.info['callers'])
     cap = caps.get(row_id)
@@ -1171,8 +1172,9 @@ def parse_args(argv):
         raise Usage('--candidate must be a 40-hex sha')
     if not args.bucket:
         raise Usage('--bucket or RVOIP_AWS_EVIDENCE_BUCKET is required')
-    if args.record and profiles.PROFILES[args.profile]['method'] != 'search':
-        raise Usage('--record is for minor, full and baseline')
+    if args.record and profiles.PROFILES[args.profile]['method'] != 'search' \
+            and not profiles.PROFILES[args.profile].get('search_missing'):
+        raise Usage('--record is for minor, minor-lite, full, baseline and release (rows it measured)')
     ea = profiles.PROFILES[args.profile].get('ea_uas')
     if not ea and not args.dry_run and not (args.dut_bin and Path(args.dut_bin).is_file()):
         raise Usage('--dut-bin: no such file %r' % args.dut_bin)
@@ -1357,8 +1359,14 @@ def dry_run_walk(ctx, args, aws, profile, rows_wanted, lock, log):
         check('lane config matches EC2', lambda: ctx.lane.verify_lane_config(tf) or 'templates boot %s' % tf.get('ami_id'))
     rates, rates_path = load_rates(env_id) if env_id else (None, None)
     if args.profile == 'release':
-        check('recorded rates', lambda: rates['rows'] and str(rates_path) if rates and rates.get('rows')
-              else (_ for _ in ()).throw(Usage('no recorded rates for %s (%s)' % (env_id, rates_path))))
+        def release_rates():
+            if not (rates or {}).get('tester_caps'):
+                raise Usage('no recorded rates for %s (%s): no §6.1 baseline' % (env_id, rates_path))
+            missing = [row for row in rows_wanted if not ((rates.get('rows') or {}).get(row) or {}).get('r')]
+            return 'confirm %s; %s search for %s' % (
+                [row for row in rows_wanted if row not in missing] or 'none', profile.get('search_missing'),
+                missing or 'none')
+        check('recorded rates', release_rates)
     elif not profile.get('ea_uas'):
         check('tester caps', lambda: (rates or {}).get('tester_caps') or 'none recorded (searches run uncapped)')
     if tf is not None:
@@ -1526,8 +1534,9 @@ def run(argv=None):
         # Caps from a lower-bound baseline row (the tester's ceiling never observed) are flagged in every row.
         args.cap_lower_bound = {row for row, b in ((rates or {}).get('baseline_sps') or {}).items()
                                 if b.get('lower_bound') and row not in args.cap}
-        if args.profile == 'release' and not rates:
-            raise Usage('no recorded rates for %s (%s): run baseline and minor --record first' % (env_id, rates_path))
+        if args.profile == 'release' and not (rates or {}).get('tester_caps'):
+            raise Usage('no recorded rates for %s (%s): the env-id needs its §6.1 baseline (tester caps) first'
+                        % (env_id, rates_path))
         for row_id in rows_wanted:
             done = ctx.state.get('rows', {}).get(row_id)
             if done and done.get('verdict'):
@@ -1537,15 +1546,26 @@ def run(argv=None):
             if profile['method'] == 'smoke':
                 result = run_smoke(ctx, row_id)
             elif profile['method'] == 'confirm':
-                if not recorded:
+                if recorded and recorded.get('r'):
+                    result = run_confirm(ctx, row_id, recorded)
+                elif profile.get('search_missing'):
+                    # No recorded R for this row on this env-id yet (its first release there, or after a re-pin):
+                    # measure it with the light search; --record writes its R for the next release to confirm.
+                    log('%s has no recorded R in %s: %s search' % (row_id, rates_path, profile['search_missing']))
+                    result = run_search_row(ctx, row_id, None, caps, profile['search_missing'])
+                    result.update(searched=True, search_profile=profile['search_missing'])
+                else:
                     raise Usage('no recorded R for %s in %s' % (row_id, rates_path))
-                result = run_confirm(ctx, row_id, recorded)
             else:
                 result = run_search_row(ctx, row_id, recorded, caps)
             ctx.persist_row(row_id, result)
             rows.append(result)
-        if profile.get('overload'):
-            r2 = next((r for r in rows if r['id'] == 'R2' and r.get('r')), None)
+        searched = [r for r in rows if r.get('searched')]
+        lite = profiles.PROFILES.get(profile.get('search_missing') or '', {})
+        if profile.get('overload') or (lite.get('overload') and any(r['id'] == 'R2' for r in searched)):
+            # A release lane runs the overload trial only when it measured R2 itself.
+            r2 = next((r for r in (rows if profile.get('overload') else searched) if r['id'] == 'R2' and r.get('r')),
+                      None)
             done = ctx.state.get('rows', {}).get('R4')
             if done and done.get('verdict'):
                 rows.append(done)
@@ -1563,10 +1583,16 @@ def run(argv=None):
             status, code = 'WARN', EXIT_PASS
         else:
             status, code = 'PASS', EXIT_PASS
-        if profile.get('report'):
+        if profile.get('report') or (searched and lite.get('report')):
             report = score.render_report(ctx, rows, env_id, (rates or {}).get('baseline_sps'))
         if args.record and status in ('PASS', 'WARN'):
-            score.record_rates(rows, env_id, BASELINES, ctx, args.profile, out=args.record_out)
+            # A release lane records only the rows it measured (a confirmed row keeps its recorded R).
+            measured = searched + [r for r in rows if r['id'] == 'R4' and searched] if profile['method'] == 'confirm' \
+                else rows
+            if measured:
+                score.record_rates(measured, env_id, BASELINES, ctx, args.profile, out=args.record_out)
+            else:
+                log('record: every row confirmed its recorded R; nothing new to record')
     except WallClock as error:
         log('stopping (exit 4, resume later):', error)
         stopped_for_wall = True
