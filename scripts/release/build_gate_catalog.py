@@ -1359,6 +1359,12 @@ def codeql_gate() -> dict[str, Any]:
     )
     gate["kind"] = "security"
     gate["expected_outputs"].append("codeql-policy.json")
+    # The result is a property of GitHub's analyses of the inputs, not of
+    # running them: a version-bump candidate that a PR merge commit reached
+    # main through has no main-ref analysis of its own, so its run fails
+    # while the parent's exact-input PASS still holds (0.5.0, run
+    # 45274500898). The planner keeps that PASS over the later failure.
+    gate["reuse_exact_pass_after_failure"] = True
     return gate
 
 

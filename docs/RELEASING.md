@@ -168,6 +168,11 @@ release machinery has a recent successful preflight. The first candidate
 should set `first_candidate=true`; after a fix, provide the prior qualification
 run and the previous candidate SHA, and set `first_candidate=false`, so exact
 matching evidence can be reused while failed and affected gates are rerun.
+A gate whose newest prior receipt failed reruns even when an older receipt
+with the same inputs passed. The exception is `security.codeql-exact`
+(`reuse_exact_pass_after_failure` in the catalog): its result is GitHub's
+analysis of the inputs, so an exact-input PASS outlives a later run that could
+not see those analyses.
 Diagnose and reproduce a failed gate by itself before spending another complete
 qualification run.
 

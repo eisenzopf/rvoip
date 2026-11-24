@@ -5642,6 +5642,7 @@
       "retry_on_exit_codes": [
         75
       ],
+      "reuse_exact_pass_after_failure": true,
       "timeout_minutes": 75,
       "working_directory": "."
     },
