@@ -29,6 +29,36 @@ the release-gated interoperability evidence against Asterisk, FreeSWITCH,
 Jambonz, Kamailio, and OpenSIPS. Carriers evaluating standards coverage,
 performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 
+## Performance at a glance (0.5.0)
+
+One AWS c8i.4xlarge (16 vCPU, 8 cores, Intel Xeon 6, 32 GiB) running a single
+rvoip process, measured with the RFC 7501/7502 benchmark:
+
+| Workload | Max calls/s | per vCPU | Concurrent calls | p99 setup at 90% load |
+| --- | ---: | ---: | ---: | ---: |
+| SIP over TLS, signaling only | 8,348 | ~520 | n/a | 6 ms |
+| SIP over UDP, signaling only | 8,256 | ~515 | n/a | 6 ms |
+| TLS + SRTP (SDES), G.711, 10 s calls | 1,124 | ~70 | ~11,200 | 4 ms |
+| UDP + RTP, G.711, 10 s calls | 1,204 | ~75 | ~12,000 | n/m |
+
+At 2x capacity, rvoip keeps admitting calls at its maximum rate, refuses the
+excess with fast 503 responses, and recovers cleanly once the load drops.
+
+- Max calls/s is the highest rate with zero failed calls over a trial of at
+  least 180 s and 50,000 call attempts (RFC 7502).
+- rvoip was measured as a terminating endpoint: it answers each call and echoes
+  its media. A relaying B2BUA or SBC handles two call legs per session.
+- G.711 media is passed through; nothing is transcoded.
+- Concurrent calls = rate x the 10 s hold time.
+- The server is a cloud VM, not an appliance.
+- p99 setup is the RFC 6076 session request delay measured at 90% of the max
+  rate; n/m = not measured.
+- The UDP + RTP rate was confirmed twice rather than three times.
+- The release check also passed 5% above the TLS and UDP signaling rates, so
+  those two figures may be slightly understated.
+
+Full method and per-trial data: [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md).
+
 ## Five-minute start
 
 **1. Add one dependency.**

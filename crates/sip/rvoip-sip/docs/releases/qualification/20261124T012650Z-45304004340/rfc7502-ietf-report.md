@@ -27,7 +27,7 @@ Report date 2026-11-24. Device under test (DUT): rvoip-bench-uas (rvoip b089eeb5
 
 - The trials ran in bench-minor GitHub Actions run 45065590604 on candidate b089eeb5d4b2: the 0.5.0 code before the url dependency bump (RUSTSEC-2026-0592), which changes no benchmarked code path.
 - The report the run rendered at the time scored R1 and R5 as tester-invalid and R6 and R4 as failed. Those were harness rules, not DUT behaviour, fixed in rvoip PR #468: a DUT whose median setup delay collapses is a DUT failure, not a tester limit; overload recovery is scored on its steady window like every other stage. This report re-applies those rules to the same stored trial evidence; no trial was re-run and no number was edited. The re-scored values are the ones recorded in the env-id's rates.json.
-- The 0.5.0 release then confirmed R1, R5 and R2 on the published commit 2ae9fa49c in bench-release run 45221679416: three trials at 0.95 x R per row and the latency step at 0.9 x R passed. Its verdict was WARN because the 1.05 x R probe also passed, so R may be slightly understated.
+- The 0.5.0 release then confirmed R1, R5 and R2 in bench-release run 45221679416, on candidate 81452a5fb8a5, which the published commit 2ae9fa49c reuses because it differs only in release bookkeeping and version strings. Three trials at 0.95 x R per row and the latency step at 0.9 x R passed. Its verdict was WARN because the 1.05 x R probes of R1 (8,764 sps) and R5 (8,668 sps) also passed, so those two rates may be slightly understated. R2's 1.05 x R probe failed, as expected at its limit.
 
 ## 1. Headline: Sustained Session Establishment Rate (>= 180 s trials) per row
 
