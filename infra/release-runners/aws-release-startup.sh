@@ -160,6 +160,14 @@ PY
 }
 trap finish EXIT
 
+# Tell the controller this worker booted and ran its user-data. A worker that
+# never gets here (no instance metadata, cloud-init DataSourceNone) leaves no
+# marker, and the controller replaces it once instead of waiting out the
+# evidence deadline.
+printf '{"schema":"rvoip-ec2-release-boot-v1","shard_id":"%s","run_id":"%s","started_at":"%s"}\n' \
+  "$SHARD_ID" "$RUN_ID" "$STARTED_AT" > /tmp/booted.json
+upload /tmp/booted.json "${PREFIX}/booted.json" || true
+
 capture_host_memory_policy() {
   local path
   {

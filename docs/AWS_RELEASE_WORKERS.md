@@ -116,6 +116,15 @@ Everything the fleet needs is created by the Terraform module in
   that terminates any `managed-by=github-actions` instance whose
   `rvoip-expires-at` tag is in the past. Controllers set the tag to four hours
   after creation.
+- **Boot replacement.** A worker uploads `<prefix>/booted.json` as soon as its
+  user-data runs. If a live worker has neither that marker nor a result 20
+  minutes after launch, it never booted: an instance with no metadata service
+  logs `DataSourceNone` from cloud-init, fails its instance status check, and
+  is unreachable over SSM. The controller terminates it and relaunches the
+  shard once, with the same user-data and evidence prefix, tagged
+  `rvoip-replaces=<old instance id>`, and records it in
+  `boot-replacements.json`. A second boot failure on that shard is left to the
+  evidence deadline.
 
 The module outputs map directly onto the repository variables the workflow
 reads:

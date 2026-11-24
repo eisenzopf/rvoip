@@ -215,6 +215,89 @@ class AwsReleaseFanoutTests(unittest.TestCase):
                 run_attempt="1",
             )
 
+    def test_boot_replacement_takes_only_live_workers_that_never_booted(self) -> None:
+        import datetime as dt
+
+        manifest = self.manifest()
+        performance, soak = manifest["workers"]
+        bucket = "evidence"
+        now = dt.datetime(2026, 11, 23, 18, 0, tzinfo=dt.timezone.utc)
+        old = "2026-11-23T17:30:00+00:00"  # 30 minutes before `now`
+        instances = [
+            {"id": "i-perf", "name": performance["name"], "state": "running", "launched": old},
+            {"id": "i-soak", "name": soak["name"], "state": "running", "launched": old},
+        ]
+
+        def decide(objects=(), replaced=(), launched=None, deadline=1200):
+            listed = [dict(item) for item in instances]
+            if launched:
+                for item in listed:
+                    item["launched"] = launched
+            return fanout.boot_replacements(
+                manifest=manifest,
+                instances=listed,
+                objects=set(objects),
+                replaced=list(replaced),
+                now=now,
+                bucket=bucket,
+                deadline_seconds=deadline,
+            )
+
+        # Neither worker booted, both launched 30 minutes ago.
+        self.assertEqual(
+            [item["shard_id"] for item in decide()],
+            [performance["id"], soak["id"]],
+        )
+        # A boot marker or a result means the worker ran its user-data.
+        self.assertEqual(
+            [item["shard_id"] for item in decide(objects={
+                f"s3://{bucket}/{performance['prefix']}/booted.json",
+                f"s3://{bucket}/{soak['prefix']}/result.json",
+            })],
+            [],
+        )
+        # Inside the deadline nothing is replaced yet.
+        self.assertEqual(decide(launched="2026-11-23T17:50:00Z"), [])
+        # A shard is replaced at most once.
+        self.assertEqual(
+            [item["instance_id"] for item in decide(
+                replaced=[{"shard_id": performance["id"], "instance_id": "i-perf"}]
+            )],
+            ["i-soak"],
+        )
+        # A stopped or terminated instance is the evidence loop's to report.
+        instances[0]["state"] = "terminated"
+        self.assertEqual([item["shard_id"] for item in decide()], [soak["id"]])
+
+    def test_boot_replacement_cli_reads_the_controller_snapshots(self) -> None:
+        manifest = self.manifest()
+        worker = manifest["workers"][0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "manifest.json").write_text(json.dumps(manifest))
+            (root / "instances.json").write_text(json.dumps([
+                {"id": "i-1", "name": worker["name"], "state": "pending",
+                 "launched": "2000-01-01T00:00:00+00:00"},
+            ]))
+            (root / "objects.txt").write_text("")
+            result = subprocess.run(
+                [
+                    "python3", str(SCRIPT), "boot-replacements",
+                    "--manifest", str(root / "manifest.json"),
+                    "--instances", str(root / "instances.json"),
+                    "--objects", str(root / "objects.txt"),
+                    "--replaced", str(root / "missing.json"),
+                    "--bucket", "evidence",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                json.loads(result.stdout),
+                [{"instance_id": "i-1", "shard_id": worker["id"], "worker": worker["name"]}],
+            )
+
     def test_early_failure_cutoff_waits_for_every_bounded_worker(self) -> None:
         manifest = self.cutoff_manifest()
         states = {worker["name"]: "RUNNING" for worker in manifest["workers"]}

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import datetime as dt
 import gzip
 import hashlib
 import json
@@ -19,6 +20,12 @@ from typing import Any
 
 MANIFEST_SCHEMA = "rvoip-ec2-release-fanout-v1"
 RESULT_SCHEMA = "rvoip-ec2-release-shard-v1"
+# A worker uploads `<prefix>/booted.json` once its user-data runs. One with no
+# marker and no result this long after launch never booted, and is replaced
+# once (0.5.0's C-triple-prime run: an instance with no metadata service sat
+# impaired until the evidence deadline).
+BOOT_DEADLINE_SECONDS = 20 * 60
+LIVE_INSTANCE_STATES = frozenset({"pending", "running"})
 COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 RUN_NUMBER = re.compile(r"^[1-9][0-9]*$")
 SHARD_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
@@ -350,6 +357,70 @@ def load_instance_states(path: Path) -> dict[str, str]:
             raise FanoutError(f"duplicate EC2 instance-state row: {row[0]}")
         states[row[0]] = row[1]
     return states
+
+
+def parse_launch_time(value: str) -> dt.datetime:
+    try:
+        launched = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise FanoutError(f"invalid EC2 launch time: {value!r}") from error
+    if launched.tzinfo is None:
+        raise FanoutError(f"EC2 launch time has no time zone: {value!r}")
+    return launched
+
+
+def boot_replacements(
+    *,
+    manifest: dict[str, Any],
+    instances: list[dict[str, Any]],
+    objects: set[str],
+    replaced: list[dict[str, Any]],
+    now: dt.datetime,
+    bucket: str,
+    deadline_seconds: int = BOOT_DEADLINE_SECONDS,
+) -> list[dict[str, str]]:
+    """Live workers that never booted and may be replaced once.
+
+    `instances` is the controller's describe-instances snapshot
+    (`id`, `name`, `state`, `launched`), `objects` the run's S3 object URIs,
+    and `replaced` the replacements already made (`shard_id`, `instance_id`).
+    A worker qualifies when it has neither a result nor a boot marker, its
+    only live instance launched at least `deadline_seconds` ago, and its
+    shard has not been replaced before. A worker that booted and then
+    stalls is the evidence deadline's business, not this one's.
+    """
+
+    validate_manifest(manifest)
+    replaced_shards = {str(entry.get("shard_id")) for entry in replaced}
+    replaced_ids = {str(entry.get("instance_id")) for entry in replaced}
+    decisions: list[dict[str, str]] = []
+    for worker in manifest["workers"]:
+        shard_id = worker["id"]
+        prefix = f"s3://{bucket}/{worker['prefix']}"
+        if shard_id in replaced_shards:
+            continue
+        if f"{prefix}/result.json" in objects or f"{prefix}/booted.json" in objects:
+            continue
+        live = [
+            instance
+            for instance in instances
+            if instance.get("name") == worker["name"]
+            and instance.get("state") in LIVE_INSTANCE_STATES
+            and instance.get("id") not in replaced_ids
+        ]
+        if len(live) != 1:
+            continue
+        launched = parse_launch_time(str(live[0].get("launched", "")))
+        if (now - launched).total_seconds() < deadline_seconds:
+            continue
+        decisions.append(
+            {
+                "shard_id": shard_id,
+                "worker": worker["name"],
+                "instance_id": str(live[0]["id"]),
+            }
+        )
+    return decisions
 
 
 def dependent_gates(
@@ -698,6 +769,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="gate catalog; scopes the cutoff to workers that depend on a failed shard",
     )
 
+    boot = commands.add_parser("boot-replacements")
+    boot.add_argument("--manifest", type=Path, required=True)
+    boot.add_argument("--instances", type=Path, required=True)
+    boot.add_argument("--objects", type=Path, required=True)
+    boot.add_argument("--replaced", type=Path, required=True)
+    boot.add_argument("--bucket", required=True)
+    boot.add_argument("--deadline-seconds", type=int, default=BOOT_DEADLINE_SECONDS)
+
     user_data = commands.add_parser("user-data")
     user_data.add_argument("--startup", type=Path, required=True)
     user_data.add_argument("--shutdown", type=Path)
@@ -748,6 +827,30 @@ def main(argv: list[str] | None = None) -> int:
                 dependencies=dependencies,
             )
             print(json.dumps(decision, sort_keys=True))
+        elif args.command == "boot-replacements":
+            instances = json.loads(args.instances.read_text(encoding="utf-8") or "[]")
+            replaced = (
+                json.loads(args.replaced.read_text(encoding="utf-8"))
+                if args.replaced.is_file()
+                else []
+            )
+            objects = {
+                line.strip()
+                for line in args.objects.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            }
+            if not isinstance(instances, list) or not isinstance(replaced, list):
+                raise FanoutError("boot-replacements needs JSON lists")
+            decisions = boot_replacements(
+                manifest=load_json(args.manifest, "EC2 fanout manifest"),
+                instances=instances,
+                objects=objects,
+                replaced=replaced,
+                now=dt.datetime.now(dt.timezone.utc),
+                bucket=args.bucket,
+                deadline_seconds=args.deadline_seconds,
+            )
+            print(json.dumps(decisions, sort_keys=True))
         else:
             env: dict[str, str] = {}
             for assignment in args.env:
