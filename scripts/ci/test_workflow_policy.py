@@ -372,6 +372,22 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("tshark", startup)
         self.assertIn("docker-compose-v2", startup)
 
+    def test_gate_output_stays_out_of_the_cached_target_directory(self) -> None:
+        # Swatinem/rust-cache saves all of target/. A shard directory under it
+        # came back in the next run's cache, and a gate that refuses existing
+        # output failed (0.5.0's report.regression-baseline, run 45274500898).
+        workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
+        jobs = re.split(r"(?m)^  (?=[a-z][a-z0-9-]*:$)", workflow.split("\njobs:\n", 1)[1])
+        cached = [job for job in jobs if "Swatinem/rust-cache@" in job]
+        self.assertTrue(cached)
+        for job in cached:
+            name = job.split(":", 1)[0]
+            with self.subTest(job=name):
+                if "gates.py run-shard" in job:
+                    self.assertIn("--output '${{ runner.temp }}/release-shard'", job)
+                self.assertNotRegex(job, r"--output\s+'?target/")
+                self.assertNotIn("path: target/release-shard", job)
+
     def test_release_workflow_is_ephemeral_and_fail_closed_on_aws(self) -> None:
         workflow = (ROOT / ".github/workflows/release-qualify.yml").read_text()
 
