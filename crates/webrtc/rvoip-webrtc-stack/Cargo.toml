@@ -244,3 +244,19 @@ workspace = true
 [dev-dependencies.signal]
 version = "0.21.1"
 package = "rtc-signal"
+
+[dependencies.turn-client]
+package = "turn"
+version = "=0.17.3"
+
+[dependencies.turn-util]
+package = "webrtc-util"
+version = "0.17.3"
+default-features = false
+features = ["conn", "vnet"]
+
+[dependencies.tokio-util]
+version = "0.7"
+
+[dependencies.url]
+version = "2"

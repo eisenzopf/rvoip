@@ -3,6 +3,9 @@
 pub(crate) mod driver;
 pub(crate) mod ice_gatherer;
 
+mod turn;
+pub use turn::TurnOptions;
+
 use log::error;
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket};
@@ -165,11 +168,14 @@ pub struct PeerConnectionBuilder<A: ToSocketAddrs> {
     tcp_addrs: Vec<A>,
     udp_advertised_ip: Option<IpAddr>,
     allocated_udp_sockets: Option<Arc<AtomicUsize>>,
+    turn_options: TurnOptions,
 }
 
 struct UdpSocketDriverOptions {
     advertised_ip: Option<IpAddr>,
     allocated_sockets: Option<Arc<AtomicUsize>>,
+    turn_options: TurnOptions,
+    port_range: Option<(IpAddr, u16, u16)>,
 }
 
 impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A> {
@@ -182,6 +188,7 @@ impl<A: ToSocketAddrs> Default for PeerConnectionBuilder<A> {
             tcp_addrs: vec![],
             udp_advertised_ip: None,
             allocated_udp_sockets: None,
+            turn_options: TurnOptions::default(),
         }
     }
 }
@@ -243,6 +250,12 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
         self
     }
 
+    /// Configure bounded TURN allocation and cleanup.
+    pub fn with_turn_options(mut self, options: TurnOptions) -> Self {
+        self.turn_options = options;
+        self
+    }
+
     pub fn with_tcp_addrs(mut self, tcp_addrs: Vec<A>) -> Self {
         self.tcp_addrs = tcp_addrs;
         self
@@ -274,6 +287,8 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
             UdpSocketDriverOptions {
                 advertised_ip: self.udp_advertised_ip,
                 allocated_sockets: self.allocated_udp_sockets,
+                turn_options: self.turn_options,
+                port_range: None,
             },
         )
         .await
@@ -311,6 +326,8 @@ impl<A: ToSocketAddrs> PeerConnectionBuilder<A> {
             UdpSocketDriverOptions {
                 advertised_ip: self.udp_advertised_ip,
                 allocated_sockets: self.allocated_udp_sockets,
+                turn_options: self.turn_options,
+                port_range: Some((bind_ip, port_start, port_end)),
             },
         )
         .await
@@ -420,6 +437,7 @@ pub trait PeerConnection: Send + Sync + 'static {
 pub(crate) struct PeerConnectionImpl {
     inner: Arc<PeerConnectionRef>,
     driver_handle: Mutex<Option<JoinHandle>>,
+    turn_lease: turn::TurnLease,
 }
 
 pub(crate) struct PeerConnectionRef {
@@ -467,6 +485,8 @@ impl PeerConnectionImpl {
             }
         }
 
+        let turn_lease =
+            turn::allocate(&opts, &udp_options, &runtime, &mut async_udp_sockets).await?;
         let (driver_event_tx, driver_event_rx) =
             channel(PEER_CONNECTION_DRIVER_EVENT_CHANNEL_CAPACITY);
         let peer_connection = Self {
@@ -480,11 +500,13 @@ impl PeerConnectionImpl {
                 driver_event_tx,
             }),
             driver_handle: Mutex::new(None),
+            turn_lease,
         };
 
         let (host_candidate_addrs, advertised_to_socket) =
             advertised_udp_addrs(&local_addrs, udp_options.advertised_ip)?;
-        let ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
+        let mut ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
+        ice_gatherer.relay_candidate = peer_connection.turn_lease.candidate();
         let socket_count = async_udp_sockets.len();
         let mut driver = PeerConnectionDriver::new(
             peer_connection.inner.clone(),
@@ -520,8 +542,10 @@ impl PeerConnectionImpl {
         let local_addr = socket.local_addr()?;
         let async_udp_socket = runtime.wrap_udp_socket(socket)?;
         let local_addrs = vec![local_addr];
-        let async_udp_sockets = HashMap::from([(local_addr, async_udp_socket)]);
+        let mut async_udp_sockets = HashMap::from([(local_addr, async_udp_socket)]);
 
+        let turn_lease =
+            turn::allocate(&opts, &udp_options, &runtime, &mut async_udp_sockets).await?;
         let (driver_event_tx, driver_event_rx) =
             channel(PEER_CONNECTION_DRIVER_EVENT_CHANNEL_CAPACITY);
         let peer_connection = Self {
@@ -535,10 +559,12 @@ impl PeerConnectionImpl {
                 driver_event_tx,
             }),
             driver_handle: Mutex::new(None),
+            turn_lease,
         };
         let (host_candidate_addrs, advertised_to_socket) =
             advertised_udp_addrs(&local_addrs, udp_options.advertised_ip)?;
-        let ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
+        let mut ice_gatherer = RTCIceGatherer::new(local_addrs, host_candidate_addrs, opts);
+        ice_gatherer.relay_candidate = peer_connection.turn_lease.candidate();
         let socket_count = async_udp_sockets.len();
         let mut driver = PeerConnectionDriver::new(
             peer_connection.inner.clone(),
@@ -586,23 +612,16 @@ impl Drop for AllocatedUdpSocketGuard {
 #[async_trait::async_trait]
 impl PeerConnection for PeerConnectionImpl {
     async fn close(&self) -> Result<()> {
-        {
-            let mut core = self.inner.core.lock().await;
-            core.close()?;
-        }
-        self.inner
+        let result = self.inner.core.lock().await.close();
+        let _ = self
+            .inner
             .driver_event_tx
-            .try_send(PeerConnectionDriverEvent::Close)
-            .map_err(|e| Error::Other(format!("{:?}", e)))?;
-
-        {
-            let mut driver_handle = self.driver_handle.lock().await;
-            if let Some(driver_handle) = driver_handle.take() {
-                driver_handle.abort();
-            }
+            .try_send(PeerConnectionDriverEvent::Close);
+        if let Some(handle) = self.driver_handle.lock().await.take() {
+            handle.abort();
         }
-
-        Ok(())
+        self.turn_lease.close().await;
+        result
     }
 
     async fn create_offer(
@@ -714,6 +733,14 @@ impl PeerConnection for PeerConnectionImpl {
 
     async fn set_configuration(&self, configuration: RTCConfiguration) -> Result<()> {
         let mut core = self.inner.core.lock().await;
+        let current = core.get_configuration();
+        if current.ice_servers() != configuration.ice_servers()
+            || current.ice_transport_policy() != configuration.ice_transport_policy()
+        {
+            return Err(Error::Other(
+                "changing ICE servers or policy requires a new peer connection".into(),
+            ));
+        }
         core.set_configuration(configuration)
     }
 
@@ -1004,5 +1031,15 @@ mod udp_port_range_tests {
         )
         .expect_err("mixed address families must fail");
         assert!(error.to_string().contains("address-family-mismatch"));
+    }
+}
+
+impl Drop for PeerConnectionImpl {
+    fn drop(&mut self) {
+        if let Ok(mut handle) = self.driver_handle.0.try_lock()
+            && let Some(handle) = handle.take()
+        {
+            handle.abort();
+        }
     }
 }

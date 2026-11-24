@@ -2612,7 +2612,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
- "webrtc-util 0.17.2",
+ "webrtc-util 0.17.3",
  "x25519-dalek",
  "x509-parser 0.16.0",
 ]
@@ -3687,6 +3687,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -3719,7 +3720,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tokio",
  "tower-service",
  "tracing",
@@ -5872,6 +5873,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "precis-core"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9c2e7b31f132e0c6f8682cfb7bf4a5340dbe925b7986618d0826a56dfe0c8e56"
+dependencies = [
+ "precis-tools",
+ "ucd-parse",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-profiles"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31e2768890a47af73a032af9f0cedbddce3c9d06cf8de201d5b8f2436ded7674"
+dependencies = [
+ "lazy_static",
+ "precis-core",
+ "precis-tools",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "precis-tools"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ade9e98ddb189f367494f1fa0a966a8d0d38f9a3eec4aef0f5ec035a7e0963d"
+dependencies = [
+ "regex",
+ "ucd-parse",
+]
+
+[[package]]
 name = "prefix-trie"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6012,7 +6046,7 @@ version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03da047801ff44bb6a4d407d4860c05fd70bb81714e6b2f3812603d5b145b042"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "itertools 0.14.0",
  "log",
  "multimap",
@@ -6215,7 +6249,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash 2.1.3",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -6257,7 +6291,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.5",
  "tracing",
  "windows-sys 0.61.2",
 ]
@@ -6676,16 +6710,21 @@ dependencies = [
  "http-body 1.1.0",
  "http-body-util",
  "hyper 1.11.0",
+ "hyper-rustls",
  "hyper-util",
  "js-sys",
  "log",
  "percent-encoding",
  "pin-project-lite",
+ "quinn",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-http 0.6.11",
  "tower-service",
@@ -6693,6 +6732,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "webpki-roots 1.0.11",
 ]
 
 [[package]]
@@ -7129,7 +7169,7 @@ checksum = "adad7f6a501162881032fc84b4bc78ae11f1b30748180b9f5cbe8810bf613aab"
 dependencies = [
  "bytes",
  "thiserror 1.0.69",
- "webrtc-util 0.17.2",
+ "webrtc-util 0.17.3",
 ]
 
 [[package]]
@@ -7159,7 +7199,7 @@ dependencies = [
  "rand 0.9.5",
  "serde",
  "thiserror 1.0.69",
- "webrtc-util 0.17.2",
+ "webrtc-util 0.17.3",
 ]
 
 [[package]]
@@ -7426,6 +7466,7 @@ dependencies = [
  "parking_lot 0.13.0",
  "prost",
  "prost-build",
+ "reqwest 0.12.28",
  "rustls",
  "rvoip-core",
  "rvoip-media-core",
@@ -8009,7 +8050,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webrtc-srtp 0.17.2",
- "webrtc-util 0.17.2",
+ "webrtc-util 0.17.3",
  "winapi",
  "x509-parser 0.18.1",
 ]
@@ -8514,7 +8555,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "tracing-subscriber",
- "turn",
+ "turn 0.11.0",
  "url",
  "vpx-encode",
  "webpki-roots 1.0.11",
@@ -8541,6 +8582,10 @@ dependencies = [
  "rvoip-rtc",
  "serde_json",
  "tokio",
+ "tokio-util",
+ "turn 0.17.3",
+ "url",
+ "webrtc-util 0.17.3",
 ]
 
 [[package]]
@@ -9462,6 +9507,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "stun"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94d8b3188f40c4c2b44afda6efe78ef890bbe9cb6dab86c953f8590081f8101c"
+dependencies = [
+ "base64 0.22.1",
+ "crc",
+ "lazy_static",
+ "md-5 0.10.6",
+ "rand 0.9.5",
+ "ring",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+ "webrtc-util 0.17.3",
+]
+
+[[package]]
 name = "substring"
 version = "1.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9567,7 +9631,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
@@ -10186,11 +10250,34 @@ dependencies = [
  "portable-atomic",
  "rand 0.9.5",
  "ring",
- "stun",
+ "stun 0.9.0",
  "thiserror 1.0.69",
  "tokio",
  "tokio-util",
  "webrtc-util 0.12.0",
+]
+
+[[package]]
+name = "turn"
+version = "0.17.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d99e003b4c5118d91b258844f1e0f96e32677bd6523205d4b3c0a4dbf684485"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures",
+ "log",
+ "md-5 0.10.6",
+ "portable-atomic",
+ "precis-profiles",
+ "rand 0.9.5",
+ "ring",
+ "stun 0.17.3",
+ "subtle",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "webrtc-util 0.17.3",
 ]
 
 [[package]]
@@ -10204,6 +10291,15 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ucd-parse"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ce84be817ae77653b0f919d43f11ddc5bf0ca17b5bf4d80f128d80c2958b5e0"
+dependencies = [
+ "regex-lite",
+]
 
 [[package]]
 name = "ucd-trie"
@@ -10780,10 +10876,10 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "smol_str",
- "stun",
+ "stun 0.9.0",
  "thiserror 1.0.69",
  "tokio",
- "turn",
+ "turn 0.11.0",
  "unicase",
  "url",
  "waitgroup",
@@ -10825,10 +10921,10 @@ dependencies = [
  "rand 0.9.5",
  "serde",
  "serde_json",
- "stun",
+ "stun 0.9.0",
  "thiserror 1.0.69",
  "tokio",
- "turn",
+ "turn 0.11.0",
  "url",
  "uuid",
  "waitgroup",
@@ -10923,7 +11019,7 @@ dependencies = [
  "subtle",
  "thiserror 1.0.69",
  "tokio",
- "webrtc-util 0.17.2",
+ "webrtc-util 0.17.3",
 ]
 
 [[package]]
@@ -10948,9 +11044,9 @@ dependencies = [
 
 [[package]]
 name = "webrtc-util"
-version = "0.17.2"
+version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1beae0b4f24969741c26ca282a257dc5823bd9cbe608f7e3ca3775102d323ad9"
+checksum = "3b5fefd16348c0923d686d02a8d0c3eed16115190fdb64ee163ee4310bbf57e1"
 dependencies = [
  "async-trait",
  "bitflags 1.3.2",

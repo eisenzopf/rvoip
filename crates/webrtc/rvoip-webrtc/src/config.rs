@@ -144,6 +144,17 @@ pub struct WebRtcConfig {
     #[serde(default = "default_gather_timeout_secs")]
     pub gather_timeout_secs: u64,
 
+    /// Per-address TURN allocation budget inside gather_timeout_secs.
+    #[serde(default = "default_turn_timeout_secs")]
+    pub turn_attempt_timeout_secs: u64,
+
+    /// Deadline for TURN permission/channel transactions.
+    #[serde(default = "default_turn_timeout_secs")]
+    pub turn_send_timeout_secs: u64,
+    /// Deadline for best-effort TURN allocation release.
+    #[serde(default = "default_turn_timeout_secs")]
+    pub turn_close_timeout_secs: u64,
+
     /// Absolute wait for the peer connection to reach `Connected`, covering
     /// ICE selection and the DTLS handshake after signaling completes.
     #[serde(default = "default_connection_timeout_secs")]
@@ -361,6 +372,10 @@ pub enum IceTransportPolicy {
     Relay,
 }
 
+fn default_turn_timeout_secs() -> u64 {
+    2
+}
+
 fn default_gather_timeout_secs() -> u64 {
     5
 }
@@ -417,6 +432,9 @@ impl Default for WebRtcConfig {
             nat_1to1_ips: Vec::new(),
             nat_1to1_candidate_type: Nat1To1CandidateType::Host,
             ice_servers: vec![IceServerConfig::stun("stun:stun.l.google.com:19302")],
+            turn_attempt_timeout_secs: default_turn_timeout_secs(),
+            turn_send_timeout_secs: default_turn_timeout_secs(),
+            turn_close_timeout_secs: default_turn_timeout_secs(),
             gather_timeout_secs: default_gather_timeout_secs(),
             connection_timeout_secs: default_connection_timeout_secs(),
             capabilities: default_capabilities(),
@@ -448,6 +466,9 @@ impl WebRtcConfig {
             nat_1to1_ips: Vec::new(),
             nat_1to1_candidate_type: Nat1To1CandidateType::Host,
             ice_servers: vec![],
+            turn_attempt_timeout_secs: default_turn_timeout_secs(),
+            turn_send_timeout_secs: default_turn_timeout_secs(),
+            turn_close_timeout_secs: default_turn_timeout_secs(),
             gather_timeout_secs: 5,
             connection_timeout_secs: default_connection_timeout_secs(),
             capabilities: crate::sdp::capability::default_webrtc_capabilities(),

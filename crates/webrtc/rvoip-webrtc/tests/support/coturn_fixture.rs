@@ -75,6 +75,26 @@ impl CoturnFixture {
         self.host_port
     }
 
+    #[allow(dead_code)]
+    pub async fn allocation_count(&self) -> usize {
+        self.server
+            .get_allocations_info(None)
+            .await
+            .expect("query allocations")
+            .len()
+    }
+
+    #[allow(dead_code)]
+    pub async fn wait_for_no_allocations(&self) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while self.allocation_count().await != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("TURN allocation must be explicitly released");
+    }
+
     pub async fn close(self) -> Result<(), turn_server::Error> {
         self.server.close().await
     }

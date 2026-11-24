@@ -40,6 +40,7 @@ pub struct ConnectMediaConnectOptions {
     pub media_connect_timeout: Duration,
     /// Chime protocol PING interval.
     pub keepalive_interval: Duration,
+    pub turn: crate::turn::ConnectTurnConfig,
 }
 
 impl fmt::Debug for ConnectMediaConnectOptions {
@@ -186,7 +187,12 @@ impl ConnectMediaConnector for ChimeWebRtcMediaConnector {
 
         let join = ChimeSignalingClient::join(connection, options.signaling_timeout).await?;
         let mut webrtc = options.webrtc;
-        webrtc.ice_servers.extend(join.ice_servers());
+        webrtc
+            .ice_servers
+            .extend(crate::turn::resolve(connection, &options.turn, join.ice_servers()).await?);
+        if options.turn.relay_only {
+            webrtc.ice_transport_policy = rvoip_webrtc::config::IceTransportPolicy::Relay;
+        }
 
         let peer = RvoipPeerConnection::new(&webrtc, PeerRole::Offerer).await?;
         peer.add_local_audio_track().await?;
@@ -200,6 +206,11 @@ impl ConnectMediaConnector for ChimeWebRtcMediaConnector {
             .await?;
         peer.set_remote_answer(&answer_sdp).await?;
         peer.wait_connected(options.media_connect_timeout).await?;
+        if let Some(pair) = peer.selected_candidate_pair().await {
+            tracing::info!(local_candidate_type = %pair.local_candidate_type,
+                remote_candidate_type = %pair.remote_candidate_type,
+                nominated = pair.nominated, "Connect ICE selected candidate pair");
+        }
 
         let negotiated = NegotiatedCodecs::default();
         let codec = negotiated.audio.clone().unwrap_or_else(opus_codec);
@@ -686,6 +697,7 @@ mod tests {
             },
             signaling_timeout: Duration::from_secs(1),
             media_connect_timeout: Duration::from_secs(2),
+            turn: Default::default(),
             keepalive_interval: Duration::from_secs(3),
         };
         let event = ConnectMediaDtmfEvent {
@@ -831,6 +843,7 @@ mod tests {
                     webrtc: local_webrtc_config(),
                     signaling_timeout: Duration::from_secs(5),
                     media_connect_timeout: Duration::from_secs(5),
+                    turn: Default::default(),
                     keepalive_interval: Duration::from_millis(20),
                 },
             )

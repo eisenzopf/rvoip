@@ -36,16 +36,23 @@ async fn relay_policy_with_coturn_fixture_builds_peer() {
     );
     peer.add_local_audio_track().await.expect("audio");
 
-    // Build a Relay-only offer. We don't try to complete the handshake
-    // (would need a remote peer also dialed via coturn); the assertion is
-    // that the config plumbs through cleanly and the engine accepts it.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        peer.create_offer_and_gather(),
-    )
-    .await;
+    let offer = tokio::time::timeout(Duration::from_secs(8), peer.create_offer_and_gather())
+        .await
+        .expect("offer deadline")
+        .expect("relay offer");
+    let candidates: Vec<_> = offer
+        .lines()
+        .filter(|line| line.starts_with("a=candidate:"))
+        .collect();
+    assert!(
+        !candidates.is_empty(),
+        "relay policy must advertise a candidate"
+    );
+    assert!(candidates.iter().all(|line| line.contains(" typ relay")));
+    peer.close().await.expect("close relay peer");
 
     drop(peer);
+    coturn.wait_for_no_allocations().await;
     coturn.close().await.expect("close TURN fixture");
 }
 
@@ -60,7 +67,6 @@ async fn relay_policy_with_coturn_fixture_builds_peer() {
 /// 2. Media frames traverse the relay end to end (not just config plumbing).
 /// 3. The G4 `selected_pair` stats surface the relay candidate type.
 #[tokio::test]
-#[ignore = "requires the owner-reviewed UDP TURN alpha-fork candidate"]
 async fn relay_only_two_peer_media_round_trip() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let coturn = CoturnFixture::start().await.expect("start TURN fixture");
@@ -165,7 +171,100 @@ async fn relay_only_two_peer_media_round_trip() {
         "selected_pair.local_candidate_type must be 'relay' under IceTransportPolicy::Relay"
     );
 
+    // Verify the reverse media direction too; this must traverse the second
+    // allocation and its permission rather than a directly reachable host.
+    let reverse =
+        RvoipPeerConnection::prime_remote_track(&answerer, &offerer, Duration::from_secs(10))
+            .await
+            .expect("reverse relay track");
+    offerer_stream.attach_remote(reverse);
+    let mut reverse_inbound = offerer_stream.try_frames_in().unwrap();
+    answerer_stream
+        .frames_out()
+        .send(rvoip_core::stream::MediaFrame {
+            stream_id: answerer_stream.id(),
+            kind: rvoip_core::stream::StreamKind::Audio,
+            payload: silent_opus_payload(),
+            timestamp_rtp: 960 * 40,
+            captured_at: chrono::Utc::now(),
+            payload_type: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        !tokio::time::timeout(Duration::from_secs(10), reverse_inbound.recv())
+            .await
+            .unwrap()
+            .unwrap()
+            .payload
+            .is_empty()
+    );
+    assert_eq!(coturn.allocation_count().await, 2);
     offerer.close().await.ok();
     answerer.close().await.ok();
+    coturn.wait_for_no_allocations().await;
     coturn.close().await.expect("close TURN fixture");
+}
+
+#[tokio::test]
+async fn relay_peer_drop_releases_allocation() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let coturn = CoturnFixture::start().await.unwrap();
+    let mut config = WebRtcConfig::loopback();
+    config.ice_servers = vec![coturn.ice_config()];
+    config.ice_transport_policy = IceTransportPolicy::Relay;
+    let peer = RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .unwrap();
+    assert_eq!(coturn.allocation_count().await, 1);
+    drop(peer);
+    coturn.wait_for_no_allocations().await;
+    coturn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn relay_policy_fails_closed_without_usable_credentials() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let coturn = CoturnFixture::start().await.unwrap();
+    let mut config = WebRtcConfig::loopback();
+    config.ice_transport_policy = IceTransportPolicy::Relay;
+    assert!(RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .is_err());
+    let mut server = coturn.ice_config();
+    server.credential = Some("wrong-test-password".into());
+    config.ice_servers = vec![server];
+    config.gather_timeout_secs = 1;
+    assert!(tokio::time::timeout(
+        Duration::from_secs(3),
+        RvoipPeerConnection::new(&config, PeerRole::Offerer)
+    )
+    .await
+    .expect("bounded failed allocation")
+    .is_err());
+    coturn.wait_for_no_allocations().await;
+    coturn.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn allocation_falls_back_to_a_reachable_server() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let blackhole = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let coturn = CoturnFixture::start().await.unwrap();
+    let mut config = WebRtcConfig::loopback();
+    let mut unavailable = coturn.ice_config();
+    unavailable.urls = vec![format!(
+        "turn:{}?transport=udp",
+        blackhole.local_addr().unwrap()
+    )];
+    config.ice_servers = vec![unavailable, coturn.ice_config()];
+    config.ice_transport_policy = IceTransportPolicy::Relay;
+    config.turn_attempt_timeout_secs = 1;
+    config.gather_timeout_secs = 4;
+    let peer = RvoipPeerConnection::new(&config, PeerRole::Offerer)
+        .await
+        .expect("second TURN server must be attempted");
+    peer.close().await.unwrap();
+    coturn.wait_for_no_allocations().await;
+    coturn.close().await.unwrap();
 }

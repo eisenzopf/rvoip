@@ -49,6 +49,7 @@ tracing.workspace = true
 thiserror.workspace = true
 chrono.workspace = true
 url = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 zeroize.workspace = true
 
 # Chime signaling: protobuf-over-secure-WebSocket.
