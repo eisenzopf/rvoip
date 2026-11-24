@@ -13,7 +13,7 @@ generated from clean tested commit `2ae9fa49c5903a3e947a53609ee3f7d64c71a013`
 `m5.4xlarge` workers in run
 [`45274500898`](https://github.com/eisenzopf/rvoip/actions/runs/45274500898).
 
-The `0.4.0` deployment profile constructors (`Config::public_server`,
+The deployment profile constructors added in `0.4.0` (`Config::public_server`,
 `carrier_trunk_udp`, `behind_nat`, `tls_direct_routing`) are covered by
 rvoip-sip tests only (`deployment_profiles.rs`,
 `tls_direct_routing_integration.rs`); no release gate runs a profile against an

@@ -475,6 +475,77 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             self.assertIn("0.3.9 remains the latest published release", updated)
             self.assertIn('rvoip = { version = "0.3.10"', updated)
 
+    # The 0.5.0 bump's Prepare relabelled these 0.4.0 evidence and history
+    # lines as 0.5.0 (restored by hand in 2ae9fa49c), and correctly bumped
+    # the live references below them.
+    RELEASE_EVIDENCE_LINES_0_4_0 = (
+        "retains prior releases and the detailed 0.4.0 performance evaluation.",
+        "## Current 0.4.0 release evidence",
+        "[`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0) and",
+        "Current published qualified runtime crate version: `0.4.0`.",
+        "Protected run `38195041080` qualified the exact published `0.4.0` commit",
+        "`f4d528eaabbac935bce9a6404d3ce4fdec35ed0f` (tag `v0.4.0`, publish run",
+        "| RFC 4028 session timers | Yes after 0.4.0: `session_timer` on dedicated `timers = yes` endpoints |",
+        "After 0.4.0 the FreeSWITCH gate also runs `rtcp_mux` and `session_timer`",
+        "`examples/pbx/pbx_evidence.sh`. These rows are release-gated after 0.4.0; no",
+        "matrix and becomes mandatory in 0.4.0.",
+        "Current published reference: [protected 0.4.0 qualification](BETA_RELEASE_REPORT.md),",
+        "(tag `v0.4.0`). Its performance rows ran fresh on 16-vCPU AWS `m5.4xlarge`",
+        "The deployment profile constructors added in `0.4.0` (`Config::public_server`,",
+        "The published `0.4.0` release came from a strict, exact-source qualification.",
+        "`0.4.0` is also the first release gated on the RFC 7501/7502 benchmark",
+    )
+    LIVE_RELEASE_LINES_0_4_0 = (
+        "[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.4.0)](https://crates.io/crates/rvoip/0.4.0)",
+        "[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.4.0?label=SIP%20API)](https://docs.rs/rvoip-sip/0.4.0/rvoip_sip/)",
+        'rvoip = { version = "0.4.0", features = ["app"] }',
+        "All 14 extension crates ship at `0.4.0`. They stay optional so protocol",
+        "> **Unified `0.4.0` release train.** The `sip` feature is the release-gated beta",
+        "> **rvoip 0.4.0 security notice:** direct AES-CM SRTP and SDES remain",
+        "as available below may be selected in 0.4.0.",
+        "## SRTP availability in 0.4.0",
+        "| Kamailio | Transaction-stateful proxy interoperability peer | Required for the `0.4.0` proxy release gate. |",
+        "Jambonz 0.4.0 profile's UDP/plain-RTP boundary: authenticated registration,",
+        "| Scenario | Required for `0.4.0` |",
+        "publication of `0.4.0` requires a new complete matrix PASS.",
+        "feature-gated 0.4.0 capability whose claim is bounded by fresh protected",
+        "- **[API reference](https://docs.rs/rvoip-sip-core/0.4.0/rvoip_sip_core/)** - Published types and methods for this release",
+        "crate now carries the required 0.4.0 package version.",
+        'EXPECTED_RELEASE_VERSION="0.4.0"',
+    )
+
+    def test_release_evidence_lines_match_the_0_5_0_bump(self) -> None:
+        for line in self.RELEASE_EVIDENCE_LINES_0_4_0:
+            with self.subTest(evidence=line):
+                self.assertTrue(release.release_evidence_line(line, "0.4.0"))
+        for line in self.LIVE_RELEASE_LINES_0_4_0:
+            with self.subTest(live=line):
+                self.assertFalse(release.release_evidence_line(line, "0.4.0"))
+
+    def test_all_marker_update_keeps_release_evidence_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "README.md"
+            body = "\n".join(
+                self.RELEASE_EVIDENCE_LINES_0_4_0 + self.LIVE_RELEASE_LINES_0_4_0
+            ) + "\n"
+            path.write_text(body, encoding="utf-8")
+            with mock.patch.object(
+                release, "ACTIVE_RELEASE_METADATA_FILES", (Path("README.md"),)
+            ):
+                edits = release.planned_release_metadata_edits(
+                    root, "0.4.0", "0.5.0"
+                )
+
+            updated = edits[path].decode().splitlines()
+            evidence = len(self.RELEASE_EVIDENCE_LINES_0_4_0)
+            self.assertEqual(updated[:evidence], list(self.RELEASE_EVIDENCE_LINES_0_4_0))
+            self.assertEqual(
+                updated[evidence:],
+                [line.replace("0.4.0", "0.5.0") for line in self.LIVE_RELEASE_LINES_0_4_0],
+            )
+            self.assertTrue(edits[path].decode().endswith("\n"))
+
     def test_active_release_metadata_rejects_stale_dependency_example(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
