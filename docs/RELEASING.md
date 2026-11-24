@@ -225,7 +225,10 @@ gate's evidence beside the fresh evidence, so the performance reports render
 from the reused results and the next run can reuse them again. Performance
 gates are reused as a group from one prior run, because their results are
 stored per worker; the canonical 2,000-CPS evaluation is bound to the ancestor
-commit that measured it.
+commit that measured it. The report renderer accepts such results only when
+their commit is in the plan's receipt chain and is the commit the reused
+performance receipts name, and the release report then names that commit
+instead of claiming the rows were measured on the tested commit.
 
 After collection, `scripts/release/render_qualification_reports.py` rejects any
 missing, duplicate, stale, cross-candidate, unclean, or hash-mismatched receipt,
