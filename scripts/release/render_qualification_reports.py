@@ -32,6 +32,8 @@ ATTESTATION_SCHEMA = "rvoip-release-qualification-report-attestation-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 SEMVER_RE = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
+# Performance gates whose results the collector stages under _perf-results.
+PERFORMANCE_RESULT_CLASS_PREFIX = "ec2-performance"
 REPORT_FILES = (
     "BETA_RELEASE_REPORT.md",
     "BETA_GATE_REPORT.md",
@@ -268,6 +270,24 @@ def load_bundle(
         for row in gate_rows
         if row["category"] == "Performance and resiliency" and row["source"] == "reused"
     )
+    # Reused performance gates come from one prior run, with their staged
+    # results. Those were measured on the commit the gates' receipts name:
+    # the candidate, or an ancestor in the plan's receipt chain whose inputs
+    # match after version normalization (a version-bump candidate), so they
+    # report that commit's own rvoip-sip version.
+    receipt_chain = {
+        entry.get("candidate_sha")
+        for entry in plan.get("receipt_chain", [])
+        if isinstance(entry, dict)
+    }
+    reused_measurement_commits = {
+        row["receipt_candidate_sha"]
+        for row in gate_rows
+        if row["source"] == "reused"
+        and str(row["resource_class"]).startswith(PERFORMANCE_RESULT_CLASS_PREFIX)
+        and row["receipt_candidate_sha"] in receipt_chain
+    }
+    measured_commits: set[str] = set()
     measurements: list[dict[str, Any]] = []
     perf_root = evidence_root / "_perf-results"
     if not perf_root.is_dir() and fresh_performance_gates > 0:
@@ -286,12 +306,19 @@ def load_bundle(
             continue
         if not ("results" in payload or "headline" in payload):
             continue
-        if (
-            environment.get("git_commit") != candidate
-            or environment.get("git_dirty") is not False
-            or environment.get("rvoip_sip_version") != version
-        ):
+        measured_commit = environment.get("git_commit")
+        measured_version = environment.get("rvoip_sip_version")
+        if measured_commit == candidate:
+            exact = measured_version == version
+        else:
+            exact = (
+                measured_commit in reused_measurement_commits
+                and isinstance(measured_version, str)
+                and SEMVER_RE.fullmatch(measured_version) is not None
+            )
+        if environment.get("git_dirty") is not False or not exact:
             raise ReportError(f"{path}: performance result is not exact-candidate {version} evidence")
+        measured_commits.add(measured_commit)
         results = payload.get("results") if isinstance(payload.get("results"), dict) else {}
         headline = payload.get("headline") if isinstance(payload.get("headline"), dict) else {}
         load = payload.get("load") if isinstance(payload.get("load"), dict) else {}
@@ -336,6 +363,7 @@ def load_bundle(
             "legacy_required_count": coverage.get("required_legacy_count"),
             "legacy_covered_count": coverage.get("profile_legacy_count"),
             "reused_performance_gate_count": reused_performance_gates,
+            "performance_measured_commits": sorted(measured_commits),
         },
         "inputs": {
             "catalog_sha256": expected_catalog_hash,
@@ -347,6 +375,23 @@ def load_bundle(
         "performance_measurements": measurements,
     }
     return summary, gate_rows, measurements
+
+
+def performance_binding(summary: dict[str, Any]) -> str:
+    candidate = summary["release"]["candidate_sha"]
+    others = [
+        commit
+        for commit in summary["qualification"].get("performance_measured_commits", [])
+        if commit != candidate
+    ]
+    if not others:
+        return "- Every published performance row is bound to the tested commit, a clean tree, and rvoip-sip at the release version."
+    named = ", ".join(f"`{commit}`" for commit in others)
+    return (
+        "- Every published performance row is bound to a clean tree and to the tested commit or, "
+        f"for performance gates reused through the receipt chain, the ancestor that measured them ({named}), "
+        "with that commit's own rvoip-sip version."
+    )
 
 
 def render_release(summary: dict[str, Any], provenance: dict[str, str]) -> str:
@@ -391,7 +436,7 @@ def render_release(summary: dict[str, Any], provenance: dict[str, str]) -> str:
             f"- Qualification aggregate: `{summary['inputs']['aggregate_sha256']}`",
             f"- GitHub artifact archive: `{provenance['artifact_digest']}`",
             "- Every fresh gate receipt and command log was rehashed before rendering; any reused receipt remains explicitly identified and was input-bound by the qualification collector.",
-            "- Every published performance row is bound to the tested commit, a clean tree, and rvoip-sip at the release version.",
+            performance_binding(summary),
             "",
             "## Claim boundary",
             "",

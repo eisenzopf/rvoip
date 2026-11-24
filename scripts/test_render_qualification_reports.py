@@ -322,6 +322,108 @@ class QualificationReportTests(unittest.TestCase):
         self.assertEqual(measurements, [])
         self.assertEqual(summary["qualification"]["reused_performance_gate_count"], 1)
 
+    def reuse_performance_from(self, ancestor: str, *, in_chain: bool) -> None:
+        """Make test.workspace a performance gate reused from `ancestor`,
+        with the staged result measured there at the ancestor's version."""
+
+        self.catalog["gates"][1]["category"] = "Performance and resiliency"
+        self.catalog["gates"][1]["resource_class"] = "ec2-performance"
+        receipt_path = self.evidence / "test.workspace/receipt.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["candidate_sha"] = ancestor
+        planned = self.plan["gates"][1]
+        planned["decision"] = "REUSE"
+        planned["reuse_receipt"] = receipt
+        planned["reuse_receipt_sha256"] = reports.sha256_bytes(
+            reports.canonical_bytes(receipt)
+        )
+        self.plan["receipt_chain"] = [{"candidate_sha": self.candidate}] + (
+            [{"candidate_sha": ancestor}] if in_chain else []
+        )
+        accepted = self.aggregate["accepted_gates"][1]
+        accepted["source"] = "reused"
+        accepted["receipt_candidate_sha"] = ancestor
+        accepted["receipt_sha256"] = reports.sha256_bytes(reports.canonical_bytes(receipt))
+        self.aggregate["fresh_count"] = 1
+        self.aggregate["reused_count"] = 1
+        self.aggregate["catalog_sha256"] = reports.sha256_bytes(
+            reports.canonical_bytes(self.catalog)
+        )
+        shutil.rmtree(self.evidence / "test.workspace")
+        result = self.evidence / "_perf-results/host/perf_call_setup.json"
+        payload = json.loads(result.read_text())
+        payload["environment"]["git_commit"] = ancestor
+        payload["environment"]["rvoip_sip_version"] = "0.3.8"
+        result.write_text(json.dumps(payload))
+        self.catalog_path.write_bytes(reports.pretty_bytes(self.catalog))
+        self.plan_path.write_bytes(reports.pretty_bytes(self.plan))
+        self.aggregate_path.write_bytes(reports.pretty_bytes(self.aggregate))
+
+    def test_accepts_performance_reused_from_a_receipt_chain_ancestor(self) -> None:
+        # A version-bump candidate reuses its parent's performance gates; the
+        # staged results name the parent commit and its own version.
+        ancestor = "b" * 40
+        self.reuse_performance_from(ancestor, in_chain=True)
+        summary, _, measurements = reports.load_bundle(
+            catalog_path=self.catalog_path,
+            plan_path=self.plan_path,
+            aggregate_path=self.aggregate_path,
+            evidence_root=self.evidence,
+            version="0.3.9",
+        )
+        self.assertEqual(len(measurements), 1)
+        self.assertEqual(
+            summary["qualification"]["performance_measured_commits"], [ancestor]
+        )
+        self.generate()
+        release = (self.output / "BETA_RELEASE_REPORT.md").read_text()
+        self.assertIn(f"the ancestor that measured them (`{ancestor}`)", release)
+        reports.verify_bundle(self.output, MODULE_PATH)
+
+    def test_rejects_reused_performance_from_outside_the_receipt_chain(self) -> None:
+        self.reuse_performance_from("b" * 40, in_chain=False)
+        with self.assertRaisesRegex(reports.ReportError, "not exact-candidate"):
+            reports.load_bundle(
+                catalog_path=self.catalog_path,
+                plan_path=self.plan_path,
+                aggregate_path=self.aggregate_path,
+                evidence_root=self.evidence,
+                version="0.3.9",
+            )
+
+    def test_rejects_ancestor_performance_when_the_gates_ran_fresh(self) -> None:
+        self.plan["receipt_chain"] = [
+            {"candidate_sha": self.candidate},
+            {"candidate_sha": "b" * 40},
+        ]
+        self.plan_path.write_bytes(reports.pretty_bytes(self.plan))
+        self.catalog["gates"][1]["resource_class"] = "ec2-performance"
+        self.aggregate["catalog_sha256"] = reports.sha256_bytes(
+            reports.canonical_bytes(self.catalog)
+        )
+        self.catalog_path.write_bytes(reports.pretty_bytes(self.catalog))
+        self.aggregate_path.write_bytes(reports.pretty_bytes(self.aggregate))
+        result = self.evidence / "_perf-results/host/perf_call_setup.json"
+        payload = json.loads(result.read_text())
+        payload["environment"]["git_commit"] = "b" * 40
+        result.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(reports.ReportError, "not exact-candidate"):
+            reports.load_bundle(
+                catalog_path=self.catalog_path,
+                plan_path=self.plan_path,
+                aggregate_path=self.aggregate_path,
+                evidence_root=self.evidence,
+                version="0.3.9",
+            )
+
+    def test_exact_candidate_performance_keeps_the_tested_commit_wording(self) -> None:
+        self.generate()
+        release = (self.output / "BETA_RELEASE_REPORT.md").read_text()
+        self.assertIn(
+            "Every published performance row is bound to the tested commit, a clean tree,",
+            release,
+        )
+
     def test_rejects_fresh_performance_gate_without_local_measurements(self) -> None:
         self.catalog["gates"][1]["category"] = "Performance and resiliency"
         self.aggregate["catalog_sha256"] = reports.sha256_bytes(
