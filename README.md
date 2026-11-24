@@ -53,8 +53,9 @@ excess with fast 503 responses, and recovers cleanly once the load drops.
   maximum; long-call capacity, where most SBC datasheets quote their
   concurrency, has not been measured yet.
 - The server is a cloud VM, not an appliance.
-- p99 setup is the RFC 6076 session request delay measured at 90% of the max
-  rate; n/m = not measured.
+- p50 and p99 setup are the RFC 6076 session request delay measured at 90% of
+  the max rate, recorded in whole milliseconds (so 1 ms means 1 ms or less);
+  n/m = not measured.
 - The UDP + RTP rate was confirmed twice rather than three times.
 - The release check also passed 5% above the TLS and UDP signaling rates, so
   those two figures may be slightly understated.
