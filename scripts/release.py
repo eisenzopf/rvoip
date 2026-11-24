@@ -120,6 +120,23 @@ DEPENDENCY_EXAMPLE_VERSION = re.compile(
     r'(?=[^\n}]*\bpackage[ \t]*=[ \t]*"rvoip(?:-[A-Za-z0-9_-]+)?")'
     rf'[^\n}}]*\bversion[ \t]*=[ \t]*"(?P<renamed>{_DEPENDENCY_REQUIREMENT})"[^\n}}]*\}})'
 )
+# Phrases that bind a version to release evidence or history: what a
+# published release recorded, or when a behaviour arrived. Prepare's
+# all-marker update leaves these lines alone, so a version bump never
+# relabels the published release's qualification as the next one's
+# (the 0.5.0 bump relabelled 15 such lines, restored by hand in 2ae9fa49c).
+# `{version}` is the escaped workspace version being replaced.
+RELEASE_EVIDENCE_LINE_PATTERNS = (
+    r"\b(?:after|since)\s+`?{version}`?",
+    r"\b(?:new|introduced|added|mandatory)\s+in\s+`?{version}`?",
+    r"\bpublished\s+`?v?{version}`?",
+    r"`?{version}`?\s+(?:release\s+evidence|performance\s+evaluation)",
+    r"\bprotected\s+`?{version}`?\s+qualification",
+    r"`?{version}`?\s+is\s+(?:also\s+)?the\s+first\s+release",
+    r"\btag\s+`v{version}`",
+    r"/releases/tag/v{version}\b",
+    r"\bqualified\s+runtime\s+crate\s+version:\s*`{version}`",
+)
 CURRENT_WORKSPACE_RELEASE_VERSION = re.compile(
     r"(?m)^(?P<prefix>Current workspace runtime crate version:\s*`)"
     r"[0-9]+\.[0-9]+\.[0-9]+(?P<suffix>`\.)$"
@@ -667,7 +684,9 @@ def planned_release_metadata_edits(
     version and the next version.  In those files, only live dependency
     examples are mechanical release metadata; the remaining version prose is
     author-owned history or qualification context.  Documents that do not yet
-    mention the target retain the legacy all-marker update.
+    mention the target get the all-marker update, except on lines that cite
+    the version as release evidence or history
+    (`RELEASE_EVIDENCE_LINE_PATTERNS`).
     """
     validate_active_release_metadata(root, current_version)
     changes: dict[Path, bytes] = {}
@@ -690,9 +709,30 @@ def planned_release_metadata_edits(
                 updated,
             )
         else:
-            updated = text.replace(current_version, version)
+            updated = replace_version_outside_evidence(text, current_version, version)
         changes[path] = updated.encode()
     return changes
+
+
+def release_evidence_line(line: str, version: str) -> bool:
+    """Whether `line` cites `version` as release evidence or history."""
+    escaped = re.escape(version)
+    return any(
+        re.search(pattern.format(version=escaped), line, flags=re.IGNORECASE)
+        for pattern in RELEASE_EVIDENCE_LINE_PATTERNS
+    )
+
+
+def replace_version_outside_evidence(
+    text: str, current_version: str, version: str
+) -> str:
+    """The all-marker update, except on release evidence and history lines."""
+    return "".join(
+        line
+        if release_evidence_line(line, current_version)
+        else line.replace(current_version, version)
+        for line in text.splitlines(keepends=True)
+    )
 
 
 def validate_active_release_metadata(root: Path, version: str) -> None:

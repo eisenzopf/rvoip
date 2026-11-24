@@ -12,7 +12,7 @@ generated from clean tested commit `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`
 (tag `v0.4.0`). Its performance rows ran fresh on 16-vCPU AWS `m5.4xlarge`
 workers.
 
-The `0.4.0` deployment profile constructors (`Config::public_server`,
+The deployment profile constructors added in `0.4.0` (`Config::public_server`,
 `carrier_trunk_udp`, `behind_nat`, `tls_direct_routing`) are covered by
 rvoip-sip tests only (`deployment_profiles.rs`,
 `tls_direct_routing_integration.rs`); no release gate runs a profile against an

@@ -55,6 +55,14 @@ preserves existing file permission modes, including executable release
 wrappers. The release PR must pass the normal `PR Gate`; it is never pushed
 directly to `main`.
 
+Preparation moves every live reference to the new version: dependency
+examples, badges, docs.rs links, and "this release" prose. It leaves lines
+that cite the old version as release evidence or history, for example the
+published release's qualification run and tag, "since 0.5.0", or "added in
+0.4.0" (`RELEASE_EVIDENCE_LINE_PATTERNS` in `scripts/release.py`). Those lines
+change when the published release's evidence is promoted, not at the bump.
+Write new evidence prose in one of those forms so the next bump keeps it.
+
 The branch and pull request are created with the release GitHub App's
 installation token, so the PR Gate starts on the PR by itself. (A pull
 request opened with `GITHUB_TOKEN` starts no workflows: 0.4.0's needed a
