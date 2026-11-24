@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Fail a release until exact-main CodeQL is current and has no open alerts."""
+"""Fail a release until exact-main CodeQL is current and has no open alerts.
+
+The candidate counts as analysed when main has a CodeQL analysis, in every
+required category, of the candidate itself or of a main commit with the
+identical source tree. The second case is a version-bump candidate that
+reached main through a merge commit: main's push analysis is bound to the
+merge commit, whose tree is the candidate's, never to the candidate.
+"""
 
 from __future__ import annotations
 
@@ -41,27 +48,31 @@ def latest_codeql_by_category(analyses: list[dict[str, Any]]) -> dict[str, dict[
 
 
 def candidate_codeql_by_category(
-    analyses: list[dict[str, Any]], candidate: str
+    analyses: list[dict[str, Any]],
+    candidate: str,
+    same_tree_commits: frozenset[str] = frozenset(),
 ) -> dict[str, dict[str, Any]]:
-    """The newest CodeQL analysis of exactly this commit, per category.
+    """The newest CodeQL analysis of this candidate's source, per category.
 
     The candidate need not be the head of main: a release may qualify any
     main commit with a receipt chain, and a nightly candidate stays valid
-    after later merges add newer analyses for other commits.
+    after later merges add newer analyses for other commits. An analysis of
+    the candidate itself wins over one of a commit with the same tree.
     """
 
-    bound: dict[str, dict[str, Any]] = {}
+    accepted = {candidate} | set(same_tree_commits)
+    exact: dict[str, dict[str, Any]] = {}
+    equivalent: dict[str, dict[str, Any]] = {}
     for analysis in analyses:
         if analysis.get("tool", {}).get("name") != "CodeQL":
             continue
         category = analysis.get("category")
-        if (
-            isinstance(category, str)
-            and category not in bound
-            and analysis.get("commit_sha") == candidate
-        ):
-            bound[category] = analysis
-    return bound
+        commit = analysis.get("commit_sha")
+        if not isinstance(category, str) or commit not in accepted:
+            continue
+        target = exact if commit == candidate else equivalent
+        target.setdefault(category, analysis)
+    return {**equivalent, **exact}
 
 
 def evaluate(
@@ -69,9 +80,10 @@ def evaluate(
     alerts: list[dict[str, Any]],
     candidate: str,
     required_categories: tuple[str, ...] = DEFAULT_CATEGORIES,
+    same_tree_commits: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     latest = latest_codeql_by_category(analyses)
-    bound = candidate_codeql_by_category(analyses, candidate)
+    bound = candidate_codeql_by_category(analyses, candidate, same_tree_commits)
     missing = [category for category in required_categories if category not in latest]
     stale = [
         category
@@ -98,6 +110,12 @@ def evaluate(
             for category in required_categories
             if category in bound
         },
+        "analysis_commits": {
+            category: bound[category].get("commit_sha")
+            for category in required_categories
+            if category in bound
+        },
+        "same_tree_commits": sorted(same_tree_commits),
         "open_alert_count": len(open_alerts),
         "open_alert_numbers": [alert.get("number") for alert in open_alerts],
         "status": "PASS" if not failures else "FAIL",
@@ -137,14 +155,75 @@ def api_pages(url: str, token: str) -> list[dict[str, Any]]:
     return values
 
 
-def fetch_state(api_url: str, repository: str, token: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def api_object(url: str, token: str) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "rvoip-release-policy",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            value = json.load(response)
+    except (urllib.error.URLError, json.JSONDecodeError) as error:
+        raise PolicyError(f"GitHub API request failed: {type(error).__name__}") from error
+    if not isinstance(value, dict):
+        raise PolicyError("GitHub API returned a non-object response")
+    return value
+
+
+# Main analyses of commits other than the candidate whose trees are compared.
+# The merge commit that brings a candidate onto main is analysed within the
+# hour, so it is among the newest few; this bounds the API calls per poll.
+SAME_TREE_COMMIT_LIMIT = 20
+
+
+def same_tree_commits(
+    analyses: list[dict[str, Any]],
+    candidate: str,
+    tree_of: Any,
+    limit: int = SAME_TREE_COMMIT_LIMIT,
+) -> frozenset[str]:
+    """Main commits, newest first, whose source tree is the candidate's."""
+
+    candidate_tree = tree_of(candidate)
+    seen: list[str] = []
+    for analysis in analyses:
+        commit = analysis.get("commit_sha")
+        if isinstance(commit, str) and commit != candidate and commit not in seen:
+            seen.append(commit)
+        if len(seen) >= limit:
+            break
+    return frozenset(commit for commit in seen if tree_of(commit) == candidate_tree)
+
+
+def fetch_state(
+    api_url: str, repository: str, token: str, candidate: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], frozenset[str]]:
     encoded_ref = urllib.parse.quote("refs/heads/main", safe="")
     base = f"{api_url.rstrip('/')}/repos/{repository}"
     analyses = api_pages(
         f"{base}/code-scanning/analyses?ref={encoded_ref}&per_page=100", token
     )
     alerts = api_pages(f"{base}/code-scanning/alerts?state=open&per_page=100", token)
-    return analyses, alerts
+    equivalent: frozenset[str] = frozenset()
+    if len(candidate_codeql_by_category(analyses, candidate)) < len(DEFAULT_CATEGORIES):
+        trees: dict[str, str] = {}
+
+        def tree_of(commit: str) -> str:
+            if commit not in trees:
+                value = api_object(f"{base}/git/commits/{commit}", token)
+                tree = value.get("tree", {}).get("sha")
+                if not isinstance(tree, str):
+                    raise PolicyError(f"GitHub returned no tree for {commit}")
+                trees[commit] = tree
+            return trees[commit]
+
+        equivalent = same_tree_commits(analyses, candidate, tree_of)
+    return analyses, alerts, equivalent
 
 
 def write_receipt(path: Path, result: dict[str, Any]) -> None:
@@ -176,8 +255,12 @@ def main() -> int:
 
     deadline = time.monotonic() + args.timeout_seconds
     while True:
-        analyses, alerts = fetch_state(args.api_url, args.repository, token)
-        result = evaluate(analyses, alerts, args.candidate)
+        analyses, alerts, equivalent = fetch_state(
+            args.api_url, args.repository, token, args.candidate
+        )
+        result = evaluate(
+            analyses, alerts, args.candidate, same_tree_commits=equivalent
+        )
         write_receipt(args.receipt, result)
         analysis_is_stale = any(
             failure.startswith(("missing CodeQL categories", "CodeQL categories are not bound"))

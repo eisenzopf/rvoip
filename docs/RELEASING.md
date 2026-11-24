@@ -153,7 +153,9 @@ The release profiles include `security.codeql-exact`, which waits up to one
 hour for all five CodeQL categories to bind to the exact candidate commit and
 fails on any open alert. It is a gate in the hosted evidence shard, so the wait
 overlaps every other gate instead of holding the planner, and an analysis of an
-older main commit still counts after newer pushes. Release workflows also raise
+older main commit still counts after newer pushes. A main analysis of a commit
+with the candidate's exact source tree also counts: a version-bump candidate
+merged through a merge commit is analysed only as that merge commit. Release workflows also raise
 rustup's bounded download retry count to tolerate transient distribution-network
 resets without weakening any test or evidence requirement.
 
