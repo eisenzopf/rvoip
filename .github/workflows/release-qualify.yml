@@ -1075,12 +1075,67 @@ jobs:
       - name: Wait for every immutable worker result
         env:
           BUCKET: ${{ vars.RVOIP_AWS_EVIDENCE_BUCKET }}
+          CANDIDATE: ${{ needs.plan.outputs.candidate_sha }}
+          AMI_ID: ${{ needs.preflight-aws.outputs.ami_id }}
+          SUBNET_ID: ${{ vars.RVOIP_AWS_SUBNET_ID }}
+          SECURITY_GROUP_ID: ${{ vars.RVOIP_AWS_SECURITY_GROUP_ID }}
+          INSTANCE_PROFILE: ${{ vars.RVOIP_AWS_RUNNER_INSTANCE_PROFILE }}
         run: |
           set -euo pipefail
-          mkdir -p target/aws-controller/downloads
+          mkdir -p target/aws-controller/downloads target/aws-controller/create-logs
           expected="$(jq -r .worker_count target/aws-controller/workers.json)"
           run_id="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           builder="rvoip-rel-${run_id}-prebuild"
+          # Shards whose first worker never booted, each replaced once.
+          replaced=target/aws-controller/boot-replacements.json
+          echo '[]' > "$replaced"
+          tag_list() {
+            # key=value ... -> Tags=[{Key=key,Value=value},...] for --tag-specifications
+            local pairs=()
+            for pair in "$@"; do
+              pairs+=("{Key=${pair%%=*},Value=${pair#*=}}")
+            done
+            local IFS=,
+            printf 'Tags=[%s]' "${pairs[*]}"
+          }
+          # Relaunch a shard with the user-data its first worker was given:
+          # same shard, prefix, gates, and (for performance) bundle.
+          replace_worker() {
+            local descriptor="$1" old_id="$2"
+            local shard_id worker resource_class machine_type disk_type disk_size_gb expires_at tags
+            shard_id="$(jq -r .id <<< "$descriptor")"
+            worker="$(jq -r .name <<< "$descriptor")"
+            resource_class="$(jq -r .resource_class <<< "$descriptor")"
+            machine_type="$(jq -r .machine_type <<< "$descriptor")"
+            disk_type="$(jq -r .disk_type <<< "$descriptor")"
+            disk_size_gb="$(jq -r .disk_size_gb <<< "$descriptor")"
+            expires_at="$(date -u -d '+4 hours' +%Y-%m-%dT%H:%M:%SZ)"
+            tags="$(tag_list \
+              "Name=${worker}" \
+              managed-by=github-actions \
+              rvoip-role=release-gate \
+              "rvoip-run-id=${run_id}" \
+              "rvoip-candidate=${CANDIDATE}" \
+              "rvoip-shard-id=${shard_id}" \
+              "rvoip-resource-class=${resource_class}" \
+              "rvoip-replaces=${old_id}" \
+              "rvoip-expires-at=${expires_at}")"
+            aws ec2 run-instances \
+              --image-id "$AMI_ID" \
+              --instance-type "$machine_type" \
+              --subnet-id "$SUBNET_ID" \
+              --security-group-ids "$SECURITY_GROUP_ID" \
+              --iam-instance-profile "Name=${INSTANCE_PROFILE}" \
+              --block-device-mappings "DeviceName=/dev/sda1,Ebs={VolumeSize=${disk_size_gb},VolumeType=${disk_type},DeleteOnTermination=true}" \
+              --metadata-options HttpTokens=required,HttpEndpoint=enabled,InstanceMetadataTags=enabled \
+              --instance-initiated-shutdown-behavior terminate \
+              --user-data "fileb://target/aws-controller/user-data/${shard_id}.gz" \
+              --tag-specifications \
+                "ResourceType=instance,${tags}" \
+                "ResourceType=volume,${tags}" \
+              --output json \
+              > "target/aws-controller/create-logs/${shard_id}-replacement.log" 2>&1
+          }
           for attempt in $(seq 1 340); do
             {
               aws s3api list-objects-v2 \
@@ -1093,8 +1148,42 @@ jobs:
             } > target/aws-controller/objects.txt || true
             aws ec2 describe-instances \
               --filters "Name=tag:rvoip-run-id,Values=${run_id}" Name=tag:managed-by,Values=github-actions \
-              --query 'Reservations[].Instances[].[Tags[?Key==`Name`]|[0].Value,State.Name]' \
-              --output text | tr '\t' ',' > target/aws-controller/states-all.csv
+              --query 'Reservations[].Instances[].{id:InstanceId,name:Tags[?Key==`Name`]|[0].Value,state:State.Name,launched:LaunchTime}' \
+              --output json > target/aws-controller/instances.json
+
+            # A worker with neither a boot marker nor a result 20 minutes
+            # after launch never ran its user-data (no instance metadata,
+            # cloud-init DataSourceNone): replace it once rather than wait
+            # out the evidence deadline. The record is written before the
+            # launch, so a shard is never replaced twice.
+            while IFS= read -r decision; do
+              shard_id="$(jq -r .shard_id <<< "$decision")"
+              old_id="$(jq -r .instance_id <<< "$decision")"
+              descriptor="$(jq -c --arg id "$shard_id" '.workers[] | select(.id == $id)' target/aws-controller/workers.json)"
+              echo "::warning title=EC2 worker never booted::${shard_id} (${old_id}) left no boot marker 20 minutes after launch; replacing it once"
+              jq --argjson decision "$decision" '. + [$decision]' "$replaced" > "${replaced}.next"
+              mv "${replaced}.next" "$replaced"
+              aws ec2 terminate-instances --instance-ids "$old_id" >/dev/null || true
+              if ! replace_worker "$descriptor" "$old_id"; then
+                tail -n 50 "target/aws-controller/create-logs/${shard_id}-replacement.log" || true
+                echo "::error title=EC2 worker replacement failed::${shard_id} could not be relaunched"
+              fi
+            done < <(
+              python3 scripts/release/aws_fanout.py boot-replacements \
+                --manifest target/aws-controller/workers.json \
+                --instances target/aws-controller/instances.json \
+                --objects target/aws-controller/objects.txt \
+                --replaced "$replaced" \
+                --bucket "$BUCKET" | jq -c '.[]'
+            )
+
+            # A replaced instance leaves the evidence view; the replacement
+            # carries the same Name tag.
+            jq -r --slurpfile replaced "$replaced" \
+              '($replaced[0] | map(.instance_id)) as $old
+               | .[] | select(.id as $id | ($old | index($id)) == null)
+               | "\(.name),\(.state)"' \
+              target/aws-controller/instances.json > target/aws-controller/states-all.csv
             awk -F, -v builder="$builder" 'NF >= 2 && $1 != builder' \
               target/aws-controller/states-all.csv > target/aws-controller/states.csv
             completed=0

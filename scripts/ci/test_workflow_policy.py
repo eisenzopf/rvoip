@@ -578,8 +578,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("sysctl -w net.core.rmem_max=67108864", startup)
         self.assertIn("sysctl -w net.core.wmem_max=67108864", startup)
         # One launch for the prebuilder, one for bundle-free workers (interop and
-        # proxy interop) before the prebuild, one for performance workers after.
-        self.assertEqual(workflow.count("aws ec2 run-instances"), 3)
+        # proxy interop) before the prebuild, one for performance workers after,
+        # and one that replaces a worker which never booted.
+        self.assertEqual(workflow.count("aws ec2 run-instances"), 4)
         self.assertIn(
             "RELEASE_ENVIRONMENT_ID: rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16",
             workflow,
@@ -970,6 +971,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("Create performance workers once the bundle exists", controller)
         self.assertIn('pids+=("$!")', controller)
         self.assertIn("Wait for every immutable worker result", controller)
+        self.assertIn("aws_fanout.py boot-replacements", controller)
+        self.assertIn('"rvoip-replaces=${old_id}"', controller)
+        self.assertIn('upload /tmp/booted.json "${PREFIX}/booted.json"', startup)
         self.assertIn("aws_fanout.py verify", controller)
         self.assertIn("Terminate all workers and root volumes", controller)
         self.assertIn("release-gate-shard-aws-controller", controller)
