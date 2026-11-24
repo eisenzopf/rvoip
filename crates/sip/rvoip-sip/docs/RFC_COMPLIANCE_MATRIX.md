@@ -1,6 +1,6 @@
 # rvoip-sip Beta Standards Evidence Matrix
 
-Date: 2026-10-12
+Date: 2026-11-24
 
 This document maps each retained beta-profile claim to exact, non-ignored
 executable test sources. It is a claim boundary, not a declaration that the
@@ -10,24 +10,27 @@ the current source tree.
 The earlier July 20 evidence remains preserved in the
 [legacy archive](releases/beta/20260720T055257Z/baseline-evidence.json) and is
 diagnostic-only. Current execution evidence is the clean, source-matched
-`0.4.0` release at `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f` (tag `v0.4.0`),
-qualified by protected `remote-release` run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080):
+`0.5.0` release at `2ae9fa49c5903a3e947a53609ee3f7d64c71a013` (tag `v0.5.0`),
+qualified by protected `release-minor` run
+[`45304004340`](https://github.com/eisenzopf/rvoip/actions/runs/45304004340):
 see the [protected qualification report](BETA_RELEASE_REPORT.md), exact
-[214-gate ledger](BETA_GATE_REPORT.md), and
+[221-gate ledger](BETA_GATE_REPORT.md), and
 [machine summary](QUALIFICATION_SUMMARY.json). The ledger marks each gate
-`fresh` or `reused`; 92 gates were reused from candidate
-`d89c1bc34aadb7184e38792db5da1e91f5a1c8c1` because their definition, inputs,
-and environment were unchanged.
+`fresh` or `reused` and records each receipt's commit. 206 gates ran on the
+tested commit in run
+[`45274500898`](https://github.com/eisenzopf/rvoip/actions/runs/45274500898)
+and were reused by exact receipt match; 13 source and report gates ran fresh;
+`security.codeql-exact` and `perf.rfc7502-release` were reused from parent
+candidate `81452a5fb8a5730d4e085dac0e110ca6f9e3af02`, which differs only in
+release bookkeeping and version strings.
 
 Release gates run whole test targets, not individual `T-*` tests. Every
-rvoip-sip `T-*` test below runs in the fresh `core.rvoip-sip` gate, which
-builds with the `test-hooks` feature that the second-scale session-timer
-targets need. In the `0.4.0` qualification `test.sip-integration` built
-without it and compiled those targets out; after `0.4.0` the rvoip-sip unit,
-integration, doctest, all-target, and example gates build with `test-hooks`
-too, so from the next release the session-timer targets are also covered by
-`test.sip-integration`. `scripts/test_release_gates.py` fails if a gate
+rvoip-sip `T-*` test below runs in the `core.rvoip-sip` gate, which builds
+with the `test-hooks` feature that the second-scale session-timer targets
+need. In the `0.4.0` qualification `test.sip-integration` built without it
+and compiled those targets out; since then the rvoip-sip unit, integration,
+doctest, all-target, and example gates build with `test-hooks` too, so in
+`0.5.0` the session-timer targets also ran in `test.sip-integration`. `scripts/test_release_gates.py` fails if a gate
 selects a `test-hooks`-gated target without the feature. Tests in other
 crates run in that crate's `core.<crate>` gate.
 
@@ -58,11 +61,11 @@ crates run in that crate's `core.<crate>` gate.
 | SIP-3264-OA | RFC 3264 | Audio offer/answer codec intersection, direction propagation, and an established-dialog re-INVITE carrying SDP on the wire. | Partial | `T-3264-U1`, `T-3264-U2`, `T-3264-W1` | Complex multi-stream renegotiation, all glare permutations, and WebRTC negotiation are outside this claim. |
 | SIP-3311-UPDATE | RFC 3311 | In-dialog UPDATE transmission plus `401` and `407` digest retry on the same method. | Partial | `T-3311-W1`, `T-3311-W2`, `T-3311-W3` | No complete UPDATE offer/answer, glare, retry-after, or independent-peer matrix is claimed. Ignored resilience skeletons are not evidence. |
 | SIP-3325-PAI | RFC 3325 | Configured and per-call `P-Asserted-Identity` reach the receiving endpoint, with per-call override behavior. | Partial | `T-3325-W1`, `T-3325-W2` | Trusted-domain policy, privacy interactions, and carrier certification are not claimed. |
-| SIP-3515-REFER | RFC 3515 | Blind REFER request construction, end-to-end blind transfer, and ordered typed NOTIFY progress/final status on the wire. | Supported (bounded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3`, `J-3515-I1` | `Refer-To` is required. Attended transfer and RFC 3891 call replacement are excluded. `J-3515-I1` is protected `0.4.0` evidence (`interop.jambonz-matrix`, fresh PASS). |
+| SIP-3515-REFER | RFC 3515 | Blind REFER request construction, end-to-end blind transfer, and ordered typed NOTIFY progress/final status on the wire. | Supported (bounded) | `T-3515-W1`, `T-3515-W2`, `T-3515-W3`, `J-3515-I1` | `Refer-To` is required. Attended transfer and RFC 3891 call replacement are excluded. `J-3515-I1` is protected `0.5.0` evidence (`interop.jambonz-matrix`, PASS on the tested commit). |
 | SIP-3581-RPORT | RFC 3581 | Top Via `received`/`rport` response restamping when the inbound request carries the `rport` flag. | Partial | `T-3581-U1`, `T-3581-U2` | No live NAT, multi-hop interoperability, keepalive, ICE, or TURN claim follows from these tests. |
 | SIP-3891-REPLACES | RFC 3891 | Call replacement using `Replaces`. | Unsupported | `T-3891-C1`, `T-3891-U1` | The listed tests only construct/carry a Replaces parameter; they do not execute replacement semantics and therefore do not elevate the status. |
-| SIP-3892-REFERRED-BY | RFC 3892 | Parse and expose a typed `Referred-By` header and, when supplied during a blind transfer, copy it unchanged into the referenced INVITE. | Partial | `T-3892-W1`, `J-3892-I1` | RFC 3892 makes `Referred-By` optional; RVoIP does not require it generally. The Jambonz propagation result is protected `0.4.0` evidence (`interop.jambonz-matrix`, fresh PASS). Identity signing, privacy behavior, and attended transfer are not claimed. |
-| SIP-4028-TIMER | RFC 4028 | Successful session refresh and refresh-failure event delivery; since `0.4.0`, the 90-second Min-SE floor, `422` with `Min-SE` for a timer-capable caller below the floor, no `Require: timer` toward a caller without timer support (rvoip refreshes), the `refresher=uac` role on refreshes, a `422` retry with the peer's Min-SE, re-INVITE refresh when the peer rules out UPDATE or rejects it, a rejected refresh that keeps the call, and the non-refresher's 408 BYE before expiry. | Partial | `T-4028-W1`–`T-4028-W9`, `T-4028-U1`–`T-4028-U3`, `P-4028-I1` | `0.4.0` evidence is two rvoip endpoints only: no PBX, SBC, or proxy exercised session timers in a release gate (the `0.4.0` Asterisk/FreeSWITCH session-timer runs were a local diagnostic lab). After `0.4.0` this is release-gated against Asterisk and FreeSWITCH (`P-4028-I1`: refresher roles in both directions and FreeSWITCH's `422`/Min-SE retry), but no protected qualification has recorded it yet, so no independent-peer claim is made. Proxy behavior, glare permutations beyond the tested `491` backoff, and every proxy-inserted interval are not claimed. |
+| SIP-3892-REFERRED-BY | RFC 3892 | Parse and expose a typed `Referred-By` header and, when supplied during a blind transfer, copy it unchanged into the referenced INVITE. | Partial | `T-3892-W1`, `J-3892-I1` | RFC 3892 makes `Referred-By` optional; RVoIP does not require it generally. The Jambonz propagation result is protected `0.5.0` evidence (`interop.jambonz-matrix`, PASS on the tested commit). Identity signing, privacy behavior, and attended transfer are not claimed. |
+| SIP-4028-TIMER | RFC 4028 | Successful session refresh and refresh-failure event delivery; since `0.4.0`, the 90-second Min-SE floor, `422` with `Min-SE` for a timer-capable caller below the floor, no `Require: timer` toward a caller without timer support (rvoip refreshes), the `refresher=uac` role on refreshes, a `422` retry with the peer's Min-SE, re-INVITE refresh when the peer rules out UPDATE or rejects it, a rejected refresh that keeps the call, and the non-refresher's 408 BYE before expiry. | Partial | `T-4028-W1`–`T-4028-W9`, `T-4028-U1`–`T-4028-U3`, `P-4028-I1` | `0.4.0` evidence is two rvoip endpoints only: no PBX, SBC, or proxy exercised session timers in a release gate (the `0.4.0` Asterisk/FreeSWITCH session-timer runs were a local diagnostic lab). In `0.5.0` the Asterisk and FreeSWITCH `session_timer` rows passed in protected qualification (`P-4028-I1`: refresher roles in both directions and FreeSWITCH's `422`/Min-SE retry), over UDP with the `Endpoint` API only. Proxy behavior, glare permutations beyond the tested `491` backoff, and every proxy-inserted interval are not claimed. |
 | SIP-4475-TORTURE | RFC 4475 | Parser conformance on all 49 bit-exact Appendix A messages (plus the archive's undescribed `test.dat`) in Strict and Lenient mode: per-message acceptance or rejection and parsed values as the RFC specifies, liberal handling only where the RFC allows it, and every accepted message re-serializes to valid SIP. Element behaviour: a running endpoint answers each request message over UDP with the response the RFC calls for (400/406/415/416/420/501/505, or processes it), discards responses and messages no valid response can be formed for, matches transactions on branch, sent-by and method (RFC 3261 §17.2.3, RFC 2543 rules without the magic cookie), and every response it sends is valid SIP. | Supported | `T-4475-U0`, `T-4475-U1`, `T-4475-U2`, `T-4475-W1` | No exclusions. `insuf` (no Call-ID, From, To) is discarded: RFC 3261 §8.2.6.2 makes those header fields mandatory in every response, so the 400 RFC 4475 §3.3.1 calls ideal cannot be formed. |
 | SIP-5118-TORTURE | RFC 5118 | IPv6 parser conformance on all 12 bit-exact Appendix A messages, as published (RFC 3261 framing applied) and normalized, in both modes; IPv6 sent-by and `received` rendering. A single-address-family IPv6 endpoint places and answers a call over the IPv6 loopback: INVITE, ACK, OPTIONS, BYE and their responses are Strict-valid with bracketed IPv6 hosts, the SDP is `IN IP6`, and RTP flows both ways. | Supported (bounded) | `T-5118-U1`, `T-5118-W1` | Dual-stack operation (IPv4 and IPv6 listeners in one endpoint), IPv4-mapped addresses and link-local zone identifiers are not supported; `Config::validate` rejects mixed families and zones. |
 | SIP-5626-OUTBOUND | RFC 5626 | Outbound Contact construction plus registrar-side opaque exact-flow ownership, ordered multi-flow selection, replacement rollback, close degradation, and recoverable exact-flow failover. | Partial | `T-5626-C1`, `T-5626-U1`–`T-5626-U7` | Protected evidence from two independent UAs behind real NAT, including rebinding and restart recovery, is still required before this becomes a supported release claim. See `docs/sip/REMOTE_ENDPOINT_PROFILE.md`. |
@@ -71,10 +74,10 @@ crates run in that crate's `core.<crate>` gate.
 | SIP-7118-WS | RFC 7118 | Plain SIP-over-WebSocket client/server round trip delivering REGISTER. | Partial | `T-7118-W1` | WSS release evidence, browser/WebRTC behavior, reconnect, proxy traversal, and complete framing/error matrices are not claimed. |
 | SIP-AUTH-DIGEST | RFC 3261 §22, RFC 7616, RFC 8760 | SHA-256 digest generation/validation, `auth-int`, nonce-count progression, stale-nonce retry, and endpoint INVITE digest retry. | Partial | `T-AUTH-U1`, `T-AUTH-U2`, `T-AUTH-U3`, `T-AUTH-W1`, `T-AUTH-W2`, `T-AUTH-W3` | The full algorithm matrix, every challenge-selection rule, independent-server certification, and every SIP method are not claimed. Basic and bearer extensions are not RFC 7616 compliance claims. |
 | SDP-8866 | RFC 8866 | SDP audio offer parsing/matching, payload filtering, media direction propagation, and generated INVITE SDP validation. | Partial | `T-SDP-U1`, `T-SDP-U2`, `T-SDP-C1` | Full grammar coverage, every media type, bundle, trickle ICE, and WebRTC negotiation are not claimed. Attribute carry-through alone is not semantic support. |
-| RTP-3550 | RFC 3550 | RTP packet serialization/parsing, RTCP receiver-report serialization/parsing, and bidirectional audio/bridge media delivery. | Partial | `T-RTP-U1`, `T-RTP-U2`, `T-RTP-W1`, `T-RTP-W2`, `P-5761-I1`, `P-3605-I1`, `P-5761-I2` | Full RTCP scheduling, feedback profiles, congestion behavior, multicast, and independent RTP-stack certification are not claimed. RTCP report exchange with Asterisk and FreeSWITCH over mux and a separate port is release-gated after `0.4.0` and awaits its first protected qualification run. |
-| RTP-5761-MUX | RFC 5761 | Since `0.4.0`: every SDP offer carries `a=rtcp-mux`; periodic RTCP and BYE reach a peer that answers with mux on the RTP port; a call whose answer declines mux sends no RTCP; the opt-out restores the plain offer; strict mode adds `a=rtcp-mux-only` and refuses separate-port peers; peer-reported quality flows over a muxed call. | Supported (bounded) | `T-5761-U1`, `T-5761-W1`–`T-5761-W4`, `P-5761-I1`, `P-5761-I2` | `0.4.0` evidence is two rvoip endpoints or a scripted socket peer only; no `0.4.0` release gate checked RTCP against an independent stack (the `0.4.0` Asterisk/FreeSWITCH RTCP runs were a local diagnostic lab). After `0.4.0` this is release-gated against Asterisk and FreeSWITCH (`P-5761-I1` mux report exchange, `P-5761-I2` no RTCP when mux is declined), with protected qualification evidence pending the next run. `a=rtcp-mux-only` interop is not claimed. |
-| RTP-3605-NONMUX | RFC 3550 §11, RFC 3605 | Since `0.4.0`, with `Config::rtcp_non_mux`: RTCP on a separate local port toward a peer that declines mux, at the peer's RTP port + 1 or its `a=rtcp` address, SRTCP on that port under SDES-SRTP, and release of the RTCP port when the answer accepts mux. | Partial | `T-3605-W1`–`T-3605-W3`, `T-3605-U1`, `P-3605-I1`, `P-3711-I1` | Off by default. Not available with DTLS-SRTP, ICE, or strict mux. `0.4.0` had no independent-peer release gate. After `0.4.0` this is release-gated against Asterisk (`P-3605-I1`, with SRTCP in `P-3711-I1`), with protected qualification evidence pending the next run; FreeSWITCH has no non-mux row. |
-| SRTP-3711-SDES | RFC 3711 and RFC 4568 | SDES-negotiated SRTP call establishment, encrypted media exchange, malformed suite rejection, and executable overhead measurement. | Partial | `T-SRTP-W1`, `T-SRTP-U1`, `T-SRTP-W2`, `P-3711-I1` | DTLS-SRTP, MIKEY, complete replay/rollover suites, and independent-peer certification are not claimed. SRTCP accepted by Asterisk (`P-3711-I1`) is release-gated after `0.4.0` and pending protected qualification. |
+| RTP-3550 | RFC 3550 | RTP packet serialization/parsing, RTCP receiver-report serialization/parsing, and bidirectional audio/bridge media delivery. | Partial | `T-RTP-U1`, `T-RTP-U2`, `T-RTP-W1`, `T-RTP-W2`, `P-5761-I1`, `P-3605-I1`, `P-5761-I2` | Full RTCP scheduling, feedback profiles, congestion behavior, multicast, and independent RTP-stack certification are not claimed. RTCP report exchange with Asterisk and FreeSWITCH over mux and a separate port passed in the `0.5.0` protected qualification. |
+| RTP-5761-MUX | RFC 5761 | Since `0.4.0`: every SDP offer carries `a=rtcp-mux`; periodic RTCP and BYE reach a peer that answers with mux on the RTP port; a call whose answer declines mux sends no RTCP; the opt-out restores the plain offer; strict mode adds `a=rtcp-mux-only` and refuses separate-port peers; peer-reported quality flows over a muxed call. | Supported (bounded) | `T-5761-U1`, `T-5761-W1`–`T-5761-W4`, `P-5761-I1`, `P-5761-I2` | `0.4.0` evidence is two rvoip endpoints or a scripted socket peer only; no `0.4.0` release gate checked RTCP against an independent stack (the `0.4.0` Asterisk/FreeSWITCH RTCP runs were a local diagnostic lab). In `0.5.0` the Asterisk and FreeSWITCH rows passed in protected qualification (`P-5761-I1` mux report exchange, `P-5761-I2` no RTCP when mux is declined). `a=rtcp-mux-only` interop is not claimed. |
+| RTP-3605-NONMUX | RFC 3550 §11, RFC 3605 | Since `0.4.0`, with `Config::rtcp_non_mux`: RTCP on a separate local port toward a peer that declines mux, at the peer's RTP port + 1 or its `a=rtcp` address, SRTCP on that port under SDES-SRTP, and release of the RTCP port when the answer accepts mux. | Partial | `T-3605-W1`–`T-3605-W3`, `T-3605-U1`, `P-3605-I1`, `P-3711-I1` | Off by default. Not available with DTLS-SRTP, ICE, or strict mux. `0.4.0` had no independent-peer release gate. In `0.5.0` the Asterisk rows passed in protected qualification (`P-3605-I1`, with SRTCP in `P-3711-I1`); FreeSWITCH has no non-mux row. |
+| SRTP-3711-SDES | RFC 3711 and RFC 4568 | SDES-negotiated SRTP call establishment, encrypted media exchange, malformed suite rejection, and executable overhead measurement. | Partial | `T-SRTP-W1`, `T-SRTP-U1`, `T-SRTP-W2`, `P-3711-I1` | DTLS-SRTP, MIKEY, complete replay/rollover suites, and independent-peer certification are not claimed. SRTCP accepted by Asterisk (`P-3711-I1`) passed in the `0.5.0` protected qualification. |
 
 ## Executable evidence catalog
 
@@ -175,30 +178,36 @@ these named tests has an adjacent `#[ignore]` attribute as of this matrix.
 
 These gates execute against independently implemented peers. A local run is
 diagnostic; only a protected exact-candidate artifact promotes the result into
-published-release evidence. Both rows below are backed by the fresh
-`interop.jambonz-matrix` PASS (63/63 cells, Jambonz OSS 0.9.14 confirmed as the
-latest line by `interop.jambonz-latest`) in protected `0.4.0` run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080).
+published-release evidence. Both rows below are backed by the
+`interop.jambonz-matrix` PASS (63/63 cells on the tested commit, Jambonz OSS
+0.9.15 confirmed as the latest line by `interop.jambonz-latest`) in protected
+`0.5.0` run
+[`45304004340`](https://github.com/eisenzopf/rvoip/actions/runs/45304004340).
 
 | Evidence ID | Strength | Executable gate | What it demonstrates |
 |---|---|---|---|
 | `J-3515-I1` | interop | `examples/pbx/run.sh --pbx jambonz --api all --scenario blind_transfer --transport UDP` | Across all three public SIP APIs, Jambonz forwards REFER, RVoIP accepts it, the implicit subscription emits ordered `100`/progress/terminal NOTIFY requests, a referenced call is established, and both dialogs clean up. |
 | `J-3892-I1` | interop | `examples/pbx/run.sh --pbx jambonz --api all --scenario blind_transfer --transport UDP` | A supplied typed `Referred-By` survives Jambonz forwarding and is copied unchanged into the referenced INVITE. |
 
-## Release-gated external interoperability evidence (pending)
+## Release-gated external interoperability evidence
 
-These PBX cells (issue #318) run in the Asterisk and FreeSWITCH release gates
-after `0.4.0`. No protected qualification has recorded them yet, so they are
-not published-release evidence and raise no status above; the `0.4.0` claims
-they attach to rest on tests only. A local lab run is diagnostic.
+These PBX cells (issue #318) run in the `interop.asterisk-matrix` and
+`interop.freeswitch-matrix` release gates. `0.5.0` is the first protected
+qualification to record them: every row passed on the tested commit in run
+[`45304004340`](https://github.com/eisenzopf/rvoip/actions/runs/45304004340)
+(Asterisk 20.20.1: `rtcp_mux`, `rtcp_non_mux`, and `rtcp_mux_declined` over UDP
+and TLS, `session_timer` over UDP; FreeSWITCH 1.10.12: `rtcp_mux` and
+`session_timer` over UDP; `Endpoint` API, caller, callee, and PBX checks each).
+The statuses above were not raised on this evidence. A local lab run is
+diagnostic.
 
 | Evidence ID | Strength | Executable gate | What it demonstrates |
 |---|---|---|---|
-| `P-5761-I1` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario rtcp_mux` (UDP and TLS) and `--pbx freeswitch --api endpoint --scenario rtcp_mux --transport UDP` | Both legs negotiate `a=rtcp-mux`; RTCP SR/RR flow both ways on the RTP port; rvoip reports `rtt_ms` and `remote_*`; Asterisk computes an RTT from rvoip's reports (`rtcp set debug`) and FreeSWITCH raises `RECV_RTCP_MESSAGE` for rvoip reports that echo its own SRs. Release-gated after 0.4.0; pending protected qualification. |
-| `P-3605-I1` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario rtcp_non_mux` (UDP and TLS) | Against endpoints with `rtcp_mux = no`, `Config::rtcp_non_mux` carries RTCP both ways between the RTP + 1 ports, with the same rvoip and Asterisk RTT requirements. Release-gated after 0.4.0; pending protected qualification. |
-| `P-5761-I2` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario rtcp_mux_declined` (UDP and TLS) | With `rtcp_non_mux` off and mux declined, rvoip sends no RTCP: Asterisk's RTP debug sees no RTCP payload type on its RTP port and its RTCP log sees no report from rvoip. Release-gated after 0.4.0; pending protected qualification. |
-| `P-3711-I1` | interop | The TLS rows of `P-5761-I1` and `P-3605-I1` | Asterisk decrypts rvoip's SRTCP (SDES) on the RTP port and on RTP + 1. Release-gated after 0.4.0; pending protected qualification. |
-| `P-4028-I1` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario session_timer --transport UDP` and the same with `--pbx freeswitch` | rvoip offers 90 s; FreeSWITCH answers `422` with Min-SE 120 and rvoip retries; rvoip refreshes the leg it originated, the PBX refreshes the leg toward rvoip, both sides record the refreshes, and the call outlives the RFC 4028 §10 deadline on both legs. Release-gated after 0.4.0; pending protected qualification. |
+| `P-5761-I1` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario rtcp_mux` (UDP and TLS) and `--pbx freeswitch --api endpoint --scenario rtcp_mux --transport UDP` | Both legs negotiate `a=rtcp-mux`; RTCP SR/RR flow both ways on the RTP port; rvoip reports `rtt_ms` and `remote_*`; Asterisk computes an RTT from rvoip's reports (`rtcp set debug`) and FreeSWITCH raises `RECV_RTCP_MESSAGE` for rvoip reports that echo its own SRs. Passed in `0.5.0` protected qualification. |
+| `P-3605-I1` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario rtcp_non_mux` (UDP and TLS) | Against endpoints with `rtcp_mux = no`, `Config::rtcp_non_mux` carries RTCP both ways between the RTP + 1 ports, with the same rvoip and Asterisk RTT requirements. Passed in `0.5.0` protected qualification. |
+| `P-5761-I2` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario rtcp_mux_declined` (UDP and TLS) | With `rtcp_non_mux` off and mux declined, rvoip sends no RTCP: Asterisk's RTP debug sees no RTCP payload type on its RTP port and its RTCP log sees no report from rvoip. Passed in `0.5.0` protected qualification. |
+| `P-3711-I1` | interop | The TLS rows of `P-5761-I1` and `P-3605-I1` | Asterisk decrypts rvoip's SRTCP (SDES) on the RTP port and on RTP + 1. Passed in `0.5.0` protected qualification. |
+| `P-4028-I1` | interop | `examples/pbx/run.sh --pbx asterisk --api endpoint --scenario session_timer --transport UDP` and the same with `--pbx freeswitch` | rvoip offers 90 s; FreeSWITCH answers `422` with Min-SE 120 and rvoip retries; rvoip refreshes the leg it originated, the PBX refreshes the leg toward rvoip, both sides record the refreshes, and the call outlives the RFC 4028 §10 deadline on both legs. Passed in `0.5.0` protected qualification. |
 
 ## July 20 historical run evidence
 
