@@ -5,17 +5,20 @@ candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
 Current workspace runtime crate version: `0.5.0`.
-Current published qualified runtime crate version: `0.4.0`.
+Current published qualified runtime crate version: `0.5.0`.
 Next release candidate runtime crate version: not declared.
-Protected run `38195041080` qualified the exact published `0.4.0` commit
-`f4d528eaabbac935bce9a6404d3ce4fdec35ed0f` (tag `v0.4.0`, publish run
-`38204650077`) with 214/214 gates, 122 fresh and 92 reused under an exact
-definition, input, and environment digest match from candidate
-`d89c1bc34aadb7184e38792db5da1e91f5a1c8c1`, and covered all 108 requirements
-in the strict legacy ledger. Its generated reports are promoted below and
-archived in the protected qualification history. The `0.3.10` and `0.3.9`
-evidence and the historical `0.3.2` exception path remain immutable history
-and do not qualify a later candidate.
+Protected run `45304004340` qualified the exact published `0.5.0` commit
+`2ae9fa49c5903a3e947a53609ee3f7d64c71a013` (tag `v0.5.0`, publish run
+`45307505314`) with 221/221 gates and covered all 108 requirements in the
+strict legacy ledger. 13 gates ran fresh in that run and 208 were reused under
+an exact definition, input, and environment digest match: 206 ran on the same
+commit in run `45274500898`, and `security.codeql-exact` and
+`perf.rfc7502-release` ran on parent candidate
+`81452a5fb8a5730d4e085dac0e110ca6f9e3af02`, which differs only in release
+bookkeeping and version strings. Its generated reports are promoted below and
+archived in the protected qualification history. The `0.4.0`, `0.3.10`, and
+`0.3.9` evidence and the historical `0.3.2` exception path remain immutable
+history and do not qualify a later candidate.
 
 - [Beta Release Candidate Report](BETA_RELEASE_REPORT.md)
 - [Complete Beta Gate Report](BETA_GATE_REPORT.md)

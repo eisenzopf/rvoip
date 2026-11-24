@@ -19,7 +19,7 @@ ledger](docs/BETA_GATE_REPORT.md), and [performance
 report](docs/BETA_PERFORMANCE_REPORT.md) are authoritative for the tested PBX,
 proxy, SIPp, strict-UA, security, performance, and soak boundaries. The
 [immutable qualification history](docs/releases/qualification/README.md)
-retains prior releases and the detailed 0.4.0 performance evaluation.
+retains prior releases and the detailed 0.5.0 performance evaluation.
 
 What changed in this release: the [release notes](../../../docs/release/RELEASE_NOTES_NEXT.md)
 and the [changelog](../../../CHANGELOG.md). Upgrading from 0.3? The
@@ -342,48 +342,75 @@ do not imply carrier certification or untested peer-version/topology coverage.
 - Performance recipes and tuning hooks for local labs, PBX media server
   profiles, and signaling-heavy test profiles.
 
-## Current 0.4.0 release evidence
+## Current 0.5.0 release evidence
 
 Protected run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080)
+[`45304004340`](https://github.com/eisenzopf/rvoip/actions/runs/45304004340)
 qualified the exact published commit
-`f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, tagged
-[`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0) and
+`2ae9fa49c5903a3e947a53609ee3f7d64c71a013`, tagged
+[`v0.5.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.5.0) and
 published by run
-[`38204650077`](https://github.com/eisenzopf/rvoip/actions/runs/38204650077):
-**214/214 gates passed** and all 108 legacy release requirements were covered.
-122 gates ran fresh on that commit. The other 92 were reused from the
-qualification of candidate `d89c1bc34aadb7184e38792db5da1e91f5a1c8c1` (run
-[`38181512663`](https://github.com/eisenzopf/rvoip/actions/runs/38181512663))
-because their definition, inputs, and environment digests were unchanged; the
-only source change between the two candidates was the release notes. The gate
-ledger marks every gate `fresh` or `reused`. The Asterisk, FreeSWITCH,
-Jambonz, SIPp, and strict-UA matrices, every performance, resiliency, and soak
-gate, the rvoip-sip unit, integration, and doctest gates, rustdoc, and the
-local fuzz and advisory scans ran fresh. The reused gates are the Kamailio and
-OpenSIPS proxy matrices, the AMR rate sweep, browser DTMF, remote libsrtp, the
-remote fuzz and advisory scans, the AMR fuzz targets, the 13 standalone
-examples, the generated and RFC 4475 parser suites, the rtp-core and
-supporting-SIP-crate tests, the per-crate gates of 30 lower crates, and the
-format, public-API, facade-bundle, and lower-crate build checks.
+[`45307505314`](https://github.com/eisenzopf/rvoip/actions/runs/45307505314):
+**221/221 gates passed** and all 108 legacy release requirements were covered.
+The gate ledger marks every gate `fresh` or `reused` and records the commit
+each receipt was produced on:
+
+- 206 gates ran on the tested commit itself in run
+  [`45274500898`](https://github.com/eisenzopf/rvoip/actions/runs/45274500898)
+  and were reused by exact definition, input, and environment digest match.
+  They include every build, test, and Clippy gate, the Asterisk, FreeSWITCH,
+  Jambonz, SIPp, strict-UA, Kamailio, and OpenSIPS matrices, the AMR rate
+  sweep, browser DTMF, remote libsrtp, every performance, resiliency, and soak
+  gate except the RFC 7502 benchmark, and the advisory and fuzz scans.
+- 13 source-fingerprint, package-inventory, Jambonz upstream-check, and report
+  gates ran fresh in the protected run.
+- `security.codeql-exact` and `perf.rfc7502-release` were reused from parent
+  candidate `81452a5fb8a5730d4e085dac0e110ca6f9e3af02`; the tested commit
+  differs from it only in release bookkeeping and version strings.
 
 | Evidence | Current record |
 | --- | --- |
 | Release disposition and provenance | [`docs/BETA_RELEASE_REPORT.md`](docs/BETA_RELEASE_REPORT.md) |
 | Complete accepted-gate ledger | [`docs/BETA_GATE_REPORT.md`](docs/BETA_GATE_REPORT.md) |
 | Performance observations | [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md) |
-| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-evaluation.md) |
-| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-evaluation.json) |
-| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20261012T042041Z-38195041080/current-performance-artifact-index.json) |
+| Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20261124T012650Z-45304004340/current-performance-evaluation.md) |
+| Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20261124T012650Z-45304004340/current-performance-evaluation.json) |
+| Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20261124T012650Z-45304004340/current-performance-artifact-index.json) |
 | Signed report manifest | [`QUALIFICATION_REPORT_ATTESTATION.json`](docs/QUALIFICATION_REPORT_ATTESTATION.json) |
-| Immutable release archive | [`20261012T042041Z-38195041080`](docs/releases/qualification/20261012T042041Z-38195041080) |
+| Immutable release archive | [`20261124T012650Z-45304004340`](docs/releases/qualification/20261124T012650Z-45304004340) |
 
-The detailed evaluation records three clean 65,000-call canonical runs, a
-high-density media burst with full audio delivery, a 60-minute monolithic
-soak, and a 60-minute split 500-call soak. All recorded performance policies
-passed. The exact measurements and claim boundaries are in the linked reports;
-they are evidence for the tested candidate and environment, not a performance
-SLA.
+The detailed evaluation records, on 16-vCPU AWS `m5.4xlarge` workers:
+
+- three clean canonical runs of 65,000 calls each at a 2,000-CPS target
+  (1,857.10 to 1,857.14 CPS achieved, ASR 1.0, setup latency p99 2.27 to
+  2.29 ms);
+- a high-density media burst at 160 CPS with full audio delivery (ASR 1.0, no
+  timeouts, nothing retained after drain);
+- a 60-minute monolithic soak at 30 active calls: 587/587 calls succeeded,
+  0 errors, active-tail RSS growth 11.71 MB/h against a 15 MB/h limit;
+- a two-hour split soak at 500 active calls: 19,655/19,655 calls succeeded and
+  completed at the receiver, 0 errors, active-tail RSS growth 2.81 MB/h for
+  the caller and -1.21 MB/h for the receiver against a 15 MB/h limit.
+
+The SIPp standalone matrix passed at 30, 100, 300, 1,000, and 2,000 CPS.
+
+`0.5.0` is also the first release gated on the RFC 7501/7502 benchmark
+([`RFC7502_BENCHMARK.md`](docs/RFC7502_BENCHMARK.md)). The recorded Session
+Establishment Rates in
+[`rates.json`](perf-baselines/rfc7502/aws-usw2-c8i4xl-3xc8in24xl-0d3897eb-12299927/rates.json)
+are R1 8,348, R5 8,256, R2 1,124, and R6 1,204 sessions/s on the pinned
+testbed `aws-usw2-c8i4xl-3xc8in24xl-0d3897eb-12299927` (a c8i.4xlarge device
+under test and three c8in.24xlarge callers in us-west-2a). The release lane
+(`perf.rfc7502-release`, bench run
+[`45221679416`](https://github.com/eisenzopf/rvoip/actions/runs/45221679416))
+re-tested R1, R5, and R2 and confirmed them; its `WARN` verdict records that
+the 1.05 R trials of R1 and R5 also passed (8,764 and 8,668 sessions/s), a
+likely improvement to record after review. R6 is not re-tested by the release
+lane.
+
+All recorded performance policies passed. The exact measurements and claim
+boundaries are in the linked reports; they are evidence for the tested
+candidate and environment, not a performance SLA.
 
 ## Historical 0.3.2 exception evidence
 
