@@ -34,12 +34,12 @@ performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 One AWS c8i.4xlarge (16 vCPU, 8 cores, Intel Xeon 6, 32 GiB) running a single
 rvoip process, measured with the RFC 7501/7502 benchmark:
 
-| Workload | Max calls/s | per vCPU | Concurrent calls | p99 setup at 90% load |
-| --- | ---: | ---: | ---: | ---: |
-| SIP over TLS, signaling only | 8,348 | ~520 | n/a | 6 ms |
-| SIP over UDP, signaling only | 8,256 | ~515 | n/a | 6 ms |
-| TLS + SRTP (SDES), G.711, 10 s calls | 1,124 | ~70 | ~11,200 | 4 ms |
-| UDP + RTP, G.711, 10 s calls | 1,204 | ~75 | ~12,000 | n/m |
+| Workload | Max calls/s | per vCPU | Concurrent calls (10 s calls) | p50 setup at 90% load | p99 setup at 90% load |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SIP over TLS, signaling only | 8,348 | ~520 | n/a | 1 ms | 6 ms |
+| SIP over UDP, signaling only | 8,256 | ~515 | n/a | 1 ms | 6 ms |
+| TLS + SRTP (SDES), G.711, 10 s calls | 1,124 | ~70 | ~11,200 | 1 ms | 4 ms |
+| UDP + RTP, G.711, 10 s calls | 1,204 | ~75 | ~12,000 | n/m | n/m |
 
 At 2x capacity, rvoip keeps admitting calls at its maximum rate, refuses the
 excess with fast 503 responses, and recovers cleanly once the load drops.
@@ -49,13 +49,17 @@ excess with fast 503 responses, and recovers cleanly once the load drops.
 - rvoip was measured as a terminating endpoint: it answers each call and echoes
   its media. A relaying B2BUA or SBC handles two call legs per session.
 - G.711 media is passed through; nothing is transcoded.
-- Concurrent calls = rate x the 10 s hold time.
+- Concurrent calls is the rate times the 10 s call length, not a measured
+  maximum; long-call capacity, where most SBC datasheets quote their
+  concurrency, has not been measured yet.
 - The server is a cloud VM, not an appliance.
 - p99 setup is the RFC 6076 session request delay measured at 90% of the max
   rate; n/m = not measured.
 - The UDP + RTP rate was confirmed twice rather than three times.
 - The release check also passed 5% above the TLS and UDP signaling rates, so
   those two figures may be slightly understated.
+- Not yet measured: B2BUA/relay mode (two legs per call), registrations,
+  transcoding, WebRTC (DTLS-SRTP), and failover.
 
 Full method and per-trial data: [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md).
 
