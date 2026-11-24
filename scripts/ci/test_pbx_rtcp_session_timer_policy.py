@@ -272,7 +272,16 @@ class PbxRtcpSessionTimerPolicyTests(unittest.TestCase):
         harness = (PBX / "common.rs").read_text(encoding="utf-8")
         self.assertIn('("freeswitch-rtcp-timer", 5069)', harness)
 
-    def test_docs_mark_the_cells_release_gated_without_claiming_evidence(self) -> None:
+    def test_docs_cite_the_protected_qualification_that_recorded_the_cells(self) -> None:
+        # 0.5.0 (run 45304004340) is the first protected qualification to
+        # record these cells. The documents must cite the promoted run and
+        # no longer call the cells pending.
+        attestation = json.loads(
+            (ROOT / "crates/sip/rvoip-sip/docs/QUALIFICATION_REPORT_ATTESTATION.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        run_id = attestation["qualification"]["run_id"]
         documents = {
             "compatibility matrix": ROOT / "crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md",
             "RFC matrix": ROOT / "crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md",
@@ -281,8 +290,13 @@ class PbxRtcpSessionTimerPolicyTests(unittest.TestCase):
         for label, path in documents.items():
             with self.subTest(document=label):
                 text = " ".join(path.read_text(encoding="utf-8").split())
-                self.assertRegex(text, r"release-gated (?:against Asterisk and FreeSWITCH )?after `?0\.4\.0`?")
-                self.assertRegex(text, r"(?i)pending|no protected qualification has recorded")
+                self.assertIn(run_id, text)
+                self.assertNotRegex(
+                    text,
+                    r"(?i)pending (?:the next run|protected qualification)"
+                    r"|no protected qualification has recorded"
+                    r"|awaits its first protected",
+                )
         readme = (PBX / "README.md").read_text(encoding="utf-8")
         for scenario in NEW_SCENARIOS:
             self.assertIn(f"`{scenario}`", readme)

@@ -237,6 +237,9 @@ fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
         .as_u64()
         .unwrap();
     let candidate = summary_json["release"]["candidate_sha"].as_str().unwrap();
+    // The ledger names the profile that qualified the release: `remote-release`
+    // through 0.4.0, `release-minor` or `release-patch` since.
+    let profile = summary_json["qualification"]["profile"].as_str().unwrap();
     let run_id = attestation_json["qualification"]["run_id"]
         .as_str()
         .unwrap();
@@ -249,7 +252,7 @@ fn current_beta_reports_are_complete_and_match_immutable_snapshot() {
     assert!(release.contains(&format!("{legacy_count}/{legacy_count} covered")));
     assert!(release.contains(candidate));
     assert!(gates.contains(&format!(
-        "PASS — {gate_count}/{gate_count} remote-release gates passed; 0 failed"
+        "PASS — {gate_count}/{gate_count} {profile} gates passed; 0 failed"
     )));
     assert!(gates.contains("workspace unit tests"));
     assert!(gates.contains("SIPp standalone target start"));

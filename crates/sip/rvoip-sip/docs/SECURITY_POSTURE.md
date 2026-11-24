@@ -1,13 +1,13 @@
 # rvoip-sip Beta Security Posture
 
-Date: 2026-10-12
+Date: 2026-11-24
 
 This document records the security claims that may be made for the beta line
 and the evidence required before release notes are cut. The current clean
-release is `0.4.0` at `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f` (tag `v0.4.0`),
+release is `0.5.0` at `2ae9fa49c5903a3e947a53609ee3f7d64c71a013` (tag `v0.5.0`),
 documented by the [protected qualification report](BETA_RELEASE_REPORT.md) and
-[complete 214-gate ledger](BETA_GATE_REPORT.md) of `remote-release` run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080).
+[complete 221-gate ledger](BETA_GATE_REPORT.md) of `release-minor` run
+[`45304004340`](https://github.com/eisenzopf/rvoip/actions/runs/45304004340).
 
 ## Beta Claims
 
@@ -77,7 +77,8 @@ Current security evidence:
 
 | Check | Status |
 |-------|--------|
-| Dependency advisory audit archived with no unaccepted advisories | Complete in protected 0.4.0 run `38195041080`: `security.advisory-audit` ran fresh; `security.remote-advisories` is a reused entry from candidate `d89c1bc34aadb7184e38792db5da1e91f5a1c8c1`. |
-| Parser fuzz-smoke logs archived | Complete in protected 0.4.0 run: the ten local `security.fuzz-*` targets ran fresh; the AMR and remote fuzz scopes are reused entries. |
-| Final remote-release gate from clean commit | Complete: `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, `214` passed, `0` failed (122 fresh, 92 reused). |
-| Long-duration evidence | The policy accepts the recorded one-hour monolithic and split soak configurations; this is not a 24-hour claim. |
+| Dependency advisory audit archived with no unaccepted advisories | Complete in protected 0.5.0 run `45304004340`: `security.advisory-audit` and `security.remote-advisories` ran on the tested commit (run `45274500898`, reused by exact receipt match). |
+| Parser fuzz-smoke logs archived | Complete in protected 0.5.0 run: the ten local `security.fuzz-*` targets, the three AMR fuzz targets, and the ten `security.remote-fuzz-*` targets ran on the tested commit. |
+| CodeQL analysis of the release source | Complete: `security.codeql-exact` passed for parent candidate `81452a5fb8a5730d4e085dac0e110ca6f9e3af02` and was reused for the tested commit, which differs only in release bookkeeping and version strings. |
+| Final release gate from clean commit | Complete: `2ae9fa49c5903a3e947a53609ee3f7d64c71a013`, `221` passed, `0` failed (13 fresh, 208 reused; 206 of the reused receipts are for the tested commit). |
+| Long-duration evidence | The policy accepts the recorded one-hour monolithic soak and two-hour split soak configurations; this is not a 24-hour claim. |

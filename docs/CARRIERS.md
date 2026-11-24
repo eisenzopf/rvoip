@@ -2,22 +2,25 @@
 
 Code-level statements were reviewed 2026-09-27 against branch
 `codex/downstream-feature-review`; the release evidence was refreshed on
-2026-10-12 to the published `0.4.0` release. The release evidence cited here is
-the protected `0.4.0` qualification run
-[`38195041080`](https://github.com/eisenzopf/rvoip/actions/runs/38195041080) at
-commit `f4d528eaabbac935bce9a6404d3ce4fdec35ed0f`, tag
-[`v0.4.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.4.0), published by
-run [`38204650077`](https://github.com/eisenzopf/rvoip/actions/runs/38204650077)
+2026-11-24 to the published `0.5.0` release. The release evidence cited here is
+the protected `0.5.0` qualification run
+[`45304004340`](https://github.com/eisenzopf/rvoip/actions/runs/45304004340) at
+commit `2ae9fa49c5903a3e947a53609ee3f7d64c71a013`, tag
+[`v0.5.0`](https://github.com/eisenzopf/rvoip/releases/tag/v0.5.0), published by
+run [`45307505314`](https://github.com/eisenzopf/rvoip/actions/runs/45307505314)
 ([qualification report](../crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md),
-[214-gate ledger](../crates/sip/rvoip-sip/docs/BETA_GATE_REPORT.md),
+[221-gate ledger](../crates/sip/rvoip-sip/docs/BETA_GATE_REPORT.md),
 [performance report](../crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md)).
-122 gates ran fresh on that commit; 92 were reused from candidate
-`d89c1bc34aadb7184e38792db5da1e91f5a1c8c1` (run `38181512663`) because their
-definition, inputs, and environment were unchanged, and the ledger marks each
-gate `fresh` or `reused`. The Asterisk, FreeSWITCH, Jambonz, SIPp, strict-UA,
-performance, and soak gates cited below ran fresh; the Kamailio/OpenSIPS proxy
-and registrar-proxy rows, the AMR rate sweep, browser DTMF, remote libsrtp, the
-AMR fuzz targets, and the remote fuzz/advisory scans are reused entries. Rows for behaviour new in `0.4.0` say so.
+206 gates ran on that commit in run
+[`45274500898`](https://github.com/eisenzopf/rvoip/actions/runs/45274500898) and
+were reused by exact definition, input, and environment digest match; 13
+source and report gates ran fresh in the protected run; `security.codeql-exact`
+and `perf.rfc7502-release` were reused from parent candidate
+`81452a5fb8a5730d4e085dac0e110ca6f9e3af02`, which differs only in release
+bookkeeping and version strings. The ledger marks each gate `fresh` or `reused`
+and records each receipt's commit. Every interop, performance, and soak gate
+cited below ran on the tested commit, except the RFC 7502 benchmark. Rows for
+behaviour new in `0.4.0` say so.
 
 This is an evidence index, not a certification. Every row points at a gate id
 in [`scripts/release/gates.json`](../scripts/release/gates.json), a named test,
@@ -39,7 +42,7 @@ Contents: [1 Standards compliance](#1-standards-compliance) ·
 
 | Status | Meaning in this table |
 |---|---|
-| **Release-gated** | Exercised by a gate in the `0.4.0` ledger whose id is named in the Evidence column. The gate runs against an independent peer (Asterisk, FreeSWITCH, Jambonz, Kamailio, OpenSIPS, SIPp, baresip, libsrtp, Chromium) or a named performance/fuzz executable. The bounded scope of the underlying claim still applies; see [RFC_COMPLIANCE_MATRIX.md](../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md). |
+| **Release-gated** | Exercised by a gate in the `0.5.0` ledger whose id is named in the Evidence column. The gate runs against an independent peer (Asterisk, FreeSWITCH, Jambonz, Kamailio, OpenSIPS, SIPp, baresip, libsrtp, Chromium) or a named performance/fuzz executable. The bounded scope of the underlying claim still applies; see [RFC_COMPLIANCE_MATRIX.md](../crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md). |
 | **Tested** | A non-ignored unit or integration test exists for the behaviour; one is named. These tests also run under the ledger's `core.<crate>` gates (for example `core.rvoip-sip`, `core.rvoip-sip-dialog`, `core.rvoip-sip-core`, `core.rvoip-sip-transport`, `core.rvoip-rtp-core`), but a crate-wide test gate does not name the RFC, so it is not counted as Release-gated here. |
 | **Implemented, untested against peers** | Behaviour exists in source; no test could be named for it in reasonable time. Treat as unverified. |
 | **Parsed only** | The header, URI form, SDP attribute, or payload-type entry is parsed and round-tripped; no protocol behaviour is claimed. |
@@ -51,12 +54,15 @@ read with this table: the crate-local
 (20 bounded claims with `T-*` evidence ids, plus explicit non-claims) and the
 broader [docs/sip/SIP_RFC_COMPLIANCE.md](sip/SIP_RFC_COMPLIANCE.md). Where the
 table below is more conservative than either document, the table reflects what
-could be located in code and the `0.4.0` ledger.
+could be located in code and the `0.5.0` ledger.
 
-Gate ids referenced below (all PASS in the `0.4.0` ledger):
+Gate ids referenced below (all PASS in the `0.5.0` ledger):
 `interop.asterisk-matrix`, `interop.freeswitch-matrix` (scenarios
 `registration basic_call g729_call amr_call amr_transcode_call b2bua_call hold_resume ring_cancel dtmf reject blind_transfer`
-over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
+over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`; plus the
+`Endpoint`-only RTCP and session-timer cells `rtcp_mux`, `rtcp_non_mux`,
+`rtcp_mux_declined`, and `session_timer` for Asterisk and `rtcp_mux` and
+`session_timer` for FreeSWITCH),
 `interop.jambonz-matrix` (same runner, UDP only, PCMU/PCMA),
 `interop.sipp-matrix`, `interop.strict-ua` (baresip),
 `interop.remote-proxies.{kamailio,opensips}.{rvoip-first,peer-first}.{udp,tcp,tls}`,
@@ -87,7 +93,7 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
 | 6086 | INFO | Tested | `crates/sip/rvoip-sip/tests/info_auth_retry.rs::info_extras_survive_401_driven_auth_retry`. No Info-Package negotiation. |
 | 2976 | INFO (2000) | Tested (obsoleted by 6086) | As 6086 |
 | 3903 | PUBLISH | Parsed only | `crates/sip/sip-core/src/types/sip_etag.rs`, `sip_if_match.rs`; COMPATIBILITY_MATRIX lists PUBLISH as parser-only/post-beta |
-| 4028 | Session timers | Tested | Conformance reworked in `0.4.0` (bounded claim `SIP-4028-TIMER`, evidence `T-4028-W1`–`W9`, `T-4028-U1`–`U3`): 90 s Min-SE floor, `422`/`Min-SE`, no `Require: timer` toward callers without timer support, `refresher=uac` on refreshes, re-INVITE fallback, rejected refreshes keep the call. `crates/sip/rvoip-sip/tests/session_timer_refresh_outcomes.rs`, `session_timer_rfc4028_uas.rs`, `session_timer_rfc4028_uac.rs`, `session_422_retry.rs::invite_422_retry_bumps_session_expires_and_succeeds`. These targets need the `test-hooks` feature: in `0.4.0` they ran in `core.rvoip-sip` only; after `0.4.0` `test.sip-integration` also builds with the feature. No PBX scenario exercises session timers. |
+| 4028 | Session timers | Release-gated (bounded) | Conformance reworked in `0.4.0` (bounded claim `SIP-4028-TIMER`, evidence `T-4028-W1`–`W9`, `T-4028-U1`–`U3`): 90 s Min-SE floor, `422`/`Min-SE`, no `Require: timer` toward callers without timer support, `refresher=uac` on refreshes, re-INVITE fallback, rejected refreshes keep the call. `crates/sip/rvoip-sip/tests/session_timer_refresh_outcomes.rs`, `session_timer_rfc4028_uas.rs`, `session_timer_rfc4028_uac.rs`, `session_422_retry.rs::invite_422_retry_bumps_session_expires_and_succeeds`. These targets need the `test-hooks` feature: in `0.4.0` they ran in `core.rvoip-sip` only; in `0.5.0` `test.sip-integration` also builds with the feature and runs them. Peer evidence: the `session_timer` cells of `interop.asterisk-matrix` and `interop.freeswitch-matrix` (UDP, `Endpoint` API; refresher roles in both directions and FreeSWITCH's `422`/Min-SE retry) passed in `0.5.0`. No SBC or proxy exercises session timers. |
 | 3326 | Reason header | Implemented, untested against peers | Emitted on teardown in `crates/sip/rvoip-sip/src/state_machine/actions.rs`; no test named for the header itself |
 | 3891 | Replaces | Parsed only | `crates/sip/sip-dialog/tests/refer_handling_test.rs::test_refer_with_replaces_header` constructs the header; no replacement executes (`SIP-3891-REPLACES` is Unsupported) |
 | 4538 | Target-Dialog | Parsed only | `crates/sip/rvoip-sip/src/api/headers/convenience.rs` |
@@ -143,7 +149,7 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
 | RFC | Title | Status | Evidence |
 |---|---|---|---|
 | 8866, 4566 | SDP | Release-gated | Every call scenario in the PBX, Jambonz, SIPp, and proxy gates; `security.fuzz-sdp`; `sdp_matcher_integration.rs::multi_m_line_offer_independently_matched`. Full grammar, BUNDLE, trickle ICE, WebRTC negotiation not claimed. |
-| 3550 | RTP / RTCP | Release-gated (RTP); RTCP behaviour Tested | `basic_call` tone-verified scenarios in `interop.asterisk-matrix`, `interop.freeswitch-matrix`, `interop.jambonz-matrix`; `perf.rtp-steady-state`; `interop.remote-libsrtp`; `crates/media/rtp-core/src/packet/rtp.rs::test_serialize_parse_roundtrip`. New in `0.4.0`, Tested only: the RFC 3550 report interval (`crates/media/rtp-core/src/session/mod.rs::periodic_report_interval_follows_rfc3550_under_paused_time`), a random per-session CNAME (`::cname_is_random_per_session_and_names_no_user_or_host`), and RTCP accepted only from the call's peer (`::neighbouring_calls_rtcp_is_dropped_and_leaves_stats_untouched`). No release gate checks RTCP against an independent stack; the `0.4.0` Asterisk/FreeSWITCH RTCP runs were a local diagnostic lab. Feedback matrix not claimed. |
+| 3550 | RTP / RTCP | Release-gated (RTP; RTCP report exchange with Asterisk and FreeSWITCH) | `basic_call` tone-verified scenarios in `interop.asterisk-matrix`, `interop.freeswitch-matrix`, `interop.jambonz-matrix`; `perf.rtp-steady-state`; `interop.remote-libsrtp`; `crates/media/rtp-core/src/packet/rtp.rs::test_serialize_parse_roundtrip`. New in `0.4.0`, Tested only: the RFC 3550 report interval (`crates/media/rtp-core/src/session/mod.rs::periodic_report_interval_follows_rfc3550_under_paused_time`), a random per-session CNAME (`::cname_is_random_per_session_and_names_no_user_or_host`), and RTCP accepted only from the call's peer (`::neighbouring_calls_rtcp_is_dropped_and_leaves_stats_untouched`). RTCP report exchange with Asterisk and FreeSWITCH is checked by the `rtcp_mux`, `rtcp_non_mux`, and `rtcp_mux_declined` cells of the PBX matrices, which passed in `0.5.0` (the `0.4.0` runs were a local diagnostic lab). Feedback matrix not claimed. |
 | 3551 | RTP/AVP profile (PCMU, PCMA) | Release-gated | `interop.jambonz-matrix` (`PBX_G711_PROFILES=pcmu pcma`); `basic_call` in the Asterisk/FreeSWITCH matrices; `security.fuzz-g711` |
 | 4733, 2833 | telephone-event DTMF | Release-gated | `dtmf` scenario in `interop.asterisk-matrix`, `interop.freeswitch-matrix`, `interop.jambonz-matrix`; `interop.browser-dtmf` (Chromium, via `rvoip-webrtc`) |
 | 3389 | Comfort noise | Tested | `crates/media/media-core/src/relay/controller/cn_transmitter.rs::send_emits_pt13_with_level_byte`; `config_channel_capacity_integration.rs::comfort_noise_payload_requires_comfort_noise_flag`. Off by default. |
@@ -156,8 +162,8 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
 | 5104 | Codec control messages | Parsed only | `crates/media/rtp-core/src/feedback/packets.rs` |
 | 3611 | RTCP XR | Tested (opt-in VoIP metrics) | `crates/media/rtp-core/src/packet/rtcp/xr.rs::test_voip_metrics_block`; since `0.4.0` XR VoIP-metrics reports are off unless `Config::rtcp_xr_voip_metrics` is set and the peer requests them: `crates/sip/rvoip-sip/src/adapters/media_adapter.rs::rtcp_xr_is_enabled_only_when_configured_and_requested_by_the_peer`, `crates/media/rtp-core/src/session/mod.rs::rtcp_xr_is_absent_by_default_and_follows_the_session_switch`. No peer gate. |
 | 5506 | Reduced-size RTCP | Not supported | Not implemented (SIP_RFC_COMPLIANCE.md) |
-| 5761 | RTP/RTCP multiplexing | Tested | Since `0.4.0` every offer carries `a=rtcp-mux` (bounded claim `RTP-5761-MUX`): `crates/sip/rvoip-sip/src/adapters/media_adapter.rs::default_offer_carries_rtcp_mux_and_periodic_rtcp_reaches_a_muxing_peer`, `::default_offer_sends_no_rtcp_anywhere_when_the_answer_declines_mux`, `::required_rtcp_mux_negotiates_and_refuses_separate_port_peers`; `crates/sip/rvoip-sip/tests/media_quality_integration.rs::rtcp_mux_call_reports_local_and_peer_quality_and_measures_induced_loss`; `crates/media/rtp-core/src/transport/security_transport.rs::wrapper_protects_and_unprotects_srtcp_on_muxed_and_separate_sockets`. Every PBX and Jambonz call in the `0.4.0` ledger was offered mux, but no gate asserts RTCP flow with a peer. |
-| 3605 | RTCP attribute / separate RTCP port | Tested (opt-in) | New in `0.4.0` behind `Config::rtcp_non_mux` (bounded claim `RTP-3605-NONMUX`): `media_adapter.rs::rtcp_non_mux_reaches_a_non_mux_peers_rtp_port_plus_one_both_ways`, `::rtcp_non_mux_follows_the_answers_a_rtcp_port`, `::rtcp_non_mux_carries_srtcp_with_sdes_both_ways`. Not available with DTLS-SRTP, ICE, or strict mux. |
+| 5761 | RTP/RTCP multiplexing | Release-gated (bounded) | Since `0.4.0` every offer carries `a=rtcp-mux` (bounded claim `RTP-5761-MUX`): `crates/sip/rvoip-sip/src/adapters/media_adapter.rs::default_offer_carries_rtcp_mux_and_periodic_rtcp_reaches_a_muxing_peer`, `::default_offer_sends_no_rtcp_anywhere_when_the_answer_declines_mux`, `::required_rtcp_mux_negotiates_and_refuses_separate_port_peers`; `crates/sip/rvoip-sip/tests/media_quality_integration.rs::rtcp_mux_call_reports_local_and_peer_quality_and_measures_induced_loss`; `crates/media/rtp-core/src/transport/security_transport.rs::wrapper_protects_and_unprotects_srtcp_on_muxed_and_separate_sockets`. The `rtcp_mux` cells of `interop.asterisk-matrix` (UDP and TLS/SDES-SRTP) and `interop.freeswitch-matrix` (UDP) assert RTCP both ways on the RTP port, and Asterisk's `rtcp_mux_declined` cells assert that no RTCP is sent when mux is declined; all passed in `0.5.0`. `a=rtcp-mux-only` interop is not claimed. |
+| 3605 | RTCP attribute / separate RTCP port | Release-gated (opt-in, Asterisk only) | New in `0.4.0` behind `Config::rtcp_non_mux` (bounded claim `RTP-3605-NONMUX`): `media_adapter.rs::rtcp_non_mux_reaches_a_non_mux_peers_rtp_port_plus_one_both_ways`, `::rtcp_non_mux_follows_the_answers_a_rtcp_port`, `::rtcp_non_mux_carries_srtcp_with_sdes_both_ways`. Peer evidence: the `rtcp_non_mux` cells of `interop.asterisk-matrix` (UDP and TLS/SDES-SRTP) passed in `0.5.0`; FreeSWITCH has no non-mux cell. Not available with DTLS-SRTP, ICE, or strict mux. |
 | 8285, 5285 | RTP header extensions | Tested | `crates/media/rtp-core/src/packet/extension/mod.rs::test_one_byte_extensions`, `::test_two_byte_extensions` |
 | 6464 | Client-to-mixer audio level | Parsed only | `a=extmap` and extension ids in `extension/mod.rs`, `sdp/attributes/extmap.rs` |
 | 6465 | Mixer-to-client audio level | Not supported | Absent |
@@ -207,12 +213,12 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
 
 ## 2. Interoperability attestation
 
-### Peers in the `0.4.0` ledger
+### Peers in the `0.5.0` ledger
 
 | Peer | Pinned version / image | Gate ids | Executed scope | Not covered by this peer |
 |---|---|---|---|---|
-| Asterisk (`res_pjsip`) | 20.20.1 on Debian 12 (`infra/release-runners/pbx/asterisk/Dockerfile`) | `interop.asterisk-matrix` (+ `up`/`down`/`restore`), `interop.amr-rate-sweep.*` | `Endpoint`, `StreamPeer`, `CallbackPeer`; registration, basic_call (PCMU/PCMA, bidirectional tone analysis), g729_call (G.729A, G.729AB), amr_call, amr_transcode_call, b2bua_call, hold_resume, ring_cancel, dtmf, reject, blind_transfer; UDP and TLS; AMR-NB/WB every mode over UDP and TLS+SRTP | 100rel/PRACK, session timers, SUBSCRIBE/NOTIFY packages, DTLS-SRTP, IPv6 |
-| FreeSWITCH (Sofia) | v1.10.12, sofia-sip v1.13.17 (`infra/release-runners/pbx/freeswitch/Dockerfile`) | `interop.freeswitch-matrix` (+ lifecycle) | Same runner and scenario list as Asterisk | Same as Asterisk |
+| Asterisk (`res_pjsip`) | 20.20.1 on Debian 12 (`infra/release-runners/pbx/asterisk/Dockerfile`) | `interop.asterisk-matrix` (+ `up`/`down`/`restore`), `interop.amr-rate-sweep.*` | `Endpoint`, `StreamPeer`, `CallbackPeer`; registration, basic_call (PCMU/PCMA, bidirectional tone analysis), g729_call (G.729A, G.729AB), amr_call, amr_transcode_call, b2bua_call, hold_resume, ring_cancel, dtmf, reject, blind_transfer; UDP and TLS; AMR-NB/WB every mode over UDP and TLS+SRTP; `Endpoint`-only RTCP cells (`rtcp_mux`, `rtcp_non_mux`, `rtcp_mux_declined`, UDP and TLS) and `session_timer` (UDP) | 100rel/PRACK, session timers beyond the UDP `Endpoint` cell, SUBSCRIBE/NOTIFY packages, DTLS-SRTP, IPv6 |
+| FreeSWITCH (Sofia) | v1.10.12, sofia-sip v1.13.17 (`infra/release-runners/pbx/freeswitch/Dockerfile`) | `interop.freeswitch-matrix` (+ lifecycle) | Same runner and scenario list as Asterisk, except that its RTCP cell is `rtcp_mux` over UDP only | Same as Asterisk |
 | Jambonz OSS | Release line 0.9.15; `sbc-inbound` `c5a2ca73…`, `sbc-outbound` `ef2a9ada…`, built on Node 24.22.1, drachtio/rtpengine/registrar/auth/redis/mysql images digest-pinned (`infra/release-runners/pbx/jambonz/versions.env`); latest-line check `interop.jambonz-latest` | `interop.jambonz-latest`, `interop.jambonz-up`, `interop.jambonz-matrix`, `interop.jambonz-down` (residue proof) | All three APIs; UDP only; PCMU/PCMA; registration, basic_call, hold_resume, ring_cancel, dtmf, reject, blind_transfer with ordered NOTIFY and optional Referred-By | G.729, AMR, b2bua_call, TLS/SRTP, WebRTC, PSTN, application verbs, recording, HA, load; commercial Jambonz 10.x and jambonz.cloud |
 | Kamailio | 6.1.3 Bookworm `ghcr.io/kamailio/kamailio:6.1.3-bookworm@sha256:26b26c6…` (`crates/sip/sip-proxy/tests/interop/README.md`) | `interop.remote-proxies.kamailio.{rvoip-first,peer-first}.{udp,tcp,tls}`, `interop.proxy-pbx.kamailio.matrix` | Transaction-stateful proxy in both hop orders (`SIPp UAC -> rvoip -> Kamailio -> SIPp UAS` and the reverse) over UDP, TCP, and hostname-verified mTLS through gate-owned boundaries; scenario inventory: INVITE success, CANCEL before/after provisional, matched/unmatched/retransmitted CANCEL, 2xx and non-2xx ACK routing, forks, Timer C, Via push/pop, Route/Record-Route strict and loose, SIPS, 401/407 aggregation, RFC 3263 failover, stray-response discard, retention drain. Registrar-proxy + rtpengine lab: registration, basic_call, amr_call with the `Endpoint` API (`run.sh` `provider_scenario_supported`) | hold_resume, REFER, DTMF, and TLS cells through the proxy labs are gated off in `run.sh` until proven; native outbound TLS hostname enforcement by the peer is explicitly not claimed |
 | OpenSIPS | 3.6.7 (`opensips/opensips:3.6@sha256:eba1396…`) | `interop.remote-proxies.opensips.*`, `interop.proxy-pbx.opensips.matrix` | Same 12-row proxy matrix and rtpengine lab scope as Kamailio | Same as Kamailio; the OpenSIPS lab has no TLS listener for the registrar-proxy media cells |
@@ -227,9 +233,9 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
   `source.final-capture` / `source.canonical-2k-unchanged` / `source.remote-clean` /
   `source.remote-final` prove it did not change. Every row of the gate report
   carries the candidate SHA, a receipt SHA-256, and a command-log SHA-256.
-- Catalog and plan: gate catalog `00f259f0…`, plan `deff2c19…`, aggregate
-  `82cabd72…`; evidence artifact `11726014831`
-  (`sha256:2a97885f…`) ([BETA_RELEASE_REPORT.md](../crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)).
+- Catalog and plan: gate catalog `f86eda84…`, plan `072e09ed…`, aggregate
+  `2abd0bcf…`; evidence artifact `14880422047`
+  (`sha256:f2bb79f5…`) ([BETA_RELEASE_REPORT.md](../crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md)).
   A reused gate carries the receipt and command-log hashes of its earlier run,
   bound to the same definition, input, and environment digests.
 - Peers: image digests and source tarball hashes are release inputs; floating
@@ -243,14 +249,14 @@ over UDP and TLS, APIs `endpoint`/`stream_peer`/`callback`),
   both adjacency orders, and UDP/TCP/verified-TLS rows, with each peer covering
   the complete scenario inventory independently.
 - Legacy coverage: all 108 requirements of the earlier strict beta ledger are
-  mapped onto the 214-gate profile (`remote_release_legacy_coverage` in
+  mapped onto the 221-gate `release-minor` profile (`remote_release_legacy_coverage` in
   `gates.json`, `unautomated_legacy_ids: []`).
 
 ### Not covered
 
 From the evidence matrix non-claims, COMPATIBILITY_MATRIX, and the run
-configuration: 100rel with any PBX; session-timer negotiation with any PBX;
-SUBSCRIBE/NOTIFY event packages with any peer; DTLS-SRTP with any SIP peer;
+configuration: 100rel with any PBX; session timers with any PBX other than the
+UDP `Endpoint` cells against Asterisk and FreeSWITCH; SUBSCRIBE/NOTIFY event packages with any peer; DTLS-SRTP with any SIP peer;
 IPv6 on the network path; WSS; ICE/TURN; any carrier SBC or IMS core;
 PSTN; any peer version other than the pinned one; Jambonz over TLS/SRTP or with
 G.729/AMR; hold/resume, transfer, and DTMF through the Kamailio/OpenSIPS
@@ -263,9 +269,10 @@ protected evidence also records two independent UAs behind real NAT".
 
 ### What was measured, where
 
-All `0.4.0` performance rows ran fresh on ephemeral AWS EC2 workers over
-loopback networking (environment
-`rvoip-release-v6-rust-1.91-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`).
+All `0.5.0` performance rows except the RFC 7502 benchmark ran on the tested
+commit on ephemeral AWS EC2 workers over loopback networking (run
+`45274500898`, environment
+`rvoip-release-v6-rust-1.95-nextest-0.9.140-prebuilt-perf-v2-lld-ec2-m5-perf16-soaklong16-interop16`).
 Machine classes ([AWS_RELEASE_WORKERS.md](AWS_RELEASE_WORKERS.md)): performance
 and long-soak workers `m5.4xlarge` (16 vCPU, 64 GB), short-soak `m5.xlarge`,
 interop `m5.4xlarge`, proxy interop `m5.large`. Performance executables were
@@ -286,19 +293,20 @@ times on the `pbx-media-server` profile with media enabled (PCMU/PCMA/DTMF), fou
 Alice shards pinned to 16 dispatcher workers each. Acceptance thresholds are in
 `crates/sip/rvoip-sip/scripts/perf_2k_acceptance.py`:
 
-| Metric | Threshold | Pass 1 (`…031437Z`) | Pass 2 (`…032949Z`) | Pass 3 (`…034459Z`) |
+| Metric | Threshold | Pass 1 (`…225108Z`) | Pass 2 (`…230622Z`) | Pass 3 (`…232135Z`) |
 |---|---|---|---|---|
 | Calls at target 2,000 CPS | 65,000/65,000 | 65,000/65,000 | 65,000/65,000 | 65,000/65,000 |
 | ASR | >= 0.999 | 1.0 | 1.0 | 1.0 |
-| NER | >= 0.999 | pass | pass | pass |
-| Achieved CPS | (reported) | 1,857.10 | 1,857.13 | 1,857.13 |
-| Setup p99 | <= 16.69 ms | 2.568 ms | 2.605 ms | 2.683 ms |
-| Full-cycle p99 | <= 159.66 ms | pass | pass | pass |
-| Peak RSS | <= 3,202.26 MB | 2,082.10 MB | 2,083.60 MB | 2,082.64 MB |
+| NER | >= 0.999 | 1.0 | 1.0 | 1.0 |
+| Achieved CPS | (reported) | 1,857.11 | 1,857.10 | 1,857.14 |
+| Setup p99 | <= 16.69 ms | 2.271 ms | 2.290 ms | 2.275 ms |
+| Full-cycle p99 | <= 159.66 ms | 3.531 ms | 3.516 ms | 3.604 ms |
+| Peak RSS | <= 3,202.26 MB | 2,088.92 MB | 2,098.78 MB | 2,096.71 MB |
 | Post-drain RSS growth | <= 10 MB/h | pass | pass | pass |
 
-Achieved/target is 0.9286 at every step of every sweep (27.86/30, 92.85/100,
-278.57/300, 928.55/1,000, 1,857.1/2,000) on both the `pbx-media-server` and
+Achieved/target is about 0.9286 at every step of every sweep (27.86/30,
+92.85–92.86/100, 278.56–278.57/300, 928.54–928.57/1,000,
+1,857.10–1,857.14/2,000) on both the `pbx-media-server` and
 `signaling-only-server-high-performance` profiles. That is the driver's pacing
 ratio, not a throughput knee; the report publishes achieved CPS rather than
 normalising it.
@@ -307,15 +315,15 @@ normalising it.
 
 | Scenario (gate) | Target | Result |
 |---|---|---|
-| `perf_call_setup_cps_signaling-only-server-high-performance` (`perf.call-setup-signaling`) | 2,000 CPS | 65,000/65,000, ASR 1.0, p99 2.654 ms, peak RSS 2,070.03 MB |
-| `perf_call_setup_cps_endpoint` (`perf.call-setup-endpoint`) | 30 CPS | 975/975, p99 2.101 ms |
-| `perf_concurrent_active_calls` (`perf.concurrent-calls`) | 500 active | ASR 1.0, p99 213.778 ms, peak RSS 253.96 MB |
-| `perf_tls_overhead` (`perf.tls-overhead`) | 100 CPS | 3,250/3,250, p99 20.726 ms |
-| `perf_srtp_overhead` (`perf.srtp-overhead`) | 50 CPS | ASR 1.0, p99 24.789 ms |
-| `perf_b2bua_forwarding` (`perf.b2bua`) | 30 CPS | 975/975, p99 2.079 ms |
-| `perf_pdd_with_180_first` (`perf.pdd-180`) | 50 CPS | 1,625/1,625, p99 1.759 ms |
-| `perf_registration_throughput`, `perf_registrar_binding_scale` | 100 | PASS; peak RSS 90.61 / 89.08 MB |
-| `perf_backpressure_step` (`perf.backpressure`) | 200 CPS step | 13,912/13,912 |
+| `perf_call_setup_cps_signaling-only-server-high-performance` (`perf.call-setup-signaling`) | 2,000 CPS | 65,000/65,000, ASR 1.0, p99 2.877 ms, peak RSS 2,077.32 MB |
+| `perf_call_setup_cps_endpoint` (`perf.call-setup-endpoint`) | 30 CPS | 975/975, p99 1.965 ms |
+| `perf_concurrent_active_calls` (`perf.concurrent-calls`) | 500 active | ASR 1.0, p99 202.768 ms, peak RSS 235.17 MB |
+| `perf_tls_overhead` (`perf.tls-overhead`) | 100 CPS | 3,250/3,250, p99 1.773 ms |
+| `perf_srtp_overhead` (`perf.srtp-overhead`) | 50 CPS | ASR 1.0, p99 30.933 ms |
+| `perf_b2bua_forwarding` (`perf.b2bua`) | 30 CPS | 975/975, p99 1.686 ms |
+| `perf_pdd_with_180_first` (`perf.pdd-180`) | 50 CPS | 1,625/1,625, p99 2.022 ms |
+| `perf_registration_throughput`, `perf_registrar_binding_scale` | 100 | PASS; peak RSS 93.09 / 91.14 MB |
+| `perf_backpressure_step` (`perf.backpressure`) | 200 CPS step | 13,483/13,483 |
 | `perf_sipp_parity` (`perf.sipp-parity`) | 20 CPS | PASS (the archived row shows setup p99 `0`; treat that cell as not emitted) |
 
 ### Burst profiles
@@ -337,8 +345,33 @@ Per-scenario counters live in the run's evidence artifact, not in the
 repository report. The `0.3.2` release carried a documented exception on this
 profile (17,871/18,000, ASR 0.9928;
 [BETA_PERFORMANCE_EXCEPTION.md](../crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_EXCEPTION.md));
-`0.4.0` passed it without exception (ASR 1.0, no timeouts, 9,700,333 audio
-frames delivered).
+`0.5.0` passed it without exception (160 CPS, ASR 1.0, no timeouts,
+11,610,101 audio frames delivered, nothing retained after drain).
+
+### RFC 7501/7502 benchmark
+
+`0.5.0` is the first release gated on an RFC 7501/7502 SIP benchmark
+([RFC7502_BENCHMARK.md](../crates/sip/rvoip-sip/docs/RFC7502_BENCHMARK.md)). The
+device under test is `rvoip-bench-uas` on a c8i.4xlarge (16 vCPU), driven by
+three c8in.24xlarge callers in us-west-2a; the testbed is pinned by environment
+id `aws-usw2-c8i4xl-3xc8in24xl-0d3897eb-12299927`. The recorded Session
+Establishment Rates
+([`rates.json`](../crates/sip/rvoip-sip/perf-baselines/rfc7502/aws-usw2-c8i4xl-3xc8in24xl-0d3897eb-12299927/rates.json))
+come from a full search on an earlier 0.5 candidate (run `45065590604`):
+
+| Row | Transport | Media | R (sessions/s) |
+|---|---|---|---:|
+| R1 | TLS | signaling only | 8,348 |
+| R5 | UDP | signaling only | 8,256 |
+| R2 | TLS | SDES-SRTP G.711, 10 s hold | 1,124 |
+| R6 | UDP | RTP G.711, 10 s hold | 1,204 |
+
+The release lane `perf.rfc7502-release` (bench run `45221679416`, on parent
+candidate `81452a5fb8a5730d4e085dac0e110ca6f9e3af02`) re-tested R1, R5, and R2
+and confirmed them. Its `WARN` verdict records that the 1.05 R trials of R1 and
+R5 also passed (8,764 and 8,668 sessions/s), a likely improvement to record
+after review. R6 is not re-tested by the release lane. These are rates for this
+device under test and testbed, not a carrier capacity figure.
 
 ### Exclusions from the performance claim
 
@@ -362,10 +395,10 @@ frames delivered).
 
 | Evidence | Gate / source | What it shows |
 |---|---|---|
-| Split soak, 500 active calls (one hour in 0.4.0; two hours from 0.5) | `perf.soak-candidate` (`perf_soak_split.sh`; `RVOIP_PERF_SOAK_ACTIVE_CALLS=500`, hold 10–360 s, 3,600 s in 0.4.0, 7,200 s from 0.5, `RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15`) | `perf_soak_caller`: 9,904/9,904 calls, ASR 1.0, setup p99 166.986 ms, peak RSS 169.45 MB, active-tail RSS growth 8.41 MB/h; `perf_soak_receiver`: peak RSS 183.79 MB, growth 5.69 MB/h |
-| One-hour monolithic soak, 30 active calls | `perf.monolithic-soak` | `perf_soak_30min`: 587/587, ASR 1.0, p99 15.032 ms, peak RSS 119.53 MB, active-tail RSS growth 9.54 MB/h |
-| Mass teardown | `perf.mass-teardown` (500 calls torn down together, 160 s retention drain) | Peak RSS 271.93 MB; 0 retained |
-| Session churn leak | `perf.session-churn` | 250/250, peak RSS 98.5 MB |
+| Two-hour split soak, 500 active calls (one hour in 0.4.0) | `perf.soak-candidate` (`perf_soak_split.sh`; `RVOIP_PERF_SOAK_ACTIVE_CALLS=500`, hold 10–360 s, `RVOIP_PERF_SOAK_DURATION_SECS=7200`, `RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR=15`) | `perf_soak_caller`: 19,655/19,655 calls, all completed at the receiver, ASR 1.0, setup p99 117.506 ms, peak RSS 175.82 MB, active-tail RSS growth 2.81 MB/h; `perf_soak_receiver`: peak RSS 171.35 MB, growth -1.21 MB/h; 0 call, media-setup, or teardown failures |
+| One-hour monolithic soak, 30 active calls | `perf.monolithic-soak` | `perf_soak_30min`: 587/587, ASR 1.0, p99 16.138 ms, peak RSS 115.25 MB, active-tail RSS growth 11.71 MB/h |
+| Mass teardown | `perf.mass-teardown` (500 calls torn down together, 160 s retention drain) | Peak RSS 237.38 MB; 0 retained |
+| Session churn leak | `perf.session-churn` | 250/250, peak RSS 98.16 MB |
 | Transport recovery, resiliency invariants | `perf.transport-recovery`, `perf.resiliency-all` (`crates/sip/rvoip-sip/tests/resiliency_invariants.rs`) | PASS |
 | Overload behaviour | `perf.media-burst.overload-recovery` | Admission cap rejects cleanly; recovery ASR >= 0.999 within 5 s |
 | Regression audit | `report.regression-baseline`, `report.regression-audit` against `crates/sip/rvoip-sip/perf-baselines/20260929T224805Z` (15 % throughput, 25 % latency tolerance) | PASS |
@@ -464,7 +497,7 @@ What a carrier or CPaaS would normally expect and rvoip does not yet claim:
 | Live two-UA real-NAT qualification of the RFC 5626 remote endpoint profile | [REMOTE_ENDPOINT_PROFILE.md](sip/REMOTE_ENDPOINT_PROFILE.md); issue #102 (closed as implemented, qualification still pending) |
 | IPv6 on the network path | COMPATIBILITY_MATRIX "Not audited" |
 | WSS (SIP over secure WebSocket) outbound | COMPATIBILITY_MATRIX "Not supported" |
-| 100rel/PRACK, session timers, UPDATE offer/answer against real PBXs | RFC_COMPLIANCE_MATRIX limits on `SIP-3262-100REL`, `SIP-4028-TIMER`, `SIP-3311-UPDATE`; no PBX scenario |
+| 100rel/PRACK, UPDATE offer/answer, and session timers beyond the UDP `Endpoint` cells against real PBXs | RFC_COMPLIANCE_MATRIX limits on `SIP-3262-100REL`, `SIP-4028-TIMER`, `SIP-3311-UPDATE`; the only PBX session-timer scenario is `session_timer` (Asterisk and FreeSWITCH, UDP, `Endpoint`) |
 | Attended transfer / Replaces (RFC 3891) end to end | `SIP-3891-REPLACES` Unsupported; README lists attended-transfer primitives as developer preview |
 | History-Info, Diversion, Privacy semantics (beyond carry-through) | §1 Parsed-only rows |
 | PUBLISH, presence agent, MWI, dialog-event notifier state machines | §1 Presence and events |
@@ -502,10 +535,11 @@ reading them side by side will notice):
    that are not in the scenario list.
 5. Release pointers: RFC_COMPLIANCE_MATRIX.md, COMPATIBILITY_MATRIX.md,
    SECURITY_POSTURE.md, TOPOLOGY_PROFILES.md, and the promoted reports now name
-   the `0.4.0` 214-gate run. CRYPTO_CAPABILITIES.md still scopes its claim to
+   the `0.5.0` 221-gate run. CRYPTO_CAPABILITIES.md still scopes its claim to
    `rvoip-sip 0.3.9`, and docs/sip/README.md cites a June attestation basis.
-6. Resolved in `0.4.0`: the promoted BETA_RELEASE_REPORT.md records evidence
-   artifact `11726014831` and its digest instead of `pending-upload`.
+6. Resolved since `0.4.0`: the promoted BETA_RELEASE_REPORT.md records the
+   evidence artifact (`14880422047` for `0.5.0`) and its digest instead of
+   `pending-upload`.
 
 ## 7. How to reproduce
 
