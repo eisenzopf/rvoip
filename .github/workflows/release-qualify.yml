@@ -304,6 +304,10 @@ jobs:
         if: matrix.needs_chromium
         run: sudo apt-get install -y chromium
 
+      # Gate output lives outside target/: the Rust cache above saves all of
+      # target/, and a shard directory saved by one run's cache came back in
+      # the next, so a gate that refuses existing output failed (0.5.0's
+      # report.regression-baseline, run 45274500898).
       - name: Run gate shard
         env:
           GH_TOKEN: ${{ matrix.needs_github_token && github.token || '' }}
@@ -312,14 +316,14 @@ jobs:
           --candidate '${{ needs.plan.outputs.candidate_sha }}'
           --environment-id '${{ needs.plan.outputs.environment_id }}'
           --gates '${{ matrix.gates_csv }}'
-          --output target/release-shard
+          --output '${{ runner.temp }}/release-shard'
 
       - name: Upload shard evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-gate-shard-${{ matrix.id }}
-          path: target/release-shard/
+          path: ${{ runner.temp }}/release-shard/
           retention-days: 90
           if-no-files-found: warn
 
@@ -480,14 +484,14 @@ jobs:
           --candidate '${{ needs.plan.outputs.candidate_sha }}'
           --environment-id '${{ needs.plan.outputs.environment_id }}'
           --gates '${{ matrix.gates_csv }}'
-          --output target/release-shard
+          --output '${{ runner.temp }}/release-shard'
 
       - name: Upload shard evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-gate-shard-${{ matrix.id }}
-          path: target/release-shard/
+          path: ${{ runner.temp }}/release-shard/
           retention-days: 90
           if-no-files-found: warn
 
