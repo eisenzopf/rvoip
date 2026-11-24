@@ -29,6 +29,42 @@ the release-gated interoperability evidence against Asterisk, FreeSWITCH,
 Jambonz, Kamailio, and OpenSIPS. Carriers evaluating standards coverage,
 performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 
+## Performance at a glance (0.5.0)
+
+One AWS c8i.4xlarge (16 vCPU, 8 cores, Intel Xeon 6, 32 GiB) running a single
+rvoip process, measured with the RFC 7501/7502 benchmark:
+
+| Workload | Max CPS | CPS per vCPU | Concurrent calls (10 s calls) | p50 setup at 90% load | p99 setup at 90% load |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SIP over TLS, signaling only | 8,348 | ~520 | n/a | 1 ms | 6 ms |
+| SIP over UDP, signaling only | 8,256 | ~515 | n/a | 1 ms | 6 ms |
+| TLS + SRTP (SDES), G.711, 10 s calls | 1,124 | ~70 | ~11,200 | 1 ms | 4 ms |
+| UDP + RTP, G.711, 10 s calls | 1,204 | ~75 | ~12,000 | n/m | n/m |
+
+At 2x capacity, rvoip keeps admitting calls at its max CPS, refuses the
+excess with fast 503 responses, and recovers cleanly once the load drops.
+
+- Max CPS (calls per second; RFC 7502's Session Establishment Rate) is the
+  highest rate with zero failed calls over a trial of at least 180 s and
+  50,000 call attempts.
+- rvoip was measured as a terminating endpoint: it answers each call and echoes
+  its media. A relaying B2BUA or SBC handles two call legs per session.
+- G.711 media is passed through; nothing is transcoded.
+- Concurrent calls is the CPS times the 10 s call length, not a measured
+  maximum; long-call capacity, where most SBC datasheets quote their
+  concurrency, has not been measured yet.
+- The server is a cloud VM, not an appliance.
+- p50 and p99 setup are the RFC 6076 session request delay measured at 90% of
+  max CPS, recorded in whole milliseconds (so 1 ms means 1 ms or less);
+  n/m = not measured.
+- The UDP + RTP max CPS was confirmed twice rather than three times.
+- The release check also passed at 5% above the TLS and UDP signaling max CPS,
+  so those two figures may be slightly understated.
+- Not yet measured: B2BUA/relay mode (two legs per call), registrations,
+  transcoding, WebRTC (DTLS-SRTP), and failover.
+
+Full method and per-trial data: [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md).
+
 ## Five-minute start
 
 **1. Add one dependency.**
@@ -489,6 +525,7 @@ The current release's authority documents:
 
 - [Qualification report](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md) — exact versions, row counts, scenarios, hashes, PASS status.
 - [Performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md).
+- [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md): sustained Session Establishment Rates for 0.5.0 on one c8i.4xlarge, reported in IETF format (R1 TLS 8,348 and R5 UDP 8,256 sessions/s without media; R2 TLS+SRTP 1,124 and R6 UDP+RTP 1,204 with media).
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) and [security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md).
 - [Interop plan](crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md) — the evidence boundaries.
 - [Changelog](CHANGELOG.md), [release notes](docs/release/RELEASE_NOTES_NEXT.md) and the [0.4 migration guide](docs/MIGRATING_0.4.md) — what changed in this release and how to upgrade from 0.3.
