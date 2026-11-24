@@ -916,6 +916,54 @@ class GateFrameworkTests(unittest.TestCase):
                 "PASS",
             )
 
+    def test_prior_failure_outranks_exact_pass_except_for_evidence_policy_gates(
+        self,
+    ) -> None:
+        passed = {"status": "PASS"}
+        failed = {"status": "FAIL"}
+        prior = {
+            # Same inputs passed, then failed: the PASS may have been luck.
+            "flaky": [passed, failed],
+            # The CodeQL policy: a later run could not see the analyses, so
+            # the exact-input PASS still holds.
+            "codeql": [passed, failed],
+            # Policy gate with no exact PASS to keep: it runs again.
+            "codeql-without-pass": [failed],
+            # Failed, then passed: the newest receipt decides.
+            "recovered": [failed, passed],
+            "unselected": [failed],
+        }
+        by_id = {
+            "flaky": {},
+            "codeql": {"reuse_exact_pass_after_failure": True},
+            "codeql-without-pass": {"reuse_exact_pass_after_failure": True},
+            "recovered": {},
+            "unselected": {},
+        }
+        reusable = {
+            "flaky": passed,
+            "codeql": passed,
+            "codeql-without-pass": None,
+            "recovered": passed,
+        }
+        self.assertEqual(
+            gates.prior_failures(
+                prior,
+                ["flaky", "codeql", "codeql-without-pass", "recovered"],
+                by_id,
+                reusable,
+            ),
+            {"flaky", "codeql-without-pass"},
+        )
+
+    def test_only_the_codeql_policy_keeps_an_exact_pass_over_a_failure(self) -> None:
+        flagged = sorted(
+            gate["id"]
+            for gate in self.catalog["gates"]
+            if gate.get("reuse_exact_pass_after_failure")
+        )
+        self.assertEqual(flagged, ["security.codeql-exact"])
+
     def test_failed_gate_invalidates_reverse_dependency_closure(self) -> None:
         by_id = {
             "a": {"dependencies": []},

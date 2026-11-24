@@ -624,6 +624,36 @@ def exact_reusable(
     return None
 
 
+def prior_failures(
+    prior: dict[str, list[dict[str, Any]]],
+    selected: list[str],
+    by_id: dict[str, dict[str, Any]],
+    reusable: dict[str, dict[str, Any] | None],
+) -> set[str]:
+    """Gates whose most recent prior receipt failed, so they must run again.
+
+    A failure normally outranks an older exact-input PASS: the same inputs
+    failing later means the PASS may have been luck. A gate whose result is
+    a property of external evidence about its inputs rather than of running
+    them (`reuse_exact_pass_after_failure`, the CodeQL policy) keeps its exact
+    PASS instead. A later failure there says the evidence was not visible to
+    that run (for CodeQL, analyses bound to a merge commit), and rerunning
+    it on the same inputs can only fail the same way.
+    """
+
+    selected_ids = set(selected)
+    failed = set()
+    for gate_id, receipts in prior.items():
+        if gate_id not in selected_ids or not receipts:
+            continue
+        if receipts[-1].get("status") == "PASS":
+            continue
+        if by_id[gate_id].get("reuse_exact_pass_after_failure") and reusable.get(gate_id):
+            continue
+        failed.add(gate_id)
+    return failed
+
+
 def require_whole_performance_group(
     selected: list[str],
     by_id: dict[str, dict[str, Any]],
@@ -1027,17 +1057,6 @@ def create_plan(
     prior = load_prior_receipts(prior_path)
     changed = changed_files(root, changed_since, resolved_candidate) if changed_since else []
     unknown = unknown_change(changed, [by_id[gate_id] for gate_id in selected]) if changed else []
-    previous_failures = {
-        gate_id
-        for gate_id, receipts in prior.items()
-        if gate_id in set(selected) and receipts and receipts[-1].get("status") != "PASS"
-    }
-    reverse_dependencies = reverse_gate_dependencies(selected, by_id)
-    invalidated_by_failure = dependent_closure(previous_failures, reverse_dependencies)
-    changed_gate_ids = directly_changed_gate_ids(
-        changed, [by_id[gate_id] for gate_id in selected]
-    )
-    invalidated_by_change = dependent_closure(changed_gate_ids, reverse_dependencies)
     in_chain = chain_checker(root, resolved_candidate)
     reusable_receipts = {
         gate_id: exact_reusable(
@@ -1049,6 +1068,13 @@ def create_plan(
         )
         for gate_id in selected
     }
+    previous_failures = prior_failures(prior, selected, by_id, reusable_receipts)
+    reverse_dependencies = reverse_gate_dependencies(selected, by_id)
+    invalidated_by_failure = dependent_closure(previous_failures, reverse_dependencies)
+    changed_gate_ids = directly_changed_gate_ids(
+        changed, [by_id[gate_id] for gate_id in selected]
+    )
+    invalidated_by_change = dependent_closure(changed_gate_ids, reverse_dependencies)
     require_whole_performance_group(selected, by_id, reusable_receipts, prior_path)
     # A definition, environment, or selected-input mismatch must also rerun
     # every downstream gate that consumes the changed gate. Always-fresh
