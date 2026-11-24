@@ -489,6 +489,7 @@ The current release's authority documents:
 
 - [Qualification report](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md) — exact versions, row counts, scenarios, hashes, PASS status.
 - [Performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md).
+- [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md): sustained Session Establishment Rates for 0.5.0 on one c8i.4xlarge, reported in IETF format (R1 TLS 8,348 and R5 UDP 8,256 sessions/s without media; R2 TLS+SRTP 1,124 and R6 UDP+RTP 1,204 with media).
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) and [security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md).
 - [Interop plan](crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md) — the evidence boundaries.
 - [Changelog](CHANGELOG.md), [release notes](docs/release/RELEASE_NOTES_NEXT.md) and the [0.4 migration guide](docs/MIGRATING_0.4.md) — what changed in this release and how to upgrade from 0.3.

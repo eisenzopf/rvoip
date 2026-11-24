@@ -333,4 +333,5 @@ record the result, so a scoring fix doesn't require re-running a lane. It
 takes R as the highest rate with a passing trial and no failing trial at or
 below it. A row records its `confirmations` against the profile's
 `confirmations_required`, never claiming more than it has. The 0.5 rows come
-from Day 0's bench-minor run 45065590604 re-scored this way.
+from Day 0's bench-minor run 45065590604 re-scored this way. Their report is
+[`rfc7502-ietf-report.md`](releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md).

@@ -374,6 +374,7 @@ each receipt was produced on:
 | Complete accepted-gate ledger | [`docs/BETA_GATE_REPORT.md`](docs/BETA_GATE_REPORT.md) |
 | Performance observations | [`docs/BETA_PERFORMANCE_REPORT.md`](docs/BETA_PERFORMANCE_REPORT.md) |
 | Detailed performance gate evaluation | [`current-performance-evaluation.md`](docs/releases/qualification/20261124T012650Z-45304004340/current-performance-evaluation.md) |
+| RFC 7501/7502 benchmark report (IETF format) | [`rfc7502-ietf-report.md`](docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md) |
 | Machine-readable performance evaluation | [`current-performance-evaluation.json`](docs/releases/qualification/20261124T012650Z-45304004340/current-performance-evaluation.json) |
 | Evidence artifact index | [`current-performance-artifact-index.json`](docs/releases/qualification/20261124T012650Z-45304004340/current-performance-artifact-index.json) |
 | Signed report manifest | [`QUALIFICATION_REPORT_ATTESTATION.json`](docs/QUALIFICATION_REPORT_ATTESTATION.json) |
@@ -406,7 +407,10 @@ under test and three c8in.24xlarge callers in us-west-2a). The release lane
 re-tested R1, R5, and R2 and confirmed them; its `WARN` verdict records that
 the 1.05 R trials of R1 and R5 also passed (8,764 and 8,668 sessions/s), a
 likely improvement to record after review. R6 is not re-tested by the release
-lane.
+lane. The full benchmark report, in IETF format, is
+[`rfc7502-ietf-report.md`](docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md).
+It covers the setup, every search trace, the RFC 6076 metrics, R4 overload and
+recovery, and how the rates were re-scored.
 
 All recorded performance policies passed. The exact measurements and claim
 boundaries are in the linked reports; they are evidence for the tested
