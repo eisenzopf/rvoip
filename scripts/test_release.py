@@ -1574,6 +1574,55 @@ rvoip-rtc = { path = "../rvoip-rtc" }
         ):
             release.publish(Path("/repo"), "0.4.1", execute=True)
 
+    def test_patch_packaging_builds_archives_while_full_profiles_reuse_the_gate(self) -> None:
+        for profile in ("release-patch-smoke", "release-patch", "release-minor"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                version = "0.5.1"
+                name = "rvoip-test"
+                archive = root / f"target/package/{name}-{version}.crate"
+                archive.parent.mkdir(parents=True)
+                verification = root / f"target/release-logs/{version}/verification.json"
+                verification.parent.mkdir(parents=True)
+                verification.write_text("{}")
+                receipt = {
+                    "beta_qualification": {"profile": profile},
+                    "package_file_manifest_sha256": {name: "f" * 64},
+                }
+                def build(argv, cwd):
+                    self.assertEqual(argv[:3], ["cargo", "package", "--locked"])
+                    self.assertEqual(argv[-2:], ["-p", name])
+                    self.assertEqual("--no-verify" in argv, profile != "release-patch-smoke")
+                    archive.write_bytes(b"verified archive")
+                with (
+                    mock.patch.object(release, "ensure_release_state", return_value="a" * 40),
+                    mock.patch.object(release, "validate_workspace", return_value=({name: package(name, version)}, [name])),
+                    mock.patch.object(release, "read_verification_receipt", return_value=receipt),
+                    mock.patch.object(release.ReleaseLog, "command", side_effect=build) as command,
+                ):
+                    output = root / "output"
+                    release.package_release(root, version, qualified_head="a" * 40, output=output)
+                command.assert_called_once()
+                manifest = json.loads((output / release.PACKAGE_MANIFEST_NAME).read_text())
+                self.assertEqual(manifest["package_sha256"][name], release.file_sha256(archive))
+                self.assertEqual((output / archive.name).read_bytes(), archive.read_bytes())
+
+    def test_failed_patch_archive_build_cannot_produce_publishable_output(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "output"
+            with (
+                mock.patch.object(release, "ensure_release_state", return_value="a" * 40),
+                mock.patch.object(release, "validate_workspace", return_value=({}, [])),
+                mock.patch.object(release, "read_verification_receipt", return_value={
+                    "beta_qualification": {"profile": "release-patch-smoke"},
+                }),
+                mock.patch.object(release.ReleaseLog, "command", side_effect=release.ReleaseError("archive build failed")),
+                self.assertRaisesRegex(release.ReleaseError, "archive build failed"),
+            ):
+                release.package_release(root, "0.5.1", qualified_head="a" * 40, output=output)
+            self.assertFalse(output.exists())
+
     def packaged_dir(self, root: Path, head: str) -> Path:
         output = root / "packages"
         output.mkdir()
