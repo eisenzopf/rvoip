@@ -36,6 +36,8 @@ pub struct ConnectConfig {
     /// Reap routes whose peer connection has been `Failed` for at least this
     /// long. Zero disables the reaper.
     pub session_idle_ttl: Duration,
+    /// Per-contact TURN credential source and relay policy.
+    pub turn: crate::turn::ConnectTurnConfig,
 }
 
 impl fmt::Debug for ConnectConfig {
@@ -70,6 +72,7 @@ impl Default for ConnectConfig {
             media_connect_timeout: Duration::from_secs(30),
             keepalive_interval: Duration::from_secs(10),
             session_idle_ttl: Duration::from_secs(120),
+            turn: Default::default(),
         }
     }
 }

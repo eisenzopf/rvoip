@@ -137,6 +137,20 @@ pub struct RvoipPeerConnection {
 }
 
 impl RvoipPeerConnection {
+    /// Address-free snapshot of the nominated ICE path, suitable for operational evidence.
+    pub async fn selected_candidate_pair(&self) -> Option<crate::media::CandidatePairStats> {
+        let stats = crate::media::InboundStats::default();
+        let report = self
+            .peer_connection()
+            .get_stats(
+                std::time::Instant::now(),
+                rtc::statistics::StatsSelector::None,
+            )
+            .await;
+        stats.merge_webrtc_report(&report);
+        stats.webrtc_snapshot().selected_pair
+    }
+
     pub async fn new(config: &WebRtcConfig, role: PeerRole) -> Result<Arc<Self>> {
         Self::new_inner(config, role, None).await
     }

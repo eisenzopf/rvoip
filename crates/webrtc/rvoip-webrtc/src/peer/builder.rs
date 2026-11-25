@@ -377,6 +377,12 @@ async fn build_peer_connection_inner(
     let setting_engine = setting_engine.build();
 
     let mut builder = PeerConnectionBuilder::<String>::new()
+        .with_turn_options(webrtc::peer_connection::TurnOptions {
+            allocation_timeout: std::time::Duration::from_secs(config.gather_timeout_secs),
+            attempt_timeout: std::time::Duration::from_secs(config.turn_attempt_timeout_secs),
+            send_timeout: std::time::Duration::from_secs(config.turn_send_timeout_secs),
+            close_timeout: std::time::Duration::from_secs(config.turn_close_timeout_secs),
+        })
         .with_configuration(rtc_config)
         .with_media_engine(media_engine)
         .with_setting_engine(setting_engine)

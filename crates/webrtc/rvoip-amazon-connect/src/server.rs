@@ -115,6 +115,8 @@ pub struct ScreenPopServerConfig {
     /// Amazon Connect control + media settings (instance/flow/region, mapping,
     /// timeouts).
     pub connect: ConnectConfig,
+    /// Base ICE/media settings, including an explicit empty server list.
+    pub webrtc: rvoip_webrtc::WebRtcConfig,
     /// The control-plane starter. Use `AwsConnectStarter` (feature
     /// `aws-control`) for the real path, or a mock in tests.
     pub starter: Arc<dyn ConnectContactStarter>,
@@ -135,7 +137,13 @@ impl ScreenPopServerConfig {
             connect,
             starter,
             router: None,
+            webrtc: rvoip_webrtc::WebRtcConfig::default(),
         }
+    }
+
+    pub fn with_webrtc_config(mut self, webrtc: rvoip_webrtc::WebRtcConfig) -> Self {
+        self.webrtc = webrtc;
+        self
     }
 
     /// Set the per-call router (builder-style).
@@ -936,7 +944,8 @@ impl ConnectScreenPopServer {
                 .with_media_connector(media_connector)
                 .build(),
             None => AmazonConnectAdapter::new(config.connect, config.starter),
-        };
+        }
+        .with_webrtc_config(config.webrtc);
         let cleanup: Arc<dyn ScreenPopCleanupActions> = Arc::new(RuntimeCleanupActions {
             coordinator: Arc::clone(&coordinator),
             adapter: Arc::clone(&adapter),

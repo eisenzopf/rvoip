@@ -1,15 +1,12 @@
-//! H6 deferred (#45): TURN-relay-only ICE transport policy.
+//! TURN configuration behavior with a real, hermetic relay.
 //!
-//! A full end-to-end relay-path test requires a TURN server (e.g. `coturn`)
-//! reachable from both peers — out of scope for this in-repo test. What this
-//! verifies is that the `IceTransportPolicy::Relay` knob propagates correctly:
-//!
-//! - The config field is wired into `RTCConfigurationBuilder::with_ice_transport_policy`.
-//! - With `Relay` policy and no TURN server configured, ICE gathering yields
-//!   zero candidates (host candidates are suppressed).
-//! - With `Relay` policy and a TURN URL configured, gathering attempts to use
-//!   the TURN server (failure to reach an unreachable URL is acceptable; what
-//!   matters is the policy reached webrtc-rs).
+//! Relay-only construction requires a usable allocation; an advertised URL
+//! alone is insufficient. The media/cleanup contract is exercised further by
+//! `turn_relay_e2e`.
+
+mod support {
+    pub mod coturn_fixture;
+}
 
 use std::time::Duration;
 
@@ -18,17 +15,7 @@ use rvoip_webrtc::peer::{PeerRole, RvoipPeerConnection};
 use rvoip_webrtc::{IceServerConfig, WebRtcConfig};
 
 #[tokio::test]
-async fn relay_policy_config_is_accepted_and_peer_still_builds() {
-    // webrtc-rs 0.20-alpha currently still emits host candidates even with
-    // `RTCIceTransportPolicy::Relay` set — relay-only filtering happens at
-    // candidate-pair selection time (during connectivity checks), not at
-    // gather time. The end-user-visible effect on real network paths is the
-    // same (only relay pairs get nominated), but our gather-time SDP still
-    // contains host candidates.
-    //
-    // What we CAN verify here: the config knob propagates without error and
-    // the peer connection still builds + offers. The full e2e relay path test
-    // belongs in an external-TURN integration suite (coturn + iptables).
+async fn relay_policy_requires_allocation_and_suppresses_direct_candidates() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // A relay-only policy with nothing to relay through is rejected when the
@@ -42,9 +29,11 @@ async fn relay_policy_config_is_accepted_and_peer_still_builds() {
         "Relay policy without a TURN server must be rejected"
     );
 
-    // With a TURN server configured (unreachable here; only the policy is
-    // under test) the peer builds and offers.
-    let mut config = WebRtcConfig::loopback().with_turn("turn:127.0.0.1:3478", "rvoip", "rvoip");
+    let relay = support::coturn_fixture::CoturnFixture::start()
+        .await
+        .expect("start TURN fixture");
+    let mut config = WebRtcConfig::loopback();
+    config.ice_servers = vec![relay.ice_config()];
     config.ice_transport_policy = IceTransportPolicy::Relay;
 
     let peer = std::sync::Arc::new(
@@ -60,6 +49,19 @@ async fn relay_policy_config_is_accepted_and_peer_still_builds() {
         .expect("gather timeout")
         .expect("offer");
     assert!(sdp.contains("m=audio"));
+    let candidates: Vec<_> = sdp
+        .lines()
+        .filter(|line| line.starts_with("a=candidate:"))
+        .collect();
+    assert!(
+        !candidates.is_empty(),
+        "relay offer must contain a candidate"
+    );
+    assert!(candidates.iter().all(|line| line.contains(" typ relay")));
+    assert_eq!(relay.allocation_count().await, 1);
+    peer.close().await.expect("close peer");
+    relay.wait_for_no_allocations().await;
+    relay.close().await.expect("close TURN fixture");
 }
 
 #[tokio::test]
@@ -83,13 +85,12 @@ async fn all_policy_default_still_produces_host_candidates() {
         host,
         "default All policy must yield host candidates on loopback. SDP:\n{sdp}"
     );
+    peer.close().await.expect("close direct peer");
 }
 
 #[tokio::test]
-async fn turn_url_passes_through_config_to_webrtc_rs() {
-    // Verify the IceServerConfig with TURN credentials is preserved through
-    // round-trip into the peer connection. We can't easily inspect webrtc-rs's
-    // internal config, but we can assert the config retains the URL.
+async fn turn_url_and_credentials_are_preserved_in_configuration() {
+    // Configuration retains customer-provided TURN URLs and credentials.
     let cfg = WebRtcConfig::loopback().with_turn("turn:turn.example.com:3478", "alice", "secret");
     assert_eq!(cfg.ice_servers.len(), 1);
     let turn = &cfg.ice_servers[0];

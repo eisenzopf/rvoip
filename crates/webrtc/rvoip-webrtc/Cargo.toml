@@ -45,10 +45,8 @@ interop-browser = ["signaling-whip", "signaling-ws", "dep:chromiumoxide"]
 # Asserts tokio task count returns to baseline after sustained churn — catches
 # task leaks that the regular test suite doesn't have time to surface.
 soak-1h = []
-# Deprecated compatibility marker for the unintegrated UDP TURN/NACK fork.
-# It intentionally enables no implementation or qualification tests: Cargo's
-# `--all-features` must not imply that the separately owner-reviewed candidate
-# has landed. The candidate-only tests remain explicit `--ignored` gates.
+# Deprecated compatibility marker. UDP TURN is integrated and its relay tests
+# run without this feature. This marker does not enable the separate NACK work.
 turn-fork-candidate = []
 bridge-quic = [
     "signaling-whip",
@@ -344,6 +342,10 @@ required-features = ["signaling-whip", "signaling-ws"]
 [[example]]
 name = "webrtc_browser_demo"
 required-features = ["comprehensive", "signaling-whip", "signaling-ws"]
+
+[[example]]
+name = "turn_ice"
+required-features = []
 
 [lints]
 workspace = true

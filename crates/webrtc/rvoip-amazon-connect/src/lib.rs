@@ -79,3 +79,5 @@ pub use rvoip_sip::Config as SipConfig;
 /// closure can be written without a direct `rvoip-sip` dependency.
 #[cfg(feature = "server")]
 pub use rvoip_sip::IncomingCall;
+
+pub mod turn;

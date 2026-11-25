@@ -1674,6 +1674,7 @@ impl AmazonConnectAdapter {
                     signaling_timeout: environment.config.signaling_timeout,
                     media_connect_timeout: environment.config.media_connect_timeout,
                     keepalive_interval: environment.config.keepalive_interval,
+                    turn: environment.config.turn.clone(),
                 },
             ),
         )
@@ -2235,6 +2236,7 @@ impl AmazonConnectAdapter {
                         signaling_timeout: self.config.signaling_timeout,
                         media_connect_timeout: self.config.media_connect_timeout,
                         keepalive_interval: self.config.keepalive_interval,
+                        turn: self.config.turn.clone(),
                     },
                 )
                 .await?;

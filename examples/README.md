@@ -49,6 +49,19 @@ The source of truth is
 | 13 | [sip-to-amazon-connect](13-sip-to-amazon-connect/) | SIP headers become Amazon Connect attributes with a live audio bridge | `rvoip-amazon-connect` | `cargo run` |
 | 14 | [vapi-agent](14-vapi-agent/) | One server accepts SIP or WebRTC callers and attaches a Vapi voice agent | `rvoip::app` + `rvoip::vapi` | `cargo run -- --transport sip\|webrtc` |
 
+## TURN and ICE verification
+
+For a self-contained relay-only call with verified two-way media, run from the
+repository root:
+
+```sh
+cargo run --locked -p rvoip-webrtc --example turn_ice
+```
+
+See [the step-by-step TURN/ICE guide](../docs/TURN_ICE.md) for direct ICE with no
+ICE servers, your own configurable TURN server, and the CI regression commands.
+This example lives with the WebRTC crate and uses the root Cargo workspace.
+
 ## Conventions
 
 - **One examples workspace.** `examples/Cargo.toml` is a single `[workspace]`

@@ -53,6 +53,7 @@ pub(crate) struct RTCIceGatherer {
     ice_servers: Vec<RTCIceServer>,
     gather_policy: RTCIceTransportPolicy,
     state: RTCIceGatheringState,
+    pub(crate) relay_candidate: Option<RTCIceCandidateInit>,
 
     stun_clients: Vec<StunClient>,
     gathering_clients: HashSet<FourTuple>,
@@ -75,6 +76,7 @@ impl RTCIceGatherer {
             ice_servers: opts.ice_servers,
             gather_policy: opts.ice_gather_policy,
             state: RTCIceGatheringState::New,
+            relay_candidate: None,
 
             stun_clients: Vec::new(),
             gathering_clients: HashSet::new(),
@@ -102,8 +104,14 @@ impl RTCIceGatherer {
 
     pub(crate) async fn gather(&mut self) -> Result<(), Error> {
         self.state = RTCIceGatheringState::Gathering;
-        self.gather_host_candidates()?;
-        self.gather_srflx_candidates().await?;
+        if self.gather_policy != RTCIceTransportPolicy::Relay {
+            self.gather_host_candidates()?;
+            self.gather_srflx_candidates().await?;
+        }
+        if let Some(candidate) = self.relay_candidate.clone() {
+            self.events
+                .push_back(RTCIceGathererEvent::LocalIceCandidate(candidate));
+        }
         if self.gathering_clients.is_empty() && self.state != RTCIceGatheringState::Complete {
             self.state = RTCIceGatheringState::Complete;
             self.events
