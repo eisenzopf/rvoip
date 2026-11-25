@@ -462,7 +462,7 @@ def render_gates(summary: dict[str, Any], rows: list[dict[str, Any]], provenance
         "## Result",
         "",
         f"**PASS — {count}/{count} {summary['qualification']['profile']} gates passed; 0 failed.** " + (
-            "This is reduced patch qualification: crate tests, examples, TURN/ICE regressions, and package checks. It does not cover the full 108-requirement legacy ledger or performance qualification."
+            "This is reduced patch qualification: crate tests, examples, TURN/ICE regressions, and package inventory checks. It does not cover the full 108-requirement legacy ledger or performance qualification."
             if summary["qualification"]["profile"] == "release-patch-smoke" else
             "All 108 requirements inherited from the strict beta ledger are covered, and the expanded profile adds current crate, feature-bundle, security, interoperability, and remote-host checks."
         ),

@@ -16,11 +16,13 @@ regular correctness checks without the extended release campaign. It runs
 workspace crate unit, integration, regression, and example tests; standalone
 example tests; workspace and SIP doc tests; direct ICE and TURN relay tests
 and runnable examples; formatting, Clippy, feature-bundle builds, and package
-verification. Tests requiring an explicit ignored-test opt-in remain separate.
+inventory checks. Tests requiring an explicit ignored-test opt-in remain separate.
 
 This path uses GitHub-hosted runners. It does **not** start EC2 benchmark,
-load, soak, long fuzz, or external interoperability jobs. Compilation and
-verification of every published crate still take time. Reports explicitly mark
+load, soak, long fuzz, or external interoperability jobs. The protected publisher
+builds and verifies every final crate archive once, before publishing; this
+shorter qualification does not duplicate that build. Compilation still takes
+time. Reports explicitly mark
 performance qualification **NOT RUN**; passing this profile does not claim
 full release qualification.
 

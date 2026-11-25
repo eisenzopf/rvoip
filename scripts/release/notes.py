@@ -193,7 +193,7 @@ def render_qualification(evidence: Path, run_url: str, version: str) -> str:
             "## Qualification record\n\n"
             f"Candidate `{candidate}` passed `{aggregate['gate_count']}` gates in the protected "
             f"`release-patch-smoke` [workflow run]({run_url}): workspace crate tests, "
-            "integration and regression tests, standalone examples, doc tests, direct ICE and TURN relay regressions, and package verification. "
+            "integration and regression tests, standalone examples, doc tests, direct ICE and TURN relay regressions, and package inventory checks. "
             "Benchmarks, load/soak tests, long fuzz campaigns, and external interoperability "
             "qualification were intentionally not run. This is reduced patch qualification.\n\n"
             f"The `{version}` version-bump commit must pass the same profile, bound to its exact "

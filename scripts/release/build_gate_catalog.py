@@ -1658,7 +1658,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
         estimated_seconds=30,
     ))
     patch_ids = sorted(set(core_ids + framework_ids + [
-        "build.format", "build.facade-feature-bundles", "package.archives",
+        "build.format", "build.facade-feature-bundles",
         "test.workspace-doctest", "test.sip-doctest", "test.patch-turn-ice",
         *[gate["id"] for gate in legacy if gate["id"].startswith("test.example-")],
         *[gate["id"] for gate in patch_extra],

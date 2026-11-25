@@ -1947,7 +1947,10 @@ version = "{version}"
         self.assertTrue({key for key in by_id if key.startswith("core.")} <= selected)
         self.assertTrue({key for key in by_id if key.startswith("test.example-")} <= selected)
         self.assertTrue({"test.workspace-doctest", "test.sip-doctest", "test.patch-turn-ice",
-                         "package.archives", "package.inventory", "build.format"} <= selected)
+                         "package.inventory", "build.format"} <= selected)
+        # Protected publication still builds/verifies every final archive;
+        # patch qualification must not repeat that expensive package build.
+        self.assertNotIn("package.archives", selected)
         self.assertFalse(any(key.startswith(("perf.", "interop.", "preflight.", "security.fuzz"))
                              for key in selected))
         self.assertTrue(all(by_id[key]["resource_class"].startswith("github-") for key in selected))
