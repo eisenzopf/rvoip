@@ -814,7 +814,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('if [[ "${PROFILE:?}" == remote-diagnostic ]]; then', download)
         self.assertIn("--name diagnostic-gate-evidence", download)
         self.assertIn(
-            "remote-release|release-patch|release-minor) ;;",
+            "remote-release|release-patch|release-minor|release-patch-smoke) ;;",
             (ROOT / "scripts/release/resolve_qualified_candidate.sh").read_text(),
         )
 
@@ -956,6 +956,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn('"$reports/QUALIFICATION_SUMMARY.json"', release)
         self.assertIn('"$reports/QUALIFICATION_REPORT_ATTESTATION.json"', release)
         self.assertIn('"$performance/current-performance-evaluation.json"', release)
+        self.assertIn('if [[ "$(jq -r .profile "$aggregate")" != release-patch-smoke ]]; then', release)
         self.assertIn('"$performance/current-performance-artifact-index.json"', release)
         self.assertIn('gh release create "$tag" "${assets[@]}"', release)
         self.assertIn("Protected qualification run and full evidence", release)

@@ -9,7 +9,49 @@ Feature maturity remains independent of package version. In particular, the
 SIP surface has release-gated beta evidence while other optional surfaces may
 remain experimental.
 
-## Release day
+## Choose the release path
+
+Use **`release-patch-smoke`** for a patch such as `0.5.1` when you want the
+regular correctness checks without the extended release campaign. It runs
+workspace crate unit, integration, regression, and example tests; standalone
+example tests; workspace and SIP doc tests; direct ICE and TURN relay tests
+and runnable examples; formatting, Clippy, feature-bundle builds, and package
+verification. Tests requiring an explicit ignored-test opt-in remain separate.
+
+This path uses GitHub-hosted runners. It does **not** start EC2 benchmark,
+load, soak, long fuzz, or external interoperability jobs. Compilation and
+verification of every published crate still take time. Reports explicitly mark
+performance qualification **NOT RUN**; passing this profile does not claim
+full release qualification.
+
+For feature or breaking releases (`X.Y.0` or `X.0.0`), use the full path below.
+Patch releases can also select the full path. Publication rejects the shorter
+profile for a version whose patch component is zero.
+
+### Shorter patch release, step by step
+
+1. Select a commit on `main` with passing CI. In GitHub Actions, run
+   **Release qualification** with that commit, `profile=release-patch-smoke`,
+   and `first_candidate=true`.
+2. When it passes, run **Prepare release PR** with your patch version, the
+   same candidate, and its qualification run ID. Review the generated notes,
+   including the reduced test scope. Merge the version PR after CI passes.
+3. Run **Release qualification** on the merged release commit with the same
+   `release-patch-smoke` profile, `first_candidate=false`, and the first run's
+   ID in `prior_run_id`. Only evidence with exactly matching inputs is reused;
+   changed or failed gates run again.
+4. Run **Publish protected release** with the patch version, the final
+   qualification run ID, and `execute=true`. Complete the existing
+   `release-publish` environment approval if required. Package builds, archive
+   hashes, signed qualification evidence, and exact-commit checks still apply.
+5. Open the GitHub release's gate report and qualification summary for the
+   tested commit, commands, results, and fresh/reused counts. The performance
+   report says **NOT RUN**. The qualification workflow retains the individual
+   test logs and receipts needed to reproduce or diagnose each gate.
+
+No benchmark dispatch or prior full-release evidence is needed for this path.
+
+## Full release day
 
 A patch release takes about four hours of machine time and one human
 approval. No qualification runs on a schedule; the EC2 fanout runs only on
@@ -171,8 +213,9 @@ Use `remote-core` for a hosted-runner dry run and `remote-release` for the
 complete nightly profile. The release profiles `release-patch` and
 `release-minor` are both `remote-release` plus the release-only RFC 7502
 confirmation gate `perf.rfc7502-release` (see
-`docs/release/BENCH_GATE_INTERFACE.md`); from 0.5.0 publication accepts only
-those. `perf.rfc7502-minor` (profile `bench-minor`) runs on demand. The candidate may be any commit on `main`, not only its
+`docs/release/BENCH_GATE_INTERFACE.md`). Patch versions may instead explicitly
+select `release-patch-smoke` as described above. `perf.rfc7502-minor` (profile
+`bench-minor`) runs on demand. The candidate may be any commit on `main`, not only its
 head, so a merge during qualification does not restart it. Do not start the full profile unless the exact
 release machinery has a recent successful preflight. The first candidate
 should set `first_candidate=true`; after a fix, provide the prior qualification

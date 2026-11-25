@@ -918,6 +918,36 @@ rvoip-rtc = { path = "../rvoip-rtc" }
                     root, "0.3.6", head, str(aggregate), mock.Mock()
                 )
 
+    def test_patch_smoke_qualification_requires_exact_complete_evidence(self) -> None:
+        catalog = json.loads((SCRIPT.parent / "release/gates.json").read_text())
+        ids = catalog["profiles"]["release-patch-smoke"]
+        head = "a" * 40
+        payload = {
+            "schema": release.REMOTE_QUALIFICATION_SCHEMA, "status": "PASS", "failures": [],
+            "profile": "release-patch-smoke", "candidate_sha": head,
+            "catalog_sha256": release.canonical_json_sha256(catalog),
+            "gate_count": len(ids), "fresh_count": len(ids), "reused_count": 0,
+            "accepted_gates": [{"gate_id": key} for key in ids],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "scripts/release/gates.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(catalog))
+            aggregate = root / "aggregate.json"
+            aggregate.write_text(json.dumps(payload))
+            result = release.verify_remote_qualification(root, "0.5.1", head, str(aggregate), mock.Mock())
+            self.assertEqual(result["profile"], "release-patch-smoke")
+            for version in ("0.5.0", "0.6.0", "1.0.0"):
+                with self.assertRaises(release.ReleaseError):
+                    release.verify_remote_qualification(root, version, head, str(aggregate), mock.Mock())
+            for override in ({"candidate_sha": "b" * 40}, {"catalog_sha256": "f" * 64},
+                             {"accepted_gates": payload["accepted_gates"][:-1]},
+                             {"status": "FAIL"}, {"failures": ["failed test"]}):
+                aggregate.write_text(json.dumps({**payload, **override}))
+                with self.assertRaises(release.ReleaseError):
+                    release.verify_remote_qualification(root, "0.5.1", head, str(aggregate), mock.Mock())
+
     def test_remote_qualification_cli_is_mutually_exclusive(self) -> None:
         parser = release.parser()
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -1661,15 +1691,18 @@ rvoip-rtc = { path = "../rvoip-rtc" }
             changelog.assert_called_once_with(root, "0.4.1")
             final.assert_called_once_with(root, "0.4.1")
 
-    def test_release_profile_policy_requires_the_benchmark_from_0_5(self) -> None:
+    def test_release_profile_policy_limits_smoke_to_patch_versions(self) -> None:
         self.assertEqual(
             release.required_qualification_profiles("0.4.7"),
             ("remote-release", "release-patch", "release-minor"),
         )
         self.assertEqual(release.required_qualification_profiles("0.5.0"), ("release-minor",))
         self.assertEqual(
-            release.required_qualification_profiles("0.5.3"), ("release-patch", "release-minor")
+            release.required_qualification_profiles("0.5.3"),
+            ("release-patch", "release-minor", "release-patch-smoke"),
         )
+        for version in ("0.6.0", "1.0.0", "2.0.0"):
+            self.assertEqual(release.required_qualification_profiles(version), ("release-minor",))
 
     def test_visibility_timeout_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

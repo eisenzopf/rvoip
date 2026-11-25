@@ -86,6 +86,7 @@ RELEASE_PROFILES = (
     "bench-release",
     "bench-minor",
     "release-patch",
+    "release-patch-smoke",
     "release-minor",
     "legacy-full",
 )

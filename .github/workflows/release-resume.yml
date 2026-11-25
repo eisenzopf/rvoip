@@ -114,7 +114,7 @@ jobs:
           # hard-coded count went stale as soon as the catalog grew.
           catalog = json.loads((root / "catalog.json").read_text())
           profile = aggregate.get("profile")
-          if profile not in ("remote-release", "release-patch", "release-minor"):
+          if profile not in ("remote-release", "release-patch", "release-minor", "release-patch-smoke"):
               raise SystemExit(f"aggregate profile {profile!r} is not a release profile")
           expected_ids = catalog["profiles"][profile]
           gate_count = len(expected_ids)

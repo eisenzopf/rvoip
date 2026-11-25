@@ -24,12 +24,12 @@ on:
         required: true
         type: string
       candidate:
-        description: Main commit to release (one with a green remote-release qualification); defaults to the head of main
+        description: Main commit to release with passing full or patch-smoke qualification; defaults to main
         required: true
         default: main
         type: string
       qualification_run_id:
-        description: The candidate's passing remote-release qualification run, to fill the notes' qualification record (optional)
+        description: The candidate's passing release qualification run, to fill the notes (optional)
         required: false
         type: string
 
@@ -213,7 +213,7 @@ jobs:
           if [[ "$APP_CONFIGURED" != true ]]; then
             gate="- **Fallback mode (no release App):** this PR's own PR Gate run waits for a maintainer's **Approve and run**; the link is in a comment below. It includes the release-notes finality check, and the PR cannot merge until it passes."
           fi
-          body="Version bump of every workspace crate to v$VERSION on top of qualified candidate \`$CANDIDATE\`, with the changelog and release notes assembled from \`changes/\`."$'\n\n'"- Candidate qualification: $qualification"$'\n'"$gate"$'\n'"- After merge, requalify this PR's head commit with \`release-patch\` or \`release-minor\`, \`first_candidate=false\` and the candidate's runs as \`prior_run_id\`; only the bookkeeping gates run. Then publish that commit."
+          body="Version bump of every workspace crate to v$VERSION on top of qualified candidate \`$CANDIDATE\`, with the changelog and release notes assembled from \`changes/\`."$'\n\n'"- Candidate qualification: $qualification"$'\n'"$gate"$'\n'"- After merge, requalify this PR's head commit with the matching release profile (\`release-patch-smoke\`, \`release-patch\`, or \`release-minor\`), \`first_candidate=false\` and the candidate's runs as \`prior_run_id\`; only the bookkeeping gates run. Then publish that commit."
           gh pr create \
             --base main \
             --head "$branch" \

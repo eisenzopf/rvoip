@@ -184,10 +184,22 @@ def render_qualification(evidence: Path, run_url: str, version: str) -> str:
     if (
         aggregate.get("status") != "PASS"
         or aggregate.get("failures") != []
-        or aggregate.get("profile") not in {"remote-release", "release-patch", "release-minor"}
+        or aggregate.get("profile") not in {"remote-release", "release-patch", "release-minor", "release-patch-smoke"}
     ):
         raise NotesError("the candidate's qualification aggregate is not a release-profile PASS")
     candidate = aggregate["candidate_sha"]
+    if aggregate["profile"] == "release-patch-smoke":
+        return (
+            "## Qualification record\n\n"
+            f"Candidate `{candidate}` passed `{aggregate['gate_count']}` gates in the protected "
+            f"`release-patch-smoke` [workflow run]({run_url}): workspace crate tests, "
+            "integration and regression tests, standalone examples, doc tests, direct ICE and TURN relay regressions, and package verification. "
+            "Benchmarks, load/soak tests, long fuzz campaigns, and external interoperability "
+            "qualification were intentionally not run. This is reduced patch qualification.\n\n"
+            f"The `{version}` version-bump commit must pass the same profile, bound to its exact "
+            "commit, before protected publication. Reused receipts require matching inputs; "
+            "the release archives include the accepted-gate ledger and explicit NOT RUN performance report."
+        )
     jambonz = sorted((evidence / "release-evidence").glob("interop.jambonz-latest/latest.json"))
     jambonz_line = ""
     if jambonz:

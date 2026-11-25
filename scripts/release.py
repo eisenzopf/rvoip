@@ -149,8 +149,8 @@ REMOTE_QUALIFICATION_SCHEMA = "rvoip-release-qualification-v1"
 # the nightly profile; the release profiles add the release-only RFC 7502
 # benchmark gate (docs/release/BENCH_GATE_INTERFACE.md).
 RELEASE_QUALIFICATION_PROFILES = ("remote-release", "release-patch", "release-minor")
-# Decided 2026-11-16: from 0.5.0 every release carries the benchmark, the
-# minor profile for an X.Y.0 release and either profile for a patch.
+# Feature releases retain full benchmark qualification. Patch releases may
+# explicitly select release-patch-smoke; its evidence discloses omitted gates.
 BENCH_REQUIRED_FROM = (0, 5, 0)
 REMOTE_GATE_CATALOG_SCHEMA = "rvoip-release-gate-catalog-v1"
 REMOTE_REPORT_SUMMARY_SCHEMA = "rvoip-release-qualification-summary-v1"
@@ -1810,7 +1810,7 @@ def required_qualification_profiles(version: str) -> tuple[str, ...]:
         return RELEASE_QUALIFICATION_PROFILES
     if parts[2] == 0:
         return ("release-minor",)
-    return ("release-patch", "release-minor")
+    return ("release-patch", "release-minor", "release-patch-smoke")
 
 
 def verify_remote_qualification(

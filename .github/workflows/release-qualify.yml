@@ -21,6 +21,7 @@ on:
           - bench-release
           - bench-minor
           - release-patch
+          - release-patch-smoke
           - release-minor
       diagnostic_gates:
         description: Comma-separated exact release or preflight EC2 gate IDs for remote-diagnostic
@@ -1555,7 +1556,7 @@ jobs:
           python3 scripts/release/gates.py collect "${args[@]}"
 
       - name: Render exact-candidate qualification reports
-        if: contains(fromJSON('["remote-release","release-patch","release-minor"]'), inputs.profile)
+        if: contains(fromJSON('["remote-release","release-patch","release-minor","release-patch-smoke"]'), inputs.profile)
         env:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |

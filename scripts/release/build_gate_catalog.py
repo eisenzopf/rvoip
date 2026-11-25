@@ -1623,6 +1623,35 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     remote_release_legacy_coverage = sorted(
         set(record["id"] for record in records) - set(remote_release)
     )
+    # Explicit, hosted-only patch scope. Do not derive this by subtracting
+    # expensive gates from the full profile: new full-release gates must not
+    # silently expand a patch run into an EC2, benchmark, or soak campaign.
+    patch_ids = sorted(set(core_ids + framework_ids + [
+        "build.format", "build.facade-feature-bundles", "package.archives",
+        "test.workspace-doctest", "test.sip-doctest", "test.patch-turn-ice",
+        *[gate["id"] for gate in legacy if gate["id"].startswith("test.example-")],
+    ]))
+    turn = synthetic_gate(
+        "test.patch-turn-ice", "TURN relay, direct ICE, and runtime regression tests",
+        executor="argv", resource="github-standard",
+        command=["python3", "scripts/ci/run_checks.py", "specialty", "--name",
+                 "release-patch-turn-ice", "--gate", "webrtc-runtime", "--output",
+                 "{artifact_dir}/nested-ci-receipt.json"],
+        dependencies=["source.remote-clean"],
+        paths=["crates/media/**", "crates/webrtc/**", "scripts/ci/run_checks.py"],
+    )
+    turn["expected_outputs"].append("nested-ci-receipt.json")
+    gates.extend([
+        turn,
+        synthetic_gate(
+            "report.patch-aggregate", "patch smoke evidence reconciliation",
+            executor="aggregate", dependencies=patch_ids, always_fresh=True,
+        ),
+        synthetic_gate(
+            "source.patch-final", "patch smoke final source fingerprint",
+            executor="aggregate", dependencies=["report.patch-aggregate"], always_fresh=True,
+        ),
+    ])
     return {
         "schema": SCHEMA,
         "catalog_version": 1,
@@ -1651,6 +1680,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             "bench-release": ["perf.rfc7502-release", "source.remote-clean"],
             "bench-minor": ["perf.rfc7502-minor", "source.remote-clean"],
             "release-patch": sorted(set(remote_release) | {"perf.rfc7502-release"}),
+            "release-patch-smoke": sorted(patch_ids + ["report.patch-aggregate", "source.patch-final"]),
             # A minor release confirms the recorded R like a patch release; the full search
             # (bench-minor) runs on demand.
             "release-minor": sorted(set(remote_release) | {"perf.rfc7502-release"}),

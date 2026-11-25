@@ -235,11 +235,15 @@ jobs:
             "$reports/QUALIFICATION_SUMMARY.json"
             "$reports/QUALIFICATION_REPORT_ATTESTATION.json"
             "$reports/QUALIFICATION_REPORT_ATTESTATION.json.sha256"
-            "$performance/current-performance-evaluation.json"
-            "$performance/current-performance-evaluation.md"
-            "$performance/current-performance-artifact-index.json"
             target/release-packages/SHA256SUMS
           )
+          if [[ "$(jq -r .profile "$aggregate")" != release-patch-smoke ]]; then
+            assets+=(
+              "$performance/current-performance-evaluation.json"
+              "$performance/current-performance-evaluation.md"
+              "$performance/current-performance-artifact-index.json"
+            )
+          fi
           for asset in "${assets[@]}"; do
             test -s "$asset" || {
               echo "required immutable release asset is missing or empty: $asset" >&2

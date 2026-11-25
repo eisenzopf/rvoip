@@ -20,7 +20,7 @@ test "$(jq -r .schema "$aggregate")" = rvoip-release-qualification-v1
 test "$(jq -r .status "$aggregate")" = PASS
 # release.py verify enforces which profile this version needs.
 case "$(jq -r .profile "$aggregate")" in
-  remote-release|release-patch|release-minor) ;;
+  remote-release|release-patch|release-minor|release-patch-smoke) ;;
   *) echo "qualification is not a release profile" >&2; exit 1 ;;
 esac
 candidate="$(jq -r .candidate_sha "$aggregate")"
