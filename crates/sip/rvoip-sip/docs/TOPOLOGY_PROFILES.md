@@ -1,5 +1,11 @@
 # rvoip-sip Beta Topology Profiles
 
+For 0.5.1, the shorter patch profile runs regular correctness tests, including
+integration, regression, example, doc, and TURN/ICE tests. It does not rerun
+the extended external matrix below. Historical results retain their original
+versions; see the [release notes](../../../../docs/release/RELEASE_NOTES_NEXT.md)
+and [release policy](../../../../docs/RELEASING.md) for the current scope.
+
 Date: 2026-11-24
 
 This document defines which deployment shapes beta is allowed to claim and
@@ -44,7 +50,7 @@ independent peer, so they do not widen the profiles below.
 | RTPengine media relay | Investigation | Media-relay integration is separate from the `0.5.0` signaling-proxy conformance claim. |
 | Carrier SBC certification | Post-beta | Requires carrier-specific certification and security audit. |
 | Browser/WebRTC edge | Post-beta | DTLS-SRTP, ICE, TURN, and browser interop are outside beta. |
-| ICE/TURN NAT traversal | Post-beta | Current STUN support is limited address discovery, not ICE. |
+| ICE/TURN NAT traversal | Post-beta | Native WebRTC UDP TURN has separate automated tests; external NAT qualification remains deployment-specific. |
 | Recording/announcement/IVR media server | Post-beta unless completed | Media-core feature plan still lists gaps. |
 
 ## General Full-Media Beta Profile

@@ -68,7 +68,7 @@ This example lives with the WebRTC crate and uses the root Cargo workspace.
   with all 14 examples as members sharing `examples/Cargo.lock`; run each from
   its own directory. Every example uses
   local rvoip crates from this checkout through `path`. The paired `version`
-  tracks the unified workspace train (`0.5.0`). When copying an example into
+  tracks the unified workspace train (`0.5.1`). When copying an example into
   your own project, drop `path` and select the published version you intend to
   use.
 - **`./run_demo.sh`** builds release binaries, boots every process with port

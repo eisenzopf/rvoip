@@ -1,5 +1,11 @@
 # rvoip-sip Beta Interop CI Plan
 
+For 0.5.1, the shorter patch profile runs regular correctness tests, including
+integration, regression, example, doc, and TURN/ICE tests. It does not rerun
+the extended external matrix below. Historical results retain their original
+versions; see the [release notes](../../../../docs/release/RELEASE_NOTES_NEXT.md)
+and [release policy](../../../../docs/RELEASING.md) for the current scope.
+
 Date: 2026-05-25
 
 The beta release needs repeatable external-peer evidence. This plan defines the

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-11-25
+
 ### Added
 
 - Add UDP TURN allocation and relay media transport, per-contact Amazon Connect

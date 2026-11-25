@@ -32,7 +32,8 @@ profile for a version whose patch component is zero.
 
 ### Shorter patch release, step by step
 
-1. Select a commit on `main` with passing CI. In GitHub Actions, run
+1. Prepare the hand-written release notes as described below, then select a
+   commit on `main` with passing CI. In GitHub Actions, run
    **Release qualification** with that commit, `profile=release-patch-smoke`,
    and `first_candidate=true`.
 2. When it passes, run **Prepare release PR** with your patch version, the
@@ -89,6 +90,14 @@ qualification record from the candidate's qualification run, and deletes
 them. Hand-written changelog and notes prose stays as it is.
 
 ## Prepare
+
+Before selecting the candidate, update the heading and hand-written introduction
+in `docs/release/RELEASE_NOTES_NEXT.md` for the target version. Clear the previous
+release's generated changes between the `generated:changes` markers, keeping
+both markers; new change fragments will fill that block. Preserve historical
+benchmark and interoperability versions and state which checks the selected
+profile will run. Preparation preserves hand-written prose, and its metadata
+check rejects a heading that still names the previous release.
 
 Use the **Prepare release PR** workflow with the next version, for example
 `0.4.0`, and the candidate commit (default: the head of `main`). It branches

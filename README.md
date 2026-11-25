@@ -7,10 +7,10 @@
 
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](#license)
-[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.5.0)](https://crates.io/crates/rvoip/0.5.0)
-[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.5.0)](https://crates.io/crates/rvoip-sip/0.5.0)
-[![Facade API](https://img.shields.io/docsrs/rvoip/0.5.0?label=Facade%20API)](https://docs.rs/rvoip/0.5.0/rvoip/)
-[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.5.0?label=SIP%20API)](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/)
+[![rvoip](https://img.shields.io/crates/v/rvoip.svg?label=rvoip&release=0.5.1)](https://crates.io/crates/rvoip/0.5.1)
+[![rvoip-sip](https://img.shields.io/crates/v/rvoip-sip.svg?label=rvoip-sip&release=0.5.1)](https://crates.io/crates/rvoip-sip/0.5.1)
+[![Facade API](https://img.shields.io/docsrs/rvoip/0.5.1?label=Facade%20API)](https://docs.rs/rvoip/0.5.1/rvoip/)
+[![SIP API](https://img.shields.io/docsrs/rvoip-sip/0.5.1?label=SIP%20API)](https://docs.rs/rvoip-sip/0.5.1/rvoip_sip/)
 
 [**Five-minute start**](#five-minute-start) · [**For carriers**](docs/CARRIERS.md) · [**Which crate?**](#you-need-one-crate) · [**Pick a path**](#pick-your-path) · [**How it fits together**](#how-it-fits-together) · [**What ships**](#what-ships-today) · [**Interop evidence**](#sip-interoperability-and-release-evidence) · [**Changes**](CHANGELOG.md) · [**Upgrading from 0.3**](docs/MIGRATING_0.4.md)
 
@@ -29,7 +29,7 @@ the release-gated interoperability evidence against Asterisk, FreeSWITCH,
 Jambonz, Kamailio, and OpenSIPS. Carriers evaluating standards coverage,
 performance, and reliability should start with [For carriers](docs/CARRIERS.md).
 
-## Performance at a glance (0.5.0)
+## Historical performance: published 0.5.0
 
 One AWS c8i.4xlarge (16 vCPU, 8 cores, Intel Xeon 6, 32 GiB) running a single
 rvoip process, measured with the RFC 7501/7502 benchmark:
@@ -71,7 +71,7 @@ Full method and per-trial data: [RFC 7501/7502 benchmark report](crates/sip/rvoi
 
 ```toml
 [dependencies]
-rvoip-sip = "0.5.0"
+rvoip-sip = "0.5.1"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -251,7 +251,7 @@ and Opus behind Cargo features. The full surface is documented in the
 runs SIP, WebRTC, and UCTP listeners on the shared `Orchestrator`:
 
 ```toml
-rvoip = { version = "0.5.0", features = ["app"] }
+rvoip = { version = "0.5.1", features = ["app"] }
 ```
 
 ```rust,no_run
@@ -443,7 +443,7 @@ RTP-over-QUIC has shipped.
 
 ## Extensions
 
-All 14 extension crates ship at `0.5.0`. They stay optional so protocol
+All 14 extension crates ship at `0.5.1`. They stay optional so protocol
 crates depend on provider contracts, never on a deployment backend.
 
 | Group | Extensions | Available capability |
@@ -459,10 +459,10 @@ identity surface; `vapi` and `sip-stir-shaken` are their own facade features;
 everything else is a direct dependency.
 
 ```toml
-rvoip = { version = "0.5.0", features = ["sip", "vapi", "sip-stir-shaken"] }
-rvoip-keycloak = "0.5.0"
-rvoip-redis = "0.5.0"
-rvoip-audit = "0.5.0"
+rvoip = { version = "0.5.1", features = ["sip", "vapi", "sip-stir-shaken"] }
+rvoip-keycloak = "0.5.1"
+rvoip-redis = "0.5.1"
+rvoip-audit = "0.5.1"
 ```
 
 The contracts they implement live in
@@ -529,11 +529,18 @@ report if a required peer is missing, skipped, ambiguous, unpinned, or failing.
 | **Kamailio** | RFC 3261 transaction-stateful proxy interoperability | Digest-pinned peer, both hop orders, UDP/TCP/TLS, packet assertions, verified TLS evidence, and post-retention cleanup |
 | **OpenSIPS** | RFC 3261 transaction-stateful proxy interoperability | Digest-pinned peer, both hop orders, UDP/TCP/TLS, packet assertions, verified TLS evidence, and post-retention cleanup |
 
-The current release's authority documents:
+The 0.5.1 release uses the shorter patch profile: regular unit, integration,
+regression, example, and doc tests, including TURN/ICE checks. Benchmarks and
+extended external interoperability were not rerun. See the
+[0.5.1 release notes](docs/release/RELEASE_NOTES_NEXT.md) and the
+[release's qualification attachments](https://github.com/eisenzopf/rvoip/releases/tag/v0.5.1)
+for exact commands, results, and scope.
+
+Historical full-release evidence, retained at its original versions:
 
 - [Qualification report](crates/sip/rvoip-sip/docs/BETA_RELEASE_REPORT.md) — exact versions, row counts, scenarios, hashes, PASS status.
 - [Performance report](crates/sip/rvoip-sip/docs/BETA_PERFORMANCE_REPORT.md).
-- [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md): sustained Session Establishment Rates for 0.5.0 on one c8i.4xlarge, reported in IETF format (R1 TLS 8,348 and R5 UDP 8,256 sessions/s without media; R2 TLS+SRTP 1,124 and R6 UDP+RTP 1,204 with media).
+- [RFC 7501/7502 benchmark report](crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340/rfc7502-ietf-report.md): sustained Session Establishment Rates for published 0.5.0 on one c8i.4xlarge, reported in IETF format (R1 TLS 8,348 and R5 UDP 8,256 sessions/s without media; R2 TLS+SRTP 1,124 and R6 UDP+RTP 1,204 with media).
 - [RFC evidence matrix](crates/sip/rvoip-sip/docs/RFC_COMPLIANCE_MATRIX.md) and [security posture](crates/sip/rvoip-sip/docs/SECURITY_POSTURE.md).
 - [Interop plan](crates/sip/rvoip-sip/docs/INTEROP_CI_PLAN.md) — the evidence boundaries.
 - [Changelog](CHANGELOG.md), [release notes](docs/release/RELEASE_NOTES_NEXT.md) and the [0.4 migration guide](docs/MIGRATING_0.4.md) — what changed in this release and how to upgrade from 0.3.
@@ -595,6 +602,6 @@ Licensed under the [MIT License](LICENSE).
 
 ---
 
-**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.5.0/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.5.0/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
+**Built in Rust** · [Facade API](https://docs.rs/rvoip/0.5.1/rvoip/) · [SIP API](https://docs.rs/rvoip-sip/0.5.1/rvoip_sip/) · [Examples](examples/) · [Issues](https://github.com/eisenzopf/rvoip/issues) · [Discussions](https://github.com/eisenzopf/rvoip/discussions)
 
 </div>

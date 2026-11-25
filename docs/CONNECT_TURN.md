@@ -1,6 +1,6 @@
 # Amazon Connect TURN over UDP
 
-This candidate extends the published 0.5.0 WebRTC wrapper with an actual UDP
+rvoip 0.5.1 extends the WebRTC wrapper with an actual UDP
 TURN data path. The `turn` 0.17.3 client owns authenticated allocation,
 permission/channel establishment and refresh. The wrapper exposes the allocated
 relay address to the ICE core as a socket and routes ICE, DTLS and RTP through
