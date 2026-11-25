@@ -497,10 +497,15 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
         .peer_identity
         .as_ref()
         .is_some_and(|identity| identity.is_authenticated()));
-    assert_eq!(
+    // The publisher's initial catalog can reach the relay before or after
+    // this subscriber's SUBSCRIBE acknowledgement. Both startup modes are
+    // valid; a newly connected subscriber does not imply an empty cache.
+    // Deterministic cold-join coverage lives in moq-transport's subscribe
+    // tests, and the retained-cache subscription below must use FETCH.
+    assert!(matches!(
         snapshot.delivery_mode,
-        Some(MoqCatalogDeliveryMode::LiveFallback)
-    );
+        Some(MoqCatalogDeliveryMode::LiveFallback | MoqCatalogDeliveryMode::RelativeJoiningFetch)
+    ));
     let latest = snapshot.latest.expect("live catalog update missing");
     assert_eq!(latest.catalog.state(), MsfCatalogState::Live);
     assert_eq!(latest.catalog.tracks().len(), 1);
@@ -527,7 +532,7 @@ async fn assert_managed_relay_path(substrate: MoqRelaySubstratePolicy) {
     assert_eq!(received.object.payload, Bytes::from_static(&[0x78, 0x00]));
     assert_eq!(catalog_subscriber.audio_snapshot().received_objects, 1);
 
-    // Keep the cold subscription active so the shared relay cache retains a
+    // Keep the first subscription active so the shared relay cache retains a
     // Largest Object. The next subscriber must use Relative Joining FETCH.
     let warm_credentials: Arc<dyn MoqSubscriberCredentialProvider> = Arc::new(FreshCredentials {
         next: AtomicU64::new(10_000),

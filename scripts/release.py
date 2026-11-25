@@ -2315,11 +2315,10 @@ def package_release(
     levels go to `output`; `publish --execute --packages output` uploads
     exactly these bytes and nothing it has not seen here.
 
-    Building every archive (`cargo package` without `--no-verify`) takes
-    about 30 minutes on 16 vCPUs, so it is the `package.archives`
-    qualification gate (`package-check`), which the version-bump commit
-    reuses by version-normalized inputs. Here packaging only assembles the
-    same archives, in seconds.
+    Full release profiles build archives in the `package.archives` gate and
+    reuse that evidence by version-normalized inputs. The patch-smoke profile
+    omits that gate, so this invocation must build-verify its archives before
+    any bytes become available to the protected upload job.
     """
 
     head = ensure_release_state(
@@ -2329,12 +2328,15 @@ def package_release(
     receipt = read_verification_receipt(root, version, head, ordered)
     log = ReleaseLog(root, version, "package")
     log.event("start", operation="package", version=version, git_commit=head)
+    verify_archives = (
+        receipt.get("beta_qualification", {}).get("profile") == "release-patch-smoke"
+    )
     log.command(
         [
             "cargo",
             "package",
             "--locked",
-            "--no-verify",
+            *([] if verify_archives else ["--no-verify"]),
             *[arg for name in ordered for arg in ("-p", name)],
         ],
         root,

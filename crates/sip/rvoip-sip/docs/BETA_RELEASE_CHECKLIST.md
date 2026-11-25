@@ -4,7 +4,7 @@ This document defines the promotion procedure. It does not duplicate a
 candidate's results. The versioned reporting and selection authority is
 `config/beta-release-policy.yaml`; current outcomes are generated from evidence:
 
-Current workspace runtime crate version: `0.5.0`.
+Current workspace runtime crate version: `0.5.1`.
 Current published qualified runtime crate version: `0.5.0`.
 Next release candidate runtime crate version: not declared.
 Protected run `45304004340` qualified the exact published `0.5.0` commit

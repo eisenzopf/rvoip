@@ -1,13 +1,13 @@
 [package]
 name = "rvoip-example-ivr-server"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.95"
 publish = false
 
 [dependencies]
-# Copying into your own project? Drop `path` and keep: rvoip-sip = "0.5.0"
-rvoip-sip = { version = "0.5.0", path = "../../crates/sip/rvoip-sip" }
+# Copying into your own project? Drop `path` and keep: rvoip-sip = "0.5.1"
+rvoip-sip = { version = "0.5.1", path = "../../crates/sip/rvoip-sip" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

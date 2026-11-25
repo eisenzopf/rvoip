@@ -2,6 +2,50 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-11-25
+
+### Fixed
+
+- Correct the managed MoQ relay test's assumption that the first subscriber
+  always sees an empty cache. It accepts either valid startup mode while
+  retaining exact audio, retained-fetch, and cleanup assertions. Runtime
+  behavior is unchanged; deterministic transport tests cover cold fallback.
+
+### Added
+
+- Add UDP TURN allocation and relay media transport, per-contact Amazon Connect
+  credentials from Chime JOIN_ACK or the configured control endpoint, configurable
+  relay-only ICE, bounded allocation/send/close operations, and allocation cleanup.
+  Regular regression tests and runnable examples check relay nomination, exact
+  bidirectional packets, invalid credentials, fallback, cleanup, and direct ICE
+  with an empty ICE-server list. TCP/TLS TURN and credential replacement during an
+  established contact remain outside this implementation. (#482)
+
+- Patch releases can explicitly select `release-patch-smoke` to run regular unit,
+  integration, regression, example, and doc tests, including direct ICE and TURN
+  relay checks, without benchmark, soak/load, or extended release jobs. Package
+  verification and signed exact-commit evidence remain required. Reports disclose
+  the reduced scope and mark performance qualification NOT RUN; feature and
+  breaking releases retain full qualification. (#484)
+
+### Documentation
+
+- The rvoip-sip README, release checklist, compatibility and RFC matrices,
+  security posture, topology profiles, interop plan, PBX lab README, and
+  `docs/CARRIERS.md` now cite the published 0.5.0 qualification (run
+  45304004340), including the first protected evidence for the Asterisk and
+  FreeSWITCH RTCP and session-timer cells and the RFC 7501/7502 benchmark rates.
+  Its reports are archived under
+  `crates/sip/rvoip-sip/docs/releases/qualification/20261124T012650Z-45304004340`. (#474)
+
+- The 0.5.0 RFC 7501/7502 benchmark report (IETF format) is now in the
+  repository, in the 0.5.0 qualification archive, and linked from the README,
+  the rvoip-sip README and `RFC7502_BENCHMARK.md`. It covers the sustained
+  Session Establishment Rates of rvoip-bench-uas on one c8i.4xlarge, the test
+  setup, every search trace, the RFC 6076 metrics, and the R4 overload and
+  recovery trial. The README adds a short "Performance at a glance (0.5.0)"
+  table from the same evidence. (#481)
+
 ## 0.5.0 — 2026-11-23
 
 ### Highlights
