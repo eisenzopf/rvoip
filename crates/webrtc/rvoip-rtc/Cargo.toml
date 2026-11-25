@@ -399,7 +399,7 @@ version = "2.8"
 workspace = true
 
 [dependencies.x509-parser]
-version = "0.16.0"
+version = "0.18.1"
 
 [dev-dependencies.anyhow]
 workspace = true
@@ -412,4 +412,4 @@ version = "1.49.0"
 features = ["full"]
 
 [dev-dependencies.webrtc]
-version = "0.14.0"
+version = "0.21.1"
