@@ -1623,6 +1623,68 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     remote_release_legacy_coverage = sorted(
         set(record["id"] for record in records) - set(remote_release)
     )
+    # Explicit, hosted-only patch scope. Do not derive this by subtracting
+    # expensive gates from the full profile: new full-release gates must not
+    # silently expand a patch run into an EC2, benchmark, or soak campaign.
+    mapped_examples = {
+        argument.removeprefix("{workspace}/")
+        for gate in legacy for argument in (gate.get("command") or [])
+        if argument.startswith("{workspace}/examples/") and argument.endswith("Cargo.toml")
+    }
+    patch_extra = []
+    for manifest in sorted((root / "examples").glob("*/Cargo.toml")):
+        relative = manifest.relative_to(root).as_posix()
+        if relative in mapped_examples:
+            continue
+        patch_extra.append(synthetic_gate(
+            f"test.patch-example-{manifest.parent.name}",
+            f"standalone example {manifest.parent.name} tests",
+            executor="argv", resource="github-standard",
+            command=["cargo", "test", "--locked", "--manifest-path",
+                     "{workspace}/" + relative, "--all-targets"],
+            dependencies=["source.clean-start"],
+            paths=[manifest.parent.relative_to(root).as_posix() + "/**"],
+            estimated_seconds=120,
+        ))
+    patch_extra.append(synthetic_gate(
+        "build.patch-release-tests", "release-tool unit and regression tests",
+        executor="argv", resource="github-standard",
+        command=["python3", "-m", "unittest",
+                 *[path.relative_to(root).as_posix()
+                   for path in sorted((root / "scripts").glob("test_release*.py"))],
+                 "scripts/test_render_qualification_reports.py"],
+        dependencies=["source.remote-clean"],
+        paths=["scripts/**", ".github/workflows/release*.yml"],
+        estimated_seconds=30,
+    ))
+    patch_ids = sorted(set(core_ids + framework_ids + [
+        "build.format", "build.facade-feature-bundles",
+        "test.workspace-doctest", "test.sip-doctest", "test.patch-turn-ice",
+        *[gate["id"] for gate in legacy if gate["id"].startswith("test.example-")],
+        *[gate["id"] for gate in patch_extra],
+    ]))
+    turn = synthetic_gate(
+        "test.patch-turn-ice", "TURN relay, direct ICE, and runtime regression tests",
+        executor="argv", resource="github-standard",
+        command=["python3", "scripts/ci/run_checks.py", "specialty", "--name",
+                 "release-patch-turn-ice", "--gate", "webrtc-runtime", "--output",
+                 "{artifact_dir}/nested-ci-receipt.json"],
+        dependencies=["source.remote-clean"],
+        paths=["crates/media/**", "crates/webrtc/**", "scripts/ci/run_checks.py"],
+    )
+    turn["expected_outputs"].append("nested-ci-receipt.json")
+    gates.extend([
+        *patch_extra,
+        turn,
+        synthetic_gate(
+            "report.patch-aggregate", "patch smoke evidence reconciliation",
+            executor="aggregate", dependencies=patch_ids, always_fresh=True,
+        ),
+        synthetic_gate(
+            "source.patch-final", "patch smoke final source fingerprint",
+            executor="aggregate", dependencies=["report.patch-aggregate"], always_fresh=True,
+        ),
+    ])
     return {
         "schema": SCHEMA,
         "catalog_version": 1,
@@ -1651,6 +1713,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
             "bench-release": ["perf.rfc7502-release", "source.remote-clean"],
             "bench-minor": ["perf.rfc7502-minor", "source.remote-clean"],
             "release-patch": sorted(set(remote_release) | {"perf.rfc7502-release"}),
+            "release-patch-smoke": sorted(patch_ids + ["report.patch-aggregate", "source.patch-final"]),
             # A minor release confirms the recorded R like a patch release; the full search
             # (bench-minor) runs on demand.
             "release-minor": sorted(set(remote_release) | {"perf.rfc7502-release"}),

@@ -170,6 +170,20 @@ class ReleaseNotesTests(unittest.TestCase):
             for forbidden in ("pending", "Candidate Release Notes"):
                 self.assertNotIn(forbidden, record)
 
+    def test_patch_notes_disclose_reduced_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory)
+            folder = evidence / "release-qualification"
+            folder.mkdir()
+            (folder / "aggregate.json").write_text(json.dumps({
+                "status": "PASS", "failures": [], "profile": "release-patch-smoke",
+                "candidate_sha": "c" * 40, "gate_count": 73,
+            }))
+            rendered = notes.render_qualification(evidence, "https://example.invalid/run", "0.5.1")
+            self.assertIn("intentionally not run", rendered)
+            self.assertNotIn("including the complete", rendered)
+            self.assertIn("exact commit", rendered)
+
     def test_failed_qualification_cannot_fill_the_record(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = self.tree(directory, {})

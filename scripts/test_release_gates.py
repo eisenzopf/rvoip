@@ -1941,6 +1941,29 @@ version = "{version}"
                     {"github-evidence"},
                 )
 
+    def test_patch_smoke_runs_regular_tests_without_extended_jobs(self) -> None:
+        by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
+        selected = set(self.catalog["profiles"]["release-patch-smoke"])
+        self.assertTrue({key for key in by_id if key.startswith("core.")} <= selected)
+        self.assertTrue({key for key in by_id if key.startswith("test.example-")} <= selected)
+        self.assertTrue({"test.workspace-doctest", "test.sip-doctest", "test.patch-turn-ice",
+                         "package.inventory", "build.format"} <= selected)
+        # Protected publication still builds/verifies every final archive;
+        # patch qualification must not repeat that expensive package build.
+        self.assertNotIn("package.archives", selected)
+        self.assertFalse(any(key.startswith(("perf.", "interop.", "preflight.", "security.fuzz"))
+                             for key in selected))
+        self.assertTrue(all(by_id[key]["resource_class"].startswith("github-") for key in selected))
+        self.assertGreaterEqual(sum(by_id[key]["always_fresh"] for key in selected), 4)
+        self.assertIn("webrtc-runtime", by_id["test.patch-turn-ice"]["command"])
+        manifests = {"{workspace}/" + path.relative_to(ROOT).as_posix()
+                     for path in (ROOT / "examples").glob("*/Cargo.toml")}
+        commands = [by_id[key].get("command") or [] for key in selected]
+        self.assertTrue(all(any(manifest in command for command in commands) for manifest in manifests))
+        self.assertIn("scripts/test_release.py", by_id["build.patch-release-tests"]["command"])
+        for gate_id in selected:
+            self.assertTrue(set(by_id[gate_id]["dependencies"]) <= selected)
+
     def test_bench_gates_are_release_only(self) -> None:
         by_id = {gate["id"]: gate for gate in self.catalog["gates"]}
         profiles = self.catalog["profiles"]

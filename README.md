@@ -490,10 +490,18 @@ extending the platform itself.
 
 ## SIP interoperability and release evidence
 
-`rvoip-sip` exercises its public APIs against independently implemented peers
-on every release. The exact peer versions, scenarios, transports, results, and
+The full release path exercises `rvoip-sip` public APIs against independently
+implemented peers. The exact peer versions, scenarios, transports, results, and
 exclusions are recorded in signed qualification evidence; see the
 [compatibility matrix](crates/sip/rvoip-sip/docs/COMPATIBILITY_MATRIX.md).
+
+Patch releases can explicitly use the [shorter release path](docs/RELEASING.md#shorter-patch-release-step-by-step):
+unit, integration, regression, example, and doc tests, including runnable
+[TURN/ICE examples](docs/TURN_ICE.md), without
+benchmark, soak/load, or extended interoperability jobs. Each GitHub release
+links its tested commit and gate results; a reduced patch report marks
+performance qualification **NOT RUN**. The matrix below describes the full
+qualification scope, not a claim that a patch run repeated it.
 
 | Peer/tool | Status | Executed scope |
 | --- | --- | --- |

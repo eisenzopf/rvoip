@@ -27,7 +27,7 @@ RECEIPT_SCHEMA = "rvoip-release-gate-receipt-v1"
 SUMMARY_SCHEMA = "rvoip-release-qualification-summary-v1"
 # The nightly profile and the two release profiles that add the RFC 7502
 # benchmark gate (scripts/release/build_gate_catalog.py).
-RELEASE_PROFILES = ("remote-release", "release-patch", "release-minor")
+RELEASE_PROFILES = ("remote-release", "release-patch", "release-minor", "release-patch-smoke")
 ATTESTATION_SCHEMA = "rvoip-release-qualification-report-attestation-v1"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -344,7 +344,7 @@ def load_bundle(
         )
     if not measurements and fresh_performance_gates > 0:
         raise ReportError("qualification bundle has no exact-candidate performance measurements")
-    if not measurements and reused_performance_gates == 0:
+    if not measurements and reused_performance_gates == 0 and profile != "release-patch-smoke":
         raise ReportError("qualification bundle has no exact-candidate performance measurements")
 
     summary = {
@@ -361,7 +361,10 @@ def load_bundle(
             "fresh_count": aggregate.get("fresh_count"),
             "reused_count": aggregate.get("reused_count"),
             "legacy_required_count": coverage.get("required_legacy_count"),
-            "legacy_covered_count": coverage.get("profile_legacy_count"),
+            "legacy_covered_count": (
+                sum(bool(definitions[gate_id].get("legacy")) for gate_id in expected_ids)
+                if profile == "release-patch-smoke" else coverage.get("profile_legacy_count")
+            ),
             "reused_performance_gate_count": reused_performance_gates,
             "performance_measured_commits": sorted(measured_commits),
         },
@@ -378,6 +381,8 @@ def load_bundle(
 
 
 def performance_binding(summary: dict[str, Any]) -> str:
+    if summary["qualification"]["profile"] == "release-patch-smoke":
+        return "- Benchmarks, performance, soak, fuzz campaigns, and external interoperability were not run by this patch profile."
     candidate = summary["release"]["candidate_sha"]
     others = [
         commit
@@ -456,7 +461,11 @@ def render_gates(summary: dict[str, Any], rows: list[dict[str, Any]], provenance
         "",
         "## Result",
         "",
-        f"**PASS — {count}/{count} {summary['qualification']['profile']} gates passed; 0 failed.** All 108 requirements inherited from the strict beta ledger are covered, and the expanded profile adds current crate, feature-bundle, security, interoperability, and remote-host checks.",
+        f"**PASS — {count}/{count} {summary['qualification']['profile']} gates passed; 0 failed.** " + (
+            "This is reduced patch qualification: crate tests, examples, TURN/ICE regressions, and package inventory checks. It does not cover the full 108-requirement legacy ledger or performance qualification."
+            if summary["qualification"]["profile"] == "release-patch-smoke" else
+            "All 108 requirements inherited from the strict beta ledger are covered, and the expanded profile adds current crate, feature-bundle, security, interoperability, and remote-host checks."
+        ),
         "",
         "| # | Gate | Category | Executor | Source | Receipt candidate | Seconds | Receipt SHA-256 | Command-log SHA-256 |",
         "|---:|---|---|---|---|---|---:|---|---|",
@@ -485,6 +494,15 @@ def render_gates(summary: dict[str, Any], rows: list[dict[str, Any]], provenance
 
 
 def render_performance(summary: dict[str, Any], rows: list[dict[str, Any]], provenance: dict[str, str]) -> str:
+    if summary["qualification"]["profile"] == "release-patch-smoke":
+        return (
+            "# RVoIP Performance Qualification Report\n\n"
+            "**NOT RUN — release-patch-smoke intentionally excludes performance qualification.**\n\n"
+            f"Release `{summary['release']['version']}`, commit `{summary['release']['candidate_sha']}`. "
+            f"[Qualification run]({provenance['run_url']}).\n\n"
+            "No benchmark, load, soak, capacity, or performance-regression claim is made for this release. "
+            "Use release-patch or release-minor for full qualification.\n"
+        )
     lines = [
         "# RVoIP Performance Qualification Report",
         "",

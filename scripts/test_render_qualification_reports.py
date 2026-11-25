@@ -177,6 +177,25 @@ class QualificationReportTests(unittest.TestCase):
             generator=MODULE_PATH,
         )
 
+    def test_patch_smoke_reports_omitted_performance_and_partial_legacy_coverage(self) -> None:
+        profile = "release-patch-smoke"
+        self.catalog["profiles"][profile] = self.catalog["profiles"]["remote-release"]
+        self.plan["profile"] = profile
+        self.aggregate["profile"] = profile
+        self.aggregate["catalog_sha256"] = reports.sha256_bytes(reports.canonical_bytes(self.catalog))
+        self.catalog_path.write_bytes(reports.pretty_bytes(self.catalog))
+        self.plan_path.write_bytes(reports.pretty_bytes(self.plan))
+        self.aggregate_path.write_bytes(reports.pretty_bytes(self.aggregate))
+        shutil.rmtree(self.evidence / "_perf-results")
+        self.generate()
+        reports.verify_bundle(self.output, MODULE_PATH)
+        summary = json.loads((self.output / "QUALIFICATION_SUMMARY.json").read_text())
+        self.assertEqual(summary["performance_measurements"], [])
+        self.assertEqual(summary["qualification"]["legacy_covered_count"], 0)
+        self.assertIn("NOT RUN", (self.output / "BETA_PERFORMANCE_REPORT.md").read_text())
+        self.assertNotIn("All 108 requirements", (self.output / "BETA_GATE_REPORT.md").read_text())
+        self.assertIn("0/108 covered", (self.output / "BETA_RELEASE_REPORT.md").read_text())
+
     def test_generates_and_verifies_exact_candidate_reports(self) -> None:
         self.generate()
         reports.verify_bundle(self.output, MODULE_PATH)
