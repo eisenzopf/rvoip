@@ -4,6 +4,13 @@
 
 ## 0.5.1 — 2026-11-25
 
+### Fixed
+
+- Correct the managed MoQ relay test's assumption that the first subscriber
+  always sees an empty cache. It accepts either valid startup mode while
+  retaining exact audio, retained-fetch, and cleanup assertions. Runtime
+  behavior is unchanged; deterministic transport tests cover cold fallback.
+
 ### Added
 
 - Add UDP TURN allocation and relay media transport, per-contact Amazon Connect

@@ -66,6 +66,12 @@ from 0.4.x must also follow the breaking-change migrations in the historical
 <!-- generated:changes:start -->
 ## Changes in this release
 
+### Fixed
+
+- The managed MoQ relay test accepts either valid first-subscriber cache state.
+  Exact audio, retained-fetch, cleanup, and deterministic cold-fallback checks
+  remain enforced. This is a test correction, with no runtime change.
+
 ### Added
 
 - Add UDP TURN allocation and relay media transport, per-contact Amazon Connect
