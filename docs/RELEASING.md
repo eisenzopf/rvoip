@@ -1,6 +1,6 @@
 # Unified Workspace Release
 
-All 46 publishable workspace crates use `[workspace.package].version` and ship
+All 48 publishable workspace crates use `[workspace.package].version` and ship
 together. `scripts/release.sh` is the only release authority; it discovers the
 package graph from Cargo metadata and publishes normal/build dependencies
 before their dependents.
@@ -153,7 +153,7 @@ setting changes.
 The underlying `scripts/release.sh prepare` command rejects unstable SemVer
 strings, version downgrades, versions already present on crates.io, dirty
 trees, missing internal dependency versions, and a workspace inventory other
-than the expected 46 publishable packages. It updates package inheritance and
+than the expected 48 publishable packages. It updates package inheritance and
 the lockfile transactionally.
 
 ### Version references

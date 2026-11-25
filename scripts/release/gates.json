@@ -11340,6 +11340,86 @@
     {
       "affected_crates": [],
       "affected_paths": [
+        "examples/14-vapi-agent/**"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "--manifest-path",
+        "{workspace}/examples/14-vapi-agent/Cargo.toml",
+        "--all-targets"
+      ],
+      "dependencies": [
+        "source.clean-start"
+      ],
+      "display_command": "cargo test --locked --manifest-path {workspace}/examples/14-vapi-agent/Cargo.toml --all-targets",
+      "estimated_seconds": 120,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "test.patch-example-14-vapi-agent",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "standalone example 14-vapi-agent tests",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
+        "scripts/**",
+        ".github/workflows/release*.yml"
+      ],
+      "always_fresh": false,
+      "category": "Remote release framework",
+      "command": [
+        "python3",
+        "-m",
+        "unittest",
+        "scripts/test_release.py",
+        "scripts/test_release_aws_fanout.py",
+        "scripts/test_release_carry_forward_attestation.py",
+        "scripts/test_release_exception_attestation.py",
+        "scripts/test_release_gates.py",
+        "scripts/test_release_notes.py",
+        "scripts/test_release_prebuilt_performance.py",
+        "scripts/test_render_qualification_reports.py"
+      ],
+      "dependencies": [
+        "source.remote-clean"
+      ],
+      "display_command": "python3 -m unittest scripts/test_release.py scripts/test_release_aws_fanout.py scripts/test_release_carry_forward_attestation.py scripts/test_release_exception_attestation.py scripts/test_release_gates.py scripts/test_release_notes.py scripts/test_release_prebuilt_performance.py scripts/test_render_qualification_reports.py",
+      "estimated_seconds": 30,
+      "executor": "argv",
+      "expected_outputs": [
+        "receipt.json",
+        "command.log"
+      ],
+      "id": "build.patch-release-tests",
+      "kind": "remote",
+      "legacy": null,
+      "max_infrastructure_retries": 1,
+      "name": "release-tool unit and regression tests",
+      "resource_class": "github-standard",
+      "retry_on_exit_codes": [
+        75
+      ],
+      "timeout_minutes": 60,
+      "working_directory": "."
+    },
+    {
+      "affected_crates": [],
+      "affected_paths": [
         "crates/media/**",
         "crates/webrtc/**",
         "scripts/ci/run_checks.py"
@@ -11391,6 +11471,7 @@
       "dependencies": [
         "build.facade-feature-bundles",
         "build.format",
+        "build.patch-release-tests",
         "core.rvoip",
         "core.rvoip-amazon-a2a",
         "core.rvoip-amazon-connect",
@@ -11457,6 +11538,7 @@
         "test.example-11",
         "test.example-12",
         "test.example-13",
+        "test.patch-example-14-vapi-agent",
         "test.patch-turn-ice",
         "test.sip-doctest",
         "test.workspace-doctest"
@@ -12107,6 +12189,7 @@
     "release-patch-smoke": [
       "build.facade-feature-bundles",
       "build.format",
+      "build.patch-release-tests",
       "core.rvoip",
       "core.rvoip-amazon-a2a",
       "core.rvoip-amazon-connect",
@@ -12175,6 +12258,7 @@
       "test.example-11",
       "test.example-12",
       "test.example-13",
+      "test.patch-example-14-vapi-agent",
       "test.patch-turn-ice",
       "test.sip-doctest",
       "test.workspace-doctest"

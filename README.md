@@ -497,7 +497,7 @@ exclusions are recorded in signed qualification evidence; see the
 
 Patch releases can explicitly use the [shorter release path](docs/RELEASING.md#shorter-patch-release-step-by-step):
 unit, integration, regression, example, and doc tests, including runnable
-[TURN/ICE examples](crates/webrtc/rvoip-webrtc/examples/turn_ice.rs), without
+[TURN/ICE examples](docs/TURN_ICE.md), without
 benchmark, soak/load, or extended interoperability jobs. Each GitHub release
 links its tested commit and gate results; a reduced patch report marks
 performance qualification **NOT RUN**. The matrix below describes the full

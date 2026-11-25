@@ -1626,10 +1626,42 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     # Explicit, hosted-only patch scope. Do not derive this by subtracting
     # expensive gates from the full profile: new full-release gates must not
     # silently expand a patch run into an EC2, benchmark, or soak campaign.
+    mapped_examples = {
+        argument.removeprefix("{workspace}/")
+        for gate in legacy for argument in (gate.get("command") or [])
+        if argument.startswith("{workspace}/examples/") and argument.endswith("Cargo.toml")
+    }
+    patch_extra = []
+    for manifest in sorted((root / "examples").glob("*/Cargo.toml")):
+        relative = manifest.relative_to(root).as_posix()
+        if relative in mapped_examples:
+            continue
+        patch_extra.append(synthetic_gate(
+            f"test.patch-example-{manifest.parent.name}",
+            f"standalone example {manifest.parent.name} tests",
+            executor="argv", resource="github-standard",
+            command=["cargo", "test", "--locked", "--manifest-path",
+                     "{workspace}/" + relative, "--all-targets"],
+            dependencies=["source.clean-start"],
+            paths=[manifest.parent.relative_to(root).as_posix() + "/**"],
+            estimated_seconds=120,
+        ))
+    patch_extra.append(synthetic_gate(
+        "build.patch-release-tests", "release-tool unit and regression tests",
+        executor="argv", resource="github-standard",
+        command=["python3", "-m", "unittest",
+                 *[path.relative_to(root).as_posix()
+                   for path in sorted((root / "scripts").glob("test_release*.py"))],
+                 "scripts/test_render_qualification_reports.py"],
+        dependencies=["source.remote-clean"],
+        paths=["scripts/**", ".github/workflows/release*.yml"],
+        estimated_seconds=30,
+    ))
     patch_ids = sorted(set(core_ids + framework_ids + [
         "build.format", "build.facade-feature-bundles", "package.archives",
         "test.workspace-doctest", "test.sip-doctest", "test.patch-turn-ice",
         *[gate["id"] for gate in legacy if gate["id"].startswith("test.example-")],
+        *[gate["id"] for gate in patch_extra],
     ]))
     turn = synthetic_gate(
         "test.patch-turn-ice", "TURN relay, direct ICE, and runtime regression tests",
@@ -1642,6 +1674,7 @@ def build_catalog(root: Path, source: Path) -> dict[str, Any]:
     )
     turn["expected_outputs"].append("nested-ci-receipt.json")
     gates.extend([
+        *patch_extra,
         turn,
         synthetic_gate(
             "report.patch-aggregate", "patch smoke evidence reconciliation",
