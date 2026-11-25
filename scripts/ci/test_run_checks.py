@@ -18,6 +18,13 @@ SPEC.loader.exec_module(run_checks)
 
 
 class RunChecksTests(unittest.TestCase):
+    def test_webrtc_runtime_executes_relay_and_direct_media_proofs(self) -> None:
+        commands = [row[0] for row in run_checks.specialty_commands("webrtc-runtime", ROOT)]
+        base = ["cargo", "run", "--locked", "-p", "rvoip-webrtc", "--example", "turn_ice", "--"]
+        self.assertIn(base, commands)
+        self.assertIn([*base, "--direct"], commands)
+        self.assertIn(["cargo", "test", "--locked", "-p", "rvoip-webrtc", "--test", "turn_relay_e2e"], commands)
+
     def test_package_arguments_reject_shell_metacharacters(self) -> None:
         with self.assertRaises(run_checks.CheckError):
             run_checks.package_args("safe; touch compromised")

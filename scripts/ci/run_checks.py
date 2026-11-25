@@ -901,6 +901,15 @@ def specialty_commands(
                     None,
                 )
             )
+        commands.append(([
+            "cargo", "test", "--locked", "-p", "rvoip-webrtc",
+            "--test", "turn_relay_e2e",
+        ], None, None))
+        for example_args in ([], ["--direct"]):
+            commands.append(([
+                "cargo", "run", "--locked", "-p", "rvoip-webrtc",
+                "--example", "turn_ice", "--", *example_args,
+            ], None, None))
         commands.append((["python3", "scripts/ci/check_runtime_dependencies.py"], None, None))
         return commands
     if gate == "browser-smoke":

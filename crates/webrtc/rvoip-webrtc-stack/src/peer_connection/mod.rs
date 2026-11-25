@@ -942,6 +942,16 @@ impl PeerConnection for PeerConnectionImpl {
     }
 }
 
+impl Drop for PeerConnectionImpl {
+    fn drop(&mut self) {
+        if let Ok(mut handle) = self.driver_handle.0.try_lock()
+            && let Some(handle) = handle.take()
+        {
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod udp_port_range_tests {
     use super::*;
@@ -1031,15 +1041,5 @@ mod udp_port_range_tests {
         )
         .expect_err("mixed address families must fail");
         assert!(error.to_string().contains("address-family-mismatch"));
-    }
-}
-
-impl Drop for PeerConnectionImpl {
-    fn drop(&mut self) {
-        if let Ok(mut handle) = self.driver_handle.0.try_lock()
-            && let Some(handle) = handle.take()
-        {
-            handle.abort();
-        }
     }
 }

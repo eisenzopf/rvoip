@@ -350,11 +350,12 @@ fn test_ice_transport_policy() {
             .with_ice_transport_policy(RTCIceTransportPolicy::All)
             .build();
 
-        // A relay-only policy needs a TURN server to relay through; without one
-        // the core rejects the configuration when the peer connection is built.
+        // Keep a UDP endpoint bound but silent so no external service or
+        // unrelated local TURN server can satisfy this allocation request.
+        let unavailable = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let config_relay = RTCConfigurationBuilder::new()
             .with_ice_servers(vec![RTCIceServer {
-                urls: vec!["turn:127.0.0.1:3478".to_owned()],
+                urls: vec![format!("turn:{}", unavailable.local_addr().unwrap())],
                 username: "rvoip".to_owned(),
                 credential: "rvoip".to_owned(),
             }])
@@ -373,15 +374,22 @@ fn test_ice_transport_policy() {
             .unwrap();
         let pc_relay = PeerConnectionBuilder::new()
             .with_configuration(config_relay)
+            .with_turn_options(TurnOptions {
+                allocation_timeout: Duration::from_millis(250),
+                attempt_timeout: Duration::from_millis(100),
+                ..Default::default()
+            })
             .with_handler(handler_relay)
             .with_udp_addrs(vec!["127.0.0.1:0"])
             .build()
-            .await
-            .unwrap();
+            .await;
 
-        // Both should succeed
         assert!(pc_all.create_offer(None).await.is_ok());
-        assert!(pc_relay.create_offer(None).await.is_ok());
+        assert!(
+            matches!(pc_relay, Err(ref error) if error.to_string().contains("TURN relay required")),
+            "relay-only must fail closed when no allocation succeeds"
+        );
+        pc_all.close().await.unwrap();
     });
 }
 

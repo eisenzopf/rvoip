@@ -37,6 +37,10 @@ for an unanswered candidate pair). Its checking/failure deadline is separate.
 Increasing the limit cannot make a forbidden direct-media destination reachable.
 The new relay path supplies a reachable candidate instead.
 
+For a runnable example proving relay allocation, ICE nomination, exact audio
+packets in both directions, and cleanup, follow [TURN and ICE checks](TURN_ICE.md).
+The example also checks direct ICE with `ice_servers: []`.
+
 ## Local validation
 
 Run from this checkout:
