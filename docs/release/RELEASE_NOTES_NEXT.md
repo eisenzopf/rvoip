@@ -38,6 +38,8 @@ results, and fresh/reused evidence.
 long-running soak/fuzz campaigns, and extended external interoperability jobs.
 The 0.5.0 benchmark reports remain historical evidence for their recorded
 commits and environments; they are not a new performance measurement of 0.5.1.
+General-user 10,000 CPS full-media capability remains outside this release's
+claims.
 
 ## Interoperability
 
@@ -45,6 +47,13 @@ The extended Asterisk, FreeSWITCH, Jambonz OSS, Kamailio, OpenSIPS, and SIPp
 release matrix was not repeated by this patch profile. Regular automated
 integration tests remain included. Use the full release profile when that
 extended qualification is required.
+
+For context, the [published 0.5.0 notes](https://github.com/eisenzopf/rvoip/blob/v0.5.0/docs/release/RELEASE_NOTES_NEXT.md)
+describe the Jambonz OSS 0.9.15 profile: `Endpoint`, `StreamPeer`, and
+`CallbackPeer` over UDP, PCMU/PCMA audio, DTMF, CANCEL, and transfer. Its
+exclusions include G.729, AMR, TLS/SRTP, WebRTC, and PSTN. Those boundaries
+remain historical; this patch does not claim a fresh execution or expand
+them. The transfer `Referred-By` header remains optional.
 
 ## Compatibility
 
