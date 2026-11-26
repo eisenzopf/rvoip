@@ -132,15 +132,39 @@ pub fn ctext(input: &[u8]) -> ParseResult<'_, &[u8]> {
     .parse(input)
 }
 
+/// Maximum nesting depth accepted for a `comment` (RFC 3261 §25.1).
+///
+/// The grammar is recursive, so without a bound a single header such as
+/// `Server: ((((...` with a few thousand parentheses (folded across
+/// continuation lines to get past per-line framing limits) recurses until
+/// the worker thread's stack overflows and the process aborts. Real-world
+/// comments nest one or two levels; 32 is far above any legitimate use.
+pub const MAX_COMMENT_DEPTH: usize = 32;
+
 // comment = LPAREN *(ctext / quoted-pair / comment) RPAREN
-// Recursive parser. We return the content inside the parens.
+// Recursive parser with a depth bound. We return the content inside the parens.
 pub fn comment(input: &[u8]) -> ParseResult<'_, &[u8]> {
-    delimited(
-        lparen,                                               // Consumes LPAREN and surrounding SWS
-        recognize(many0(alt((ctext, quoted_pair, comment)))), // Recursive call
-        rparen,                                               // Consumes RPAREN and surrounding SWS
-    )
-    .parse(input)
+    comment_at_depth(input, 1)
+}
+
+fn comment_at_depth(input: &[u8], depth: usize) -> ParseResult<'_, &[u8]> {
+    // Consumes LPAREN and surrounding SWS. Only once an opening paren has
+    // matched do we enforce the depth bound, so that `comment` stays a
+    // recoverable `Error` (not a `Failure`) for input that isn't a comment.
+    let (rest, _) = lparen(input)?;
+    if depth > MAX_COMMENT_DEPTH {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            ErrorKind::TooLarge,
+        )));
+    }
+    let (rest, content) = recognize(many0(alt((ctext, quoted_pair, |i| {
+        comment_at_depth(i, depth + 1)
+    }))))
+    .parse(rest)?;
+    // Consumes RPAREN and surrounding SWS
+    let (rest, _) = rparen(rest)?;
+    Ok((rest, content))
 }
 
 /// Unescapes a comment by removing the escape character (\)
@@ -160,6 +184,38 @@ pub fn parse_comment(input: &[u8]) -> ParseResult<'_, Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_comment_nesting_within_limit() {
+        let depth = MAX_COMMENT_DEPTH;
+        let input = format!("{}x{}", "(".repeat(depth), ")".repeat(depth));
+        let (rem, _) = comment(input.as_bytes()).unwrap();
+        assert!(rem.is_empty());
+    }
+
+    #[test]
+    fn test_comment_nesting_over_limit_is_rejected() {
+        let depth = MAX_COMMENT_DEPTH + 1;
+        let input = format!("{}x{}", "(".repeat(depth), ")".repeat(depth));
+        assert!(matches!(
+            comment(input.as_bytes()),
+            Err(nom::Err::Failure(_))
+        ));
+    }
+
+    #[test]
+    fn test_comment_deep_unbalanced_nesting_does_not_overflow_stack() {
+        // Security pass 2026-11-24 F1: ~6,000 unbalanced parens used to
+        // overflow a 2 MiB worker stack. Run on a deliberately small stack.
+        let handle = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(|| {
+                let input = "(".repeat(100_000);
+                comment(input.as_bytes()).is_err()
+            })
+            .unwrap();
+        assert!(handle.join().unwrap());
+    }
 
     #[test]
     fn test_qdtext_utf8() {
