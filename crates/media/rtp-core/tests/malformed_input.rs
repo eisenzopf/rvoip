@@ -90,3 +90,91 @@ fn srtp_suite_with_oversized_tag_length_is_rejected() {
     let key = SrtpCryptoKey::new(vec![0u8; 16], vec![0u8; 14]);
     assert!(SrtpContext::new(bad, key).is_err());
 }
+
+// --- DTLS handshake messages -------------------------------------------------
+//
+// The in-house DTLS handshake parsers read length-prefixed fields from the peer.
+// They used to read a field before checking it was present, so a short
+// ClientHello panicked with "advance out of bounds" (security pass 2026-11-24,
+// F3). With the release profile's `panic = "abort"` that kills the process from
+// a single datagram.
+
+use rvoip_rtp_core::dtls::message::handshake::{HandshakeHeader, HandshakeMessage, HandshakeType};
+
+const DTLS_HANDSHAKE_TYPES: [HandshakeType; 6] = [
+    HandshakeType::ClientHello,
+    HandshakeType::ServerHello,
+    HandshakeType::HelloVerifyRequest,
+    HandshakeType::ServerKeyExchange,
+    HandshakeType::ClientKeyExchange,
+    HandshakeType::Finished,
+];
+
+/// A well-formed DTLS 1.2 ClientHello body carrying a use_srtp extension.
+fn valid_client_hello_body() -> Vec<u8> {
+    let mut b = vec![0xFE, 0xFD]; // DTLS 1.2
+    b.extend_from_slice(&[0x11; 32]); // random
+    b.push(0); // session id length
+    b.push(0); // cookie length
+    b.extend_from_slice(&[0x00, 0x02, 0xC0, 0x2B]); // one cipher suite
+    b.extend_from_slice(&[0x01, 0x00]); // one compression method (null)
+    b.extend_from_slice(&[0x00, 0x09]); // extensions length
+    b.extend_from_slice(&[0x00, 0x0E, 0x00, 0x05, 0x00, 0x02, 0x00, 0x01, 0x00]); // use_srtp
+    b
+}
+
+#[test]
+fn dtls_client_hello_fuzzer_crash_input_is_err() {
+    // crashes/dtls-clienthello.bin: first byte is the handshake type.
+    let input: [u8; 39] = [
+        0x01, 0xfe, 0xfd, 0xff, 0x0a, 0xfe, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0xff, 0xff, 0x00, 0xff, 0x1a, 0x00, 0x00, 0x00, 0x01, 0xfe, 0xff, 0xff, 0x00,
+        0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    assert!(HandshakeMessage::parse(HandshakeType::from(input[0]), &input[1..]).is_err());
+}
+
+#[test]
+fn dtls_client_hello_truncations_never_panic() {
+    let body = valid_client_hello_body();
+    assert!(HandshakeMessage::parse(HandshakeType::ClientHello, &body).is_ok());
+    for len in 0..body.len() {
+        let _ = HandshakeMessage::parse(HandshakeType::ClientHello, &body[..len]);
+    }
+}
+
+#[test]
+fn dtls_client_hello_overclaimed_lengths_are_err() {
+    let body = valid_client_hello_body();
+    // Offsets of each length field in the body above.
+    for (offset, width) in [(34usize, 1usize), (35, 1), (36, 2), (40, 1), (42, 2)] {
+        let mut mutated = body.clone();
+        mutated[offset..offset + width].fill(0xFF);
+        if width == 2 && offset == 36 {
+            mutated[offset + 1] = 0xFE; // keep the cipher-suite length even
+        }
+        assert!(
+            HandshakeMessage::parse(HandshakeType::ClientHello, &mutated).is_err(),
+            "over-claimed length at offset {offset} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn dtls_handshake_bodies_of_every_short_length_never_panic() {
+    for msg_type in DTLS_HANDSHAKE_TYPES {
+        for fill in [0x00u8, 0x01, 0x7F, 0xFF] {
+            for len in 0..96usize {
+                let mut buf = vec![fill; len];
+                // Keep a DTLS version where one is expected, so parsing gets
+                // past the version check and into the length fields.
+                if len >= 2 {
+                    buf[0] = 0xFE;
+                    buf[1] = 0xFD;
+                }
+                let _ = HandshakeMessage::parse(msg_type, &buf);
+                let _ = HandshakeHeader::parse(&buf);
+            }
+        }
+    }
+}
