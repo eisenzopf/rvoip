@@ -111,18 +111,25 @@ fn parse_time_with_unit_nom(input: &str) -> IResult<&str, u64> {
 
     // Parse numeric part followed by unit
     let (input, numeric_part) = digit1(input)?;
-    let num_value = numeric_part.parse::<u64>().unwrap();
+    // `digit1` guarantees ASCII digits, but the value can still overflow u64
+    // (e.g. `r=99999999999999999999999 1 0`); reject it rather than panic.
+    let num_value = numeric_part.parse::<u64>().map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        ))
+    })?;
 
     // Get the unit (single character)
     let (input, unit) =
         recognize(take_while1(|c: char| matches!(c, 's' | 'm' | 'h' | 'd'))).parse(input)?;
 
     // Convert to seconds based on unit
-    let seconds = match unit {
-        "s" => num_value,
-        "m" => num_value * 60,
-        "h" => num_value * 60 * 60,
-        "d" => num_value * 60 * 60 * 24,
+    let multiplier: u64 = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 60 * 60,
+        "d" => 60 * 60 * 24,
         _ => {
             return Err(nom::Err::Error(nom::error::Error::new(
                 input,
@@ -130,6 +137,12 @@ fn parse_time_with_unit_nom(input: &str) -> IResult<&str, u64> {
             )))
         }
     };
+    let seconds = num_value.checked_mul(multiplier).ok_or_else(|| {
+        nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::TooLarge,
+        ))
+    })?;
 
     Ok((input, seconds))
 }
