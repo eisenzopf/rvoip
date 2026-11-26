@@ -15,6 +15,15 @@ use crate::error::{Error, Result};
 /// - L1T2: Spatial layer 1, temporal layer 2
 /// - S2T3: Simulcast with 2 streams, 3 temporal layers
 /// - K1: Key frame dependence mode
+fn parse_layer_count(digits: &str, what: &str) -> Result<u32> {
+    digits.parse::<u32>().map_err(|_| {
+        Error::SdpParsingError(format!(
+            "Invalid {} layer count in scalability mode: {}",
+            what, digits
+        ))
+    })
+}
+
 pub fn parse_scalability_mode(
     mode: &str,
 ) -> Result<(String, Option<u32>, Option<u32>, Option<String>)> {
@@ -83,7 +92,7 @@ pub fn parse_scalability_mode(
                     spatial_part
                 )));
             }
-            spatial_layers = Some(spatial_part.parse::<u32>().unwrap());
+            spatial_layers = Some(parse_layer_count(spatial_part, "spatial")?);
         }
 
         // Temporal part must not be empty
@@ -108,7 +117,7 @@ pub fn parse_scalability_mode(
             ));
         }
 
-        temporal_layers = Some(numeric_part.parse::<u32>().unwrap());
+        temporal_layers = Some(parse_layer_count(numeric_part, "temporal")?);
 
         // Any remaining content is treated as extra information
         if numeric_end < temporal_and_extra.len() {
@@ -118,7 +127,7 @@ pub fn parse_scalability_mode(
         // No 'T' marker found - should be just spatial layers or invalid
         if rest.chars().all(|c| c.is_ascii_digit()) {
             // Just a number, must be spatial layers
-            spatial_layers = Some(rest.parse::<u32>().unwrap());
+            spatial_layers = Some(parse_layer_count(rest, "spatial")?);
         } else {
             // Non-numeric content is not valid
             return Err(Error::SdpParsingError(format!(
