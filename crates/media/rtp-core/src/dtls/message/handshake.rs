@@ -10,6 +10,33 @@ use super::extension::Extension;
 use crate::dtls::DtlsVersion;
 use crate::dtls::Result;
 
+// Bounds-checked readers for wire parsing. `bytes::Buf::get_*` and
+// `copy_to_slice` panic when the buffer is short, and the parsers below read
+// length-prefixed fields from untrusted peers, so every read goes through
+// these and turns a short buffer into `PacketTooShort` instead of a panic.
+fn ensure_remaining(buf: &impl Buf, needed: usize) -> Result<()> {
+    if buf.remaining() < needed {
+        return Err(crate::error::Error::PacketTooShort);
+    }
+    Ok(())
+}
+
+fn read_u8(buf: &mut impl Buf) -> Result<u8> {
+    ensure_remaining(buf, 1)?;
+    Ok(buf.get_u8())
+}
+
+fn read_u16(buf: &mut impl Buf) -> Result<u16> {
+    ensure_remaining(buf, 2)?;
+    Ok(buf.get_u16())
+}
+
+fn read_exact(buf: &mut impl Buf, dst: &mut [u8]) -> Result<()> {
+    ensure_remaining(buf, dst.len())?;
+    buf.copy_to_slice(dst);
+    Ok(())
+}
+
 /// DTLS handshake message type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -144,22 +171,25 @@ impl HandshakeHeader {
         let mut cursor = Cursor::new(data);
 
         // Message type (1 byte)
-        let msg_type = HandshakeType::from(cursor.get_u8());
+        let msg_type = HandshakeType::from(read_u8(&mut cursor)?);
 
         // Length (3 bytes)
-        let length =
-            (cursor.get_u8() as u32) << 16 | (cursor.get_u8() as u32) << 8 | cursor.get_u8() as u32;
+        let length = (read_u8(&mut cursor)? as u32) << 16
+            | (read_u8(&mut cursor)? as u32) << 8
+            | read_u8(&mut cursor)? as u32;
 
         // Message sequence (2 bytes)
-        let message_seq = cursor.get_u16();
+        let message_seq = read_u16(&mut cursor)?;
 
         // Fragment offset (3 bytes)
-        let fragment_offset =
-            (cursor.get_u8() as u32) << 16 | (cursor.get_u8() as u32) << 8 | cursor.get_u8() as u32;
+        let fragment_offset = (read_u8(&mut cursor)? as u32) << 16
+            | (read_u8(&mut cursor)? as u32) << 8
+            | read_u8(&mut cursor)? as u32;
 
         // Fragment length (3 bytes)
-        let fragment_length =
-            (cursor.get_u8() as u32) << 16 | (cursor.get_u8() as u32) << 8 | cursor.get_u8() as u32;
+        let fragment_length = (read_u8(&mut cursor)? as u32) << 16
+            | (read_u8(&mut cursor)? as u32) << 8
+            | read_u8(&mut cursor)? as u32;
 
         let header = Self {
             msg_type,
@@ -471,42 +501,42 @@ impl ClientHello {
         let mut cursor = Cursor::new(data);
 
         // Protocol version (2 bytes)
-        let version = cursor.get_u16();
+        let version = read_u16(&mut cursor)?;
 
         // Random (32 bytes)
         let mut random = [0u8; 32];
-        cursor.copy_to_slice(&mut random);
+        read_exact(&mut cursor, &mut random)?;
 
         // Session ID length (1 byte) and data
-        let session_id_len = cursor.get_u8() as usize;
+        let session_id_len = read_u8(&mut cursor)? as usize;
         if data.len() < 35 + session_id_len {
             return Err(crate::error::Error::PacketTooShort);
         }
 
         let session_id = if session_id_len > 0 {
             let mut session_id_data = vec![0u8; session_id_len];
-            cursor.copy_to_slice(&mut session_id_data);
+            read_exact(&mut cursor, &mut session_id_data)?;
             Bytes::from(session_id_data)
         } else {
             Bytes::new()
         };
 
         // Cookie length (1 byte) and data
-        let cookie_len = cursor.get_u8() as usize;
+        let cookie_len = read_u8(&mut cursor)? as usize;
         if data.len() < 36 + session_id_len + cookie_len {
             return Err(crate::error::Error::PacketTooShort);
         }
 
         let cookie = if cookie_len > 0 {
             let mut cookie_data = vec![0u8; cookie_len];
-            cursor.copy_to_slice(&mut cookie_data);
+            read_exact(&mut cursor, &mut cookie_data)?;
             Bytes::from(cookie_data)
         } else {
             Bytes::new()
         };
 
         // Cipher suites length (2 bytes) and data
-        let cipher_suites_len = cursor.get_u16() as usize;
+        let cipher_suites_len = read_u16(&mut cursor)? as usize;
         if cipher_suites_len % 2 != 0 {
             return Err(crate::error::Error::InvalidPacket(
                 "Cipher suites length must be a multiple of 2".to_string(),
@@ -519,11 +549,11 @@ impl ClientHello {
 
         let mut cipher_suites = Vec::with_capacity(cipher_suites_len / 2);
         for _ in 0..(cipher_suites_len / 2) {
-            cipher_suites.push(cursor.get_u16());
+            cipher_suites.push(read_u16(&mut cursor)?);
         }
 
         // Compression methods length (1 byte) and data
-        let compression_methods_len = cursor.get_u8() as usize;
+        let compression_methods_len = read_u8(&mut cursor)? as usize;
         if data.len()
             < 39 + session_id_len + cookie_len + cipher_suites_len + compression_methods_len
         {
@@ -532,14 +562,14 @@ impl ClientHello {
 
         let mut compression_methods = Vec::with_capacity(compression_methods_len);
         for _ in 0..compression_methods_len {
-            compression_methods.push(cursor.get_u8());
+            compression_methods.push(read_u8(&mut cursor)?);
         }
 
         // Extensions length (2 bytes) and data
         let mut extensions = Vec::new();
 
         if cursor.position() < data.len() as u64 {
-            let extensions_len = cursor.get_u16() as usize;
+            let extensions_len = read_u16(&mut cursor)? as usize;
             let extensions_end = cursor.position() as usize + extensions_len;
 
             if extensions_end > data.len() {
@@ -554,8 +584,8 @@ impl ClientHello {
                 let (_parsed_type, parsed_len) = {
                     let ext_start = cursor.position() as usize;
                     let mut temp_cursor = Cursor::new(&data[ext_start..]);
-                    let typ = temp_cursor.get_u16();
-                    let len = temp_cursor.get_u16() as usize;
+                    let typ = read_u16(&mut temp_cursor)?;
+                    let len = read_u16(&mut temp_cursor)? as usize;
                     (typ, len)
                 };
 
@@ -685,14 +715,14 @@ impl ServerHello {
         let mut cursor = Cursor::new(data);
 
         // Protocol version (2 bytes)
-        let version = cursor.get_u16();
+        let version = read_u16(&mut cursor)?;
 
         // Random (32 bytes)
         let mut random = [0u8; 32];
-        cursor.copy_to_slice(&mut random);
+        read_exact(&mut cursor, &mut random)?;
 
         // Session ID length (1 byte) and data
-        let session_id_len = cursor.get_u8() as usize;
+        let session_id_len = read_u8(&mut cursor)? as usize;
         if data.len() < 35 + session_id_len + 3 {
             // +3 for cipher_suite and compression
             return Err(crate::error::Error::PacketTooShort);
@@ -700,23 +730,23 @@ impl ServerHello {
 
         let session_id = if session_id_len > 0 {
             let mut session_id_data = vec![0u8; session_id_len];
-            cursor.copy_to_slice(&mut session_id_data);
+            read_exact(&mut cursor, &mut session_id_data)?;
             Bytes::from(session_id_data)
         } else {
             Bytes::new()
         };
 
         // Cipher suite (2 bytes)
-        let cipher_suite = cursor.get_u16();
+        let cipher_suite = read_u16(&mut cursor)?;
 
         // Compression method (1 byte)
-        let compression_method = cursor.get_u8();
+        let compression_method = read_u8(&mut cursor)?;
 
         // Extensions length (2 bytes) and data
         let mut extensions = Vec::new();
 
         if cursor.position() < data.len() as u64 {
-            let extensions_len = cursor.get_u16() as usize;
+            let extensions_len = read_u16(&mut cursor)? as usize;
             let extensions_end = cursor.position() as usize + extensions_len;
 
             if extensions_end > data.len() {
@@ -731,8 +761,8 @@ impl ServerHello {
                 let (_parsed_type, parsed_len) = {
                     let ext_start = cursor.position() as usize;
                     let mut temp_cursor = Cursor::new(&data[ext_start..]);
-                    let typ = temp_cursor.get_u16();
-                    let len = temp_cursor.get_u16() as usize;
+                    let typ = read_u16(&mut temp_cursor)?;
+                    let len = read_u16(&mut temp_cursor)? as usize;
                     (typ, len)
                 };
 
@@ -796,17 +826,17 @@ impl HelloVerifyRequest {
         let mut cursor = Cursor::new(data);
 
         // Protocol version (2 bytes)
-        let version = cursor.get_u16();
+        let version = read_u16(&mut cursor)?;
 
         // Cookie length (1 byte) and data
-        let cookie_len = cursor.get_u8() as usize;
+        let cookie_len = read_u8(&mut cursor)? as usize;
         if data.len() < 3 + cookie_len {
             return Err(crate::error::Error::PacketTooShort);
         }
 
         let cookie = if cookie_len > 0 {
             let mut cookie_data = vec![0u8; cookie_len];
-            cursor.copy_to_slice(&mut cookie_data);
+            read_exact(&mut cursor, &mut cookie_data)?;
             Bytes::from(cookie_data)
         } else {
             Bytes::new()
@@ -924,7 +954,7 @@ impl ServerKeyExchange {
         let mut cursor = Cursor::new(data);
 
         // Curve type (1 byte)
-        let curve_type = cursor.get_u8();
+        let curve_type = read_u8(&mut cursor)?;
         if curve_type != 3 {
             // Only named_curve = 3 is supported
             return Err(crate::error::Error::UnsupportedFeature(format!(
@@ -934,7 +964,7 @@ impl ServerKeyExchange {
         }
 
         // Named curve (2 bytes)
-        let named_curve = cursor.get_u16();
+        let named_curve = read_u16(&mut cursor)?;
         if named_curve != 23 {
             // Only secp256r1 = 23 is supported
             return Err(crate::error::Error::UnsupportedFeature(format!(
@@ -944,7 +974,7 @@ impl ServerKeyExchange {
         }
 
         // Public key length (1 byte)
-        let public_key_length = cursor.get_u8();
+        let public_key_length = read_u8(&mut cursor)?;
 
         // Check if we have enough data for the public key
         if data.len() < 4 + public_key_length as usize {
@@ -953,7 +983,7 @@ impl ServerKeyExchange {
 
         // Public key data
         let mut public_key = vec![0u8; public_key_length as usize];
-        cursor.copy_to_slice(&mut public_key);
+        read_exact(&mut cursor, &mut public_key)?;
         let public_key = Bytes::from(public_key);
 
         // Check if there's signature data
@@ -963,17 +993,17 @@ impl ServerKeyExchange {
 
         if cursor.position() < data.len() as u64 && data.len() - cursor.position() as usize >= 4 {
             // Signature algorithm (2 bytes)
-            signature_algorithm = Some(cursor.get_u16());
+            signature_algorithm = Some(read_u16(&mut cursor)?);
 
             // Signature length (2 bytes)
-            let sig_len = cursor.get_u16();
+            let sig_len = read_u16(&mut cursor)?;
             signature_length = Some(sig_len);
 
             // Check if we have enough data for the signature
             if data.len() - cursor.position() as usize >= sig_len as usize {
                 // Signature data
                 let mut sig_data = vec![0u8; sig_len as usize];
-                cursor.copy_to_slice(&mut sig_data);
+                read_exact(&mut cursor, &mut sig_data)?;
                 signature = Some(Bytes::from(sig_data));
             }
         }
@@ -1068,7 +1098,7 @@ impl ClientKeyExchange {
         let mut cursor = Cursor::new(data);
 
         // For ECDHE, first byte is the public key length
-        let public_key_length = cursor.get_u8();
+        let public_key_length = read_u8(&mut cursor)?;
 
         // Check if we have enough data for the public key
         if data.len() < 1 + public_key_length as usize {
@@ -1077,7 +1107,7 @@ impl ClientKeyExchange {
 
         // Public key data
         let mut exchange_data = vec![0u8; public_key_length as usize];
-        cursor.copy_to_slice(&mut exchange_data);
+        read_exact(&mut cursor, &mut exchange_data)?;
 
         Ok(Self {
             public_key_length,
