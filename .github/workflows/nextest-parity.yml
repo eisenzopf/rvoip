@@ -28,10 +28,10 @@ jobs:
         with:
           toolchain: 1.95.0
       - name: Install pinned cargo-nextest
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: nextest@0.9.140
-      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266 # v2
         with:
           shared-key: nextest-parity
       - name: Install system dependencies
@@ -87,7 +87,7 @@ jobs:
         with:
           toolchain: 1.95.0
       - name: Install pinned cargo-nextest
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: nextest@0.9.140
       - name: Install archived-test runtime dependencies
