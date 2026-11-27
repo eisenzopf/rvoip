@@ -881,6 +881,13 @@ impl EndpointCall {
     pub async fn audio(&self) -> Result<EndpointAudio> {
         self.handle.audio().await.map(EndpointAudio::new)
     }
+
+    /// The codec, payload type, clock rate and channels the call negotiated,
+    /// once its SDP exchange completed. Frames sent through [`Self::audio`]
+    /// must use this sample rate (8 kHz, or 16 kHz for wideband codecs).
+    pub async fn negotiated_media(&self) -> Result<Option<crate::api::lifecycle::NegotiatedMedia>> {
+        self.handle.negotiated_media().await
+    }
 }
 
 impl fmt::Debug for EndpointCall {
