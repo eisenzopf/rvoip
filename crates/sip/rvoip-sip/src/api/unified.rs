@@ -3247,12 +3247,14 @@ pub struct Config {
     /// comfort noise (`13`) when `comfort_noise_enabled = true`, G.729 (`18`)
     /// when the `g729` feature is enabled, Opus (`111`) when the `opus`
     /// feature is enabled, AMR-WB (`104` bandwidth-efficient, `105`
-    /// octet-aligned) when `amr-wb` is enabled. G.722 (`9`) retains wire
-    /// metadata support but is rejected because no working encoder/decoder is
-    /// implemented. AMR-NB payload types `106` and `107` remain available to
-    /// the coordinator-only media path when `amr-nb` is enabled; they are not
-    /// supported by the core-facing `SipMediaStream` and are not an end-to-end
-    /// codec claim for this API.
+    /// octet-aligned) when `amr-wb` is enabled, and wideband G.711 sampled at
+    /// 16 kHz (`120` PCMA/16000, `121` PCMU/16000). When the peer offers
+    /// wideband G.711 next to the 8 kHz formats, the answer prefers it.
+    /// G.722 (`9`) retains wire metadata support but is rejected because no
+    /// working encoder/decoder is implemented. AMR-NB payload types `106`
+    /// and `107` remain available to the coordinator-only media path when
+    /// `amr-nb` is enabled; they are not supported by the core-facing
+    /// `SipMediaStream` and are not an end-to-end codec claim for this API.
     ///
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,
@@ -6553,6 +6555,8 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
         (false, true) => format!("{base_payloads}, plus 106/107 (AMR-NB)"),
         (false, false) => base_payloads.to_string(),
     };
+    let supported_payloads =
+        format!("{supported_payloads}, plus 120/121 (wideband G.711 PCMA/PCMU at 16 kHz)");
     let mut has_audio = false;
     let mut seen = std::collections::BTreeSet::new();
     for &pt in offered_codecs {
@@ -6565,6 +6569,8 @@ fn validate_beta_media_codecs(offered_codecs: &[u8], comfort_noise_enabled: bool
 
         match pt {
             0 | 8 => has_audio = true,
+            // Wideband G.711; see `adapters/media_adapter.rs`.
+            120 | 121 => has_audio = true,
             18 => {
                 #[cfg(feature = "g729")]
                 {
