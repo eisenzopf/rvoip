@@ -37,7 +37,7 @@ jobs:
         with:
           toolchain: 1.95.0
           components: clippy
-      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266
         with:
           shared-key: webex-byova-profiles
       # Cisco's protobuf contract has no published licence, so it is neither
