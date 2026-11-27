@@ -135,6 +135,14 @@ fn is_amr(name: &str) -> bool {
     name.eq_ignore_ascii_case("AMR") || name.eq_ignore_ascii_case("AMR-WB")
 }
 
+/// G.711 at 16 kHz on a dynamic payload type. The codec is the same per
+/// sample; only the rate (and so the RTP clock) doubles.
+fn is_wideband_g711(codec: &NegotiatedAudioCodec) -> bool {
+    (codec.name.eq_ignore_ascii_case("PCMU") || codec.name.eq_ignore_ascii_case("PCMA"))
+        && codec.clock_rate == 16_000
+        && (96..=127).contains(&codec.payload_type)
+}
+
 fn validate_codec_shape(codec: &NegotiatedAudioCodec) -> Result<()> {
     if codec.payload_type > 127 {
         return Err(CodecError::InvalidParameters {
@@ -164,6 +172,19 @@ fn validate_codec_shape(codec: &NegotiatedAudioCodec) -> Result<()> {
                 details: format!(
                     "Opus RTP requires 48000Hz and one or two channels, got {}Hz/{}ch",
                     codec.clock_rate, codec.channels
+                ),
+            }
+            .into());
+        }
+    } else if is_wideband_g711(codec) {
+        // G.711 sampled at 16 kHz on a dynamic payload type (e.g.
+        // `121 PCMU/16000`). Like AMR-WB, it must not reach the 8 kHz
+        // catch-all below.
+        if codec.payload_type == 101 || codec.channels != 1 {
+            return Err(CodecError::InvalidParameters {
+                details: format!(
+                    "wideband {} requires a dynamic RTP payload type and mono, got {}/{}ch",
+                    codec.name, codec.payload_type, codec.channels
                 ),
             }
             .into());
@@ -842,6 +863,69 @@ mod tests {
                 .await
                 .is_err());
         }
+    }
+
+    fn g711_config(codec: &str, payload_type: u8, clock_rate: u32) -> MediaConfig {
+        let mut config = config(codec);
+        config.parameters.insert(
+            RTP_PAYLOAD_TYPE_PARAMETER.to_string(),
+            payload_type.to_string(),
+        );
+        config
+            .parameters
+            .insert(RTP_CLOCK_RATE_PARAMETER.to_string(), clock_rate.to_string());
+        config
+    }
+
+    /// Wideband G.711 (16 kHz on a dynamic payload type) resolves; 16 kHz on
+    /// the static numbers, and 8 kHz G.711 on a dynamic one, do not.
+    #[test]
+    fn wideband_g711_requires_a_dynamic_payload_type() {
+        for (name, payload_type) in [("PCMU", 121), ("PCMA", 120)] {
+            let codec = resolve_codec(&g711_config(name, payload_type, 16_000)).expect(name);
+            assert_eq!(codec.name, name);
+            assert_eq!(codec.payload_type, payload_type);
+            assert_eq!(codec.clock_rate, 16_000);
+        }
+        assert!(resolve_codec(&g711_config("PCMU", 0, 16_000)).is_err());
+        assert!(resolve_codec(&g711_config("PCMA", 8, 16_000)).is_err());
+        assert!(resolve_codec(&g711_config("PCMU", 121, 8_000)).is_err());
+        assert!(resolve_codec(&g711_config("PCMU", 101, 16_000)).is_err());
+    }
+
+    /// 20 ms of wideband G.711 is 320 samples and 320 bytes, and the decoded
+    /// frame comes back at 16 kHz.
+    #[tokio::test]
+    async fn wideband_g711_round_trips_320_samples_per_packet() {
+        let codec = resolve_codec(&g711_config("PCMU", 121, 16_000)).unwrap();
+        let runtime = DialogCodecRuntime::new(codec).unwrap();
+        let pcm: Vec<i16> = (0..320)
+            .map(|i| {
+                ((i as f64 * std::f64::consts::TAU * 5_000.0 / 16_000.0).sin() * 8_000.0) as i16
+            })
+            .collect();
+        let payload = runtime
+            .encode(&AudioFrame::new(pcm.clone(), 16_000, 1, 0))
+            .await
+            .unwrap();
+        assert_eq!(payload.len(), 320);
+        let decoded = runtime.decode(&payload, 0).await.unwrap();
+        assert_eq!(decoded.sample_rate, 16_000);
+        assert_eq!(decoded.samples.len(), 320);
+        // A 5 kHz tone only exists above the 8 kHz rate's Nyquist limit:
+        // μ-law is lossy, but the waveform must survive.
+        let error: f64 = pcm
+            .iter()
+            .zip(&decoded.samples)
+            .map(|(a, b)| f64::from(a - b).abs())
+            .sum::<f64>()
+            / 320.0;
+        assert!(error < 400.0, "mean error {error}");
+        // An 8 kHz frame is refused rather than sent at the wrong rate.
+        assert!(runtime
+            .encode(&AudioFrame::new(vec![0; 160], 8_000, 1, 0))
+            .await
+            .is_err());
     }
 
     fn config(codec: &str) -> MediaConfig {
