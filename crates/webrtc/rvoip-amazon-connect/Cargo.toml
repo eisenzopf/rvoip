@@ -66,9 +66,9 @@ tokio-tungstenite = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 # Keep these exact: newer generated SDK releases have a higher MSRV than the
 # workspace Rust 1.95.0 contract. The optional-feature CI lane compiles this
 # graph so an incompatible SDK cannot enter through a lockfile refresh.
-aws-config = { version = "=1.13.2", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
-aws-sdk-connect = { version = "=1.226.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
-aws-smithy-types = { version = "=1.9.4", optional = true }
+aws-config = { version = "=1.13.3", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-login"], optional = true }
+aws-sdk-connect = { version = "=1.229.0", default-features = false, features = ["default-https-client", "rt-tokio"], optional = true }
+aws-smithy-types = { version = "=1.9.5", optional = true }
 # Logging for the `connect-probe` binary (which requires `aws-control`); kept out
 # of the library's adapter-only dependency tree.
 tracing-subscriber = { workspace = true, optional = true }

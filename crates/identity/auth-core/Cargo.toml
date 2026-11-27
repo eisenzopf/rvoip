@@ -28,7 +28,7 @@ jsonwebtoken = { version = "12", features = ["aws_lc_rs"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_jcs = "0.2.0"
+serde_jcs = "0.4.0"
 
 # URL handling
 url = "2.5"

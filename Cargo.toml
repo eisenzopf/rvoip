@@ -344,7 +344,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 # so the process has exactly ONE rustls CryptoProvider — otherwise rustls
 # can't auto-select one and TLS/WSS paths panic at runtime.
 web-transport-quinn = { version = "0.13", default-features = false, features = ["ring"] }
-web-transport = "0.13"
+web-transport = "0.14"
 tokio-util = { version = "0.7", features = ["codec", "compat"] }
 metrics = "0.24"
 # Qualified, attributed MOQT draft-19 forks. Package aliases retain the
