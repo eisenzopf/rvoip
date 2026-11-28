@@ -446,6 +446,8 @@ pub(crate) fn rtpmap_for_pt(pt: u8) -> Option<&'static str> {
         AMR_WB_OA_PT => Some("AMR-WB/16000"),
         AMR_NB_BE_PT => Some("AMR/8000"),
         AMR_NB_OA_PT => Some("AMR/8000"),
+        PCMU_WB_PT => Some("PCMU/16000"),
+        PCMA_WB_PT => Some("PCMA/16000"),
         111 => Some("opus/48000/2"),
         _ => None,
     }
@@ -459,6 +461,18 @@ pub(crate) const AMR_WB_OA_PT: u8 = 105;
 pub(crate) const AMR_NB_BE_PT: u8 = 106;
 /// AMR-NB, octet-aligned framing.
 pub(crate) const AMR_NB_OA_PT: u8 = 107;
+/// G.711 A-law sampled at 16 kHz ("wideband G.711"). Not an IANA static
+/// format: AVM's FRITZ!Box offers it to IP phones as `120 PCMA/16000` for HD
+/// telephony, and these are the numbers it uses. Offered only when listed in
+/// `Config::offered_codecs`.
+pub(crate) const PCMA_WB_PT: u8 = 120;
+/// G.711 μ-law sampled at 16 kHz (`121 PCMU/16000`).
+pub(crate) const PCMU_WB_PT: u8 = 121;
+
+/// Whether `pt` is one of this stack's wideband G.711 payload types.
+pub(crate) fn is_wideband_g711_pt(pt: u8) -> bool {
+    matches!(pt, PCMU_WB_PT | PCMA_WB_PT)
+}
 
 /// NEXT_STEPS C2 — `a=fmtp:` value for payload types that require
 /// one. Returns `None` for codecs that work fine without an fmtp.
@@ -724,6 +738,8 @@ fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
         101 => "telephone-event",
         AMR_WB_BE_PT | AMR_WB_OA_PT => "AMR-WB",
         AMR_NB_BE_PT | AMR_NB_OA_PT => "AMR",
+        PCMU_WB_PT => "PCMU",
+        PCMA_WB_PT => "PCMA",
         111 => "opus",
         _ => return format!("PT{}", payload_type),
     }
@@ -733,6 +749,7 @@ fn codec_name_for_payload(payload_type: u8, g729_annex_b: bool) -> String {
 fn payload_codec_available(payload_type: u8) -> bool {
     match payload_type {
         0 | 8 | 13 | 101 => true,
+        PCMU_WB_PT | PCMA_WB_PT => true,
         18 => cfg!(feature = "g729"),
         111 => cfg!(feature = "opus"),
         AMR_WB_BE_PT | AMR_WB_OA_PT => cfg!(feature = "amr-wb"),
@@ -773,6 +790,8 @@ fn sdp_payload_codec_available(session: &SdpSession, payload_type: u8) -> bool {
             mapping_matches("opus", 48_000, &[1, 2]) && cfg!(feature = "opus")
                 || mapping_matches("AMR-WB", 16_000, &[1]) && cfg!(feature = "amr-wb")
                 || mapping_matches("AMR", 8_000, &[1]) && cfg!(feature = "amr-nb")
+                || mapping_matches("PCMU", 16_000, &[1])
+                || mapping_matches("PCMA", 16_000, &[1])
         }
         _ => false,
     }
@@ -887,8 +906,12 @@ fn negotiated_audio_shape_from_sdp(
     let valid_shape = if canonical.eq_ignore_ascii_case("opus") {
         clock_rate == 48_000 && matches!(channels, 1 | 2)
     } else if canonical.eq_ignore_ascii_case("AMR-WB") {
-        // AMR-WB is the one 16 kHz codec here. Its clock rate is what
-        // distinguishes it from AMR on the wire when both are offered.
+        // AMR-WB's clock rate is what distinguishes it from AMR on the wire
+        // when both are offered.
+        clock_rate == 16_000 && channels == 1
+    } else if matches!(canonical, "PCMU" | "PCMA") && (96..=127).contains(&payload_type) {
+        // Wideband G.711 exists only on a dynamic payload type; the static
+        // 0/8 stay 8 kHz (RFC 3551), so `0 PCMU/16000` remains invalid.
         clock_rate == 16_000 && channels == 1
     } else {
         clock_rate == 8_000 && channels == 1
@@ -906,6 +929,7 @@ fn negotiated_audio_shape_from_sdp(
             canonical.eq_ignore_ascii_case("opus")
                 || canonical.eq_ignore_ascii_case("AMR-WB")
                 || canonical.eq_ignore_ascii_case("AMR")
+                || matches!(canonical, "PCMU" | "PCMA")
         }
         _ => false,
     };
@@ -6546,8 +6570,8 @@ fn apply_inbound_offer_policy(formats: Vec<u8>, policy: Option<&[String]>) -> Re
     let mut selected = Vec::new();
     for codec in policy {
         let payloads: &[u8] = match codec.as_str() {
-            "PCMU" => &[0],
-            "PCMA" => &[8],
+            "PCMU" => &[PCMU_WB_PT, 0],
+            "PCMA" => &[PCMA_WB_PT, 8],
             "opus" => &[111],
             "AMR-WB" => &[AMR_WB_BE_PT, AMR_WB_OA_PT],
             _ => return Err(bounded_sdp_failure("local-offer", "unknown-policy-codec")),
@@ -6629,6 +6653,39 @@ fn compute_answer_formats_with_policy(
                         && amr_nb_offered);
                 if wanted && !supported.contains(format) {
                     supported.push(format.clone());
+                }
+            }
+        }
+    }
+
+    // Wideband G.711: the same, keyed on the 16 kHz rtpmap. Peers commonly
+    // offer it as `120 PCMA/16000` / `121 PCMU/16000`, our numbers too, but
+    // the encoding and rate decide, not the number.
+    let wideband_wanted = |name: &str| {
+        (name.eq_ignore_ascii_case("PCMU") && offered_codecs.contains(&PCMU_WB_PT))
+            || (name.eq_ignore_ascii_case("PCMA") && offered_codecs.contains(&PCMA_WB_PT))
+    };
+    if offered_codecs.iter().any(|pt| is_wideband_g711_pt(*pt)) {
+        if let Some(audio) = offer
+            .media_descriptions
+            .iter()
+            .find(|media| media.media.eq_ignore_ascii_case("audio"))
+        {
+            for format in &audio.formats {
+                let Ok(payload_type) = format.parse::<u8>() else {
+                    continue;
+                };
+                if !(96..=127).contains(&payload_type) || payload_type == 101 {
+                    continue;
+                }
+                let wanted = audio_rtpmap(offer, payload_type).is_some_and(|mapping| {
+                    mapping.clock_rate == 16_000 && wideband_wanted(&mapping.encoding_name)
+                });
+                if wanted && !supported.contains(format) {
+                    supported.push(format.clone());
+                } else if !wanted && is_wideband_g711_pt(payload_type) {
+                    // Our number, but the offer uses it for something else.
+                    supported.retain(|existing| existing != format);
                 }
             }
         }
@@ -6719,7 +6776,20 @@ fn compute_answer_formats_with_policy(
                     };
                     rank
                 }
-                None => 0,
+                // Without a policy the offer's order decides, except that
+                // configured wideband G.711 beats narrowband: offers often
+                // list it last (`9 8 0 120 121`), and enabling it is
+                // the only reason to list it in `offered_codecs`.
+                None => {
+                    let wideband_g711 = audio_rtpmap(offer, payload_type).is_some_and(|mapping| {
+                        mapping.clock_rate == 16_000
+                            && matches!(
+                                mapping.encoding_name.to_ascii_uppercase().as_str(),
+                                "PCMU" | "PCMA"
+                            )
+                    });
+                    usize::from(!wideband_g711)
+                }
             };
             if primary.is_none() || rank < primary_rank {
                 primary = Some(format);
@@ -9553,6 +9623,108 @@ a=fmtp:101 0-15\r\n";
         let formats = compute_answer_formats(&offer, &[0, 8, 13, 101], true, false, false)
             .expect("valid mixed offer");
         assert_eq!(formats, ["8", "13", "101"]);
+    }
+
+    /// A typical HD telephony offer: narrowband first, wideband G.711 last.
+    fn hd_telephony_offer() -> SdpSession {
+        SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "192.168.178.1")
+            .connection("IN", "IP4", "192.168.178.1")
+            .time("0", "0")
+            .media_audio(7_078, "RTP/AVP")
+            .formats(&["9", "8", "0", "120", "121", "101"])
+            .rtpmap("120", "PCMA/16000")
+            .rtpmap("121", "PCMU/16000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn uas_prefers_configured_wideband_g711_over_the_offer_order() {
+        let offer = hd_telephony_offer();
+        let formats = compute_answer_formats(&offer, &[121, 120, 0, 8, 101], false, false, false)
+            .expect("HD telephony offer");
+        assert_eq!(formats, ["120", "101"]);
+        assert_eq!(
+            answer_rtpmap_for_pt(&offer, 120).as_deref(),
+            Some("PCMA/16000")
+        );
+        assert_eq!(
+            negotiated_audio_shape_from_sdp(&offer, 120, false).unwrap(),
+            ("PCMA".to_string(), 16_000, 1)
+        );
+
+        // Only μ-law enabled: the A-law wideband format is not ours to answer.
+        let formats = compute_answer_formats(&offer, &[121, 0, 101], false, false, false).unwrap();
+        assert_eq!(formats, ["121", "101"]);
+    }
+
+    #[test]
+    fn uas_without_wideband_configured_keeps_the_narrowband_answer() {
+        let formats =
+            compute_answer_formats(&hd_telephony_offer(), &[0, 8, 101], false, false, false)
+                .unwrap();
+        assert_eq!(formats, ["8", "101"]);
+    }
+
+    /// Wideband G.711 is matched on its rtpmap, not on our numbers: a peer may
+    /// use 120/121 for something else, or put wideband G.711 elsewhere.
+    #[test]
+    fn uas_matches_wideband_g711_by_rtpmap_not_payload_number() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["121", "98", "0", "101"])
+            .rtpmap("121", "opus/48000/2")
+            .rtpmap("98", "PCMU/16000")
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let formats = compute_answer_formats(&offer, &[121, 0, 101], false, false, false).unwrap();
+        assert_eq!(formats, ["98", "101"]);
+        assert_eq!(
+            answer_rtpmap_for_pt(&offer, 98).as_deref(),
+            Some("PCMU/16000")
+        );
+    }
+
+    #[test]
+    fn uac_accepts_a_wideband_g711_answer() {
+        let offer = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_000, "RTP/AVP")
+            .formats(&["121", "0", "101"])
+            .rtpmap("121", "PCMU/16000")
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        let answer = SdpBuilder::new("Session")
+            .origin("-", "2", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(16_002, "RTP/AVP")
+            .formats(&["121", "101"])
+            .rtpmap("121", "PCMU/16000")
+            .rtpmap("101", "telephone-event/8000")
+            .done()
+            .build()
+            .unwrap();
+        assert_eq!(
+            validate_uac_audio_answer(&offer, &answer, true, false).unwrap(),
+            (121, "PCMU".to_string(), 16_000, 1)
+        );
+        assert_eq!(rtpmap_for_pt(PCMU_WB_PT), Some("PCMU/16000"));
+        assert_eq!(rtpmap_for_pt(PCMA_WB_PT), Some("PCMA/16000"));
     }
 
     #[test]

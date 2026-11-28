@@ -117,7 +117,7 @@ Clean separation of concerns across the rvoip stack:
 
 #### **Codec Support and Transcoding**
 - ✅ **Multi-Codec Support**: G.711 plus feature-gated G.729A/G.729AB, Opus and AMR
-  - ✅ **G.711**: μ-law/A-law (PCMU/PCMA) with ITU-T compliance
+  - ✅ **G.711**: μ-law/A-law (PCMU/PCMA) with ITU-T compliance, at 8 kHz or as wideband G.711 at 16 kHz on a dynamic payload type
   - ✅ **G.729A/G.729AB**: optional low-bitrate 8 kbps codec with Annex B VAD/DTX/CNG under the `g729` feature
   - ✅ **Opus**: real libopus-backed encode/decode under the `opus` feature
   - ✅ **AMR-NB**: all 8 modes, RFC 4867 framing, DTX and CMR under the `amr-nb` feature

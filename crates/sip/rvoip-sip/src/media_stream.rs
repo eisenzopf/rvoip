@@ -75,7 +75,8 @@ impl SipPayloadCodec {
             config.codec.to_ascii_lowercase().as_str(),
             "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
         ) {
-            return G711Codec::mu_law(G711_SAMPLE_RATE, 1)
+            // 8 kHz, or 16 kHz for wideband G.711; `codec_descriptor` checked.
+            return G711Codec::mu_law(config.sample_rate, 1)
                 .map(Self::G711)
                 .map_err(|_| "pcmu-codec-init");
         }
@@ -83,7 +84,7 @@ impl SipPayloadCodec {
             config.codec.to_ascii_lowercase().as_str(),
             "pcma" | "g.711-a" | "g711-a"
         ) {
-            return G711Codec::a_law(G711_SAMPLE_RATE, 1)
+            return G711Codec::a_law(config.sample_rate, 1)
                 .map(Self::G711)
                 .map_err(|_| "pcma-codec-init");
         }
@@ -306,6 +307,17 @@ fn materialized_g729_fmtp(config: &crate::session_store::state::NegotiatedConfig
     parameters.join(";")
 }
 
+/// G.711 is 8 kHz mono, or 16 kHz mono on a dynamic payload type (wideband
+/// G.711).
+fn g711_shape_valid(
+    config: &crate::session_store::state::NegotiatedConfig,
+    payload_type: u8,
+) -> bool {
+    config.channels == 1
+        && (config.sample_rate == 8_000
+            || (config.sample_rate == 16_000 && (96..=127).contains(&payload_type)))
+}
+
 pub(crate) fn codec_descriptor(
     config: &crate::session_store::state::NegotiatedConfig,
     payload_type: u8,
@@ -315,7 +327,7 @@ pub(crate) fn codec_descriptor(
         config.codec.to_ascii_lowercase().as_str(),
         "pcmu" | "g.711-mu" | "g711-mu" | "g711-u"
     ) {
-        if config.sample_rate != 8_000 || config.channels != 1 {
+        if !g711_shape_valid(config, payload_type) {
             return Err("invalid-pcmu-shape");
         }
         "g.711-mu"
@@ -323,7 +335,7 @@ pub(crate) fn codec_descriptor(
         config.codec.to_ascii_lowercase().as_str(),
         "pcma" | "g.711-a" | "g711-a"
     ) {
-        if config.sample_rate != 8_000 || config.channels != 1 {
+        if !g711_shape_valid(config, payload_type) {
             return Err("invalid-pcma-shape");
         }
         "g.711-a"
